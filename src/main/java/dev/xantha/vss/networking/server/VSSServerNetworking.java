@@ -10,6 +10,7 @@ import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
+import dev.xantha.vss.networking.payloads.ClientDirtyColumnsC2SPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
@@ -415,6 +416,33 @@ public final class VSSServerNetworking {
             if (state != null) {
                 state.setDesiredBandwidth(payload.desiredRate());
             }
+        }
+    }
+
+    public static void handleClientDirtyColumns(ClientDirtyColumnsC2SPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+        ServerPlayer player = contextSupplier.get().getSender();
+        if (player == null || !VSSServerConfig.CONFIG.enabled || !isRegistered(player)) {
+            return;
+        }
+
+        ServerLevel level = player.serverLevel();
+        int playerCx = player.getBlockX() >> 4;
+        int playerCz = player.getBlockZ() >> 4;
+        int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks + VSSConstants.LOD_DISTANCE_BUFFER;
+        int accepted = 0;
+        for (long packed : payload.dirtyPositions()) {
+            if (accepted >= VSSConstants.MAX_CLIENT_DIRTY_COLUMN_HINTS) {
+                break;
+            }
+
+            int cx = PositionUtil.unpackX(packed);
+            int cz = PositionUtil.unpackZ(packed);
+            if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) > maxDistance) {
+                continue;
+            }
+
+            DirtyColumnBroadcaster.markDirtyColumnAndNeighbors(level, cx, cz);
+            accepted++;
         }
     }
 

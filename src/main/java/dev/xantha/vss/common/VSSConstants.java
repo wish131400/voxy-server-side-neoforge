@@ -2,12 +2,13 @@ package dev.xantha.vss.common;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 16;
+    public static final int PROTOCOL_VERSION = 18;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     public static final int MAX_BATCH_CHUNK_REQUESTS = 1024;
     public static final int MAX_BATCH_RESPONSES = 4096;
     public static final int MAX_DIRTY_COLUMN_POSITIONS = 10240;
+    public static final int MAX_CLIENT_DIRTY_COLUMN_HINTS = 512;
     public static final int MAX_FAR_PLAYER_ENTRIES = 256;
     public static final int ESTIMATED_COLUMN_OVERHEAD_BYTES = 25;
     public static final int LOD_DISTANCE_BUFFER = 32;

@@ -1,8 +1,7 @@
-package dev.xantha.vss.mixin.minecraft;
+package dev.xantha.vss.mixin.client;
 
-import dev.xantha.vss.networking.server.DirtyColumnBroadcaster;
+import dev.xantha.vss.networking.client.ClientDirtyColumnReporter;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -13,19 +12,14 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(LevelChunk.class)
-public abstract class LevelChunkDirtyColumnMixin {
+public abstract class ClientLevelChunkDirtyColumnMixin {
     @Shadow
     public abstract Level getLevel();
 
     @Inject(method = "setBlockState", at = @At("RETURN"))
-    private void vss$markLodColumnDirty(BlockPos pos, BlockState state, boolean moving, CallbackInfoReturnable<BlockState> cir) {
-        if (cir.getReturnValue() == null) {
-            return;
-        }
-
-        Level level = this.getLevel();
-        if (level instanceof ServerLevel serverLevel) {
-            DirtyColumnBroadcaster.markDirty(serverLevel, pos);
+    private void vss$reportClientColumnDirty(BlockPos pos, BlockState state, boolean moving, CallbackInfoReturnable<BlockState> cir) {
+        if (cir.getReturnValue() != null) {
+            ClientDirtyColumnReporter.markChanged(this.getLevel(), pos);
         }
     }
 }

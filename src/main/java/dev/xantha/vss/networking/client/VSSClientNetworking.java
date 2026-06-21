@@ -144,6 +144,7 @@ public final class VSSClientNetworking {
         if (manager != null) {
             manager.disconnect();
         }
+        ClientDirtyColumnReporter.clear();
         FarPlayerClientRenderer.clear();
         COLUMN_PROCESSOR.shutdown();
         COLUMN_PROCESSOR.resetStats();
@@ -167,6 +168,7 @@ public final class VSSClientNetworking {
         if (manager != null && serverEnabled) {
             manager.tick();
         }
+        ClientDirtyColumnReporter.tick();
         COLUMN_PROCESSOR.scheduleProcessing(serverEnabled);
     }
 

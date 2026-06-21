@@ -8,7 +8,6 @@ import dev.xantha.vss.compat.ftbchunks.FTBChunksForceLoadCompat;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.client.FarPlayerClientRenderer;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
-import dev.xantha.vss.networking.server.DirtyColumnBroadcaster;
 import dev.xantha.vss.networking.server.FarPlayerBroadcaster;
 import dev.xantha.vss.networking.server.VSSServerCommands;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
@@ -21,7 +20,6 @@ public final class VSSMod {
     public VSSMod() {
         VSSNetworking.register();
         MinecraftForge.EVENT_BUS.register(VSSServerNetworking.class);
-        MinecraftForge.EVENT_BUS.register(DirtyColumnBroadcaster.class);
         MinecraftForge.EVENT_BUS.register(FarPlayerBroadcaster.class);
         MinecraftForge.EVENT_BUS.register(VSSServerCommands.class);
         MinecraftForge.EVENT_BUS.register(FTBChunksForceLoadCompat.class);

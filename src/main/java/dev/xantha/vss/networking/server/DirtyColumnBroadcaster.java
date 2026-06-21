@@ -13,14 +13,10 @@ import java.util.Map;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.network.chat.Component;
-import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.event.level.BlockEvent;
-import net.minecraftforge.event.level.ExplosionEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
 
 public final class DirtyColumnBroadcaster {
     private static final Map<Level, LongOpenHashSet> DIRTY = new HashMap<>();
@@ -29,32 +25,6 @@ public final class DirtyColumnBroadcaster {
     private static int cleanupTickCounter;
 
     private DirtyColumnBroadcaster() {
-    }
-
-    @SubscribeEvent
-    public static void onBlockBreak(BlockEvent.BreakEvent event) {
-        markDirty(event.getLevel(), event.getPos());
-    }
-
-    @SubscribeEvent
-    public static void onBlockPlace(BlockEvent.EntityPlaceEvent event) {
-        markDirty(event.getLevel(), event.getPos());
-    }
-
-    @SubscribeEvent
-    public static void onExplosionDetonate(ExplosionEvent.Detonate event) {
-        if (!(event.getLevel() instanceof ServerLevel level)
-                || !VSSServerConfig.CONFIG.enabled) {
-            return;
-        }
-        LongOpenHashSet affectedColumns = new LongOpenHashSet();
-        for (BlockPos pos : event.getAffectedBlocks()) {
-            markDirtyBlock(level, pos);
-            affectedColumns.add(PositionUtil.packPosition(pos.getX() >> 4, pos.getZ() >> 4));
-        }
-        for (long packed : affectedColumns) {
-            markDirtyColumnAndNeighbors(level, PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed));
-        }
     }
 
     static void tick(MinecraftServer server) {
@@ -148,13 +118,6 @@ public final class DirtyColumnBroadcaster {
         return timestamp;
     }
 
-    public static void markDirty(Object levelAccess, BlockPos pos) {
-        if (levelAccess instanceof ServerLevel level
-                && VSSServerConfig.CONFIG.enabled) {
-            markDirtyBlock(level, pos);
-        }
-    }
-
     public static void markDirtyColumn(Object levelAccess, int cx, int cz) {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
@@ -166,25 +129,6 @@ public final class DirtyColumnBroadcaster {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
             markDirtyColumnAndNeighbors(level, cx, cz);
-        }
-    }
-
-    private static void markDirtyBlock(ServerLevel level, BlockPos pos) {
-        int cx = pos.getX() >> 4;
-        int cz = pos.getZ() >> 4;
-        markDirtyColumn(level, cx, cz);
-
-        int localX = pos.getX() & 15;
-        int localZ = pos.getZ() & 15;
-        if (localX == 0) {
-            markDirtyColumn(level, cx - 1, cz);
-        } else if (localX == 15) {
-            markDirtyColumn(level, cx + 1, cz);
-        }
-        if (localZ == 0) {
-            markDirtyColumn(level, cx, cz - 1);
-        } else if (localZ == 15) {
-            markDirtyColumn(level, cx, cz + 1);
         }
     }
 

@@ -5,6 +5,7 @@ import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
+import dev.xantha.vss.networking.payloads.ClientDirtyColumnsC2SPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
@@ -53,6 +54,11 @@ public final class VSSNetworking {
                 .encoder(BandwidthUpdateC2SPayload::encode)
                 .decoder(BandwidthUpdateC2SPayload::decode)
                 .consumerMainThread(VSSServerNetworking::handleBandwidthUpdate)
+                .add();
+        CHANNEL.messageBuilder(ClientDirtyColumnsC2SPayload.class, id++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(ClientDirtyColumnsC2SPayload::encode)
+                .decoder(ClientDirtyColumnsC2SPayload::decode)
+                .consumerMainThread(VSSServerNetworking::handleClientDirtyColumns)
                 .add();
         CHANNEL.messageBuilder(SessionConfigS2CPayload.class, id++, NetworkDirection.PLAY_TO_CLIENT)
                 .encoder(SessionConfigS2CPayload::encode)
