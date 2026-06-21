@@ -49,6 +49,12 @@
 
 客户端协议版本必须和服务器匹配。版本不匹配时，玩家仍然能进服，但不会使用 VSS 的远景同步功能。
 
+## 推荐搭配
+
+推荐搭配 [ZSTDNET](https://www.curseforge.com/minecraft/mc-mods/zstdnet) 使用。它是客户端和服务器都需要安装的带宽压缩 mod，会用 ZSTD 压缩客户端和服务器之间的网络流量。VSS 同步 LOD 时会产生比较连续、重复度较高的数据包，配合 ZSTDNET 通常可以降低一部分公网带宽压力，尤其适合带宽紧张、内网穿透、转发服或玩家较多的整合包服务器。
+
+ZSTDNET 不是 VSS 的硬依赖；不安装也能正常同步远景。它也不会替代 VSS 自带的 `bytesPerSecondLimitPerPlayer` 限速，建议两者一起用：ZSTDNET 负责压缩，VSS 负责控制每名玩家的带宽峰值。
+
 ## 配置文件
 
 服务器配置文件会生成在：
@@ -102,6 +108,7 @@ config/vss-server-config.json
 
 上传带宽占用太高：
 
+- 服务器和客户端都安装 [ZSTDNET](https://www.curseforge.com/minecraft/mc-mods/zstdnet)
 - 降低 `bytesPerSecondLimitPerPlayer`
 - 降低 `lodDistanceChunks`
 
