@@ -1,0 +1,19 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "dev.xantha.vss.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "ftbessentials.TeleportCommandsNoBlockingMixin",
+    "ftbchunks.FTBChunksExpectedImplMixin",
+    "minecraft.ChunkAccessUnsavedDirtyColumnMixin",
+    "minecraft.LevelChunkDirtyColumnMixin"
+  ],
+  "client": [
+    "voxy.ModelFactoryFluidBakeOrderMixin",
+    "voxy.VoxyRenderSystemDefaultFramebufferMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
