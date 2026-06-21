@@ -75,6 +75,7 @@ public final class VSSClientNetworking {
         serverEnabled = payload.enabled();
         serverLodDistance = payload.lodDistanceChunks();
         if (payload.enabled()) {
+            COLUMN_PROCESSOR.beginSession();
             LodRequestManager manager = new LodRequestManager();
             manager.onSessionConfig(payload);
             requestManager = manager;
@@ -141,6 +142,12 @@ public final class VSSClientNetworking {
     @SubscribeEvent
     public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         LodRequestManager manager = requestManager;
+        requestManager = null;
+        serverEnabled = false;
+        serverLodDistance = 0;
+        waitingForLanPublish = false;
+        lanHostHandshakeSent = false;
+        lanHostHandshakeRetryTicks = 0;
         if (manager != null) {
             manager.disconnect();
         }
@@ -148,14 +155,8 @@ public final class VSSClientNetworking {
         FarPlayerClientRenderer.clear();
         COLUMN_PROCESSOR.shutdown();
         COLUMN_PROCESSOR.resetStats();
-        serverEnabled = false;
-        serverLodDistance = 0;
-        waitingForLanPublish = false;
-        lanHostHandshakeSent = false;
-        lanHostHandshakeRetryTicks = 0;
         columnsReceived.set(0);
         bytesReceived.set(0);
-        requestManager = null;
     }
 
     @SubscribeEvent

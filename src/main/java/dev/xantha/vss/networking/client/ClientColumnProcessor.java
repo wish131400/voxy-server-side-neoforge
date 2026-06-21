@@ -9,7 +9,6 @@ import io.netty.buffer.Unpooled;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,16 +32,27 @@ final class ClientColumnProcessor {
     private final AtomicLong queueBytes = new AtomicLong();
     private final AtomicLong columnsDropped = new AtomicLong();
     private final AtomicBoolean processing = new AtomicBoolean();
+    private final AtomicInteger sessionEpoch = new AtomicInteger();
     private volatile ExecutorService executor = createExecutor();
     private volatile boolean shuttingDown;
     private volatile long lastDropWarnMs;
+
+    void beginSession() {
+        sessionEpoch.incrementAndGet();
+        clearQueue();
+        processing.set(false);
+        shuttingDown = false;
+        if (executor.isShutdown() || executor.isTerminated()) {
+            executor = createExecutor();
+        }
+    }
 
     void offer(VoxelColumnS2CPayload payload, boolean replaceMissingSections, boolean knownRequest) {
         if (shuttingDown) {
             return;
         }
         if (knownRequest && payload.decompressedSections().length <= 1) {
-            processEmptyColumn(payload, replaceMissingSections);
+            processEmptyColumn(payload, replaceMissingSections, sessionEpoch.get());
             return;
         }
 
@@ -63,11 +73,11 @@ final class ClientColumnProcessor {
         }
     }
 
-    private void processEmptyColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
+    private void processEmptyColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections, int epoch) {
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> {
             ClientLevel level = minecraft.level;
-            if (level == null || !level.dimension().equals(payload.dimension())) {
+            if (sessionEpoch.get() != epoch || shuttingDown || level == null || !level.dimension().equals(payload.dimension())) {
                 return;
             }
             Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
@@ -103,10 +113,11 @@ final class ClientColumnProcessor {
 
         if (VSSClientConfig.CONFIG.offThreadSectionProcessing) {
             if (processing.compareAndSet(false, true)) {
+                int epoch = sessionEpoch.get();
                 try {
                     executor.execute(() -> {
                         try {
-                            drainColumnQueue(level);
+                            drainColumnQueue(level, epoch);
                         } finally {
                             processing.set(false);
                         }
@@ -116,21 +127,21 @@ final class ClientColumnProcessor {
                 }
             }
         } else {
-            drainColumnQueue(level);
+            drainColumnQueue(level, sessionEpoch.get());
         }
     }
 
-    private void drainColumnQueue(ClientLevel level) {
+    private void drainColumnQueue(ClientLevel level, int epoch) {
         Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
 
         QueuedColumn queuedColumn;
-        while (!Thread.currentThread().isInterrupted() && (queuedColumn = columnQueue.poll()) != null) {
+        while (!Thread.currentThread().isInterrupted() && sessionEpoch.get() == epoch && (queuedColumn = columnQueue.poll()) != null) {
             VoxelColumnS2CPayload payload = queuedColumn.payload();
             queueSize.decrementAndGet();
             int estimatedBytes = payload.estimatedBytes();
             queueBytes.updateAndGet(value -> Math.max(0L, value - estimatedBytes));
             byte[] decompressed = payload.decompressedSections();
-            if (!level.dimension().equals(payload.dimension()) || decompressed == null || decompressed.length == 0) {
+            if (sessionEpoch.get() != epoch || !level.dimension().equals(payload.dimension()) || decompressed == null || decompressed.length == 0) {
                 continue;
             }
 
@@ -163,6 +174,9 @@ final class ClientColumnProcessor {
                     VoxelColumnData.SectionData[] finalSections = queuedColumn.replaceMissingSections()
                             ? mergeMissingAirSections(level, biomeRegistry, sections)
                             : sections;
+                    if (sessionEpoch.get() != epoch || shuttingDown) {
+                        return;
+                    }
                     VSSApi.dispatchColumn(
                             level,
                             payload.dimension(),
@@ -180,15 +194,11 @@ final class ClientColumnProcessor {
 
     void shutdown() {
         shuttingDown = true;
+        sessionEpoch.incrementAndGet();
         ExecutorService old = executor;
-        old.shutdownNow();
         clearQueue();
-        try {
-            old.awaitTermination(2L, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
         processing.set(false);
+        old.shutdownNow();
         executor = createExecutor();
         shuttingDown = false;
     }
