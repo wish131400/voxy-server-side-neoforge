@@ -28,9 +28,10 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.network.NetworkEvent;
 
 public final class FarPlayerClientRenderer {
-    private static final long STALE_AFTER_MILLIS = 3_000L;
-    private static final long MIN_INTERPOLATION_MILLIS = 50L;
-    private static final long MAX_INTERPOLATION_MILLIS = 1_000L;
+    private static final long NANOS_PER_MILLI = 1_000_000L;
+    private static final long STALE_AFTER_NANOS = 3_000L * NANOS_PER_MILLI;
+    private static final long MIN_INTERPOLATION_NANOS = 50L * NANOS_PER_MILLI;
+    private static final long MAX_INTERPOLATION_NANOS = 1_000L * NANOS_PER_MILLI;
     private static final double TELEPORT_DISTANCE_SQR = 32.0D * 32.0D;
     private static final Map<UUID, FarPlayerState> FAR_PLAYERS = new HashMap<>();
 
@@ -45,7 +46,7 @@ public final class FarPlayerClientRenderer {
             return;
         }
 
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         Set<UUID> seen = new HashSet<>();
         for (FarPlayersS2CPayload.Entry entry : payload.entries()) {
             if (entry.uuid().equals(localPlayer.getUUID())) {
@@ -79,12 +80,12 @@ public final class FarPlayerClientRenderer {
             return;
         }
 
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         ClientLevel level = Minecraft.getInstance().level;
         Iterator<Map.Entry<UUID, FarPlayerState>> iterator = FAR_PLAYERS.entrySet().iterator();
         while (iterator.hasNext()) {
             FarPlayerState state = iterator.next().getValue();
-            if (now - state.lastSeenMillis > STALE_AFTER_MILLIS) {
+            if (now - state.lastSeenNanos > STALE_AFTER_NANOS) {
                 iterator.remove();
                 continue;
             }
@@ -114,6 +115,7 @@ public final class FarPlayerClientRenderer {
         double cameraY = event.getCamera().getPosition().y;
         double cameraZ = event.getCamera().getPosition().z;
         float partialTick = event.getPartialTick();
+        boolean renderedAny = false;
 
         for (FarPlayerState state : FAR_PLAYERS.values()) {
             if (state.level != level || isTrackedByVanilla(level, state.uuid)) {
@@ -137,9 +139,14 @@ public final class FarPlayerClientRenderer {
                         bufferSource,
                         LightTexture.FULL_BRIGHT);
                 renderNameTag(mc, dispatcher, bufferSource, poseStack, state, cameraX, cameraY, cameraZ);
+                renderedAny = true;
             } catch (RuntimeException e) {
                 VSSLogger.debug("Far player render failed for " + state.name + ": " + e.getMessage());
             }
+        }
+
+        if (renderedAny) {
+            bufferSource.endBatch();
         }
     }
 
@@ -204,9 +211,9 @@ public final class FarPlayerClientRenderer {
         private float targetYaw;
         private float targetPitch;
         private float targetHeadYaw;
-        private long lastSeenMillis;
-        private long interpolationStartMillis;
-        private long interpolationDurationMillis = MIN_INTERPOLATION_MILLIS;
+        private long lastSeenNanos;
+        private long interpolationStartNanos;
+        private long interpolationDurationNanos = MIN_INTERPOLATION_NANOS;
         private double animationX;
         private double animationY;
         private double animationZ;
@@ -218,7 +225,7 @@ public final class FarPlayerClientRenderer {
             this.level = level;
             this.player = createPlayer(level, entry);
             snapTo(entry);
-            this.lastSeenMillis = 0L;
+            this.lastSeenNanos = 0L;
         }
 
         private void update(ClientLevel newLevel, FarPlayersS2CPayload.Entry entry, long now) {
@@ -226,33 +233,36 @@ public final class FarPlayerClientRenderer {
                 level = newLevel;
                 player = createPlayer(newLevel, entry);
                 snapTo(entry);
-            } else if (distanceSqr(player.getX(), player.getY(), player.getZ(), entry.x(), entry.y(), entry.z()) > TELEPORT_DISTANCE_SQR) {
-                snapTo(entry);
             } else {
-                previousX = player.getX();
-                previousY = player.getY();
-                previousZ = player.getZ();
-                previousYaw = player.getYRot();
-                previousPitch = player.getXRot();
-                previousHeadYaw = player.getYHeadRot();
+                PoseSample current = sample(now);
+                if (distanceSqr(current.x, current.y, current.z, entry.x(), entry.y(), entry.z()) > TELEPORT_DISTANCE_SQR) {
+                    snapTo(entry);
+                } else {
+                    previousX = current.x;
+                    previousY = current.y;
+                    previousZ = current.z;
+                    previousYaw = current.yaw;
+                    previousPitch = current.pitch;
+                    previousHeadYaw = current.headYaw;
+                }
                 targetX = entry.x();
                 targetY = entry.y();
                 targetZ = entry.z();
                 targetYaw = entry.yaw();
                 targetPitch = entry.pitch();
                 targetHeadYaw = entry.headYaw();
-                long packetInterval = lastSeenMillis > 0L ? now - lastSeenMillis : MIN_INTERPOLATION_MILLIS;
-                interpolationStartMillis = now;
-                interpolationDurationMillis = clampMillis(packetInterval, MIN_INTERPOLATION_MILLIS, MAX_INTERPOLATION_MILLIS);
+                long packetInterval = lastSeenNanos > 0L ? now - lastSeenNanos : MIN_INTERPOLATION_NANOS;
+                interpolationStartNanos = now;
+                interpolationDurationNanos = clamp(packetInterval, MIN_INTERPOLATION_NANOS, MAX_INTERPOLATION_NANOS);
             }
 
             applyStateFlags(entry);
-            lastSeenMillis = now;
+            lastSeenNanos = now;
         }
 
         private void markMissing(long now) {
-            if (now - lastSeenMillis > STALE_AFTER_MILLIS / 2L) {
-                lastSeenMillis = Math.min(lastSeenMillis, now - STALE_AFTER_MILLIS);
+            if (now - lastSeenNanos > STALE_AFTER_NANOS / 2L) {
+                lastSeenNanos = Math.min(lastSeenNanos, now - STALE_AFTER_NANOS);
             }
         }
 
@@ -276,7 +286,7 @@ public final class FarPlayerClientRenderer {
         }
 
         private void apply() {
-            PoseSample sample = sample(System.currentTimeMillis());
+            PoseSample sample = sample(System.nanoTime());
             player.xo = sample.x;
             player.yo = sample.y;
             player.zo = sample.z;
@@ -303,11 +313,11 @@ public final class FarPlayerClientRenderer {
         }
 
         private float interpolationProgress(long now) {
-            if (interpolationDurationMillis <= 0L) {
+            if (interpolationDurationNanos <= 0L) {
                 return 1.0F;
             }
-            long elapsed = now - interpolationStartMillis;
-            return Mth.clamp(elapsed / (float) interpolationDurationMillis, 0.0F, 1.0F);
+            long elapsed = now - interpolationStartNanos;
+            return Mth.clamp(elapsed / (float) interpolationDurationNanos, 0.0F, 1.0F);
         }
 
         private void snapTo(FarPlayersS2CPayload.Entry entry) {
@@ -336,8 +346,8 @@ public final class FarPlayerClientRenderer {
             animationY = entry.y();
             animationZ = entry.z();
             hasAnimationPosition = true;
-            interpolationStartMillis = System.currentTimeMillis();
-            interpolationDurationMillis = MIN_INTERPOLATION_MILLIS;
+            interpolationStartNanos = System.nanoTime();
+            interpolationDurationNanos = MIN_INTERPOLATION_NANOS;
             applyStateFlags(entry);
         }
 
@@ -365,7 +375,7 @@ public final class FarPlayerClientRenderer {
             return dx * dx + dy * dy + dz * dz;
         }
 
-        private static long clampMillis(long value, long min, long max) {
+        private static long clamp(long value, long min, long max) {
             return Math.max(min, Math.min(max, value));
         }
     }
