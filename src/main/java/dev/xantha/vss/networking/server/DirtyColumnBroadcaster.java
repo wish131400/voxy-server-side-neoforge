@@ -47,8 +47,13 @@ public final class DirtyColumnBroadcaster {
                 || !VSSServerConfig.CONFIG.enabled) {
             return;
         }
+        LongOpenHashSet affectedColumns = new LongOpenHashSet();
         for (BlockPos pos : event.getAffectedBlocks()) {
-            markDirtyColumn(level, pos.getX() >> 4, pos.getZ() >> 4);
+            markDirtyBlock(level, pos);
+            affectedColumns.add(PositionUtil.packPosition(pos.getX() >> 4, pos.getZ() >> 4));
+        }
+        for (long packed : affectedColumns) {
+            markDirtyColumnAndNeighbors(level, PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed));
         }
     }
 
@@ -72,7 +77,7 @@ public final class DirtyColumnBroadcaster {
         tickCounter = 0;
 
         for (ServerLevel level : server.getAllLevels()) {
-            LongOpenHashSet positions = DIRTY.remove(level);
+            LongOpenHashSet positions = DIRTY.get(level);
             if (positions == null || positions.isEmpty()) {
                 continue;
             }
@@ -80,7 +85,10 @@ public final class DirtyColumnBroadcaster {
                 continue;
             }
 
-            long[] packed = toLimitedArray(positions);
+            long[] packed = drainLimitedArray(positions);
+            if (positions.isEmpty()) {
+                DIRTY.remove(level);
+            }
             DirtyColumnsS2CPayload payload = new DirtyColumnsS2CPayload(packed);
             for (ServerPlayer player : level.players()) {
                 if (VSSServerNetworking.isRegistered(player)) {
@@ -143,7 +151,7 @@ public final class DirtyColumnBroadcaster {
     public static void markDirty(Object levelAccess, BlockPos pos) {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
-            markDirtyColumn(level, pos.getX() >> 4, pos.getZ() >> 4);
+            markDirtyBlock(level, pos);
         }
     }
 
@@ -151,6 +159,40 @@ public final class DirtyColumnBroadcaster {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
             markDirtyColumn(level, cx, cz);
+        }
+    }
+
+    public static void markDirtyColumnAndNeighbors(Object levelAccess, int cx, int cz) {
+        if (levelAccess instanceof ServerLevel level
+                && VSSServerConfig.CONFIG.enabled) {
+            markDirtyColumnAndNeighbors(level, cx, cz);
+        }
+    }
+
+    private static void markDirtyBlock(ServerLevel level, BlockPos pos) {
+        int cx = pos.getX() >> 4;
+        int cz = pos.getZ() >> 4;
+        markDirtyColumn(level, cx, cz);
+
+        int localX = pos.getX() & 15;
+        int localZ = pos.getZ() & 15;
+        if (localX == 0) {
+            markDirtyColumn(level, cx - 1, cz);
+        } else if (localX == 15) {
+            markDirtyColumn(level, cx + 1, cz);
+        }
+        if (localZ == 0) {
+            markDirtyColumn(level, cx, cz - 1);
+        } else if (localZ == 15) {
+            markDirtyColumn(level, cx, cz + 1);
+        }
+    }
+
+    private static void markDirtyColumnAndNeighbors(ServerLevel level, int cx, int cz) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                markDirtyColumn(level, cx + dx, cz + dz);
+            }
         }
     }
 
@@ -163,7 +205,7 @@ public final class DirtyColumnBroadcaster {
         }
 
         LongOpenHashSet positions = DIRTY.computeIfAbsent(level, ignored -> new LongOpenHashSet());
-        if (positions.size() < VSSConstants.MAX_DIRTY_COLUMN_POSITIONS) {
+        if (positions.size() < VSSServerConfig.CONFIG.dirtyVersionCacheMaxEntries) {
             positions.add(packed);
         }
     }
@@ -238,12 +280,13 @@ public final class DirtyColumnBroadcaster {
         return count;
     }
 
-    private static long[] toLimitedArray(LongOpenHashSet positions) {
+    private static long[] drainLimitedArray(LongOpenHashSet positions) {
         int count = Math.min(positions.size(), VSSConstants.MAX_DIRTY_COLUMN_POSITIONS);
         long[] packed = new long[count];
         LongIterator iterator = positions.iterator();
         for (int i = 0; i < count && iterator.hasNext(); i++) {
             packed[i] = iterator.nextLong();
+            iterator.remove();
         }
         return packed;
     }

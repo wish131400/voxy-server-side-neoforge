@@ -111,11 +111,11 @@ public final class VSSClientNetworking {
         columnsReceived.incrementAndGet();
         bytesReceived.addAndGet(payload.estimatedBytes());
         LodRequestManager manager = requestManager;
-        boolean replaceMissingSections = false;
+        LodRequestManager.ColumnReceiveResult receiveResult = new LodRequestManager.ColumnReceiveResult(false, false);
         if (manager != null) {
-            replaceMissingSections = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
+            receiveResult = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
         }
-        COLUMN_PROCESSOR.offer(payload, replaceMissingSections);
+        COLUMN_PROCESSOR.offer(payload, receiveResult.replaceMissingSections(), receiveResult.knownRequest());
     }
 
     @SubscribeEvent

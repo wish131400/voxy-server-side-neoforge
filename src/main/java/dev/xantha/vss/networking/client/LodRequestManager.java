@@ -101,15 +101,17 @@ public final class LodRequestManager {
         scanAndSend(level, player);
     }
 
-    public boolean onColumnReceived(int requestId, long columnTimestamp) {
+    public ColumnReceiveResult onColumnReceived(int requestId, long columnTimestamp) {
         boolean replaceMissingSections = isDirtyRefreshRequest(requestId);
         long packed = removeRequest(requestId);
-        if (packed != Long.MIN_VALUE) {
-            dirtyColumns.remove(packed);
-            columnTimestamps.put(packed, columnTimestamp);
-            clearBackoff(packed);
+        if (packed == Long.MIN_VALUE) {
+            return new ColumnReceiveResult(false, false);
         }
-        return replaceMissingSections;
+
+        dirtyColumns.remove(packed);
+        columnTimestamps.put(packed, columnTimestamp);
+        clearBackoff(packed);
+        return new ColumnReceiveResult(true, true);
     }
 
     public void onDirtyColumns(long[] dirtyPositions) {
@@ -554,5 +556,8 @@ public final class LodRequestManager {
                 syncSent++;
             }
         }
+    }
+
+    public record ColumnReceiveResult(boolean replaceMissingSections, boolean knownRequest) {
     }
 }

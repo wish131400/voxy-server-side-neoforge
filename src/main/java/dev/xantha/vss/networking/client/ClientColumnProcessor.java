@@ -37,10 +37,15 @@ final class ClientColumnProcessor {
     private volatile boolean shuttingDown;
     private volatile long lastDropWarnMs;
 
-    void offer(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
+    void offer(VoxelColumnS2CPayload payload, boolean replaceMissingSections, boolean knownRequest) {
         if (shuttingDown) {
             return;
         }
+        if (knownRequest && payload.decompressedSections().length <= 1) {
+            processEmptyColumn(payload, replaceMissingSections);
+            return;
+        }
+
         int estimatedBytes = payload.estimatedBytes();
         if (queueSize.get() < MAX_QUEUED_COLUMNS && queueBytes.get() + estimatedBytes <= MAX_QUEUED_BYTES) {
             columnQueue.add(new QueuedColumn(payload, replaceMissingSections));
@@ -56,6 +61,26 @@ final class ClientColumnProcessor {
             VSSLogger.warn("Column processing queue full (" + MAX_QUEUED_COLUMNS + " columns, "
                     + (MAX_QUEUED_BYTES / 1024L / 1024L) + " MiB), " + dropped + " columns dropped total");
         }
+    }
+
+    private void processEmptyColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            ClientLevel level = minecraft.level;
+            if (level == null || !level.dimension().equals(payload.dimension())) {
+                return;
+            }
+            Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+            VSSApi.dispatchColumn(
+                    level,
+                    payload.dimension(),
+                    payload.chunkX(),
+                    payload.chunkZ(),
+                    new VoxelColumnData(
+                            replaceMissingSections ? emptySections(level, biomeRegistry) : new VoxelColumnData.SectionData[0],
+                            payload.columnTimestamp(),
+                            replaceMissingSections));
+        });
     }
 
     void scheduleProcessing(boolean serverEnabled) {
@@ -135,12 +160,15 @@ final class ClientColumnProcessor {
 
                         sections[i] = new VoxelColumnData.SectionData(sectionY, section, blockLight, skyLight);
                     }
+                    VoxelColumnData.SectionData[] finalSections = queuedColumn.replaceMissingSections()
+                            ? mergeMissingAirSections(level, biomeRegistry, sections)
+                            : sections;
                     VSSApi.dispatchColumn(
                             level,
                             payload.dimension(),
                             payload.chunkX(),
                             payload.chunkZ(),
-                            new VoxelColumnData(sections, payload.columnTimestamp(), queuedColumn.replaceMissingSections()));
+                            new VoxelColumnData(finalSections, payload.columnTimestamp(), queuedColumn.replaceMissingSections()));
                 } finally {
                     buf.release();
                 }
@@ -190,6 +218,51 @@ final class ClientColumnProcessor {
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    private static VoxelColumnData.SectionData[] mergeMissingAirSections(
+            ClientLevel level,
+            Registry<Biome> biomeRegistry,
+            VoxelColumnData.SectionData[] presentSections) {
+        boolean[] present = new boolean[level.getSectionsCount()];
+        int minSection = level.getMinSection();
+        for (VoxelColumnData.SectionData section : presentSections) {
+            int index = section.sectionY() - minSection;
+            if (index >= 0 && index < present.length) {
+                present[index] = true;
+            }
+        }
+
+        int missing = 0;
+        for (boolean value : present) {
+            if (!value) {
+                missing++;
+            }
+        }
+        if (missing == 0) {
+            return presentSections;
+        }
+
+        VoxelColumnData.SectionData[] merged = new VoxelColumnData.SectionData[presentSections.length + missing];
+        System.arraycopy(presentSections, 0, merged, 0, presentSections.length);
+        int out = presentSections.length;
+        for (int i = 0; i < present.length; i++) {
+            if (!present[i]) {
+                int sectionY = minSection + i;
+                merged[out++] = new VoxelColumnData.SectionData(sectionY, new LevelChunkSection(biomeRegistry), null, null);
+            }
+        }
+        return merged;
+    }
+
+    private static VoxelColumnData.SectionData[] emptySections(ClientLevel level, Registry<Biome> biomeRegistry) {
+        VoxelColumnData.SectionData[] sections = new VoxelColumnData.SectionData[level.getSectionsCount()];
+        int minSection = level.getMinSection();
+        for (int i = 0; i < sections.length; i++) {
+            int sectionY = minSection + i;
+            sections[i] = new VoxelColumnData.SectionData(sectionY, new LevelChunkSection(biomeRegistry), null, null);
+        }
+        return sections;
     }
 
     private record QueuedColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
