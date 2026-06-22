@@ -8,10 +8,13 @@
     "ftbessentials.TeleportCommandsNoBlockingMixin",
     "ftbchunks.FTBChunksExpectedImplMixin",
     "minecraft.LevelBlockUpdateDirtyColumnMixin",
+    "minecraft.LevelChunkClearBlockEntitiesMixin",
     "minecraft.LevelDirtyColumnMixin",
-    "minecraft.LevelChunkDirtyColumnMixin"
+    "minecraft.LevelChunkDirtyColumnMixin",
+    "minecraft.LevelChunkRebindableTickerAccessor"
   ],
   "client": [
+    "client.ClientChunkCacheDropMixin",
     "client.LevelRendererFarPlayerChunkMixin",
     "voxy.ModelBakerySubsystemShutdownMixin",
     "voxy.ModelFactoryFluidBakeOrderMixin",

@@ -8,9 +8,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
-import java.util.HashSet;
 import java.util.OptionalInt;
-import java.util.Set;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -54,10 +52,9 @@ final class VoxyCompat {
                     if (worldId == null) {
                         return;
                     }
-                    Set<Integer> presentSections = new HashSet<>();
+                    boolean accepted = true;
                     for (VoxelColumnData.SectionData sectionData : columnData.sections()) {
-                        presentSections.add(sectionData.sectionY());
-                        rawIngest.invoke(
+                        accepted &= (boolean) rawIngest.invoke(
                                 worldId,
                                 sectionData.section(),
                                 chunkX,
@@ -66,8 +63,8 @@ final class VoxyCompat {
                                 sectionData.blockLight(),
                                 sectionData.skyLight());
                     }
-                    if (columnData.replaceMissingSections()) {
-                        clearMissingSections(worldId, level, chunkX, chunkZ, presentSections);
+                    if (!accepted) {
+                        VSSClientNetworking.onColumnProcessingFailed(dimension, chunkX, chunkZ);
                     }
                 } catch (Throwable e) {
                     if (e instanceof Error && !(e instanceof LinkageError) && !(e instanceof AssertionError)) {
@@ -87,26 +84,6 @@ final class VoxyCompat {
         } catch (Throwable e) {
             VSSLogger.error("Failed to initialize Voxy compat", e);
             return false;
-        }
-    }
-
-    private static void clearMissingSections(Object worldId, Level level, int chunkX, int chunkZ, Set<Integer> presentSections)
-            throws Throwable {
-        int minSection = level.getMinSection();
-        int maxSection = minSection + level.getSectionsCount();
-        for (int sectionY = minSection; sectionY < maxSection; sectionY++) {
-            if (presentSections.contains(sectionY)) {
-                continue;
-            }
-
-            rawIngest.invoke(
-                    worldId,
-                    new LevelChunkSection(level.registryAccess().registryOrThrow(net.minecraft.core.registries.Registries.BIOME)),
-                    chunkX,
-                    sectionY,
-                    chunkZ,
-                    null,
-                    null);
         }
     }
 

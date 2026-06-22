@@ -33,6 +33,10 @@ public final class LodRequestManager {
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
+    private static final int NEAR_REPAIR_INTERVAL_TICKS = 20;
+    private static final int NEAR_REPAIR_COLUMNS_PER_INTERVAL = 64;
+    private static final int NEAR_REPAIR_MAX_RADIUS = 128;
+    private static final long NEAR_REPAIR_COLUMN_COOLDOWN_NANOS = 60_000_000_000L;
 
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
     private final LongOpenHashSet dirtyColumns = new LongOpenHashSet();
@@ -47,6 +51,7 @@ public final class LodRequestManager {
     private final LongOpenHashSet dirtyRefreshInFlight = new LongOpenHashSet();
     private final Long2LongOpenHashMap retryAfterNanos = new Long2LongOpenHashMap();
     private final Long2IntOpenHashMap retryAttempts = new Long2IntOpenHashMap();
+    private final Long2LongOpenHashMap nearRepairAfterNanos = new Long2LongOpenHashMap();
 
     private SessionConfigS2CPayload sessionConfig;
     private ResourceKey<Level> lastDimension;
@@ -56,6 +61,9 @@ public final class LodRequestManager {
     private int scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     private int scanRing;
     private int scanIndex;
+    private int nearRepairTickCounter;
+    private int nearRepairRing;
+    private int nearRepairIndex;
     private double syncRequestBudget;
     private double generationRequestBudget;
     private double dirtyRefreshBudget;
@@ -69,6 +77,7 @@ public final class LodRequestManager {
         retryAfterNanos.defaultReturnValue(0L);
         retryAttempts.defaultReturnValue(0);
         dirtyColumnTimestamps.defaultReturnValue(0L);
+        nearRepairAfterNanos.defaultReturnValue(0L);
     }
 
     public void onSessionConfig(SessionConfigS2CPayload config) {
@@ -97,10 +106,12 @@ public final class LodRequestManager {
         if (playerCx != lastPlayerChunkX || playerCz != lastPlayerChunkZ) {
             pruneAround(playerCx, playerCz, getEffectiveLodDistance() + VSSConstants.LOD_DISTANCE_BUFFER);
             resetScanCursor();
+            resetNearRepairCursor();
             lastPlayerChunkX = playerCx;
             lastPlayerChunkZ = playerCz;
         }
         timeoutSweep();
+        scheduleNearRepair(playerCx, playerCz, getEffectiveLodDistance());
 
         if (++scanTickCounter < SCAN_INTERVAL_TICKS) {
             return;
@@ -113,7 +124,7 @@ public final class LodRequestManager {
         boolean dirtyRefreshRequest = isDirtyRefreshRequest(requestId);
         long packed = removeRequest(requestId);
         if (packed == Long.MIN_VALUE) {
-            return new ColumnReceiveResult(false, false, false);
+            return new ColumnReceiveResult(false, false, Long.MIN_VALUE);
         }
 
         long requiredTimestamp = dirtyColumnTimestamps.get(packed);
@@ -127,7 +138,15 @@ public final class LodRequestManager {
             dirtyColumnTimestamps.remove(packed);
             clearBackoff(packed);
         }
-        return new ColumnReceiveResult(dirtyRefreshRequest, true, dirtyRefreshRequest);
+        return new ColumnReceiveResult(true, dirtyRefreshRequest, packed);
+    }
+
+    public void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
+        forgetColumn(dimension, cx, cz, true);
+    }
+
+    public void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
+        forgetColumn(dimension, cx, cz, false);
     }
 
     public void onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
@@ -245,14 +264,19 @@ public final class LodRequestManager {
                     continue;
                 }
 
-                boolean dirtyRefresh = dirtyColumns.contains(packed);
-                boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
-                if (!requestWindow.canSend(dirtyRefresh, generationCandidate)) {
-                    continue;
-                }
-
-                count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate);
-                requestWindow.record(dirtyRefresh, generationCandidate);
+                count = appendRequestCluster(
+                        packed,
+                        playerCx,
+                        playerCz,
+                        lodDistance,
+                        requestIds,
+                        positions,
+                        timestamps,
+                        allowGeneration,
+                        count,
+                        maxCount,
+                        requestWindow,
+                        now);
             }
             if (i >= ringSize) {
                 radius++;
@@ -348,6 +372,69 @@ public final class LodRequestManager {
         return count;
     }
 
+    private int appendRequestCluster(
+            long centerPacked,
+            int playerCx,
+            int playerCz,
+            int lodDistance,
+            int[] requestIds,
+            long[] positions,
+            long[] timestamps,
+            boolean[] allowGeneration,
+            int count,
+            int maxCount,
+            RequestWindow requestWindow,
+            long now) {
+        int centerX = PositionUtil.unpackX(centerPacked);
+        int centerZ = PositionUtil.unpackZ(centerPacked);
+        count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
+                allowGeneration, count, maxCount, requestWindow, now);
+        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasCapacity(); dz++) {
+            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasCapacity(); dx++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                long packed = PositionUtil.packPosition(centerX + dx, centerZ + dz);
+                count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
+                        allowGeneration, count, maxCount, requestWindow, now);
+            }
+        }
+        return count;
+    }
+
+    private int appendClusterCandidate(
+            long packed,
+            int playerCx,
+            int playerCz,
+            int lodDistance,
+            int[] requestIds,
+            long[] positions,
+            long[] timestamps,
+            boolean[] allowGeneration,
+            int count,
+            int maxCount,
+            RequestWindow requestWindow,
+            long now) {
+        if (count >= maxCount || !requestWindow.hasCapacity()) {
+            return count;
+        }
+        int cx = PositionUtil.unpackX(packed);
+        int cz = PositionUtil.unpackZ(packed);
+        if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) > lodDistance || !shouldRequestColumn(packed, now)) {
+            return count;
+        }
+
+        boolean dirtyRefresh = dirtyColumns.contains(packed);
+        boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
+        if (!requestWindow.canSend(dirtyRefresh, generationCandidate)) {
+            return count;
+        }
+
+        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate);
+        requestWindow.record(dirtyRefresh, generationCandidate);
+        return count;
+    }
+
     private boolean shouldRequestColumn(long packed, long now) {
         boolean dirty = dirtyColumns.contains(packed);
         if (inFlight.contains(packed)) {
@@ -362,6 +449,137 @@ public final class LodRequestManager {
             return false;
         }
         return dirty || timestamp != 0L || sessionConfig.generationEnabled();
+    }
+
+    private void scheduleNearRepair(int playerCx, int playerCz, int lodDistance) {
+        if (++nearRepairTickCounter < NEAR_REPAIR_INTERVAL_TICKS || lodDistance <= 0) {
+            return;
+        }
+        nearRepairTickCounter = 0;
+
+        int repairRadius = Math.min(lodDistance, NEAR_REPAIR_MAX_RADIUS);
+        if (repairRadius <= 0) {
+            return;
+        }
+
+        long now = System.nanoTime();
+        int radius = Math.max(1, nearRepairRing);
+        if (radius > repairRadius) {
+            radius = 1;
+            nearRepairIndex = 0;
+        }
+
+        int scheduled = 0;
+        int ringsChecked = 0;
+        while (scheduled < NEAR_REPAIR_COLUMNS_PER_INTERVAL && ringsChecked < repairRadius) {
+            int ringSize = Math.max(1, radius * 8);
+            int i = Math.min(nearRepairIndex, ringSize);
+            for (; i < ringSize && scheduled < NEAR_REPAIR_COLUMNS_PER_INTERVAL; i++) {
+                long packed = ringIndexToPackedCoord(radius, i, playerCx, playerCz);
+                if (!shouldRepairKnownColumn(packed, now)) {
+                    continue;
+                }
+
+                scheduled += scheduleNearRepairCluster(packed, playerCx, playerCz, repairRadius, now,
+                        NEAR_REPAIR_COLUMNS_PER_INTERVAL - scheduled);
+            }
+
+            if (i >= ringSize) {
+                radius++;
+                nearRepairIndex = 0;
+                ringsChecked++;
+                if (radius > repairRadius) {
+                    radius = 1;
+                }
+            } else {
+                nearRepairIndex = i;
+                break;
+            }
+        }
+        nearRepairRing = radius;
+    }
+
+    private int scheduleNearRepairCluster(long centerPacked, int playerCx, int playerCz, int repairRadius, long now, int remaining) {
+        int scheduled = 0;
+        int centerX = PositionUtil.unpackX(centerPacked);
+        int centerZ = PositionUtil.unpackZ(centerPacked);
+        scheduled += scheduleNearRepairColumn(centerPacked, playerCx, playerCz, repairRadius, now);
+        for (int dz = -1; dz <= 1 && scheduled < remaining; dz++) {
+            for (int dx = -1; dx <= 1 && scheduled < remaining; dx++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                scheduled += scheduleNearRepairColumn(
+                        PositionUtil.packPosition(centerX + dx, centerZ + dz),
+                        playerCx,
+                        playerCz,
+                        repairRadius,
+                        now);
+            }
+        }
+        return scheduled;
+    }
+
+    private int scheduleNearRepairColumn(long packed, int playerCx, int playerCz, int repairRadius, long now) {
+        int cx = PositionUtil.unpackX(packed);
+        int cz = PositionUtil.unpackZ(packed);
+        if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) > repairRadius || !shouldRepairKnownColumn(packed, now)) {
+            return 0;
+        }
+
+        columnTimestamps.remove(packed);
+        clearBackoff(packed);
+        nearRepairAfterNanos.put(packed, now + NEAR_REPAIR_COLUMN_COOLDOWN_NANOS);
+        deferColumn(packed, true);
+        return 1;
+    }
+
+    private boolean shouldRepairKnownColumn(long packed, long now) {
+        if (columnTimestamps.get(packed) <= 0L || dirtyColumns.contains(packed) || inFlight.contains(packed)) {
+            return false;
+        }
+        if (deferredColumns.contains(packed) || isCoolingDown(packed, now)) {
+            return false;
+        }
+        long repairAfter = nearRepairAfterNanos.get(packed);
+        return repairAfter <= 0L || repairAfter <= now;
+    }
+
+    private void forgetColumn(ResourceKey<Level> dimension, int cx, int cz, boolean applyBackoff) {
+        if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) {
+            return;
+        }
+
+        long packed = PositionUtil.packPosition(cx, cz);
+        columnTimestamps.remove(packed);
+        nearRepairAfterNanos.remove(packed);
+        if (applyBackoff) {
+            markBackoff(packed, false);
+        } else {
+            clearBackoff(packed);
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        LocalPlayer player = minecraft.player;
+        ClientLevel level = minecraft.level;
+        if (player == null || level == null || player.isRemoved() || !level.dimension().equals(dimension)) {
+            return;
+        }
+
+        int playerCx = player.getBlockX() >> 4;
+        int playerCz = player.getBlockZ() >> 4;
+        if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) <= getEffectiveLodDistance()) {
+            deferColumn(packed, true);
+            resetScanCursor();
+        }
+    }
+
+    private boolean isActiveDimension(ResourceKey<Level> dimension) {
+        if (lastDimension != null) {
+            return lastDimension.equals(dimension);
+        }
+        ClientLevel level = Minecraft.getInstance().level;
+        return level != null && level.dimension().equals(dimension);
     }
 
     private boolean isGenerationCandidate(long packed) {
@@ -503,6 +721,7 @@ public final class LodRequestManager {
             deferredColumns.remove(packed);
             retryAfterNanos.remove(packed);
             retryAttempts.remove(packed);
+            nearRepairAfterNanos.remove(packed);
         }
 
         LongOpenHashSet staleRequests = new LongOpenHashSet();
@@ -566,11 +785,15 @@ public final class LodRequestManager {
         dirtyRefreshInFlight.clear();
         retryAfterNanos.clear();
         retryAttempts.clear();
+        nearRepairAfterNanos.clear();
         nextRequestId = 0;
         lastPlayerChunkX = Integer.MIN_VALUE;
         lastPlayerChunkZ = Integer.MIN_VALUE;
         scanRing = 0;
         scanIndex = 0;
+        nearRepairRing = 0;
+        nearRepairIndex = 0;
+        nearRepairTickCounter = 0;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
         syncRequestBudget = 0.0D;
         generationRequestBudget = 0.0D;
@@ -581,6 +804,12 @@ public final class LodRequestManager {
         scanRing = 0;
         scanIndex = 0;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
+    }
+
+    private void resetNearRepairCursor() {
+        nearRepairRing = 0;
+        nearRepairIndex = 0;
+        nearRepairTickCounter = NEAR_REPAIR_INTERVAL_TICKS - 1;
     }
 
     private static long ringIndexToPackedCoord(int r, int i, int centerX, int centerZ) {
@@ -666,6 +895,6 @@ public final class LodRequestManager {
         }
     }
 
-    public record ColumnReceiveResult(boolean replaceMissingSections, boolean knownRequest, boolean priority) {
+    public record ColumnReceiveResult(boolean knownRequest, boolean priority, long packedPosition) {
     }
 }

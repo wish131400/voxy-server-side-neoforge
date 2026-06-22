@@ -20,7 +20,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.Level;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
@@ -147,13 +149,43 @@ public final class VSSClientNetworking {
         LodRequestManager manager = requestManager;
         LodRequestManager.ColumnReceiveResult receiveResult;
         if (payload.requestId() < 0) {
-            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, true);
+            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, Long.MIN_VALUE);
         } else if (manager != null) {
             receiveResult = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
         } else {
-            receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, false);
+            receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, Long.MIN_VALUE);
         }
-        COLUMN_PROCESSOR.offer(payload, receiveResult.replaceMissingSections(), receiveResult.knownRequest(), receiveResult.priority());
+        boolean queued = COLUMN_PROCESSOR.offer(
+                payload,
+                receiveResult.knownRequest(),
+                receiveResult.priority());
+        if (!queued && manager != null && receiveResult.packedPosition() != Long.MIN_VALUE) {
+            manager.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
+        }
+    }
+
+    public static void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (!minecraft.isSameThread()) {
+            minecraft.execute(() -> onColumnProcessingFailed(dimension, cx, cz));
+            return;
+        }
+        LodRequestManager manager = requestManager;
+        if (manager != null) {
+            manager.onColumnProcessingFailed(dimension, cx, cz);
+        }
+    }
+
+    public static void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (!minecraft.isSameThread()) {
+            minecraft.execute(() -> onClientChunkDropped(dimension, cx, cz));
+            return;
+        }
+        LodRequestManager manager = requestManager;
+        if (manager != null) {
+            manager.onClientChunkDropped(dimension, cx, cz);
+        }
     }
 
     @SubscribeEvent
