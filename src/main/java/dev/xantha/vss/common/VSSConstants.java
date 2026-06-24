@@ -2,9 +2,10 @@ package dev.xantha.vss.common;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 26;
+    public static final int PROTOCOL_VERSION = 27;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
+    public static final int CAPABILITY_ZSTD_COLUMNS = 1 << 1;
     public static final int MAX_BATCH_CHUNK_REQUESTS = 1024;
     public static final int MAX_BATCH_RESPONSES = 4096;
     public static final int MAX_DIRTY_COLUMN_POSITIONS = 10240;

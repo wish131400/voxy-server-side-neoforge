@@ -19,6 +19,12 @@ public final class ModCompat {
         return voxyLoaded ? VoxyCompat.getViewDistanceChunks() : OptionalInt.empty();
     }
 
+    public static void clientTick() {
+        if (voxyLoaded) {
+            VoxyCompat.clientTick();
+        }
+    }
+
     private static boolean classExists(String name) {
         try {
             Class.forName(name, false, ModCompat.class.getClassLoader());

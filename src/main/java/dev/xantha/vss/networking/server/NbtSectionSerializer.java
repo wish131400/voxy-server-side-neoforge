@@ -5,8 +5,10 @@ import com.mojang.serialization.DynamicOps;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import io.netty.buffer.Unpooled;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
@@ -85,6 +87,7 @@ final class NbtSectionSerializer {
         int countWriterIndex = buf.writerIndex();
         buf.writeVarInt(0);
         int includedCount = 0;
+        int highestIncludedSectionY = Integer.MIN_VALUE;
         try {
             for (Tag tag : sections) {
                 if (!(tag instanceof CompoundTag sectionTag) || !sectionTag.contains("Y")) {
@@ -115,6 +118,7 @@ final class NbtSectionSerializer {
                     buf.writeBytes(skyLight);
                 }
                 includedCount++;
+                highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionTag.getByte("Y"));
             }
 
             if (includedCount == 0) {
@@ -127,10 +131,65 @@ final class NbtSectionSerializer {
             buf.writerIndex(endWriterIndex);
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            return new LoadedColumnData(cx, cz, serialized, serialized.length);
+            boolean completeColumn = isCompleteColumn(chunkNbt, highestIncludedSectionY);
+            return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
         } finally {
             buf.release();
         }
+    }
+
+    private static boolean isCompleteColumn(CompoundTag chunkNbt, int highestIncludedSectionY) {
+        OptionalInt surfaceSection = highestSurfaceSection(chunkNbt);
+        return surfaceSection.isPresent() && highestIncludedSectionY >= surfaceSection.getAsInt();
+    }
+
+    private static OptionalInt highestSurfaceSection(CompoundTag chunkNbt) {
+        if (!chunkNbt.contains("Heightmaps", Tag.TAG_COMPOUND)) {
+            return OptionalInt.empty();
+        }
+
+        CompoundTag heightmaps = chunkNbt.getCompound("Heightmaps");
+        long[] surface = getHeightmapArray(heightmaps);
+        if (surface.length == 0) {
+            return OptionalInt.empty();
+        }
+
+        int minY = chunkNbt.contains("yPos", Tag.TAG_INT) ? chunkNbt.getInt("yPos") * 16 : -64;
+        int height = chunkNbt.contains("Height", Tag.TAG_INT) ? chunkNbt.getInt("Height") : 384;
+        int bits = 32 - Integer.numberOfLeadingZeros(height);
+        long mask = (1L << bits) - 1L;
+        int highestSurfaceBlockY = Integer.MIN_VALUE;
+        for (int i = 0; i < 256; i++) {
+            int bitIndex = i * bits;
+            int longIndex = bitIndex >> 6;
+            int bitOffset = bitIndex & 63;
+            if (longIndex >= surface.length) {
+                break;
+            }
+            long packed = surface[longIndex] >>> bitOffset;
+            int bitsInFirstLong = 64 - bitOffset;
+            if (bitsInFirstLong < bits && longIndex + 1 < surface.length) {
+                packed |= surface[longIndex + 1] << bitsInFirstLong;
+            }
+            int heightValue = (int) (packed & mask);
+            int surfaceBlockY = minY + heightValue - 1;
+            if (surfaceBlockY >= minY) {
+                highestSurfaceBlockY = Math.max(highestSurfaceBlockY, surfaceBlockY);
+            }
+        }
+        return highestSurfaceBlockY == Integer.MIN_VALUE
+                ? OptionalInt.empty()
+                : OptionalInt.of(SectionPos.blockToSectionCoord(highestSurfaceBlockY));
+    }
+
+    private static long[] getHeightmapArray(CompoundTag heightmaps) {
+        if (heightmaps.contains("WORLD_SURFACE", Tag.TAG_LONG_ARRAY)) {
+            return heightmaps.getLongArray("WORLD_SURFACE");
+        }
+        if (heightmaps.contains("MOTION_BLOCKING", Tag.TAG_LONG_ARRAY)) {
+            return heightmaps.getLongArray("MOTION_BLOCKING");
+        }
+        return new long[0];
     }
 
     private static LevelChunkSection parseSection(

@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -39,6 +38,7 @@ public final class VSSServerNetworking {
     private static final Map<UUID, PlayerRequestState> PLAYER_STATES = new HashMap<>();
     private static final ChunkGenerationService GENERATION_SERVICE = new ChunkGenerationService(VSSServerConfig.CONFIG);
     private static final ColumnLodCache COLUMN_CACHE = new ColumnLodCache(VSSServerConfig.CONFIG);
+    private static final PersistentColumnLodStore PERSISTENT_COLUMN_STORE = new PersistentColumnLodStore(VSSServerConfig.CONFIG);
     private static final AtomicLong totalColumnRequests = new AtomicLong();
     private static final AtomicLong totalDuplicateRequests = new AtomicLong();
     private static final AtomicLong totalDistanceRejectedRequests = new AtomicLong();
@@ -49,6 +49,7 @@ public final class VSSServerNetworking {
     private static final AtomicLong totalDiskReadMisses = new AtomicLong();
     private static final AtomicLong totalDiskReadFailures = new AtomicLong();
     private static final AtomicInteger pendingDiskReads = new AtomicInteger();
+    private static final AtomicInteger pendingPersistentWrites = new AtomicInteger();
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final int PRIORITY_SEND_COLUMNS_PER_TICK = 4;
     private static final long PRIORITY_SEND_BYTES_PER_TICK = 256L * 1024L;
@@ -92,12 +93,14 @@ public final class VSSServerNetworking {
         }
     }
 
-    public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion) {
+    public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         boolean compatible = clientProtocolVersion == VSSConstants.PROTOCOL_VERSION;
         boolean enabled = config.enabled && compatible;
         if (compatible && enabled) {
-            PLAYER_STATES.put(player.getUUID(), new PlayerRequestState());
+            PlayerRequestState state = new PlayerRequestState();
+            state.setClientCapabilities(clientCapabilities);
+            PLAYER_STATES.put(player.getUUID(), state);
             idleMemoryReleased = false;
             VSSLogger.info("Integrated host " + player.getGameProfile().getName() + " registered for VSS LOD sync");
         } else if (!compatible) {
@@ -157,7 +160,8 @@ public final class VSSServerNetworking {
                 totalDiskReadMisses.get(),
                 totalDiskReadFailures.get(),
                 DirtyColumnBroadcaster.diagnostics(),
-                COLUMN_CACHE.diagnostics());
+                COLUMN_CACHE.diagnostics() + ", " + PERSISTENT_COLUMN_STORE.diagnostics()
+                        + ", persistentWritePending=" + pendingPersistentWrites.get());
     }
 
     static Component diagnosticsComponent() {
@@ -193,7 +197,9 @@ public final class VSSServerNetworking {
             return;
         }
         if (enabled) {
-            PLAYER_STATES.put(player.getUUID(), new PlayerRequestState());
+            PlayerRequestState state = new PlayerRequestState();
+            state.setClientCapabilities(payload.capabilities());
+            PLAYER_STATES.put(player.getUUID(), state);
             idleMemoryReleased = false;
             VSSLogger.info("Player " + player.getGameProfile().getName() + " registered for VSS LOD sync");
         }
@@ -260,6 +266,11 @@ public final class VSSServerNetworking {
             long packed = payload.packedPositions()[i];
             int cx = PositionUtil.unpackX(packed);
             int cz = PositionUtil.unpackZ(packed);
+            if (i == 0) {
+                VSSLogger.debug("Processing batch request from " + player.getGameProfile().getName()
+                        + ": count=" + payload.count() + ", first chunk=" + cx + "," + cz);
+            }
+
             if (!state.beginRequest(requestId, packed)) {
                 totalDuplicateRequests.incrementAndGet();
                 continue;
@@ -278,8 +289,12 @@ public final class VSSServerNetworking {
             long clientTimestamp = payload.clientTimestamps()[i];
             boolean allowGeneration = i < payload.allowGeneration().length && payload.allowGeneration()[i];
             long dirtyTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), cx, cz);
-            boolean dirtyRefresh = dirtyTimestamp > 0L && clientTimestamp < dirtyTimestamp;
+            boolean priorityRefresh = clientTimestamp > 0L;
             ColumnLodCache.Entry cachedColumn = COLUMN_CACHE.get(level.dimension(), cx, cz);
+            if (cachedColumn != null && !cachedColumn.completeColumn()) {
+                COLUMN_CACHE.invalidate(level.dimension(), cx, cz);
+                cachedColumn = null;
+            }
             if (cachedColumn != null) {
                 long requiredTimestamp = Math.max(cachedColumn.timestamp(), dirtyTimestamp);
                 if (clientTimestamp >= requiredTimestamp) {
@@ -297,7 +312,8 @@ public final class VSSServerNetworking {
                             cachedColumn.chunkZ(),
                             level.dimension(),
                             requiredTimestamp,
-                            cachedColumn.sectionBytes()), dirtyRefresh);
+                            cachedColumn.sectionBytes(),
+                            cachedColumn.completeColumn()), priorityRefresh);
                     continue;
                 }
                 if (clientTimestamp >= requiredTimestamp || dirtyTimestamp <= cachedColumn.timestamp()) {
@@ -315,16 +331,21 @@ public final class VSSServerNetworking {
             }
 
             LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
-            if (chunk == null) {
-                submitDiskRead(player, state, requestId, cx, cz, columnTimestamp, allowGeneration, dirtyRefresh);
+            if (chunk != null) {
+                if (submitLoadedColumn(player, state, level, chunk, requestId, cx, cz, columnTimestamp, priorityRefresh)) {
+                    if (i == 0) {
+                        VSSLogger.debug("Submitted loaded column for " + cx + "," + cz);
+                    }
+                    continue;
+                }
+                submitStorageRead(player, state, requestId, cx, cz, columnTimestamp, dirtyTimestamp, true, allowGeneration, priorityRefresh);
                 continue;
             }
 
-            if (!submitLoadedColumn(player, state, level, chunk, requestId, cx, cz, columnTimestamp, dirtyRefresh)) {
-                responseTypes[responseCount] = VSSConstants.RESPONSE_RATE_LIMITED;
-                responseIds[responseCount++] = requestId;
-                state.clearRequest(requestId);
+            if (allowGeneration && i == 0) {
+                VSSLogger.debug("Chunk not loaded at " + cx + "," + cz + ", allowGeneration=" + allowGeneration);
             }
+            submitStorageRead(player, state, requestId, cx, cz, columnTimestamp, dirtyTimestamp, false, allowGeneration, priorityRefresh);
         }
 
         if (responseCount > 0) {
@@ -358,38 +379,48 @@ public final class VSSServerNetworking {
                 priority);
     }
 
-    private static void submitDiskRead(
+    private static void submitStorageRead(
             ServerPlayer player,
             PlayerRequestState state,
             int requestId,
             int cx,
             int cz,
             long columnTimestamp,
+            long dirtyTimestamp,
+            boolean preferLoadedColumn,
             boolean allowGeneration,
             boolean priority) {
         UUID playerId = player.getUUID();
         ServerLevel level = player.serverLevel();
         MinecraftServer server = player.server;
-        ChunkMap chunkMap = level.getChunkSource().chunkMap;
         try {
             totalDiskReadsSubmitted.incrementAndGet();
             pendingDiskReads.incrementAndGet();
             DISK_EXECUTOR.execute(() -> {
+                PersistentColumnLodStore.Entry storedData = PERSISTENT_COLUMN_STORE.read(
+                        server,
+                        level.dimension(),
+                        cx,
+                        cz,
+                        dirtyTimestamp > 0L ? dirtyTimestamp : 0L);
                 LoadedColumnData diskData = null;
                 boolean failed = false;
-                try {
-                    diskData = NbtSectionSerializer.readAndSerializeSections(
-                            level,
-                            chunkMap,
-                            cx,
-                            cz,
-                            VSSServerConfig.CONFIG.diskReadTimeoutMillis);
-                } catch (Exception e) {
-                    failed = true;
-                    VSSLogger.warn("Failed to read chunk NBT from disk at " + cx + ", " + cz + ": " + e.getMessage());
+                if (storedData == null && !preferLoadedColumn && VSSServerConfig.CONFIG.enableChunkNbtColumnSync) {
+                    try {
+                        diskData = NbtSectionSerializer.readAndSerializeSections(
+                                level,
+                                level.getChunkSource().chunkMap,
+                                cx,
+                                cz,
+                                VSSServerConfig.CONFIG.diskReadTimeoutMillis);
+                    } catch (Exception e) {
+                        failed = true;
+                        VSSLogger.warn("Failed to read chunk NBT from disk at " + cx + ", " + cz + ": " + e.getMessage());
+                    }
                 }
 
                 LoadedColumnData result = diskData;
+                PersistentColumnLodStore.Entry storedResult = storedData;
                 boolean readFailed = failed;
                 server.execute(() -> finishDiskRead(
                         playerId,
@@ -399,8 +430,10 @@ public final class VSSServerNetworking {
                         cx,
                         cz,
                         columnTimestamp,
+                        storedResult,
                         result,
                         readFailed,
+                        preferLoadedColumn,
                         allowGeneration,
                         priority));
             });
@@ -419,8 +452,10 @@ public final class VSSServerNetworking {
             int cx,
             int cz,
             long columnTimestamp,
+            PersistentColumnLodStore.Entry storedData,
             LoadedColumnData diskData,
             boolean readFailed,
+            boolean preferLoadedColumn,
             boolean allowGeneration,
             boolean priority) {
         pendingDiskReads.decrementAndGet();
@@ -435,25 +470,55 @@ public final class VSSServerNetworking {
             requestState.clearRequest(requestId);
             return;
         }
-        if (diskData == null || diskData.sectionBytes() == null || diskData.sizeBytes() == 0) {
-            if (diskData != null) {
-                totalDiskReadMisses.incrementAndGet();
+        if (storedData != null && storedData.columnData() != null) {
+            LoadedColumnData columnData = storedData.columnData();
+            long storedTimestamp = Math.max(storedData.timestamp(), columnTimestamp);
+            queueColumn(player, requestState, new VoxelColumnS2CPayload(
+                    requestId,
+                    columnData.chunkX(),
+                    columnData.chunkZ(),
+                    level.dimension(),
+                    storedTimestamp,
+                    columnData.sectionBytes(),
+                    columnData.completeColumn()), priority);
+            COLUMN_CACHE.put(level.dimension(), columnData, storedTimestamp);
+            return;
+        }
+        if (preferLoadedColumn) {
+            LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
+            if (chunk != null) {
+                if (submitLoadedColumn(player, requestState, level, chunk, requestId, cx, cz, columnTimestamp, priority)) {
+                    return;
+                }
                 requestState.clearRequest(requestId);
-                totalUpToDateResponses.incrementAndGet();
-                VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(new byte[] {VSSConstants.RESPONSE_UP_TO_DATE}, new int[] {requestId}, 1));
-            } else if (allowGeneration && VSSServerConfig.CONFIG.enableChunkGeneration) {
-                totalDiskReadMisses.incrementAndGet();
+                VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(
+                        new byte[] {VSSConstants.RESPONSE_RATE_LIMITED},
+                        new int[] {requestId},
+                        1));
+                return;
+            }
+        }
+        if (diskData == null || diskData.sectionBytes() == null || diskData.sizeBytes() == 0 || !diskData.completeColumn()) {
+            totalDiskReadMisses.incrementAndGet();
+            if (allowGeneration && VSSServerConfig.CONFIG.enableChunkGeneration) {
                 submitGeneration(player, requestState, level, requestId, cx, cz);
             } else {
-                totalDiskReadMisses.incrementAndGet();
                 requestState.clearRequest(requestId);
                 VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(new byte[] {VSSConstants.RESPONSE_NOT_GENERATED}, new int[] {requestId}, 1));
             }
             return;
         }
         totalDiskReadHits.incrementAndGet();
-        queueColumn(player, requestState, new VoxelColumnS2CPayload(requestId, cx, cz, level.dimension(), columnTimestamp, diskData.sectionBytes()), priority);
+        queueColumn(player, requestState, new VoxelColumnS2CPayload(
+                requestId,
+                cx,
+                cz,
+                level.dimension(),
+                columnTimestamp,
+                diskData.sectionBytes(),
+                diskData.completeColumn()), priority);
         COLUMN_CACHE.put(level.dimension(), diskData, columnTimestamp);
+        writePersistentColumn(level.getServer(), level.dimension(), diskData, columnTimestamp);
     }
 
     private static void submitGeneration(ServerPlayer player, PlayerRequestState state, ServerLevel level, int requestId, int cx, int cz) {
@@ -492,10 +557,10 @@ public final class VSSServerNetworking {
                 continue;
             }
 
-            if (columnData.sectionBytes() == null || columnData.sizeBytes() == 0) {
+            if (columnData.sectionBytes() == null || columnData.sizeBytes() == 0 || !columnData.completeColumn()) {
                 state.clearRequest(result.requestId());
                 VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(
-                        new byte[] {VSSConstants.RESPONSE_UP_TO_DATE},
+                        new byte[] {VSSConstants.RESPONSE_NOT_GENERATED},
                         new int[] {result.requestId()},
                         1));
                 continue;
@@ -507,13 +572,49 @@ public final class VSSServerNetworking {
                     columnData.chunkZ(),
                     result.dimension(),
                     result.columnTimestamp(),
-                    columnData.sectionBytes()), result.priority());
+                    columnData.sectionBytes(),
+                    columnData.completeColumn()), result.priority());
             COLUMN_CACHE.put(result.dimension(), columnData, result.columnTimestamp());
+            writePersistentColumn(server, result.dimension(), columnData, result.columnTimestamp());
         }
     }
 
     static void invalidateCachedColumn(ServerLevel level, int cx, int cz) {
         COLUMN_CACHE.invalidate(level.dimension(), cx, cz);
+        invalidatePersistentColumn(level.getServer(), level.dimension(), cx, cz);
+    }
+
+    private static void writePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, LoadedColumnData columnData, long timestamp) {
+        if (!PERSISTENT_COLUMN_STORE.enabled()) {
+            return;
+        }
+        if (pendingPersistentWrites.get() >= VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit) {
+            return;
+        }
+        pendingPersistentWrites.incrementAndGet();
+        try {
+            DISK_EXECUTOR.execute(() -> {
+                try {
+                    PERSISTENT_COLUMN_STORE.write(server, dimension, columnData, timestamp);
+                } finally {
+                    pendingPersistentWrites.decrementAndGet();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            pendingPersistentWrites.decrementAndGet();
+            VSSLogger.debug("Persistent LOD write rejected: " + e.getMessage());
+        }
+    }
+
+    private static void invalidatePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, int cx, int cz) {
+        if (!PERSISTENT_COLUMN_STORE.enabled()) {
+            return;
+        }
+        try {
+            DISK_EXECUTOR.execute(() -> PERSISTENT_COLUMN_STORE.invalidate(server, dimension, cx, cz));
+        } catch (RejectedExecutionException e) {
+            VSSLogger.debug("Persistent LOD invalidation rejected: " + e.getMessage());
+        }
     }
 
     private static void queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload) {
@@ -521,6 +622,7 @@ public final class VSSServerNetworking {
     }
 
     private static void queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload, boolean priority) {
+        payload.setAllowZstdEncoding(state.supportsZstdColumns());
         if (!state.enqueue(payload, priority)) {
             VSSNetworking.sendToPlayer(
                     player,
@@ -570,10 +672,12 @@ public final class VSSServerNetworking {
             }
 
             long effectiveLimit = Math.min(configuredLimit, state.desiredBandwidth());
+            int playerCx = player.getBlockX() >> 4;
+            int playerCz = player.getBlockZ() >> 4;
             int priorityColumnsSent = 0;
             long priorityBytesSent = 0L;
             while (priorityColumnsSent < PRIORITY_SEND_COLUMNS_PER_TICK) {
-                PlayerRequestState.QueuedPayload queued = state.peekPriorityQueuedPayload();
+                PlayerRequestState.QueuedPayload queued = state.peekPriorityQueuedPayload(playerCx, playerCz);
                 if (queued == null) {
                     break;
                 }
@@ -581,7 +685,7 @@ public final class VSSServerNetworking {
                         && priorityBytesSent + queued.estimatedBytes() > PRIORITY_SEND_BYTES_PER_TICK) {
                     break;
                 }
-                state.pollPriorityQueuedPayload();
+                state.pollPriorityQueuedPayload(playerCx, playerCz);
                 if (state.consumeCancelled(queued.payload().requestId())) {
                     continue;
                 }
@@ -594,11 +698,11 @@ public final class VSSServerNetworking {
             }
 
             while (state.queuedPayloadCount() > 0) {
-                PlayerRequestState.QueuedPayload queued = state.peekQueuedPayload();
+                PlayerRequestState.QueuedPayload queued = state.peekQueuedPayload(playerCx, playerCz);
                 if (queued == null || !state.canSend(effectiveLimit)) {
                     break;
                 }
-                state.pollQueuedPayload();
+                state.pollQueuedPayload(playerCx, playerCz);
                 if (state.consumeCancelled(queued.payload().requestId())) {
                     continue;
                 }

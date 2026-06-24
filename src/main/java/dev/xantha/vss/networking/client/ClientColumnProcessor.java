@@ -22,10 +22,10 @@ import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 
 final class ClientColumnProcessor {
-    static final int MAX_QUEUED_COLUMNS = 512;
-    private static final long MAX_QUEUED_BYTES = 16L * 1024L * 1024L;
-    private static final int MAX_COLUMNS_PER_DRAIN = 16;
-    private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 192;
+    static final int MAX_QUEUED_COLUMNS = 1024;
+    private static final long MAX_QUEUED_BYTES = 32L * 1024L * 1024L;
+    private static final int MAX_COLUMNS_PER_DRAIN = 48;
+    private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 512;
     private static final int MAX_SECTIONS_PER_COLUMN = 64;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
 
@@ -52,22 +52,22 @@ final class ClientColumnProcessor {
         shuttingDown = false;
     }
 
-    boolean offer(VoxelColumnS2CPayload payload, boolean knownRequest, boolean priority) {
+    boolean offer(VoxelColumnS2CPayload payload, boolean knownRequest, boolean priority, boolean replaceMissingSections) {
         if (shuttingDown) {
             return false;
         }
         if (knownRequest && payload.decompressedSections().length <= 1) {
-            processEmptyColumn(payload, sessionEpoch.get());
+            processEmptyColumn(payload, sessionEpoch.get(), replaceMissingSections);
             return true;
         }
 
         int estimatedBytes = payload.estimatedBytes();
         if (queueSize.get() < MAX_QUEUED_COLUMNS && queueBytes.get() + estimatedBytes <= MAX_QUEUED_BYTES) {
             if (priority) {
-                priorityColumnQueue.add(new QueuedColumn(payload));
+                priorityColumnQueue.add(new QueuedColumn(payload, replaceMissingSections));
                 priorityQueueSize.incrementAndGet();
             } else {
-                columnQueue.add(new QueuedColumn(payload));
+                columnQueue.add(new QueuedColumn(payload, replaceMissingSections));
             }
             queueSize.incrementAndGet();
             queueBytes.addAndGet(estimatedBytes);
@@ -84,7 +84,7 @@ final class ClientColumnProcessor {
         return false;
     }
 
-    private void processEmptyColumn(VoxelColumnS2CPayload payload, int epoch) {
+    private void processEmptyColumn(VoxelColumnS2CPayload payload, int epoch, boolean replaceMissingSections) {
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> {
             ClientLevel level = minecraft.level;
@@ -102,7 +102,8 @@ final class ClientColumnProcessor {
                     payload.chunkZ(),
                     new VoxelColumnData(
                             new VoxelColumnData.SectionData[0],
-                            payload.columnTimestamp()));
+                            payload.columnTimestamp(),
+                            replaceMissingSections));
         });
     }
 
@@ -110,7 +111,7 @@ final class ClientColumnProcessor {
         if (shuttingDown) {
             return;
         }
-        if (!serverEnabled || !VSSClientConfig.CONFIG.receiveServerLods || !VSSApi.hasVoxelConsumers()) {
+        if (!serverEnabled || !VSSClientConfig.CONFIG.receiveServerLods) {
             clearQueue();
             return;
         }
@@ -151,6 +152,8 @@ final class ClientColumnProcessor {
 
     private void drainColumnQueue(ClientLevel level, int epoch) {
         Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+
+        boolean hasConsumers = VSSApi.hasVoxelConsumers();
 
         QueuedColumn queuedColumn;
         int processedColumns = 0;
@@ -210,12 +213,19 @@ final class ClientColumnProcessor {
                         clearQueue();
                         return;
                     }
-                    VSSApi.dispatchColumn(
-                            level,
-                            payload.dimension(),
-                            payload.chunkX(),
-                            payload.chunkZ(),
-                            new VoxelColumnData(sections, payload.columnTimestamp()));
+                    if (hasConsumers) {
+                        VSSApi.dispatchColumn(
+                                level,
+                                payload.dimension(),
+                                payload.chunkX(),
+                                payload.chunkZ(),
+                                new VoxelColumnData(sections, payload.columnTimestamp(), queuedColumn.replaceMissingSections()));
+                    } else {
+                        if (processedColumns == 0) {
+                            VSSLogger.debug("Processing LOD column at " + payload.chunkX() + "," + payload.chunkZ()
+                                    + " with " + sections.length + " sections, but no consumers registered");
+                        }
+                    }
                     processedColumns++;
                     dispatchedSections += sections.length;
                 } finally {
@@ -283,6 +293,6 @@ final class ClientColumnProcessor {
         });
     }
 
-    private record QueuedColumn(VoxelColumnS2CPayload payload) {
+    private record QueuedColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
     }
 }

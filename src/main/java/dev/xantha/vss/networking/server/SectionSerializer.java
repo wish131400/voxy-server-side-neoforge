@@ -4,6 +4,7 @@ import dev.xantha.vss.common.processing.LoadedColumnData;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.OptionalInt;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.FriendlyByteBuf;
@@ -17,6 +18,7 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LayerLightEventListener;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 
@@ -27,7 +29,7 @@ public final class SectionSerializer {
     }
 
     static LoadedColumnData emptyColumn(int cx, int cz) {
-        return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length);
+        return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, true);
     }
 
     public static LoadedColumnData serializeColumn(ServerLevel level, LevelChunk chunk, int cx, int cz) {
@@ -46,6 +48,7 @@ public final class SectionSerializer {
         LayerLightEventListener skyLightListener = lightEngine.getLayerListener(LightLayer.SKY);
 
         ArrayList<SectionSnapshot> includedSections = new ArrayList<>(sections.length);
+        int highestIncludedSectionY = Integer.MIN_VALUE;
         for (int i = 0; i < sections.length; i++) {
             LevelChunkSection section = sections[i];
             if (section == null) {
@@ -65,12 +68,14 @@ public final class SectionSerializer {
                 PalettedContainerRO<Holder<Biome>> biomes = section.getBiomes().recreate();
                 byte[] skyLight = copyNonZeroLightData(skyLightListener, sectionPos);
                 includedSections.add(new SectionSnapshot(sectionY, states, biomes, blockLight, skyLight));
+                highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionY);
             } finally {
                 section.release();
             }
         }
 
-        return new ColumnSnapshot(cx, cz, includedSections.toArray(SectionSnapshot[]::new));
+        boolean completeColumn = isCompleteColumn(level, chunk, highestIncludedSectionY, includedSections.isEmpty());
+        return new ColumnSnapshot(cx, cz, includedSections.toArray(SectionSnapshot[]::new), completeColumn);
     }
 
     public static LoadedColumnData serializeSnapshot(ColumnSnapshot snapshot) {
@@ -98,7 +103,7 @@ public final class SectionSerializer {
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            return new LoadedColumnData(snapshot.chunkX(), snapshot.chunkZ(), serialized, serialized.length);
+            return new LoadedColumnData(snapshot.chunkX(), snapshot.chunkZ(), serialized, serialized.length, snapshot.completeColumn());
         } finally {
             buf.release();
         }
@@ -111,6 +116,7 @@ public final class SectionSerializer {
         LayerLightEventListener blockLightListener = lightEngine != null ? lightEngine.getLayerListener(LightLayer.BLOCK) : null;
 
         ArrayList<SectionInfo> includedSections = new ArrayList<>(sections.length);
+        int highestIncludedSectionY = Integer.MIN_VALUE;
         for (int i = 0; i < sections.length; i++) {
             LevelChunkSection section = sections[i];
             if (section == null) {
@@ -124,10 +130,12 @@ public final class SectionSerializer {
                 continue;
             }
             includedSections.add(new SectionInfo(i, sectionY, sectionPos, blockLight, hasBlockLight));
+            highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionY);
         }
 
         if (includedSections.isEmpty()) {
-            return emptyColumn(cx, cz);
+            boolean completeColumn = isCompleteColumn(level, chunk, Integer.MIN_VALUE, true);
+            return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, completeColumn);
         }
 
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));
@@ -152,10 +160,36 @@ public final class SectionSerializer {
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            return new LoadedColumnData(cx, cz, serialized, serialized.length);
+            boolean completeColumn = isCompleteColumn(level, chunk, highestIncludedSectionY, false);
+            return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
         } finally {
             buf.release();
         }
+    }
+
+    private static boolean isCompleteColumn(ServerLevel level, ChunkAccess chunk, int highestIncludedSectionY, boolean emptyColumn) {
+        OptionalInt surfaceSection = highestSurfaceSection(level, chunk);
+        if (surfaceSection.isEmpty()) {
+            return emptyColumn;
+        }
+        return highestIncludedSectionY >= surfaceSection.getAsInt();
+    }
+
+    private static OptionalInt highestSurfaceSection(ServerLevel level, ChunkAccess chunk) {
+        int minBuildHeight = level.getMinBuildHeight();
+        int highestSurfaceBlockY = Integer.MIN_VALUE;
+        for (int localZ = 0; localZ < 16; localZ++) {
+            for (int localX = 0; localX < 16; localX++) {
+                int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, localX, localZ);
+                int surfaceBlockY = height - 1;
+                if (surfaceBlockY >= minBuildHeight) {
+                    highestSurfaceBlockY = Math.max(highestSurfaceBlockY, surfaceBlockY);
+                }
+            }
+        }
+        return highestSurfaceBlockY == Integer.MIN_VALUE
+                ? OptionalInt.empty()
+                : OptionalInt.of(SectionPos.blockToSectionCoord(highestSurfaceBlockY));
     }
 
     private static boolean hasNonZeroData(DataLayer layer) {
@@ -178,7 +212,7 @@ public final class SectionSerializer {
     private record SectionInfo(int index, int sectionY, SectionPos sectionPos, DataLayer blockLight, boolean hasBlockLight) {
     }
 
-    public record ColumnSnapshot(int chunkX, int chunkZ, SectionSnapshot[] sections) {
+    public record ColumnSnapshot(int chunkX, int chunkZ, SectionSnapshot[] sections, boolean completeColumn) {
     }
 
     public record SectionSnapshot(

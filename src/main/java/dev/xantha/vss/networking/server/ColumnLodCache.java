@@ -38,7 +38,7 @@ final class ColumnLodCache {
     }
 
     synchronized void put(ResourceKey<Level> dimension, LoadedColumnData columnData, long timestamp) {
-        if (!config.enableColumnCache || columnData == null || columnData.sectionBytes() == null) {
+        if (!config.enableColumnCache || columnData == null || columnData.sectionBytes() == null || !columnData.completeColumn()) {
             return;
         }
 
@@ -54,7 +54,13 @@ final class ColumnLodCache {
         }
 
         byte[] cachedSections = Arrays.copyOf(columnData.sectionBytes(), columnData.sectionBytes().length);
-        entries.put(key, new Entry(columnData.chunkX(), columnData.chunkZ(), timestamp, cachedSections, sizeBytes));
+        entries.put(key, new Entry(
+                columnData.chunkX(),
+                columnData.chunkZ(),
+                timestamp,
+                cachedSections,
+                sizeBytes,
+                columnData.completeColumn()));
         cachedBytes += sizeBytes;
         puts++;
         evictOverflow();
@@ -98,6 +104,6 @@ final class ColumnLodCache {
     private record Key(ResourceLocation dimension, int chunkX, int chunkZ) {
     }
 
-    record Entry(int chunkX, int chunkZ, long timestamp, byte[] sectionBytes, int sizeBytes) {
+    record Entry(int chunkX, int chunkZ, long timestamp, byte[] sectionBytes, int sizeBytes, boolean completeColumn) {
     }
 }

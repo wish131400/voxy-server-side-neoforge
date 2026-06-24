@@ -74,24 +74,32 @@ public final class FarPlayerBroadcaster {
         pruneVehicleCaches(players);
 
         double maxHorizontalDistanceSqr = square(config.lodDistanceChunks * 16.0D);
-        double handoffHorizontalDistanceSqr = square(VSSConstants.FAR_PLAYER_SYNC_START_BLOCKS);
         for (ServerPlayer viewer : players) {
             if (!VSSServerNetworking.isRegistered(viewer)) {
                 continue;
             }
 
             List<FarPlayersS2CPayload.Entry> entries = new ArrayList<>();
+            int skippedUnavailable = 0;
+            int skippedDistance = 0;
+            int vehicleSnapshotsSent = 0;
             for (ServerPlayer target : players) {
-                if (target == viewer || target.isSpectator() || !target.serverLevel().dimension().equals(viewer.serverLevel().dimension())) {
+                if (target == viewer) {
+                    continue;
+                }
+                if (target.isSpectator() || !target.serverLevel().dimension().equals(viewer.serverLevel().dimension())) {
+                    skippedUnavailable++;
                     continue;
                 }
 
                 double horizontalDistanceSqr = horizontalDistanceSqr(target, viewer);
-                if (isInsideVanillaHandoffRange(target, viewer, horizontalDistanceSqr, handoffHorizontalDistanceSqr)
-                        || horizontalDistanceSqr > maxHorizontalDistanceSqr) {
+                if (horizontalDistanceSqr > maxHorizontalDistanceSqr) {
+                    skippedDistance++;
                     continue;
                 }
 
+                FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target);
+                vehicleSnapshotsSent += vehicles.length;
                 entries.add(new FarPlayersS2CPayload.Entry(
                         target.getUUID(),
                         target.getGameProfile().getName(),
@@ -122,14 +130,14 @@ public final class FarPlayerBroadcaster {
                         copyItem(target, EquipmentSlot.CHEST),
                         copyItem(target, EquipmentSlot.LEGS),
                         copyItem(target, EquipmentSlot.FEET),
-                        vehicleSnapshots(viewer, target)));
+                        vehicles));
                 if (entries.size() >= VSSConstants.MAX_FAR_PLAYER_ENTRIES) {
                     break;
                 }
             }
 
             VSSNetworking.sendToPlayer(viewer, safePayload(entries));
-            maybeLogBroadcast(viewer, entries.size());
+            maybeLogBroadcast(viewer, players.size(), entries.size(), vehicleSnapshotsSent, skippedUnavailable, skippedDistance);
         }
     }
 
@@ -272,16 +280,24 @@ public final class FarPlayerBroadcaster {
                 vehicles);
     }
 
-    private static void maybeLogBroadcast(ServerPlayer viewer, int entries) {
-        if (entries <= 0) {
-            return;
-        }
+    private static void maybeLogBroadcast(
+            ServerPlayer viewer,
+            int onlinePlayers,
+            int entries,
+            int vehicleSnapshots,
+            int skippedUnavailable,
+            int skippedDistance) {
         long now = System.nanoTime();
         if (now < nextDiagnosticNanos) {
             return;
         }
         nextDiagnosticNanos = now + DIAGNOSTIC_INTERVAL_NANOS;
-        VSSLogger.debug("Far players sent to " + viewer.getGameProfile().getName() + ": entries=" + entries);
+        VSSLogger.debug("Far players sent to " + viewer.getGameProfile().getName()
+                + ": entries=" + entries
+                + ", vehicleSnapshots=" + vehicleSnapshots
+                + ", online=" + onlinePlayers
+                + ", skippedUnavailable=" + skippedUnavailable
+                + ", skippedDistance=" + skippedDistance);
     }
 
     private static double square(double value) {
@@ -292,15 +308,6 @@ public final class FarPlayerBroadcaster {
         double dx = target.getX() - viewer.getX();
         double dz = target.getZ() - viewer.getZ();
         return dx * dx + dz * dz;
-    }
-
-    private static boolean isInsideVanillaHandoffRange(
-            ServerPlayer target,
-            ServerPlayer viewer,
-            double horizontalDistanceSqr,
-            double handoffHorizontalDistanceSqr) {
-        return horizontalDistanceSqr <= handoffHorizontalDistanceSqr
-                && Math.abs(target.getY() - viewer.getY()) <= VSSConstants.FAR_PLAYER_VERTICAL_HANDOFF_BLOCKS;
     }
 
     private static <E extends Enum<E>> E orDefault(E value, E fallback) {

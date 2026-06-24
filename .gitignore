@@ -1,10 +1,12 @@
 .gradle/
 build/
+bin/
 run/
 logs/
 crash-reports/
 
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.zip
 *.log
 *.log.gz
@@ -15,6 +17,7 @@ tmp*/
 src_decompiled/
 src_common/
 upstream_voxyserver/
+external/
 
 mcmodsrepo/
 out/

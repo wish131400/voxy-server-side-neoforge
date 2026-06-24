@@ -3,6 +3,8 @@ package dev.xantha.vss.networking.client;
 import dev.xantha.vss.api.VSSApi;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.processing.LodByteCompression;
+import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.config.VSSClientConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
@@ -97,8 +99,16 @@ public final class VSSClientNetworking {
             manager.onSessionConfig(payload);
             requestManager = manager;
             sendBandwidthPreference();
+
+            boolean hasConsumers = VSSApi.hasVoxelConsumers();
+            if (!hasConsumers) {
+                VSSLogger.warn("VSS LOD session started but no voxel consumers registered! LOD data will not be processed.");
+                VSSLogger.warn("Make sure Voxy mod is loaded or register a custom consumer via VSSApi.registerColumnConsumer()");
+            }
+
             VSSLogger.info("VSS LOD session ready: distance=" + payload.lodDistanceChunks()
-                    + " chunks, generation=" + (payload.generationEnabled() ? "enabled" : "disabled"));
+                    + " chunks, generation=" + (payload.generationEnabled() ? "enabled" : "disabled")
+                    + ", consumers=" + hasConsumers);
         } else {
             LodRequestManager manager = requestManager;
             requestManager = null;
@@ -155,10 +165,12 @@ public final class VSSClientNetworking {
         } else {
             receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, Long.MIN_VALUE);
         }
+        boolean replaceMissingSections = receiveResult.knownRequest() && payload.completeColumn();
         boolean queued = COLUMN_PROCESSOR.offer(
                 payload,
                 receiveResult.knownRequest(),
-                receiveResult.priority());
+                receiveResult.priority(),
+                replaceMissingSections);
         if (!queued && manager != null && receiveResult.packedPosition() != Long.MIN_VALUE) {
             manager.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
         }
@@ -186,6 +198,21 @@ public final class VSSClientNetworking {
         if (manager != null) {
             manager.onClientChunkDropped(dimension, cx, cz);
         }
+    }
+
+    public static void forceLodResync(String reason) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (!minecraft.isSameThread()) {
+            minecraft.execute(() -> forceLodResync(reason));
+            return;
+        }
+        LodRequestManager manager = requestManager;
+        if (!serverEnabled || manager == null || !isClientWorldReady()) {
+            return;
+        }
+        COLUMN_PROCESSOR.beginSession();
+        manager.forceResync();
+        VSSLogger.info("VSS LOD resync requested: " + reason);
     }
 
     @SubscribeEvent
@@ -220,6 +247,7 @@ public final class VSSClientNetworking {
             manager.tick();
         }
         COLUMN_PROCESSOR.scheduleProcessing(serverEnabled);
+        ModCompat.clientTick();
     }
 
     public static void sendBandwidthPreference() {
@@ -340,20 +368,28 @@ public final class VSSClientNetworking {
             }
             SessionConfigS2CPayload config = VSSServerNetworking.registerIntegratedHost(
                     serverPlayer,
-                    VSSConstants.PROTOCOL_VERSION);
+                    VSSConstants.PROTOCOL_VERSION,
+                    clientCapabilities());
             minecraft.execute(() -> handleSessionConfig(config, () -> null));
         });
     }
 
     private static boolean sendHandshake(String failurePrefix) {
-        int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
         try {
-            VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, clientCaps));
+            VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, clientCapabilities()));
             return true;
         } catch (Exception e) {
             VSSLogger.debug(failurePrefix + e.getMessage());
             return false;
         }
+    }
+
+    private static int clientCapabilities() {
+        int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
+        if (LodByteCompression.isZstdAvailable()) {
+            clientCaps |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
+        }
+        return clientCaps;
     }
 
     private static boolean isClientWorldReady() {
