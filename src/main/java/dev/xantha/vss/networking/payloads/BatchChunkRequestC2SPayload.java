@@ -2,13 +2,25 @@ package dev.xantha.vss.networking.payloads;
 
 import dev.xantha.vss.common.VSSConstants;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
 public record BatchChunkRequestC2SPayload(
         int[] requestIds,
         long[] packedPositions,
         long[] clientTimestamps,
         boolean[] allowGeneration,
-        int count) {
+        int count) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<BatchChunkRequestC2SPayload> TYPE = VSSPayloadCodecs.type("batch_chunk_request");
+    public static final StreamCodec<RegistryFriendlyByteBuf, BatchChunkRequestC2SPayload> STREAM_CODEC =
+            VSSPayloadCodecs.codec(BatchChunkRequestC2SPayload::encode, BatchChunkRequestC2SPayload::decode);
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
     public static void encode(BatchChunkRequestC2SPayload payload, FriendlyByteBuf buf) {
         buf.writeVarInt(payload.count);
         for (int i = 0; i < payload.count; i++) {

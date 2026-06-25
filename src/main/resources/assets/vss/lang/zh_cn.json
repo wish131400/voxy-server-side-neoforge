@@ -1,5 +1,4 @@
 {
-  "modmenu.nameTranslation.vss": "Voxy Server Side",
   "vss.config.server.title": "Voxy Server Side",
   "vss.config.server.note": "只会修改本机配置。专用服务器请用 /vss 指令或服务端配置文件。",
   "vss.config.server.enabled": "启用服务端远景",
@@ -20,6 +19,11 @@
   "vss.config.server.saved": "已保存到 vss-server-config.json",
   "vss.config.server.invalid": "%s 必须在 %s 到 %s 之间",
   "vss.voxy_options.title": "Voxy Server Side",
+  "vss.voxy_options.group.client": "客户端",
+  "vss.voxy_options.group.client_limits": "客户端限制",
+  "vss.voxy_options.group.server": "服务端",
+  "vss.voxy_options.group.server_limits": "服务端限制",
+  "vss.voxy_options.group.generation": "生成",
   "vss.voxy_options.receive_server_lods": "接收服务端远景",
   "vss.voxy_options.receive_server_lods.tooltip": "开启后，客户端会从服务器下载 Voxy 远景数据。",
   "vss.voxy_options.off_thread_processing": "后台处理远景数据",

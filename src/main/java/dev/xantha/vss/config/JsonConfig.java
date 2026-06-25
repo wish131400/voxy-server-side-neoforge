@@ -5,7 +5,7 @@ import com.google.gson.GsonBuilder;
 import dev.xantha.vss.common.VSSLogger;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import net.minecraftforge.fml.loading.FMLPaths;
+import net.neoforged.fml.loading.FMLPaths;
 
 public abstract class JsonConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();

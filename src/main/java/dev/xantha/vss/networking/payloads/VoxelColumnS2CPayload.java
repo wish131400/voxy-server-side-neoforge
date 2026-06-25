@@ -6,11 +6,18 @@ import dev.xantha.vss.config.VSSServerConfig;
 import java.io.IOException;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 
-public final class VoxelColumnS2CPayload {
+public final class VoxelColumnS2CPayload implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<VoxelColumnS2CPayload> TYPE = VSSPayloadCodecs.type("voxel_column");
+    public static final StreamCodec<RegistryFriendlyByteBuf, VoxelColumnS2CPayload> STREAM_CODEC =
+            VSSPayloadCodecs.codec(VoxelColumnS2CPayload::encode, VoxelColumnS2CPayload::decode);
+
     private static final int MAX_SECTIONS_SIZE = 0x200000;
     private static final int MAX_DIMENSION_STRING_LENGTH = 256;
 
@@ -71,6 +78,11 @@ public final class VoxelColumnS2CPayload {
 
     public void setAllowZstdEncoding(boolean allowZstdEncoding) {
         this.allowZstdEncoding = allowZstdEncoding;
+    }
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
     }
 
     public static void encode(VoxelColumnS2CPayload payload, FriendlyByteBuf buf) {

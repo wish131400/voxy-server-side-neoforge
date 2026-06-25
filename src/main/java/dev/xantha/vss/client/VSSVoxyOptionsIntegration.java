@@ -1,31 +1,112 @@
 package dev.xantha.vss.client;
 
 import com.google.common.collect.ImmutableList;
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
-import me.jellysquid.mods.sodium.client.gui.options.OptionGroup;
-import me.jellysquid.mods.sodium.client.gui.options.OptionImpact;
-import me.jellysquid.mods.sodium.client.gui.options.OptionImpl;
-import me.jellysquid.mods.sodium.client.gui.options.OptionPage;
-import me.jellysquid.mods.sodium.client.gui.options.control.SliderControl;
-import me.jellysquid.mods.sodium.client.gui.options.control.TickBoxControl;
-import me.jellysquid.mods.sodium.client.gui.options.storage.OptionStorage;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.neoforged.fml.ModList;
 
 public final class VSSVoxyOptionsIntegration {
-    private static OptionPage vssOptionPage;
+    private static final String OLD_OPTION_PAGE = "net.caffeinemc.mods.sodium.client.gui.options.OptionPage";
+    private static final String OLD_OPTION_GROUP = "net.caffeinemc.mods.sodium.client.gui.options.OptionGroup";
+    private static final String OLD_OPTION_IMPL = "net.caffeinemc.mods.sodium.client.gui.options.OptionImpl";
+    private static final String OLD_OPTION_IMPACT = "net.caffeinemc.mods.sodium.client.gui.options.OptionImpact";
+    private static final String OLD_OPTION_STORAGE = "net.caffeinemc.mods.sodium.client.gui.options.storage.OptionStorage";
+    private static final String OLD_OPTION = "net.caffeinemc.mods.sodium.client.gui.options.Option";
+    private static final String OLD_SLIDER_CONTROL = "net.caffeinemc.mods.sodium.client.gui.options.control.SliderControl";
+    private static final String OLD_TICK_BOX_CONTROL = "net.caffeinemc.mods.sodium.client.gui.options.control.TickBoxControl";
+    private static final String OLD_VALUE_FORMATTER = "net.caffeinemc.mods.sodium.client.gui.options.control.ControlValueFormatter";
+
+    private static final String SODIUM_OPTIONS_API = "toni.sodiumoptionsapi.api.OptionGUIConstruction";
+    private static final String SODIUM08_CONFIG_ENTRY_POINT = "net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint";
+    private static final String SODIUM08_CONFIG_MANAGER = "net.caffeinemc.mods.sodium.client.config.ConfigManager";
+    private static final String SODIUM08_STORAGE_HANDLER = "net.caffeinemc.mods.sodium.api.config.StorageEventHandler";
+    private static final String SODIUM08_OPTION_IMPACT = "net.caffeinemc.mods.sodium.api.config.option.OptionImpact";
+    private static final String SODIUM08_VALUE_FORMATTER = "net.caffeinemc.mods.sodium.api.config.option.ControlValueFormatter";
+
+    private static Object oldVssOptionPage;
 
     private VSSVoxyOptionsIntegration() {
     }
 
-    @SuppressWarnings("unchecked")
+    public static boolean isSodiumPresent() {
+        return classExists(OLD_OPTION_PAGE) || classExists(SODIUM08_CONFIG_ENTRY_POINT);
+    }
+
+    public static boolean registerSodiumOptionsApiBridge() {
+        if (!classExists(OLD_OPTION_PAGE) || !classExists(SODIUM_OPTIONS_API)) {
+            return false;
+        }
+
+        try {
+            Class<?> eventInterface = Class.forName(SODIUM_OPTIONS_API);
+            Field eventField = eventInterface.getField("EVENT");
+            Object event = eventField.get(null);
+            Object listener = proxy(eventInterface, (proxy, method, args) -> {
+                if ("onGroupConstruction".equals(method.getName()) && args != null && args.length == 1 && args[0] instanceof List<?> pages) {
+                    addPage(pages);
+                    return null;
+                }
+                return objectMethod(proxy, method, args, "VSS Sodium Options API listener");
+            });
+
+            invokeByName(event, "register", listener);
+            VSSLogger.info("Registered Sodium Options API bridge for VSS options");
+            return true;
+        } catch (Throwable t) {
+            VSSLogger.warn("Failed to register Sodium Options API bridge for VSS options", t);
+            return false;
+        }
+    }
+
+    public static boolean registerSodium08ConfigBridge() {
+        if (!classExists(SODIUM08_CONFIG_ENTRY_POINT) || !classExists(SODIUM08_CONFIG_MANAGER)) {
+            return false;
+        }
+
+        try {
+            Class<?> entryPointInterface = Class.forName(SODIUM08_CONFIG_ENTRY_POINT);
+            Object entryPoint = proxy(entryPointInterface, (proxy, method, args) -> {
+                if ("registerConfigLate".equals(method.getName()) && args != null && args.length == 1) {
+                    addSodium08Config(args[0]);
+                    return null;
+                }
+                if ("registerConfigEarly".equals(method.getName())) {
+                    return null;
+                }
+                return objectMethod(proxy, method, args, "VSS Sodium 0.8 config entry point");
+            });
+
+            Supplier<Object> supplier = () -> entryPoint;
+            Class<?> configManager = Class.forName(SODIUM08_CONFIG_MANAGER);
+            Method register = configManager.getMethod("registerConfigEntryPoint", Supplier.class, String.class);
+            register.invoke(null, supplier, VSSConstants.MOD_ID);
+            VSSLogger.info("Registered Sodium 0.8 config bridge for VSS options");
+            return true;
+        } catch (Throwable t) {
+            VSSLogger.warn("Failed to register Sodium 0.8 config bridge for VSS options", t);
+            return false;
+        }
+    }
+
     public static void addPage(Object sodiumOptionsScreen) {
         try {
             Field pagesField = findPagesField(sodiumOptionsScreen.getClass());
@@ -33,18 +114,27 @@ public final class VSSVoxyOptionsIntegration {
                 return;
             }
             pagesField.setAccessible(true);
-            List<OptionPage> pages = (List<OptionPage>) pagesField.get(sodiumOptionsScreen);
-            addPage(pages);
+            Object pages = pagesField.get(sodiumOptionsScreen);
+            if (pages instanceof List<?> list) {
+                addPage(list);
+            }
         } catch (Throwable ignored) {
         }
     }
 
-    public static void addPage(List<OptionPage> pages) {
-        if (pages == null) {
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static void addPage(List<?> pages) {
+        if (pages == null || !classExists(OLD_OPTION_PAGE)) {
             return;
         }
-        OptionPage page = page();
-        if (pages.contains(page) || containsPageNamed(pages, page.getName().getString())) {
+
+        Object page = oldPage();
+        if (page == null) {
+            return;
+        }
+
+        String name = pageName(page);
+        if (((List) pages).contains(page) || containsPageNamed(pages, name)) {
             return;
         }
 
@@ -52,21 +142,672 @@ public final class VSSVoxyOptionsIntegration {
         if (insertAt <= 0) {
             insertAt = pages.size();
         }
-        pages.add(insertAt, page);
-        VSSLogger.info("Added Voxy Server Side options page to Embeddium/Sodium options");
+
+        ((List) pages).add(insertAt, page);
+        VSSLogger.info("Added Voxy Server Side options page to Sodium options");
     }
 
-    private static boolean containsPageNamed(List<OptionPage> pages, String name) {
-        for (OptionPage existing : pages) {
-            if (name.equals(existing.getName().getString())) {
+    private static void addSodium08Config(Object configBuilder) {
+        try {
+            Object modOptions = invokeByName(configBuilder, "registerModOptions", VSSConstants.MOD_ID, "Voxy Server Side", modVersion());
+            Object page = invokeByName(configBuilder, "createOptionPage");
+            invokeByName(page, "setName", Component.translatable("vss.voxy_options.title"));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.client",
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "receive_server_lods",
+                            "vss.voxy_options.receive_server_lods",
+                            "vss.voxy_options.receive_server_lods.tooltip",
+                            "MEDIUM",
+                            true,
+                            value -> VSSClientConfig.CONFIG.receiveServerLods = value,
+                            () -> VSSClientConfig.CONFIG.receiveServerLods,
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "off_thread_processing",
+                            "vss.voxy_options.off_thread_processing",
+                            "vss.voxy_options.off_thread_processing.tooltip",
+                            "LOW",
+                            true,
+                            value -> VSSClientConfig.CONFIG.offThreadSectionProcessing = value,
+                            () -> VSSClientConfig.CONFIG.offThreadSectionProcessing,
+                            VSSVoxyOptionsIntegration::saveClientConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.client_limits",
+                    sodium08IntOption(
+                            configBuilder,
+                            "client_lod_distance",
+                            "vss.voxy_options.client_lod_distance",
+                            "vss.voxy_options.client_lod_distance.tooltip",
+                            "LOW",
+                            0,
+                            0,
+                            512,
+                            16,
+                            value -> VSSClientConfig.CONFIG.lodDistanceChunks = value,
+                            () -> VSSClientConfig.CONFIG.lodDistanceChunks,
+                            VSSVoxyOptionsIntegration::formatChunksAuto,
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "desired_bandwidth",
+                            "vss.voxy_options.desired_bandwidth",
+                            "vss.voxy_options.desired_bandwidth.tooltip",
+                            "LOW",
+                            0,
+                            0,
+                            100,
+                            1,
+                            value -> {
+                                VSSClientConfig.CONFIG.desiredBandwidthMiB = value;
+                                Minecraft.getInstance().execute(VSSClientNetworking::sendBandwidthPreference);
+                            },
+                            () -> VSSClientConfig.CONFIG.desiredBandwidthMiB,
+                            VSSVoxyOptionsIntegration::formatMiBAuto,
+                            VSSVoxyOptionsIntegration::saveClientConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.server",
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "server_sync",
+                            "vss.voxy_options.server_sync",
+                            "vss.voxy_options.server_sync.tooltip",
+                            "HIGH",
+                            true,
+                            value -> VSSServerConfig.CONFIG.enabled = value,
+                            () -> VSSServerConfig.CONFIG.enabled,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "generation",
+                            "vss.voxy_options.generation",
+                            "vss.voxy_options.generation.tooltip",
+                            "HIGH",
+                            true,
+                            value -> VSSServerConfig.CONFIG.enableChunkGeneration = value,
+                            () -> VSSServerConfig.CONFIG.enableChunkGeneration,
+                            VSSVoxyOptionsIntegration::saveServerConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.server_limits",
+                    sodium08IntOption(
+                            configBuilder,
+                            "server_bandwidth",
+                            "vss.voxy_options.server_bandwidth",
+                            "vss.voxy_options.server_bandwidth.tooltip",
+                            "MEDIUM",
+                            2,
+                            1,
+                            VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            1,
+                            value -> VSSServerConfig.CONFIG.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
+                            VSSServerConfig.CONFIG::getPerPlayerBandwidthMiBRounded,
+                            VSSVoxyOptionsIntegration::formatMiB,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "server_queue_memory",
+                            "vss.voxy_options.server_queue_memory",
+                            "vss.voxy_options.server_queue_memory.tooltip",
+                            "HIGH",
+                            16,
+                            VSSServerConfig.MIN_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            VSSServerConfig.MAX_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            4,
+                            value -> VSSServerConfig.CONFIG.sendQueueBytesLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
+                            VSSServerConfig.CONFIG::getSendQueueBytesMiBRounded,
+                            VSSVoxyOptionsIntegration::formatMiB,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "sync_rate",
+                            "vss.voxy_options.sync_rate",
+                            "vss.voxy_options.sync_rate.tooltip",
+                            "MEDIUM",
+                            80,
+                            20,
+                            1000,
+                            20,
+                            value -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer = value,
+                            () -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer,
+                            VSSVoxyOptionsIntegration::formatRequestsPerSecond,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "dirty_broadcast_interval",
+                            "vss.voxy_options.dirty_broadcast_interval",
+                            "vss.voxy_options.dirty_broadcast_interval.tooltip",
+                            "MEDIUM",
+                            10,
+                            VSSServerConfig.MIN_DIRTY_BROADCAST_INTERVAL_TICKS,
+                            VSSServerConfig.MAX_DIRTY_BROADCAST_INTERVAL_TICKS,
+                            1,
+                            value -> VSSServerConfig.CONFIG.dirtyBroadcastIntervalTicks = value,
+                            () -> VSSServerConfig.CONFIG.dirtyBroadcastIntervalTicks,
+                            VSSVoxyOptionsIntegration::formatTicks,
+                            VSSVoxyOptionsIntegration::saveServerConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.generation",
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_player_concurrency",
+                            "vss.voxy_options.generation_player_concurrency",
+                            "vss.voxy_options.generation_player_concurrency.tooltip",
+                            "HIGH",
+                            4,
+                            1,
+                            64,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer = value,
+                            () -> VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_global_concurrency",
+                            "vss.voxy_options.generation_global_concurrency",
+                            "vss.voxy_options.generation_global_concurrency.tooltip",
+                            "HIGH",
+                            32,
+                            1,
+                            128,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationConcurrencyLimitGlobal = value,
+                            () -> VSSServerConfig.CONFIG.generationConcurrencyLimitGlobal,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_starts_per_tick",
+                            "vss.voxy_options.generation_starts_per_tick",
+                            "vss.voxy_options.generation_starts_per_tick.tooltip",
+                            "HIGH",
+                            2,
+                            1,
+                            32,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationStartsPerTickLimit = value,
+                            () -> VSSServerConfig.CONFIG.generationStartsPerTickLimit,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_completions_per_tick",
+                            "vss.voxy_options.generation_completions_per_tick",
+                            "vss.voxy_options.generation_completions_per_tick.tooltip",
+                            "HIGH",
+                            4,
+                            1,
+                            32,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationCompletionsPerTickLimit = value,
+                            () -> VSSServerConfig.CONFIG.generationCompletionsPerTickLimit,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_packing_threads",
+                            "vss.voxy_options.generation_packing_threads",
+                            "vss.voxy_options.generation_packing_threads.tooltip",
+                            "HIGH",
+                            2,
+                            1,
+                            8,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationPackingThreads = value,
+                            () -> VSSServerConfig.CONFIG.generationPackingThreads,
+                            VSSVoxyOptionsIntegration::formatThreads,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_packing_queue",
+                            "vss.voxy_options.generation_packing_queue",
+                            "vss.voxy_options.generation_packing_queue.tooltip",
+                            "HIGH",
+                            32,
+                            1,
+                            256,
+                            1,
+                            value -> VSSServerConfig.CONFIG.generationPackingQueueLimit = value,
+                            () -> VSSServerConfig.CONFIG.generationPackingQueueLimit,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "generation_timeout",
+                            "vss.voxy_options.generation_timeout",
+                            "vss.voxy_options.generation_timeout.tooltip",
+                            "MEDIUM",
+                            45,
+                            5,
+                            120,
+                            5,
+                            value -> VSSServerConfig.CONFIG.generationTimeoutSeconds = value,
+                            () -> VSSServerConfig.CONFIG.generationTimeoutSeconds,
+                            VSSVoxyOptionsIntegration::formatSeconds,
+                            VSSVoxyOptionsIntegration::saveServerConfig)));
+
+            invokeByName(modOptions, "addPage", page);
+            VSSLogger.info("Registered VSS options page with Sodium 0.8 config API");
+        } catch (Throwable t) {
+            VSSLogger.warn("Failed to add VSS options to Sodium 0.8 config API", t);
+        }
+    }
+
+    private static Object sodium08Group(Object configBuilder, String nameKey, Object... options) throws ReflectiveOperationException {
+        Object group = invokeByName(configBuilder, "createOptionGroup");
+        invokeByName(group, "setName", Component.translatable(nameKey));
+        for (Object option : options) {
+            invokeByName(group, "addOption", option);
+        }
+        return group;
+    }
+
+    private static Object sodium08BooleanOption(
+            Object configBuilder,
+            String path,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            boolean defaultValue,
+            Consumer<Boolean> setter,
+            Supplier<Boolean> getter,
+            Runnable save) throws ReflectiveOperationException {
+        Object builder = invokeByName(configBuilder, "createBooleanOption", id(path));
+        invokeByName(builder, "setName", Component.translatable(nameKey));
+        invokeByName(builder, "setTooltip", Component.translatable(tooltipKey));
+        invokeByName(builder, "setImpact", enumConstant(SODIUM08_OPTION_IMPACT, impact));
+        invokeByName(builder, "setDefaultValue", defaultValue);
+        invokeByName(builder, "setStorageHandler", sodium08StorageHandler(save));
+        invokeByName(builder, "setBinding", setter, getter);
+        return builder;
+    }
+
+    private static Object sodium08IntOption(
+            Object configBuilder,
+            String path,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            int defaultValue,
+            int min,
+            int max,
+            int step,
+            Consumer<Integer> setter,
+            Supplier<Integer> getter,
+            IntFunction<Component> formatter,
+            Runnable save) throws ReflectiveOperationException {
+        Object builder = invokeByName(configBuilder, "createIntegerOption", id(path));
+        invokeByName(builder, "setName", Component.translatable(nameKey));
+        invokeByName(builder, "setTooltip", Component.translatable(tooltipKey));
+        invokeByName(builder, "setImpact", enumConstant(SODIUM08_OPTION_IMPACT, impact));
+        invokeByName(builder, "setDefaultValue", defaultValue);
+        invokeByName(builder, "setRange", min, max, step);
+        invokeByName(builder, "setValueFormatter", sodium08Formatter(formatter));
+        invokeByName(builder, "setStorageHandler", sodium08StorageHandler(save));
+        invokeByName(builder, "setBinding", setter, getter);
+        return builder;
+    }
+
+    private static Object oldPage() {
+        if (oldVssOptionPage != null) {
+            return oldVssOptionPage;
+        }
+
+        try {
+            List<Object> groups = new ArrayList<>();
+            Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
+            Object serverStorage = oldStorage(VSSServerConfig.CONFIG, VSSVoxyOptionsIntegration::saveServerConfig);
+
+            groups.add(oldGroup(
+                    oldBooleanOption(
+                            clientStorage,
+                            "vss.voxy_options.receive_server_lods",
+                            "vss.voxy_options.receive_server_lods.tooltip",
+                            "MEDIUM",
+                            (VSSClientConfig config, Boolean value) -> config.receiveServerLods = value,
+                            config -> config.receiveServerLods),
+                    oldBooleanOption(
+                            clientStorage,
+                            "vss.voxy_options.off_thread_processing",
+                            "vss.voxy_options.off_thread_processing.tooltip",
+                            "LOW",
+                            (VSSClientConfig config, Boolean value) -> config.offThreadSectionProcessing = value,
+                            config -> config.offThreadSectionProcessing)));
+
+            groups.add(oldGroup(
+                    oldIntOption(
+                            clientStorage,
+                            "vss.voxy_options.client_lod_distance",
+                            "vss.voxy_options.client_lod_distance.tooltip",
+                            "LOW",
+                            0,
+                            512,
+                            16,
+                            VSSVoxyOptionsIntegration::formatChunksAuto,
+                            (VSSClientConfig config, Integer value) -> config.lodDistanceChunks = value,
+                            config -> config.lodDistanceChunks),
+                    oldIntOption(
+                            clientStorage,
+                            "vss.voxy_options.desired_bandwidth",
+                            "vss.voxy_options.desired_bandwidth.tooltip",
+                            "LOW",
+                            0,
+                            100,
+                            1,
+                            VSSVoxyOptionsIntegration::formatMiBAuto,
+                            (VSSClientConfig config, Integer value) -> {
+                                config.desiredBandwidthMiB = value;
+                                Minecraft.getInstance().execute(VSSClientNetworking::sendBandwidthPreference);
+                            },
+                            config -> config.desiredBandwidthMiB)));
+
+            groups.add(oldGroup(
+                    oldBooleanOption(
+                            serverStorage,
+                            "vss.voxy_options.server_sync",
+                            "vss.voxy_options.server_sync.tooltip",
+                            "HIGH",
+                            (VSSServerConfig config, Boolean value) -> config.enabled = value,
+                            config -> config.enabled),
+                    oldBooleanOption(
+                            serverStorage,
+                            "vss.voxy_options.generation",
+                            "vss.voxy_options.generation.tooltip",
+                            "HIGH",
+                            (VSSServerConfig config, Boolean value) -> config.enableChunkGeneration = value,
+                            config -> config.enableChunkGeneration)));
+
+            groups.add(oldGroup(
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.server_bandwidth",
+                            "vss.voxy_options.server_bandwidth.tooltip",
+                            "MEDIUM",
+                            1,
+                            VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            1,
+                            VSSVoxyOptionsIntegration::formatMiB,
+                            (VSSServerConfig config, Integer value) -> config.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
+                            VSSServerConfig::getPerPlayerBandwidthMiBRounded),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.server_queue_memory",
+                            "vss.voxy_options.server_queue_memory.tooltip",
+                            "HIGH",
+                            VSSServerConfig.MIN_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            VSSServerConfig.MAX_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
+                            4,
+                            VSSVoxyOptionsIntegration::formatMiB,
+                            (VSSServerConfig config, Integer value) -> config.sendQueueBytesLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
+                            VSSServerConfig::getSendQueueBytesMiBRounded),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.sync_rate",
+                            "vss.voxy_options.sync_rate.tooltip",
+                            "MEDIUM",
+                            20,
+                            1000,
+                            20,
+                            VSSVoxyOptionsIntegration::formatRequestsPerSecond,
+                            (VSSServerConfig config, Integer value) -> config.syncOnLoadRateLimitPerPlayer = value,
+                            config -> config.syncOnLoadRateLimitPerPlayer),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.dirty_broadcast_interval",
+                            "vss.voxy_options.dirty_broadcast_interval.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.MIN_DIRTY_BROADCAST_INTERVAL_TICKS,
+                            VSSServerConfig.MAX_DIRTY_BROADCAST_INTERVAL_TICKS,
+                            1,
+                            VSSVoxyOptionsIntegration::formatTicks,
+                            (VSSServerConfig config, Integer value) -> config.dirtyBroadcastIntervalTicks = value,
+                            config -> config.dirtyBroadcastIntervalTicks)));
+
+            groups.add(oldGroup(
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_player_concurrency",
+                            "vss.voxy_options.generation_player_concurrency.tooltip",
+                            "HIGH",
+                            1,
+                            64,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.generationConcurrencyLimitPerPlayer = value,
+                            config -> config.generationConcurrencyLimitPerPlayer),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_global_concurrency",
+                            "vss.voxy_options.generation_global_concurrency.tooltip",
+                            "HIGH",
+                            1,
+                            128,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.generationConcurrencyLimitGlobal = value,
+                            config -> config.generationConcurrencyLimitGlobal),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_starts_per_tick",
+                            "vss.voxy_options.generation_starts_per_tick.tooltip",
+                            "HIGH",
+                            1,
+                            32,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.generationStartsPerTickLimit = value,
+                            config -> config.generationStartsPerTickLimit),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_completions_per_tick",
+                            "vss.voxy_options.generation_completions_per_tick.tooltip",
+                            "HIGH",
+                            1,
+                            32,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.generationCompletionsPerTickLimit = value,
+                            config -> config.generationCompletionsPerTickLimit),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_packing_threads",
+                            "vss.voxy_options.generation_packing_threads.tooltip",
+                            "HIGH",
+                            1,
+                            8,
+                            1,
+                            VSSVoxyOptionsIntegration::formatThreads,
+                            (VSSServerConfig config, Integer value) -> config.generationPackingThreads = value,
+                            config -> config.generationPackingThreads),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_packing_queue",
+                            "vss.voxy_options.generation_packing_queue.tooltip",
+                            "HIGH",
+                            1,
+                            256,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.generationPackingQueueLimit = value,
+                            config -> config.generationPackingQueueLimit),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.generation_timeout",
+                            "vss.voxy_options.generation_timeout.tooltip",
+                            "MEDIUM",
+                            5,
+                            120,
+                            5,
+                            VSSVoxyOptionsIntegration::formatSeconds,
+                            (VSSServerConfig config, Integer value) -> config.generationTimeoutSeconds = value,
+                            config -> config.generationTimeoutSeconds)));
+
+            Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
+            oldVssOptionPage = pageConstructor.newInstance(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
+            return oldVssOptionPage;
+        } catch (Throwable t) {
+            VSSLogger.warn("Failed to build VSS Sodium options page", t);
+            return null;
+        }
+    }
+
+    private static Object oldGroup(Object... options) throws ReflectiveOperationException {
+        Object builder = invokeStatic(Class.forName(OLD_OPTION_GROUP), "createBuilder");
+        for (Object option : options) {
+            invokeByName(builder, "add", option);
+        }
+        return invokeByName(builder, "build");
+    }
+
+    private static <S> Object oldBooleanOption(
+            Object storage,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            BiConsumer<S, Boolean> setter,
+            Function<S, Boolean> getter) throws ReflectiveOperationException {
+        return oldOption(
+                boolean.class,
+                storage,
+                nameKey,
+                tooltipKey,
+                impact,
+                VSSVoxyOptionsIntegration::oldTickBoxControl,
+                setter,
+                getter);
+    }
+
+    private static <S> Object oldIntOption(
+            Object storage,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            int min,
+            int max,
+            int interval,
+            IntFunction<Component> formatter,
+            BiConsumer<S, Integer> setter,
+            Function<S, Integer> getter) throws ReflectiveOperationException {
+        return oldOption(
+                int.class,
+                storage,
+                nameKey,
+                tooltipKey,
+                impact,
+                option -> oldSliderControl(option, min, max, interval, formatter),
+                setter,
+                getter);
+    }
+
+    private static <S, T> Object oldOption(
+            Class<?> valueClass,
+            Object storage,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            Function<Object, Object> controlFactory,
+            BiConsumer<S, T> setter,
+            Function<S, T> getter) throws ReflectiveOperationException {
+        Object builder = invokeStatic(Class.forName(OLD_OPTION_IMPL), "createBuilder", valueClass, storage);
+        invokeByName(builder, "setName", Component.translatable(nameKey));
+        invokeByName(builder, "setTooltip", Component.translatable(tooltipKey));
+        invokeByName(builder, "setControl", controlFactory);
+        invokeByName(builder, "setBinding", setter, getter);
+        invokeByName(builder, "setImpact", enumConstant(OLD_OPTION_IMPACT, impact));
+        return invokeByName(builder, "build");
+    }
+
+    private static Object oldTickBoxControl(Object option) {
+        try {
+            Constructor<?> constructor = Class.forName(OLD_TICK_BOX_CONTROL).getConstructor(Class.forName(OLD_OPTION));
+            return constructor.newInstance(option);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to create Sodium tick box control", e);
+        }
+    }
+
+    private static Object oldSliderControl(Object option, int min, int max, int interval, IntFunction<Component> formatter) {
+        try {
+            Constructor<?> constructor = Class.forName(OLD_SLIDER_CONTROL).getConstructor(
+                    Class.forName(OLD_OPTION),
+                    int.class,
+                    int.class,
+                    int.class,
+                    Class.forName(OLD_VALUE_FORMATTER));
+            return constructor.newInstance(option, min, max, interval, oldFormatter(formatter));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to create Sodium slider control", e);
+        }
+    }
+
+    private static Object oldStorage(Object data, Runnable save) throws ReflectiveOperationException {
+        Class<?> storageInterface = Class.forName(OLD_OPTION_STORAGE);
+        return proxy(storageInterface, (proxy, method, args) -> {
+            if ("getData".equals(method.getName())) {
+                return data;
+            }
+            if ("save".equals(method.getName())) {
+                save.run();
+                return null;
+            }
+            return objectMethod(proxy, method, args, "VSS Sodium option storage");
+        });
+    }
+
+    private static Object oldFormatter(IntFunction<Component> formatter) throws ReflectiveOperationException {
+        Class<?> formatterInterface = Class.forName(OLD_VALUE_FORMATTER);
+        return proxy(formatterInterface, (proxy, method, args) -> {
+            if ("format".equals(method.getName()) && args != null && args.length == 1) {
+                return formatter.apply((Integer) args[0]);
+            }
+            return objectMethod(proxy, method, args, "VSS Sodium value formatter");
+        });
+    }
+
+    private static Object sodium08StorageHandler(Runnable save) throws ReflectiveOperationException {
+        Class<?> storageInterface = Class.forName(SODIUM08_STORAGE_HANDLER);
+        return proxy(storageInterface, (proxy, method, args) -> {
+            if ("afterSave".equals(method.getName())) {
+                save.run();
+                return null;
+            }
+            return objectMethod(proxy, method, args, "VSS Sodium 0.8 storage handler");
+        });
+    }
+
+    private static Object sodium08Formatter(IntFunction<Component> formatter) throws ReflectiveOperationException {
+        Class<?> formatterInterface = Class.forName(SODIUM08_VALUE_FORMATTER);
+        return proxy(formatterInterface, (proxy, method, args) -> {
+            if ("format".equals(method.getName()) && args != null && args.length == 1) {
+                return formatter.apply((Integer) args[0]);
+            }
+            return objectMethod(proxy, method, args, "VSS Sodium 0.8 value formatter");
+        });
+    }
+
+    private static boolean containsPageNamed(List<?> pages, String name) {
+        for (Object existing : pages) {
+            if (name.equals(pageName(existing))) {
                 return true;
             }
         }
         return false;
     }
 
-    private static int findVoxyPageIndex(List<OptionPage> pages) {
-        OptionPage voxyPage = getVoxyOptionPage();
+    private static int findVoxyPageIndex(List<?> pages) {
+        Object voxyPage = getVoxyOptionPage();
         if (voxyPage != null) {
             int index = pages.indexOf(voxyPage);
             if (index >= 0) {
@@ -75,20 +816,19 @@ public final class VSSVoxyOptionsIntegration {
         }
 
         for (int i = 0; i < pages.size(); i++) {
-            String pageName = pages.get(i).getName().getString();
-            if ("Voxy".equals(pageName)) {
+            if ("Voxy".equals(pageName(pages.get(i)))) {
                 return i;
             }
         }
         return -1;
     }
 
-    private static OptionPage getVoxyOptionPage() {
+    private static Object getVoxyOptionPage() {
         try {
             Class<?> pagesClass = Class.forName("me.cortex.voxy.client.config.VoxyConfigScreenPages");
             Field pageField = pagesClass.getField("voxyOptionPage");
             Object value = pageField.get(null);
-            return value instanceof OptionPage page ? page : null;
+            return Class.forName(OLD_OPTION_PAGE).isInstance(value) ? value : null;
         } catch (Throwable ignored) {
             return null;
         }
@@ -106,173 +846,22 @@ public final class VSSVoxyOptionsIntegration {
         return null;
     }
 
-    private static OptionPage page() {
-        if (vssOptionPage != null) {
-            return vssOptionPage;
+    private static String pageName(Object page) {
+        Object component = null;
+        try {
+            component = invokeByName(page, "getName");
+        } catch (Throwable ignored) {
+            try {
+                component = invokeByName(page, "name");
+            } catch (Throwable ignoredAgain) {
+                return "";
+            }
         }
 
-        List<OptionGroup> groups = new ArrayList<>();
-        ClientStorage clientStorage = new ClientStorage();
-        ServerStorage serverStorage = new ServerStorage();
-
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(boolean.class, clientStorage)
-                        .setName(Component.translatable("vss.voxy_options.receive_server_lods"))
-                        .setTooltip(Component.translatable("vss.voxy_options.receive_server_lods.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((config, value) -> config.receiveServerLods = value, config -> config.receiveServerLods)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
-                .add(OptionImpl.createBuilder(boolean.class, clientStorage)
-                        .setName(Component.translatable("vss.voxy_options.off_thread_processing"))
-                        .setTooltip(Component.translatable("vss.voxy_options.off_thread_processing.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((config, value) -> config.offThreadSectionProcessing = value, config -> config.offThreadSectionProcessing)
-                        .setImpact(OptionImpact.LOW)
-                        .build())
-                .build());
-
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(int.class, clientStorage)
-                        .setName(Component.translatable("vss.voxy_options.client_lod_distance"))
-                        .setTooltip(Component.translatable("vss.voxy_options.client_lod_distance.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 512, 16, VSSVoxyOptionsIntegration::formatChunksAuto))
-                        .setBinding((config, value) -> config.lodDistanceChunks = value, config -> config.lodDistanceChunks)
-                        .setImpact(OptionImpact.LOW)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, clientStorage)
-                        .setName(Component.translatable("vss.voxy_options.desired_bandwidth"))
-                        .setTooltip(Component.translatable("vss.voxy_options.desired_bandwidth.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 100, 1, VSSVoxyOptionsIntegration::formatMiBAuto))
-                        .setBinding((config, value) -> {
-                            config.desiredBandwidthMiB = value;
-                            Minecraft.getInstance().execute(VSSClientNetworking::sendBandwidthPreference);
-                        }, config -> config.desiredBandwidthMiB)
-                        .setImpact(OptionImpact.LOW)
-                        .build())
-                .build());
-
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(boolean.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.server_sync"))
-                        .setTooltip(Component.translatable("vss.voxy_options.server_sync.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((config, value) -> config.enabled = value, config -> config.enabled)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(boolean.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((config, value) -> config.enableChunkGeneration = value, config -> config.enableChunkGeneration)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .build());
-
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.server_bandwidth"))
-                        .setTooltip(Component.translatable("vss.voxy_options.server_bandwidth.tooltip"))
-                        .setControl(option -> new SliderControl(
-                                option,
-                                1,
-                                VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                                1,
-                                VSSVoxyOptionsIntegration::formatMiB))
-                        .setBinding(
-                                (config, value) -> config.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
-                                VSSServerConfig::getPerPlayerBandwidthMiBRounded)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.server_queue_memory"))
-                        .setTooltip(Component.translatable("vss.voxy_options.server_queue_memory.tooltip"))
-                        .setControl(option -> new SliderControl(
-                                option,
-                                VSSServerConfig.MIN_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                                VSSServerConfig.MAX_SEND_QUEUE_BYTES_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                                4,
-                                VSSVoxyOptionsIntegration::formatMiB))
-                        .setBinding(
-                                (config, value) -> config.sendQueueBytesLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
-                                VSSServerConfig::getSendQueueBytesMiBRounded)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.sync_rate"))
-                        .setTooltip(Component.translatable("vss.voxy_options.sync_rate.tooltip"))
-                        .setControl(option -> new SliderControl(option, 20, 1000, 20, VSSVoxyOptionsIntegration::formatRequestsPerSecond))
-                        .setBinding((config, value) -> config.syncOnLoadRateLimitPerPlayer = value, config -> config.syncOnLoadRateLimitPerPlayer)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.dirty_broadcast_interval"))
-                        .setTooltip(Component.translatable("vss.voxy_options.dirty_broadcast_interval.tooltip"))
-                        .setControl(option -> new SliderControl(
-                                option,
-                                VSSServerConfig.MIN_DIRTY_BROADCAST_INTERVAL_TICKS,
-                                VSSServerConfig.MAX_DIRTY_BROADCAST_INTERVAL_TICKS,
-                                1,
-                                VSSVoxyOptionsIntegration::formatTicks))
-                        .setBinding((config, value) -> config.dirtyBroadcastIntervalTicks = value, config -> config.dirtyBroadcastIntervalTicks)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
-                .build());
-
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_player_concurrency"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_player_concurrency.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 64, 1, VSSVoxyOptionsIntegration::formatColumns))
-                        .setBinding((config, value) -> config.generationConcurrencyLimitPerPlayer = value, config -> config.generationConcurrencyLimitPerPlayer)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_global_concurrency"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_global_concurrency.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 128, 1, VSSVoxyOptionsIntegration::formatColumns))
-                        .setBinding((config, value) -> config.generationConcurrencyLimitGlobal = value, config -> config.generationConcurrencyLimitGlobal)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_starts_per_tick"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_starts_per_tick.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 32, 1, VSSVoxyOptionsIntegration::formatColumns))
-                        .setBinding((config, value) -> config.generationStartsPerTickLimit = value, config -> config.generationStartsPerTickLimit)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_completions_per_tick"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_completions_per_tick.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 32, 1, VSSVoxyOptionsIntegration::formatColumns))
-                        .setBinding((config, value) -> config.generationCompletionsPerTickLimit = value, config -> config.generationCompletionsPerTickLimit)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_packing_threads"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_packing_threads.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 8, 1, VSSVoxyOptionsIntegration::formatThreads))
-                        .setBinding((config, value) -> config.generationPackingThreads = value, config -> config.generationPackingThreads)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_packing_queue"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_packing_queue.tooltip"))
-                        .setControl(option -> new SliderControl(option, 1, 256, 1, VSSVoxyOptionsIntegration::formatColumns))
-                        .setBinding((config, value) -> config.generationPackingQueueLimit = value, config -> config.generationPackingQueueLimit)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, serverStorage)
-                        .setName(Component.translatable("vss.voxy_options.generation_timeout"))
-                        .setTooltip(Component.translatable("vss.voxy_options.generation_timeout.tooltip"))
-                        .setControl(option -> new SliderControl(option, 5, 120, 5, VSSVoxyOptionsIntegration::formatSeconds))
-                        .setBinding((config, value) -> config.generationTimeoutSeconds = value, config -> config.generationTimeoutSeconds)
-                        .setImpact(OptionImpact.MEDIUM)
-                        .build())
-                .build());
-
-        vssOptionPage = new OptionPage(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
-        return vssOptionPage;
+        if (component instanceof Component text) {
+            return text.getString();
+        }
+        return String.valueOf(component);
     }
 
     private static Component formatChunksAuto(int value) {
@@ -311,31 +900,155 @@ public final class VSSVoxyOptionsIntegration {
         return Component.translatable("vss.voxy_options.ticks", value);
     }
 
-    private static final class ClientStorage implements OptionStorage<VSSClientConfig> {
-        @Override
-        public VSSClientConfig getData() {
-            return VSSClientConfig.CONFIG;
-        }
+    private static void saveClientConfig() {
+        VSSClientConfig.CONFIG.normalizeAndSave();
+    }
 
-        @Override
-        public void save() {
-            VSSClientConfig.CONFIG.normalizeAndSave();
+    private static void saveServerConfig() {
+        VSSServerConfig.CONFIG.normalizeAndSave();
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.getSingleplayerServer() != null) {
+            VSSServerNetworking.refreshSessionConfigs(minecraft.getSingleplayerServer());
         }
     }
 
-    private static final class ServerStorage implements OptionStorage<VSSServerConfig> {
-        @Override
-        public VSSServerConfig getData() {
-            return VSSServerConfig.CONFIG;
+    private static ResourceLocation id(String path) {
+        return ResourceLocation.fromNamespaceAndPath(VSSConstants.MOD_ID, path);
+    }
+
+    private static String modVersion() {
+        try {
+            return ModList.get()
+                    .getModContainerById(VSSConstants.MOD_ID)
+                    .map(container -> container.getModInfo().getVersion().toString())
+                    .orElse("unknown");
+        } catch (Throwable ignored) {
+            return "unknown";
+        }
+    }
+
+    private static Object enumConstant(String className, String constant) throws ReflectiveOperationException {
+        Class<?> type = Class.forName(className);
+        if (!Enum.class.isAssignableFrom(type)) {
+            throw new IllegalArgumentException(className + " is not an enum");
+        }
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Object value = Enum.valueOf((Class<? extends Enum>) type.asSubclass(Enum.class), constant);
+        return value;
+    }
+
+    private static Object proxy(Class<?> type, InvocationHandler handler) {
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler);
+    }
+
+    private static Object objectMethod(Object proxy, Method method, Object[] args, String name) {
+        if ("toString".equals(method.getName()) && method.getParameterCount() == 0) {
+            return name;
+        }
+        if ("hashCode".equals(method.getName()) && method.getParameterCount() == 0) {
+            return System.identityHashCode(proxy);
+        }
+        if ("equals".equals(method.getName()) && method.getParameterCount() == 1) {
+            return proxy == args[0];
+        }
+        return null;
+    }
+
+    private static Object invokeStatic(Class<?> type, String name, Object... args) throws ReflectiveOperationException {
+        return invoke(type, null, name, args);
+    }
+
+    private static Object invokeByName(Object target, String name, Object... args) throws ReflectiveOperationException {
+        return invoke(target.getClass(), target, name, args);
+    }
+
+    private static Object invoke(Class<?> type, Object target, String name, Object... args) throws ReflectiveOperationException {
+        Method method = findMethod(type, name, args);
+        if (method == null) {
+            throw new NoSuchMethodException(type.getName() + "." + name);
+        }
+        try {
+            if (!method.canAccess(target)) {
+                method.setAccessible(true);
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return method.invoke(target, args);
+    }
+
+    private static Method findMethod(Class<?> type, String name, Object[] args) {
+        for (Method method : type.getMethods()) {
+            if (method.getName().equals(name) && parametersMatch(method.getParameterTypes(), args)) {
+                return method;
+            }
         }
 
-        @Override
-        public void save() {
-            VSSServerConfig.CONFIG.normalizeAndSave();
-            Minecraft minecraft = Minecraft.getInstance();
-            if (minecraft.getSingleplayerServer() != null) {
-                VSSServerNetworking.refreshSessionConfigs(minecraft.getSingleplayerServer());
+        Class<?> cursor = type;
+        while (cursor != null) {
+            for (Method method : cursor.getDeclaredMethods()) {
+                if (method.getName().equals(name) && parametersMatch(method.getParameterTypes(), args)) {
+                    return method;
+                }
             }
+            cursor = cursor.getSuperclass();
+        }
+        return null;
+    }
+
+    private static boolean parametersMatch(Class<?>[] parameters, Object[] args) {
+        if (parameters.length != args.length) {
+            return false;
+        }
+        for (int i = 0; i < parameters.length; i++) {
+            if (!parameterMatches(parameters[i], args[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean parameterMatches(Class<?> parameter, Object arg) {
+        if (arg == null) {
+            return !parameter.isPrimitive();
+        }
+        Class<?> type = parameter.isPrimitive() ? primitiveWrapper(parameter) : parameter;
+        return type.isAssignableFrom(arg.getClass());
+    }
+
+    private static Class<?> primitiveWrapper(Class<?> type) {
+        if (type == boolean.class) {
+            return Boolean.class;
+        }
+        if (type == int.class) {
+            return Integer.class;
+        }
+        if (type == long.class) {
+            return Long.class;
+        }
+        if (type == double.class) {
+            return Double.class;
+        }
+        if (type == float.class) {
+            return Float.class;
+        }
+        if (type == short.class) {
+            return Short.class;
+        }
+        if (type == byte.class) {
+            return Byte.class;
+        }
+        if (type == char.class) {
+            return Character.class;
+        }
+        return Void.class;
+    }
+
+    private static boolean classExists(String className) {
+        try {
+            Class.forName(className, false, VSSVoxyOptionsIntegration.class.getClassLoader());
+            return true;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 }

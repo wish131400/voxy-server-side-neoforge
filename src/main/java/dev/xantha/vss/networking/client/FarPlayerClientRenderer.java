@@ -15,13 +15,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.player.RemotePlayer;
+import net.minecraft.client.resources.PlayerSkin;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
@@ -35,16 +35,17 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.PlayerModelPart;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.client.event.RenderLevelStageEvent;
-import net.minecraftforge.client.event.RenderPlayerEvent;
-import net.minecraftforge.entity.IEntityAdditionalSpawnData;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.network.NetworkEvent;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+import net.neoforged.neoforge.client.event.RenderPlayerEvent;
+import net.neoforged.neoforge.entity.IEntityWithComplexSpawn;
 
 public final class FarPlayerClientRenderer {
     private static final long NANOS_PER_MILLI = 1_000_000L;
@@ -67,7 +68,7 @@ public final class FarPlayerClientRenderer {
     private FarPlayerClientRenderer() {
     }
 
-    public static void handleFarPlayers(FarPlayersS2CPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handleFarPlayers(FarPlayersS2CPayload payload) {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         LocalPlayer localPlayer = mc.player;
@@ -143,11 +144,7 @@ public final class FarPlayerClientRenderer {
     }
 
     @SubscribeEvent
-    public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
-
+    public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) {
@@ -210,7 +207,7 @@ public final class FarPlayerClientRenderer {
         for (FarPlayerState state : FAR_PLAYERS.values()) {
             if (state.level == level && state.hasRenderableObjects(level)) {
                 state.apply(now);
-                state.renderManually(event.getPoseStack(), buffers, event.getPartialTick(), cameraPosition);
+                state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition);
                 renderedAny = true;
             }
         }
@@ -455,7 +452,7 @@ public final class FarPlayerClientRenderer {
             player.setCustomNameVisible(true);
             applyImmediately(sample(System.nanoTime()));
             applyStateFlags(lastEntry);
-            currentLevel.addPlayer(entityId, player);
+            currentLevel.addEntity(player);
             VSSLogger.debug("Far player entity created: " + name + " at "
                     + player.getBlockX() + "," + player.getBlockY() + "," + player.getBlockZ());
         }
@@ -785,9 +782,11 @@ public final class FarPlayerClientRenderer {
         private float previousYaw;
         private float previousPitch;
         private float previousHeadYaw;
+        private float previousBodyYaw;
         private float targetYaw;
         private float targetPitch;
         private float targetHeadYaw;
+        private float targetBodyYaw;
         private long interpolationStartNanos;
         private long interpolationDurationNanos = MIN_INTERPOLATION_NANOS;
 
@@ -823,19 +822,21 @@ public final class FarPlayerClientRenderer {
                     previousYaw = current.yaw;
                     previousPitch = current.pitch;
                     previousHeadYaw = current.headYaw;
+                    previousBodyYaw = current.bodyYaw;
                     targetX = snapshot.x();
                     targetY = snapshot.y();
                     targetZ = snapshot.z();
                     targetYaw = snapshot.yaw();
                     targetPitch = snapshot.pitch();
                     targetHeadYaw = snapshot.headYaw();
+                    targetBodyYaw = snapshot.bodyYaw();
                     long packetInterval = lastSeenNanos > 0L ? now - lastSeenNanos : MIN_INTERPOLATION_NANOS;
                     interpolationStartNanos = now;
                     interpolationDurationNanos = FarPlayerState.clamp(packetInterval, MIN_INTERPOLATION_NANOS, MAX_INTERPOLATION_NANOS);
                 }
             }
 
-            applyFullData(snapshot);
+            applyFullData(level, snapshot);
             applyState(snapshot);
             apply(now);
         }
@@ -870,7 +871,7 @@ public final class FarPlayerClientRenderer {
             applySyntheticIdentity(snapshot);
         }
 
-        private void applyFullData(FarPlayersS2CPayload.VehicleSnapshot snapshot) {
+        private void applyFullData(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot) {
             if (vehicle == null || vehicle.isRemoved() || !snapshot.fullData()) {
                 return;
             }
@@ -886,8 +887,8 @@ public final class FarPlayerClientRenderer {
             }
 
             byte[] spawnData = snapshot.spawnData();
-            if (spawnData != null && spawnData.length > 0 && vehicle instanceof IEntityAdditionalSpawnData spawnDataEntity) {
-                FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(spawnData));
+            if (spawnData != null && spawnData.length > 0 && vehicle instanceof IEntityWithComplexSpawn spawnDataEntity) {
+                RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.wrappedBuffer(spawnData), level.registryAccess());
                 try {
                     spawnDataEntity.readSpawnData(buf);
                 } catch (RuntimeException e) {
@@ -934,11 +935,19 @@ public final class FarPlayerClientRenderer {
             vehicle.zOld = sample.z;
             vehicle.yRotO = sample.yaw;
             vehicle.xRotO = sample.pitch;
+            if (vehicle instanceof LivingEntity livingEntity) {
+                livingEntity.yBodyRotO = sample.bodyYaw;
+                livingEntity.yHeadRotO = sample.headYaw;
+            }
             vehicle.syncPacketPositionCodec(sample.x, sample.y, sample.z);
             vehicle.setPos(sample.x, sample.y, sample.z);
             vehicle.setYRot(sample.yaw);
             vehicle.setXRot(sample.pitch);
             vehicle.setYHeadRot(sample.headYaw);
+            if (vehicle instanceof LivingEntity livingEntity) {
+                livingEntity.setYBodyRot(sample.bodyYaw);
+                livingEntity.setYHeadRot(sample.headYaw);
+            }
         }
 
         private VehiclePoseSample sample(long now) {
@@ -952,7 +961,8 @@ public final class FarPlayerClientRenderer {
                     Mth.lerp(progress, previousZ, targetZ),
                     Mth.rotLerp(progress, previousYaw, targetYaw),
                     Mth.lerp(progress, previousPitch, targetPitch),
-                    Mth.rotLerp(progress, previousHeadYaw, targetHeadYaw));
+                    Mth.rotLerp(progress, previousHeadYaw, targetHeadYaw),
+                    Mth.rotLerp(progress, previousBodyYaw, targetBodyYaw));
         }
 
         private float interpolationProgress(long now) {
@@ -973,9 +983,11 @@ public final class FarPlayerClientRenderer {
             previousYaw = snapshot.yaw();
             previousPitch = snapshot.pitch();
             previousHeadYaw = snapshot.headYaw();
+            previousBodyYaw = snapshot.bodyYaw();
             targetYaw = snapshot.yaw();
             targetPitch = snapshot.pitch();
             targetHeadYaw = snapshot.headYaw();
+            targetBodyYaw = snapshot.bodyYaw();
             interpolationStartNanos = System.nanoTime();
             interpolationDurationNanos = MIN_INTERPOLATION_NANOS;
         }
@@ -1035,54 +1047,14 @@ public final class FarPlayerClientRenderer {
         }
 
         @Override
-        public boolean isSkinLoaded() {
+        public PlayerSkin getSkin() {
             PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null ? playerInfo.isSkinLoaded() : super.isSkinLoaded();
-        }
-
-        @Override
-        public ResourceLocation getSkinTextureLocation() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null ? playerInfo.getSkinLocation() : super.getSkinTextureLocation();
-        }
-
-        @Override
-        public boolean isCapeLoaded() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null && playerInfo.getCapeLocation() != null || super.isCapeLoaded();
-        }
-
-        @Override
-        public ResourceLocation getCloakTextureLocation() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null && playerInfo.getCapeLocation() != null
-                    ? playerInfo.getCapeLocation()
-                    : super.getCloakTextureLocation();
-        }
-
-        @Override
-        public boolean isElytraLoaded() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null && playerInfo.getElytraLocation() != null || super.isElytraLoaded();
-        }
-
-        @Override
-        public ResourceLocation getElytraTextureLocation() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null && playerInfo.getElytraLocation() != null
-                    ? playerInfo.getElytraLocation()
-                    : super.getElytraTextureLocation();
+            return playerInfo != null ? playerInfo.getSkin() : super.getSkin();
         }
 
         @Override
         public boolean isModelPartShown(PlayerModelPart part) {
             return true;
-        }
-
-        @Override
-        public String getModelName() {
-            PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null ? playerInfo.getModelName() : super.getModelName();
         }
 
         private PlayerInfo getSourcePlayerInfo() {
@@ -1096,6 +1068,6 @@ public final class FarPlayerClientRenderer {
     private record PoseSample(double x, double y, double z, float yaw, float pitch, float headYaw, float bodyYaw) {
     }
 
-    private record VehiclePoseSample(double x, double y, double z, float yaw, float pitch, float headYaw) {
+    private record VehiclePoseSample(double x, double y, double z, float yaw, float pitch, float headYaw, float bodyYaw) {
     }
 }

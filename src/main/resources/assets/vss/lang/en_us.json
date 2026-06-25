@@ -1,5 +1,4 @@
 {
-  "modmenu.nameTranslation.vss": "Voxy Server Side",
   "vss.config.server.title": "Voxy Server Side",
   "vss.config.server.note": "Changes this local config only. Dedicated servers should use /vss commands or the server config file.",
   "vss.config.server.enabled": "Enable server LODs",
@@ -20,6 +19,11 @@
   "vss.config.server.saved": "Saved to vss-server-config.json",
   "vss.config.server.invalid": "%s must be between %s and %s",
   "vss.voxy_options.title": "Voxy Server Side",
+  "vss.voxy_options.group.client": "Client",
+  "vss.voxy_options.group.client_limits": "Client limits",
+  "vss.voxy_options.group.server": "Server",
+  "vss.voxy_options.group.server_limits": "Server limits",
+  "vss.voxy_options.group.generation": "Generation",
   "vss.voxy_options.receive_server_lods": "Receive server LODs",
   "vss.voxy_options.receive_server_lods.tooltip": "Download Voxy LOD data from the server.",
   "vss.voxy_options.off_thread_processing": "Process LOD data in background",

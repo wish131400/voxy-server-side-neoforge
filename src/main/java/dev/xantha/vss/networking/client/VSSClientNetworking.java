@@ -17,7 +17,6 @@ import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Supplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -25,11 +24,10 @@ import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.network.NetworkEvent;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
 
 public final class VSSClientNetworking {
     private static volatile boolean serverEnabled;
@@ -77,7 +75,7 @@ public final class VSSClientNetworking {
         return COLUMN_PROCESSOR.getColumnsDropped();
     }
 
-    public static void handleSessionConfig(SessionConfigS2CPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handleSessionConfig(SessionConfigS2CPayload payload) {
         if (!isClientWorldReady()) {
             discardSession();
             return;
@@ -120,7 +118,7 @@ public final class VSSClientNetworking {
         }
     }
 
-    public static void handleBatchResponse(BatchResponseS2CPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handleBatchResponse(BatchResponseS2CPayload payload) {
         if (!serverEnabled || !isClientWorldReady()) {
             return;
         }
@@ -139,7 +137,7 @@ public final class VSSClientNetworking {
         }
     }
 
-    public static void handleDirtyColumns(DirtyColumnsS2CPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handleDirtyColumns(DirtyColumnsS2CPayload payload) {
         if (!serverEnabled || !isClientWorldReady()) {
             return;
         }
@@ -149,7 +147,7 @@ public final class VSSClientNetworking {
         }
     }
 
-    public static void handleVoxelColumn(VoxelColumnS2CPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handleVoxelColumn(VoxelColumnS2CPayload payload) {
         if (!isClientLodSessionActive()) {
             return;
         }
@@ -236,10 +234,7 @@ public final class VSSClientNetworking {
     }
 
     @SubscribeEvent
-    public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onClientTick(ClientTickEvent.Post event) {
         ensureHandshakePending();
         tryPendingHandshake();
         LodRequestManager manager = requestManager;
@@ -370,7 +365,7 @@ public final class VSSClientNetworking {
                     serverPlayer,
                     VSSConstants.PROTOCOL_VERSION,
                     clientCapabilities());
-            minecraft.execute(() -> handleSessionConfig(config, () -> null));
+            minecraft.execute(() -> handleSessionConfig(config));
         });
     }
 

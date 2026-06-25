@@ -5,6 +5,9 @@ import java.util.UUID;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -12,11 +15,20 @@ import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.item.ItemStack;
 
-public record FarPlayersS2CPayload(Entry[] entries) {
+public record FarPlayersS2CPayload(Entry[] entries) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<FarPlayersS2CPayload> TYPE = VSSPayloadCodecs.type("far_players");
+    public static final StreamCodec<RegistryFriendlyByteBuf, FarPlayersS2CPayload> STREAM_CODEC =
+            VSSPayloadCodecs.codec(FarPlayersS2CPayload::encode, FarPlayersS2CPayload::decode);
+
     private static final int MAX_NAME_LENGTH = 16;
     private static final int MAX_USE_ITEM_REMAINING_TICKS = 72000;
 
-    public static void encode(FarPlayersS2CPayload payload, FriendlyByteBuf buf) {
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+    public static void encode(FarPlayersS2CPayload payload, RegistryFriendlyByteBuf buf) {
         buf.writeVarInt(payload.entries.length);
         for (Entry entry : payload.entries) {
             buf.writeUUID(entry.uuid());
@@ -47,7 +59,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
         }
     }
 
-    public static FarPlayersS2CPayload decode(FriendlyByteBuf buf) {
+    public static FarPlayersS2CPayload decode(RegistryFriendlyByteBuf buf) {
         int count = buf.readVarInt();
         if (count < 0 || count > VSSConstants.MAX_FAR_PLAYER_ENTRIES) {
             throw new IllegalArgumentException("Far player entry count out of range: " + count);
@@ -79,24 +91,24 @@ public record FarPlayersS2CPayload(Entry[] entries) {
                     buf.readBoolean(),
                     buf.readBoolean(),
                     buf.readBoolean(),
-                    buf.readItem(),
-                    buf.readItem(),
-                    buf.readItem(),
-                    buf.readItem(),
-                    buf.readItem(),
-                    buf.readItem(),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
+                    ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
                     readVehicles(buf));
         }
         return new FarPlayersS2CPayload(entries);
     }
 
-    private static void writeEquipment(FriendlyByteBuf buf, Entry entry) {
-        buf.writeItem(orEmpty(entry.mainHand()));
-        buf.writeItem(orEmpty(entry.offHand()));
-        buf.writeItem(orEmpty(entry.head()));
-        buf.writeItem(orEmpty(entry.chest()));
-        buf.writeItem(orEmpty(entry.legs()));
-        buf.writeItem(orEmpty(entry.feet()));
+    private static void writeEquipment(RegistryFriendlyByteBuf buf, Entry entry) {
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.mainHand()));
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.offHand()));
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.head()));
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.chest()));
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.legs()));
+        ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, orEmpty(entry.feet()));
     }
 
     private static void writeVehicles(FriendlyByteBuf buf, VehicleSnapshot[] vehicles) {
@@ -138,6 +150,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
         buf.writeFloat(vehicle.yaw());
         buf.writeFloat(vehicle.pitch());
         buf.writeFloat(vehicle.headYaw());
+        buf.writeFloat(vehicle.bodyYaw());
         buf.writeBoolean(vehicle.onGround());
         buf.writeBoolean(vehicle.onFire());
         buf.writeBoolean(vehicle.invisible());
@@ -174,6 +187,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
         float yaw = buf.readFloat();
         float pitch = buf.readFloat();
         float headYaw = buf.readFloat();
+        float bodyYaw = buf.readFloat();
         boolean onGround = buf.readBoolean();
         boolean onFire = buf.readBoolean();
         boolean invisible = buf.readBoolean();
@@ -192,6 +206,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
                 yaw,
                 pitch,
                 headYaw,
+                bodyYaw,
                 onGround,
                 onFire,
                 invisible,
@@ -256,6 +271,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
                 case CHEST -> chest;
                 case LEGS -> legs;
                 case FEET -> feet;
+                default -> ItemStack.EMPTY;
             };
         }
     }
@@ -269,6 +285,7 @@ public record FarPlayersS2CPayload(Entry[] entries) {
             float yaw,
             float pitch,
             float headYaw,
+            float bodyYaw,
             boolean onGround,
             boolean onFire,
             boolean invisible,

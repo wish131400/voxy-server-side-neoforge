@@ -1,7 +1,7 @@
 package dev.xantha.vss.compat;
 
 import java.util.OptionalInt;
-import net.minecraftforge.fml.ModList;
+import net.neoforged.fml.ModList;
 
 public final class ModCompat {
     private static boolean voxyLoaded;

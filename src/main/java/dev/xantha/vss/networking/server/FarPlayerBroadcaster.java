@@ -16,6 +16,7 @@ import java.util.UUID;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -23,12 +24,13 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Pose;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.entity.IEntityAdditionalSpawnData;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.entity.IEntityWithComplexSpawn;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 public final class FarPlayerBroadcaster {
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
@@ -44,10 +46,7 @@ public final class FarPlayerBroadcaster {
     }
 
     @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onServerTick(ServerTickEvent.Post event) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         if (!config.enabled || !config.farPlayerSyncEnabled || !VSSServerNetworking.hasRegisteredPlayers()) {
             return;
@@ -136,24 +135,24 @@ public final class FarPlayerBroadcaster {
                 }
             }
 
-            VSSNetworking.sendToPlayer(viewer, safePayload(entries));
+            VSSNetworking.sendToPlayer(viewer, safePayload(viewer, entries));
             maybeLogBroadcast(viewer, players.size(), entries.size(), vehicleSnapshotsSent, skippedUnavailable, skippedDistance);
         }
     }
 
-    private static FarPlayersS2CPayload safePayload(List<FarPlayersS2CPayload.Entry> entries) {
+    private static FarPlayersS2CPayload safePayload(ServerPlayer viewer, List<FarPlayersS2CPayload.Entry> entries) {
         FarPlayersS2CPayload payload = new FarPlayersS2CPayload(entries.toArray(FarPlayersS2CPayload.Entry[]::new));
         if (!hasFullVehicleData(payload)) {
             return payload;
         }
 
-        int size = encodedSize(payload);
+        int size = encodedSize(viewer, payload);
         if (size >= 0 && size <= MAX_FAR_PLAYERS_PACKET_BYTES) {
             return payload;
         }
 
         FarPlayersS2CPayload poseOnlyPayload = copyPayloadWithPoseOnlyVehicles(payload);
-        int poseOnlySize = encodedSize(poseOnlyPayload);
+        int poseOnlySize = encodedSize(viewer, poseOnlyPayload);
         if (poseOnlySize >= 0 && poseOnlySize <= MAX_FAR_PLAYERS_PACKET_BYTES) {
             VSSLogger.warn("Far player vehicle data exceeded packet budget (" + size
                     + " bytes); sending pose-only vehicle data instead");
@@ -180,8 +179,8 @@ public final class FarPlayerBroadcaster {
         return false;
     }
 
-    private static int encodedSize(FarPlayersS2CPayload payload) {
-        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+    private static int encodedSize(ServerPlayer viewer, FarPlayersS2CPayload payload) {
+        RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), viewer.registryAccess());
         try {
             FarPlayersS2CPayload.encode(payload, buf);
             return buf.readableBytes();
@@ -230,6 +229,7 @@ public final class FarPlayerBroadcaster {
                     vehicle.yaw(),
                     vehicle.pitch(),
                     vehicle.headYaw(),
+                    vehicle.bodyYaw(),
                     vehicle.onGround(),
                     vehicle.onFire(),
                     vehicle.invisible(),
@@ -393,6 +393,7 @@ public final class FarPlayerBroadcaster {
                 vehicle.getYRot(),
                 vehicle.getXRot(),
                 vehicle.getYHeadRot(),
+                vehicleBodyYaw(vehicle),
                 vehicle.onGround(),
                 vehicle.isOnFire(),
                 vehicle.isInvisible(),
@@ -400,6 +401,10 @@ public final class FarPlayerBroadcaster {
                 fullData,
                 fullData ? captureEntityData(vehicle) : null,
                 fullData ? captureSpawnData(vehicle) : new byte[0]);
+    }
+
+    private static float vehicleBodyYaw(Entity vehicle) {
+        return vehicle instanceof LivingEntity livingEntity ? livingEntity.yBodyRot : vehicle.getYRot();
     }
 
     private static CompoundTag captureEntityData(Entity vehicle) {
@@ -422,11 +427,11 @@ public final class FarPlayerBroadcaster {
     }
 
     private static byte[] captureSpawnData(Entity vehicle) {
-        if (!(vehicle instanceof IEntityAdditionalSpawnData spawnDataEntity)) {
+        if (!(vehicle instanceof IEntityWithComplexSpawn spawnDataEntity)) {
             return new byte[0];
         }
 
-        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+        RegistryFriendlyByteBuf buf = new RegistryFriendlyByteBuf(Unpooled.buffer(), vehicle.registryAccess());
         try {
             spawnDataEntity.writeSpawnData(buf);
             int readable = buf.readableBytes();

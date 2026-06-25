@@ -1,21 +1,21 @@
-# Voxy Server Side Forge
+# Voxy Server Side NeoForge
 
-Forge 1.20.1 服务端远景同步 mod。服务端把已有、缓存过或允许生成的 LOD 数据发给安装了 Voxy 的客户端，让远景按玩家位置从近到远补齐。
+NeoForge 1.21.1 服务端远景同步 mod。服务端把已有、缓存过或允许生成的 LOD 数据发给安装了 Voxy 的客户端，让远景按玩家位置从近到远补齐。
 
 ## 安装
 
 服务器：
 
-- Forge `47.x`
+- NeoForge `21.1.x`
 - 本 mod
 - 可选：ZstdNet 或其他提供 `com.github.luben.zstd.Zstd` 的 zstd 库
 
 客户端：
 
-- Forge `47.x`
+- NeoForge `21.1.x`
 - 本 mod
 - Voxy
-- Embeddium/Sodium 兼容环境
+- Sodium 兼容环境
 - 可选：ZstdNet
 
 客户端和服务端的 VSS 协议版本必须一致，否则会进服但不启用 VSS 远景同步。

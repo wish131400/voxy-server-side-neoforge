@@ -22,17 +22,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Supplier;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.network.NetworkEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 public final class VSSServerNetworking {
     private static final Map<UUID, PlayerRequestState> PLAYER_STATES = new HashMap<>();
@@ -180,9 +179,8 @@ public final class VSSServerNetworking {
                 DirtyColumnBroadcaster.diagnosticsComponent());
     }
 
-    public static void handleHandshake(HandshakeC2SPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        ServerPlayer player = context.getSender();
+    public static void handleHandshake(HandshakeC2SPayload payload, IPayloadContext context) {
+        ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
         if (player == null) {
             return;
         }
@@ -228,9 +226,8 @@ public final class VSSServerNetworking {
                 config.bytesPerSecondLimitPerPlayer);
     }
 
-    public static void handleBatchRequest(BatchChunkRequestC2SPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
-        NetworkEvent.Context context = contextSupplier.get();
-        ServerPlayer player = context.getSender();
+    public static void handleBatchRequest(BatchChunkRequestC2SPayload payload, IPayloadContext context) {
+        ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
         if (player == null || !VSSServerConfig.CONFIG.enabled) {
             return;
         }
@@ -633,8 +630,8 @@ public final class VSSServerNetworking {
         }
     }
 
-    public static void handleCancel(CancelRequestC2SPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
-        ServerPlayer player = contextSupplier.get().getSender();
+    public static void handleCancel(CancelRequestC2SPayload payload, IPayloadContext context) {
+        ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
         if (player != null) {
             handleIntegratedCancel(player, payload);
         }
@@ -648,8 +645,8 @@ public final class VSSServerNetworking {
         }
     }
 
-    public static void handleBandwidthUpdate(BandwidthUpdateC2SPayload payload, Supplier<NetworkEvent.Context> contextSupplier) {
-        ServerPlayer player = contextSupplier.get().getSender();
+    public static void handleBandwidthUpdate(BandwidthUpdateC2SPayload payload, IPayloadContext context) {
+        ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
         if (player != null) {
             handleIntegratedBandwidthUpdate(player, payload);
         }
@@ -770,17 +767,15 @@ public final class VSSServerNetworking {
     }
 
     @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase == TickEvent.Phase.END) {
-            if (PLAYER_STATES.isEmpty()) {
-                releaseIdleMemory();
-                return;
-            }
-            MinecraftServer server = event.getServer();
-            flushGeneratedColumns(server);
-            flushQueuedColumns(server);
-            DirtyColumnBroadcaster.tick(server);
+    public static void onServerTick(ServerTickEvent.Post event) {
+        if (PLAYER_STATES.isEmpty()) {
+            releaseIdleMemory();
+            return;
         }
+        MinecraftServer server = event.getServer();
+        flushGeneratedColumns(server);
+        flushQueuedColumns(server);
+        DirtyColumnBroadcaster.tick(server);
     }
 
     @SubscribeEvent

@@ -2,8 +2,20 @@ package dev.xantha.vss.networking.payloads;
 
 import dev.xantha.vss.common.VSSConstants;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
-public record BatchResponseS2CPayload(byte[] responseTypes, int[] requestIds, int count) {
+public record BatchResponseS2CPayload(byte[] responseTypes, int[] requestIds, int count) implements CustomPacketPayload {
+    public static final CustomPacketPayload.Type<BatchResponseS2CPayload> TYPE = VSSPayloadCodecs.type("batch_response");
+    public static final StreamCodec<RegistryFriendlyByteBuf, BatchResponseS2CPayload> STREAM_CODEC =
+            VSSPayloadCodecs.codec(BatchResponseS2CPayload::encode, BatchResponseS2CPayload::decode);
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
     public static void encode(BatchResponseS2CPayload payload, FriendlyByteBuf buf) {
         buf.writeVarInt(payload.count);
         for (int i = 0; i < payload.count; i++) {

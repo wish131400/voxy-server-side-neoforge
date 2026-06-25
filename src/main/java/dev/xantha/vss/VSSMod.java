@@ -1,38 +1,50 @@
 package dev.xantha.vss;
 
-import dev.xantha.vss.client.VSSClientConfigScreens;
-import dev.xantha.vss.client.VSSEmbeddiumOptionsEventBridge;
 import dev.xantha.vss.common.VSSConstants;
-import dev.xantha.vss.compat.ModCompat;
-import dev.xantha.vss.compat.ftbchunks.FTBChunksForceLoadCompat;
+import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.VSSNetworking;
-import dev.xantha.vss.networking.client.FarPlayerClientRenderer;
-import dev.xantha.vss.networking.client.VSSClientNetworking;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import dev.xantha.vss.networking.server.FarPlayerBroadcaster;
 import dev.xantha.vss.networking.server.VSSServerCommands;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.fml.DistExecutor;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 
 @Mod(VSSConstants.MOD_ID)
 public final class VSSMod {
-    public VSSMod() {
-        VSSNetworking.register();
-        MinecraftForge.EVENT_BUS.register(VSSServerNetworking.class);
-        MinecraftForge.EVENT_BUS.register(FarPlayerBroadcaster.class);
-        MinecraftForge.EVENT_BUS.register(VSSServerCommands.class);
-        MinecraftForge.EVENT_BUS.register(FTBChunksForceLoadCompat.class);
-        DistExecutor.safeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT, () -> ClientInit::init);
+    private static final String CLIENT_BOOTSTRAP_CLASS = "dev.xantha.vss.client.VSSClientBootstrap";
+
+    public VSSMod(IEventBus modBus, ModContainer modContainer) {
+        modBus.addListener(RegisterPayloadHandlersEvent.class, VSSNetworking::register);
+        NeoForge.EVENT_BUS.register(VSSServerNetworking.class);
+        NeoForge.EVENT_BUS.register(FarPlayerBroadcaster.class);
+        NeoForge.EVENT_BUS.register(VSSServerCommands.class);
+        if (FMLEnvironment.dist.isClient()) {
+            initClient(modContainer);
+        }
     }
 
-    private static final class ClientInit {
-        private static void init() {
-            VSSClientConfigScreens.register();
-            VSSEmbeddiumOptionsEventBridge.register();
-            ModCompat.init();
-            MinecraftForge.EVENT_BUS.register(VSSClientNetworking.class);
-            MinecraftForge.EVENT_BUS.register(FarPlayerClientRenderer.class);
+    private static void initClient(ModContainer modContainer) {
+        try {
+            Class<?> bootstrapClass = Class.forName(CLIENT_BOOTSTRAP_CLASS);
+            Method init = bootstrapClass.getMethod("init", ModContainer.class);
+            init.invoke(null, modContainer);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException("Failed to initialize VSS client hooks", cause);
+        } catch (ReflectiveOperationException e) {
+            VSSLogger.error("Failed to initialize VSS client hooks", e);
         }
     }
 }

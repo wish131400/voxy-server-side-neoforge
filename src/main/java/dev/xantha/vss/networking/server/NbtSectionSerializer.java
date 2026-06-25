@@ -25,10 +25,11 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.chunk.status.ChunkType;
 import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.chunk.storage.ChunkStorage;
 
@@ -59,8 +60,8 @@ final class NbtSectionSerializer {
         }
 
         CompoundTag chunkNbt = optionalTag.get();
-        ChunkStatus.ChunkType type = ChunkSerializer.getChunkTypeFromTag(chunkNbt);
-        if (type != ChunkStatus.ChunkType.LEVELCHUNK) {
+        ChunkType type = ChunkSerializer.getChunkTypeFromTag(chunkNbt);
+        if (type != ChunkType.LEVELCHUNK) {
             return null;
         }
 

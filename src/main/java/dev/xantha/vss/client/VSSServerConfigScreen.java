@@ -132,9 +132,6 @@ final class VSSServerConfigScreen extends Screen {
 
     @Override
     public void tick() {
-        for (ConfigNumberField field : fields) {
-            field.editBox.tick();
-        }
     }
 
     @Override
@@ -144,7 +141,7 @@ final class VSSServerConfigScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        renderBackground(graphics);
+        renderBackground(graphics, mouseX, mouseY, partialTick);
         graphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFF);
         graphics.drawCenteredString(font, Component.translatable("vss.config.server.note"), width / 2, 36, 0xA0A0A0);
         for (ConfigNumberField field : fields) {
