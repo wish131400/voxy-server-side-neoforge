@@ -3,7 +3,9 @@ package dev.xantha.vss.networking.server;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LoadedColumnData;
+import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
@@ -94,7 +96,7 @@ public final class VSSServerNetworking {
 
     public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
-        boolean compatible = clientProtocolVersion == VSSConstants.PROTOCOL_VERSION;
+        boolean compatible = isCompatibleClient(clientProtocolVersion, clientCapabilities);
         boolean enabled = config.enabled && compatible;
         if (compatible && enabled) {
             PlayerRequestState state = new PlayerRequestState();
@@ -103,8 +105,7 @@ public final class VSSServerNetworking {
             idleMemoryReleased = false;
             VSSLogger.info("Integrated host " + player.getGameProfile().getName() + " registered for VSS LOD sync");
         } else if (!compatible) {
-            VSSLogger.warn("Integrated host " + player.getGameProfile().getName()
-                    + " has incompatible VSS protocol " + clientProtocolVersion);
+            logIncompatibleClient("Integrated host " + player.getGameProfile().getName(), clientProtocolVersion, clientCapabilities);
         }
         return createSessionConfig(enabled);
     }
@@ -186,12 +187,12 @@ public final class VSSServerNetworking {
         }
 
         VSSServerConfig config = VSSServerConfig.CONFIG;
-        boolean compatible = payload.protocolVersion() == VSSConstants.PROTOCOL_VERSION;
+        boolean compatible = isCompatibleClient(payload.protocolVersion(), payload.capabilities());
         boolean enabled = config.enabled && compatible;
         sendSessionConfig(player, enabled);
 
         if (!compatible) {
-            VSSLogger.warn("Player " + player.getGameProfile().getName() + " has incompatible VSS protocol " + payload.protocolVersion());
+            logIncompatibleClient("Player " + player.getGameProfile().getName(), payload.protocolVersion(), payload.capabilities());
             return;
         }
         if (enabled) {
@@ -217,7 +218,7 @@ public final class VSSServerNetworking {
                 VSSConstants.PROTOCOL_VERSION,
                 enabled,
                 config.lodDistanceChunks,
-                VSSConstants.CAPABILITY_VOXEL_COLUMNS,
+                serverCapabilities(),
                 config.syncOnLoadRateLimitPerPlayer,
                 config.syncOnLoadConcurrencyLimitPerPlayer,
                 config.generationRateLimitPerPlayer,
@@ -305,12 +306,8 @@ public final class VSSServerNetworking {
                     totalCacheHits.incrementAndGet();
                     queueColumn(player, state, new VoxelColumnS2CPayload(
                             requestId,
-                            cachedColumn.chunkX(),
-                            cachedColumn.chunkZ(),
                             level.dimension(),
-                            requiredTimestamp,
-                            cachedColumn.sectionBytes(),
-                            cachedColumn.completeColumn()), priorityRefresh);
+                            cachedColumn.columnData().withColumnStamp(requiredTimestamp)), priorityRefresh);
                     continue;
                 }
                 if (clientTimestamp >= requiredTimestamp || dirtyTimestamp <= cachedColumn.timestamp()) {
@@ -400,23 +397,26 @@ public final class VSSServerNetworking {
                         cx,
                         cz,
                         dirtyTimestamp > 0L ? dirtyTimestamp : 0L);
-                LoadedColumnData diskData = null;
+                EncodedColumnData diskData = null;
                 boolean failed = false;
                 if (storedData == null && !preferLoadedColumn && VSSServerConfig.CONFIG.enableChunkNbtColumnSync) {
                     try {
-                        diskData = NbtSectionSerializer.readAndSerializeSections(
+                        LoadedColumnData rawDiskData = NbtSectionSerializer.readAndSerializeSections(
                                 level,
                                 level.getChunkSource().chunkMap,
                                 cx,
                                 cz,
                                 VSSServerConfig.CONFIG.diskReadTimeoutMillis);
+                        if (rawDiskData != null && rawDiskData.sectionBytes() != null && rawDiskData.sizeBytes() > 0 && rawDiskData.completeColumn()) {
+                            diskData = EncodedColumnData.encodeZstd(rawDiskData, columnTimestamp);
+                        }
                     } catch (Exception e) {
                         failed = true;
                         VSSLogger.warn("Failed to read chunk NBT from disk at " + cx + ", " + cz + ": " + e.getMessage());
                     }
                 }
 
-                LoadedColumnData result = diskData;
+                EncodedColumnData result = diskData;
                 PersistentColumnLodStore.Entry storedResult = storedData;
                 boolean readFailed = failed;
                 server.execute(() -> finishDiskRead(
@@ -450,7 +450,7 @@ public final class VSSServerNetworking {
             int cz,
             long columnTimestamp,
             PersistentColumnLodStore.Entry storedData,
-            LoadedColumnData diskData,
+            EncodedColumnData diskData,
             boolean readFailed,
             boolean preferLoadedColumn,
             boolean allowGeneration,
@@ -468,17 +468,12 @@ public final class VSSServerNetworking {
             return;
         }
         if (storedData != null && storedData.columnData() != null) {
-            LoadedColumnData columnData = storedData.columnData();
-            long storedTimestamp = Math.max(storedData.timestamp(), columnTimestamp);
+            EncodedColumnData columnData = storedData.columnData().withColumnStamp(Math.max(storedData.timestamp(), columnTimestamp));
             queueColumn(player, requestState, new VoxelColumnS2CPayload(
                     requestId,
-                    columnData.chunkX(),
-                    columnData.chunkZ(),
                     level.dimension(),
-                    storedTimestamp,
-                    columnData.sectionBytes(),
-                    columnData.completeColumn()), priority);
-            COLUMN_CACHE.put(level.dimension(), columnData, storedTimestamp);
+                    columnData), priority);
+            COLUMN_CACHE.put(level.dimension(), columnData);
             return;
         }
         if (preferLoadedColumn) {
@@ -495,7 +490,7 @@ public final class VSSServerNetworking {
                 return;
             }
         }
-        if (diskData == null || diskData.sectionBytes() == null || diskData.sizeBytes() == 0 || !diskData.completeColumn()) {
+        if (diskData == null || !diskData.hasBody() || !diskData.completeColumn()) {
             totalDiskReadMisses.incrementAndGet();
             if (allowGeneration && VSSServerConfig.CONFIG.enableChunkGeneration) {
                 submitGeneration(player, requestState, level, requestId, cx, cz);
@@ -506,16 +501,13 @@ public final class VSSServerNetworking {
             return;
         }
         totalDiskReadHits.incrementAndGet();
+        EncodedColumnData encodedDiskData = diskData.withColumnStamp(columnTimestamp);
         queueColumn(player, requestState, new VoxelColumnS2CPayload(
                 requestId,
-                cx,
-                cz,
                 level.dimension(),
-                columnTimestamp,
-                diskData.sectionBytes(),
-                diskData.completeColumn()), priority);
-        COLUMN_CACHE.put(level.dimension(), diskData, columnTimestamp);
-        writePersistentColumn(level.getServer(), level.dimension(), diskData, columnTimestamp);
+                encodedDiskData), priority);
+        COLUMN_CACHE.put(level.dimension(), encodedDiskData);
+        writePersistentColumn(level.getServer(), level.dimension(), encodedDiskData);
     }
 
     private static void submitGeneration(ServerPlayer player, PlayerRequestState state, ServerLevel level, int requestId, int cx, int cz) {
@@ -544,7 +536,7 @@ public final class VSSServerNetworking {
                 continue;
             }
 
-            LoadedColumnData columnData = result.columnData();
+            EncodedColumnData columnData = result.columnData();
             if (result.notGenerated() || columnData == null) {
                 state.clearRequest(result.requestId());
                 VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(
@@ -554,7 +546,7 @@ public final class VSSServerNetworking {
                 continue;
             }
 
-            if (columnData.sectionBytes() == null || columnData.sizeBytes() == 0 || !columnData.completeColumn()) {
+            if (!columnData.hasBody() || !columnData.completeColumn()) {
                 state.clearRequest(result.requestId());
                 VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(
                         new byte[] {VSSConstants.RESPONSE_NOT_GENERATED},
@@ -565,14 +557,10 @@ public final class VSSServerNetworking {
 
             queueColumn(player, state, new VoxelColumnS2CPayload(
                     result.requestId(),
-                    columnData.chunkX(),
-                    columnData.chunkZ(),
                     result.dimension(),
-                    result.columnTimestamp(),
-                    columnData.sectionBytes(),
-                    columnData.completeColumn()), result.priority());
-            COLUMN_CACHE.put(result.dimension(), columnData, result.columnTimestamp());
-            writePersistentColumn(server, result.dimension(), columnData, result.columnTimestamp());
+                    columnData), result.priority());
+            COLUMN_CACHE.put(result.dimension(), columnData);
+            writePersistentColumn(server, result.dimension(), columnData);
         }
     }
 
@@ -581,7 +569,7 @@ public final class VSSServerNetworking {
         invalidatePersistentColumn(level.getServer(), level.dimension(), cx, cz);
     }
 
-    private static void writePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, LoadedColumnData columnData, long timestamp) {
+    private static void writePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, EncodedColumnData columnData) {
         if (!PERSISTENT_COLUMN_STORE.enabled()) {
             return;
         }
@@ -592,7 +580,7 @@ public final class VSSServerNetworking {
         try {
             DISK_EXECUTOR.execute(() -> {
                 try {
-                    PERSISTENT_COLUMN_STORE.write(server, dimension, columnData, timestamp);
+                    PERSISTENT_COLUMN_STORE.write(server, dimension, columnData);
                 } finally {
                     pendingPersistentWrites.decrementAndGet();
                 }
@@ -627,6 +615,35 @@ public final class VSSServerNetworking {
                             new byte[] {VSSConstants.RESPONSE_RATE_LIMITED},
                             new int[] {payload.requestId()},
                             1));
+        }
+    }
+
+    private static int serverCapabilities() {
+        int capabilities = VSSConstants.CAPABILITY_VOXEL_COLUMNS;
+        if (LodByteCompression.isZstdAvailable()) {
+            capabilities |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
+        }
+        return capabilities;
+    }
+
+    private static boolean isCompatibleClient(int clientProtocolVersion, int clientCapabilities) {
+        return clientProtocolVersion == VSSConstants.PROTOCOL_VERSION
+                && LodByteCompression.isZstdAvailable()
+                && (clientCapabilities & VSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0;
+    }
+
+    private static void logIncompatibleClient(String name, int clientProtocolVersion, int clientCapabilities) {
+        if (clientProtocolVersion != VSSConstants.PROTOCOL_VERSION) {
+            VSSLogger.warn(name + " has incompatible VSS protocol " + clientProtocolVersion
+                    + " (server requires " + VSSConstants.PROTOCOL_VERSION + ")");
+            return;
+        }
+        if (!LodByteCompression.isZstdAvailable()) {
+            VSSLogger.warn("VSS LOD sync disabled for " + name + ": server Zstd support is unavailable");
+            return;
+        }
+        if ((clientCapabilities & VSSConstants.CAPABILITY_ZSTD_COLUMNS) == 0) {
+            VSSLogger.warn("VSS LOD sync disabled for " + name + ": client does not advertise Zstd column support");
         }
     }
 

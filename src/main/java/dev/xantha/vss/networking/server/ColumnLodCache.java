@@ -1,7 +1,7 @@
 package dev.xantha.vss.networking.server;
 
 import dev.xantha.vss.config.VSSServerConfig;
-import dev.xantha.vss.common.processing.LoadedColumnData;
+import dev.xantha.vss.common.processing.EncodedColumnData;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -37,12 +37,12 @@ final class ColumnLodCache {
         return entry;
     }
 
-    synchronized void put(ResourceKey<Level> dimension, LoadedColumnData columnData, long timestamp) {
-        if (!config.enableColumnCache || columnData == null || columnData.sectionBytes() == null || !columnData.completeColumn()) {
+    synchronized void put(ResourceKey<Level> dimension, EncodedColumnData columnData) {
+        if (!config.enableColumnCache || columnData == null || columnData.encodedBytes() == null || !columnData.completeColumn()) {
             return;
         }
 
-        int sizeBytes = Math.max(columnData.sizeBytes(), columnData.sectionBytes().length);
+        int sizeBytes = columnData.encodedBytes().length;
         if (sizeBytes <= 0 || sizeBytes > config.columnCacheMaxBytes) {
             return;
         }
@@ -53,13 +53,16 @@ final class ColumnLodCache {
             cachedBytes -= previous.sizeBytes();
         }
 
-        byte[] cachedSections = Arrays.copyOf(columnData.sectionBytes(), columnData.sectionBytes().length);
+        byte[] cachedSections = Arrays.copyOf(columnData.encodedBytes(), columnData.encodedBytes().length);
         entries.put(key, new Entry(
                 columnData.chunkX(),
                 columnData.chunkZ(),
-                timestamp,
+                columnData.columnStamp(),
+                columnData.compression(),
+                columnData.rawSize(),
                 cachedSections,
                 sizeBytes,
+                columnData.schemaVersion(),
                 columnData.completeColumn()));
         cachedBytes += sizeBytes;
         puts++;
@@ -104,6 +107,26 @@ final class ColumnLodCache {
     private record Key(ResourceLocation dimension, int chunkX, int chunkZ) {
     }
 
-    record Entry(int chunkX, int chunkZ, long timestamp, byte[] sectionBytes, int sizeBytes, boolean completeColumn) {
+    record Entry(
+            int chunkX,
+            int chunkZ,
+            long timestamp,
+            int compression,
+            int rawSize,
+            byte[] encodedBytes,
+            int sizeBytes,
+            int schemaVersion,
+            boolean completeColumn) {
+        EncodedColumnData columnData() {
+            return new EncodedColumnData(
+                    chunkX,
+                    chunkZ,
+                    compression,
+                    rawSize,
+                    encodedBytes,
+                    timestamp,
+                    schemaVersion,
+                    completeColumn);
+        }
     }
 }

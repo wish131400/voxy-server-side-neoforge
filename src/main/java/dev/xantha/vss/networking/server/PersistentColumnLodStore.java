@@ -1,7 +1,7 @@
 package dev.xantha.vss.networking.server;
 
 import dev.xantha.vss.common.VSSLogger;
-import dev.xantha.vss.common.processing.LoadedColumnData;
+import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.config.VSSServerConfig;
 import java.io.DataInputStream;
@@ -25,8 +25,9 @@ import net.minecraft.world.level.storage.LevelResource;
 
 final class PersistentColumnLodStore {
     private static final int FILE_MAGIC = 0x5653534C;
-    private static final int FILE_VERSION_CURRENT = 4;
+    private static final int FILE_VERSION_CURRENT = 5;
     private static final int MAX_COLUMN_BYTES = 2 * 1024 * 1024;
+    private static final int MAX_ENCODED_COLUMN_BYTES = MAX_COLUMN_BYTES + 65536;
     private static final String CACHE_DIR = "vss-column-cache";
 
     private final VSSServerConfig config;
@@ -79,33 +80,42 @@ final class PersistentColumnLodStore {
             long timestamp = in.readLong();
             boolean completeColumn = in.readBoolean();
             int method = in.readInt();
-            int originalLength = in.readInt();
+            int rawSize = in.readInt();
+            int schemaVersion = in.readInt();
             int length = in.readInt();
-            if (storedCx != cx || storedCz != cz || !completeColumn || timestamp < minimumTimestamp || length <= 0 || length > MAX_COLUMN_BYTES) {
-                misses++;
-                if (!completeColumn || timestamp < minimumTimestamp || length <= 0 || length > MAX_COLUMN_BYTES) {
-                    deleteQuietly(path);
-                }
-                return null;
-            }
-
-            byte[] sectionBytes = in.readNBytes(length);
-            if (sectionBytes.length != length) {
+            if (storedCx != cx
+                    || storedCz != cz
+                    || !completeColumn
+                    || timestamp < minimumTimestamp
+                    || method != LodByteCompression.METHOD_ZSTD
+                    || rawSize <= 0
+                    || rawSize > MAX_COLUMN_BYTES
+                    || schemaVersion != EncodedColumnData.SCHEMA_VERSION
+                    || length <= 0
+                    || length > MAX_ENCODED_COLUMN_BYTES) {
                 misses++;
                 deleteQuietly(path);
                 return null;
             }
-            if (method != LodByteCompression.METHOD_NONE) {
-                sectionBytes = LodByteCompression.decompress(sectionBytes, method, originalLength, MAX_COLUMN_BYTES);
+
+            byte[] zstdFrame = in.readNBytes(length);
+            if (zstdFrame.length != length) {
+                misses++;
+                deleteQuietly(path);
+                return null;
             }
 
             hits++;
             touch(path);
-            return new Entry(new LoadedColumnData(cx, cz, sectionBytes, sectionBytes.length, true), timestamp);
-        } catch (LodByteCompression.MissingCompressionMethodException e) {
-            misses++;
-            VSSLogger.debug("Persistent LOD column " + cx + "," + cz + " uses unavailable compression: " + e.getMessage());
-            return null;
+            return new Entry(new EncodedColumnData(
+                    cx,
+                    cz,
+                    method,
+                    rawSize,
+                    zstdFrame,
+                    timestamp,
+                    schemaVersion,
+                    true));
         } catch (Exception e) {
             misses++;
             deleteQuietly(path);
@@ -114,13 +124,17 @@ final class PersistentColumnLodStore {
         }
     }
 
-    void write(MinecraftServer server, ResourceKey<Level> dimension, LoadedColumnData columnData, long timestamp) {
+    void write(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData columnData) {
         if (!config.enablePersistentColumnCache
                 || columnData == null
-                || columnData.sectionBytes() == null
+                || columnData.encodedBytes() == null
                 || !columnData.completeColumn()
-                || columnData.sizeBytes() <= 0
-                || columnData.sizeBytes() > MAX_COLUMN_BYTES) {
+                || columnData.compression() != LodByteCompression.METHOD_ZSTD
+                || columnData.rawSize() <= 0
+                || columnData.rawSize() > MAX_COLUMN_BYTES
+                || columnData.encodedBytes().length <= 0
+                || columnData.encodedBytes().length > MAX_ENCODED_COLUMN_BYTES
+                || columnData.schemaVersion() != EncodedColumnData.SCHEMA_VERSION) {
             return;
         }
 
@@ -130,19 +144,17 @@ final class PersistentColumnLodStore {
             Files.createDirectories(path.getParent());
             try (OutputStream fileOut = Files.newOutputStream(tmp);
                 DataOutputStream out = new DataOutputStream(fileOut)) {
-                LodByteCompression.Result encoded = config.enablePersistentColumnCompression
-                        ? LodByteCompression.compressForStorage(columnData.sectionBytes())
-                        : LodByteCompression.Result.raw(columnData.sectionBytes());
                 out.writeInt(FILE_MAGIC);
                 out.writeInt(FILE_VERSION_CURRENT);
                 out.writeInt(columnData.chunkX());
                 out.writeInt(columnData.chunkZ());
-                out.writeLong(timestamp);
+                out.writeLong(columnData.columnStamp());
                 out.writeBoolean(columnData.completeColumn());
-                out.writeInt(encoded.method());
-                out.writeInt(encoded.originalLength());
-                out.writeInt(encoded.bytes().length);
-                out.write(encoded.bytes());
+                out.writeInt(columnData.compression());
+                out.writeInt(columnData.rawSize());
+                out.writeInt(columnData.schemaVersion());
+                out.writeInt(columnData.encodedBytes().length);
+                out.write(columnData.encodedBytes());
             }
             moveIntoPlace(tmp, path);
             writes++;
@@ -285,6 +297,9 @@ final class PersistentColumnLodStore {
     private record FileEntry(Path path, long sizeBytes, long lastAccessMillis) {
     }
 
-    record Entry(LoadedColumnData columnData, long timestamp) {
+    record Entry(EncodedColumnData columnData) {
+        long timestamp() {
+            return columnData.columnStamp();
+        }
     }
 }

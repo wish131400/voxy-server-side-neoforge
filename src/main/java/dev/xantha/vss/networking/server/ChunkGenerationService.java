@@ -3,6 +3,7 @@ package dev.xantha.vss.networking.server;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import dev.xantha.vss.config.VSSServerConfig;
 import java.util.ArrayList;
@@ -441,11 +442,12 @@ final class ChunkGenerationService {
         boolean completed = false;
         boolean failed = false;
         try {
-            LoadedColumnData columnData = SectionSerializer.serializeSnapshot(snapshot);
+            LoadedColumnData rawColumnData = SectionSerializer.serializeSnapshot(snapshot);
             if (taskEpoch != packingEpoch || Thread.currentThread().isInterrupted()) {
                 return;
             }
             long columnTimestamp = Math.max(VSSConstants.epochMillis(), minimumTimestamp);
+            EncodedColumnData columnData = EncodedColumnData.encodeZstd(rawColumnData, columnTimestamp);
             for (GenerationCallback callback : callbacks) {
                 results.add(new GenerationResult(
                         callback.playerUuid(),
@@ -453,7 +455,6 @@ final class ChunkGenerationService {
                         callback.requestId(),
                         dimension,
                         columnData,
-                        columnTimestamp,
                         false,
                         callback.priority()));
             }
@@ -677,8 +678,7 @@ final class ChunkGenerationService {
             PlayerRequestState requestState,
             int requestId,
             ResourceKey<Level> dimension,
-            LoadedColumnData columnData,
-            long columnTimestamp,
+            EncodedColumnData columnData,
             boolean notGenerated,
             boolean priority) {
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension) {
@@ -686,7 +686,7 @@ final class ChunkGenerationService {
         }
 
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension, boolean priority) {
-            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, 0L, true, priority);
+            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, true, priority);
         }
     }
 }

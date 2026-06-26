@@ -3,6 +3,7 @@ package dev.xantha.vss.common.processing;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.lang.reflect.InvocationTargetException;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -32,6 +33,23 @@ public final class LodByteCompression {
 
     public static Result compressForNetwork(byte[] input, boolean allowZstd) {
         return compressIfBeneficial(input, allowZstd, ZSTD_NETWORK_LEVEL);
+    }
+
+    public static Result compressZstdRequired(byte[] input) throws IOException {
+        if (input == null) {
+            throw new IOException("Missing LOD data");
+        }
+
+        ZstdBridge bridge = zstdBridge();
+        if (bridge == null) {
+            throw new MissingCompressionMethodException("Zstd is not available");
+        }
+
+        try {
+            return new Result(bridge.compress(input, ZSTD_STORAGE_LEVEL), METHOD_ZSTD, input.length);
+        } catch (ReflectiveOperationException e) {
+            throw new IOException("Failed to compress LOD data with Zstd", unwrapReflectiveCause(e));
+        }
     }
 
     private static Result compressIfBeneficial(byte[] input, boolean allowZstd, int zstdLevel) {
@@ -184,6 +202,13 @@ public final class LodByteCompression {
         private byte[] decompress(byte[] input, int originalLength) throws ReflectiveOperationException {
             return (byte[]) decompress.invoke(null, input, originalLength);
         }
+    }
+
+    private static Throwable unwrapReflectiveCause(ReflectiveOperationException e) {
+        if (e instanceof InvocationTargetException invocation && invocation.getCause() != null) {
+            return invocation.getCause();
+        }
+        return e;
     }
 
     public static final class MissingCompressionMethodException extends IOException {
