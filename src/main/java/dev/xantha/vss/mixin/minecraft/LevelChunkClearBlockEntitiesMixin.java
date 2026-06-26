@@ -1,11 +1,13 @@
 package dev.xantha.vss.mixin.minecraft;
 
+import dev.xantha.vss.common.BlockEntityTickerCompactor;
 import dev.xantha.vss.common.VSSLogger;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.TickingBlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
@@ -19,30 +21,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LevelChunk.class)
 public abstract class LevelChunkClearBlockEntitiesMixin {
-    @Unique
-    private static final TickingBlockEntity vss$nullTicker = new TickingBlockEntity() {
-        @Override
-        public void tick() {
-        }
-
-        @Override
-        public boolean isRemoved() {
-            return true;
-        }
-
-        @Override
-        public BlockPos getPos() {
-            return BlockPos.ZERO;
-        }
-
-        @Override
-        public String getType() {
-            return "<vss:null>";
-        }
-    };
+    @Shadow
+    @Final
+    private static TickingBlockEntity NULL_TICKER;
 
     @Unique
     private static volatile Method vss$rebindMethod;
+
+    @Shadow
+    @Final
+    private Level level;
 
     @Shadow
     @Final
@@ -71,6 +59,9 @@ public abstract class LevelChunkClearBlockEntitiesMixin {
         for (Object ticker : tickerSnapshot) {
             vss$rebindTicker(ticker);
         }
+        if (!tickerSnapshot.isEmpty()) {
+            BlockEntityTickerCompactor.request(level);
+        }
         tickersInLevel.clear();
         ci.cancel();
     }
@@ -81,7 +72,7 @@ public abstract class LevelChunkClearBlockEntitiesMixin {
             return;
         }
         if (ticker instanceof LevelChunkRebindableTickerAccessor accessor) {
-            accessor.vss$rebind(vss$nullTicker);
+            accessor.vss$rebind(NULL_TICKER);
             return;
         }
 
@@ -90,7 +81,7 @@ public abstract class LevelChunkClearBlockEntitiesMixin {
             return;
         }
         try {
-            method.invoke(ticker, vss$nullTicker);
+            method.invoke(ticker, NULL_TICKER);
         } catch (ReflectiveOperationException | RuntimeException e) {
             VSSLogger.warn("Failed to rebind unloaded block entity ticker", e);
         }

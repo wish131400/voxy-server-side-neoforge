@@ -6,6 +6,7 @@
   "compatibilityLevel": "JAVA_17",
   "mixins": [
     "ftbessentials.TeleportCommandsNoBlockingMixin",
+    "minecraft.LevelBlockEntityTickerCompactionMixin",
     "minecraft.LevelBlockUpdateDirtyColumnMixin",
     "minecraft.LevelChunkClearBlockEntitiesMixin",
     "minecraft.LevelDirtyColumnMixin",
