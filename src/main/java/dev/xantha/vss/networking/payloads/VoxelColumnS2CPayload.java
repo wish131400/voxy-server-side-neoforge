@@ -86,7 +86,16 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     public byte[] decompressedSections() {
-        return sectionBytes;
+        if (sectionBytes != null) {
+            return sectionBytes;
+        }
+        try {
+            return encodedSectionBytes != null
+                    ? LodByteCompression.decompress(encodedSectionBytes, encodedCompression, encodedRawSize, MAX_SECTIONS_SIZE)
+                    : new byte[0];
+        } catch (IOException e) {
+            throw new IllegalStateException("Invalid encoded voxel column payload", e);
+        }
     }
 
     public boolean completeColumn() {
