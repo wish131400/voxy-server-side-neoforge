@@ -83,22 +83,13 @@ public final class VSSServerCommands {
                                 .executes(context -> showBandwidth(context.getSource())))
                         .then(Commands.literal("设置")
                                 .then(Commands.argument(
-                                                "每秒字节",
+                                                "kbps",
                                                 IntegerArgumentType.integer(
-                                                        VSSServerConfig.MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER,
-                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER))
-                                        .executes(context -> setBandwidthBytes(
+                                                        VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
+                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER))
+                                        .executes(context -> setBandwidthKbps(
                                                 context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "每秒字节")))))
-                        .then(Commands.literal("设置MiB")
-                                .then(Commands.argument(
-                                                "每秒MiB",
-                                                IntegerArgumentType.integer(
-                                                        1,
-                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB))
-                                        .executes(context -> setBandwidthMiB(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "每秒MiB"))))))
+                                                IntegerArgumentType.getInteger(context, "kbps"))))))
                 .then(Commands.literal("queue")
                         .executes(context -> showQueue(context.getSource()))
                         .then(Commands.literal("get")
