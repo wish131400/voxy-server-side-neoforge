@@ -66,6 +66,8 @@ public final class LodRequestManager {
     private long[] orderedOffsets = new long[0];
     private int scanOffsetIndex;
     private int softFrontierRadius;
+    private int lastEffectiveLodDistance = -1;
+    private boolean scanCompletedForCurrentOffsets;
     private double syncRequestBudget;
     private double generationRequestBudget;
     private double dirtyRefreshBudget;
@@ -82,10 +84,24 @@ public final class LodRequestManager {
     }
 
     public boolean onSessionConfig(SessionConfigS2CPayload config) {
+        SessionConfigS2CPayload previousConfig = sessionConfig;
         boolean shouldReset = shouldResetForSessionConfig(config);
         sessionConfig = config;
         if (shouldReset) {
             resetRequestStateAfterConfigChange();
+            primeRequestBudgets();
+            return true;
+        }
+
+        clampRequestBudgets();
+        primeRequestBudgets();
+        if (previousConfig != null && previousConfig.generationEnabled() != config.generationEnabled()) {
+            if (config.generationEnabled()) {
+                resumeGenerationCandidatesNearPlayer();
+            } else {
+                suspendGenerationCandidates();
+            }
+            scanTickCounter = SCAN_INTERVAL_TICKS - 1;
         }
         return shouldReset;
     }
@@ -108,8 +124,9 @@ public final class LodRequestManager {
         lastDimension = level.dimension();
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
+        int lodDistance = getEffectiveLodDistance();
+        handleEffectiveLodDistance(playerCx, playerCz, lodDistance);
         if (playerCx != lastPlayerChunkX || playerCz != lastPlayerChunkZ) {
-            int lodDistance = getEffectiveLodDistance();
             int moveDistance = lastPlayerChunkX == Integer.MIN_VALUE
                     ? 0
                     : Math.max(Math.abs(playerCx - lastPlayerChunkX), Math.abs(playerCz - lastPlayerChunkZ));
@@ -207,12 +224,12 @@ public final class LodRequestManager {
             } else if (sessionConfig != null && sessionConfig.generationEnabled()) {
                 columnTimestamps.remove(packed);
                 diskMissedColumns.add(packed);
-                markBackoff(packed, true);
+                clearBackoff(packed);
                 deferredColumns.remove(packed);
                 deferColumn(packed);
             } else {
                 columnTimestamps.put(packed, 0L);
-                diskMissedColumns.remove(packed);
+                diskMissedColumns.add(packed);
                 clearBackoff(packed);
                 deferredColumns.remove(packed);
             }
@@ -231,11 +248,11 @@ public final class LodRequestManager {
                 if (sessionConfig != null && sessionConfig.generationEnabled()) {
                     columnTimestamps.remove(packed);
                     diskMissedColumns.add(packed);
-                    markBackoff(packed, true);
+                    clearBackoff(packed);
                     deferColumn(packed);
                 } else {
                     columnTimestamps.put(packed, 0L);
-                    diskMissedColumns.remove(packed);
+                    diskMissedColumns.add(packed);
                     clearBackoff(packed);
                 }
                 return;
@@ -287,13 +304,7 @@ public final class LodRequestManager {
             return true;
         }
         return sessionConfig.enabled() != config.enabled()
-                || sessionConfig.lodDistanceChunks() != config.lodDistanceChunks()
-                || sessionConfig.syncOnLoadRateLimitPerPlayer() != config.syncOnLoadRateLimitPerPlayer()
-                || sessionConfig.syncOnLoadConcurrencyLimitPerPlayer() != config.syncOnLoadConcurrencyLimitPerPlayer()
-                || sessionConfig.generationRateLimitPerPlayer() != config.generationRateLimitPerPlayer()
-                || sessionConfig.generationConcurrencyLimitPerPlayer() != config.generationConcurrencyLimitPerPlayer()
-                || sessionConfig.generationEnabled() != config.generationEnabled()
-                || sessionConfig.configRevision() != config.configRevision();
+                || sessionConfig.serverCapabilities() != config.serverCapabilities();
     }
 
     private void resetRequestStateAfterConfigChange() {
@@ -303,6 +314,116 @@ public final class LodRequestManager {
         }
         resetRequestState();
         nextRequestId = preservedNextRequestId;
+    }
+
+    private void primeRequestBudgets() {
+        if (sessionConfig == null) {
+            return;
+        }
+        int syncRate = Math.max(1, sessionConfig.syncOnLoadRateLimitPerPlayer());
+        int generationRate = Math.max(1, sessionConfig.generationRateLimitPerPlayer());
+        syncRequestBudget = Math.max(syncRequestBudget, syncRate);
+        generationRequestBudget = sessionConfig.generationEnabled()
+                ? Math.max(generationRequestBudget, generationRate)
+                : 0.0D;
+        dirtyRefreshBudget = Math.max(dirtyRefreshBudget, DIRTY_REFRESH_RATE_LIMIT);
+        clampRequestBudgets();
+    }
+
+    private void clampRequestBudgets() {
+        if (sessionConfig == null) {
+            syncRequestBudget = 0.0D;
+            generationRequestBudget = 0.0D;
+            dirtyRefreshBudget = 0.0D;
+            return;
+        }
+        syncRequestBudget = Math.min(syncRequestBudget, Math.max(1, sessionConfig.syncOnLoadRateLimitPerPlayer()));
+        generationRequestBudget = sessionConfig.generationEnabled()
+                ? Math.min(generationRequestBudget, Math.max(1, sessionConfig.generationRateLimitPerPlayer()))
+                : 0.0D;
+        dirtyRefreshBudget = Math.min(dirtyRefreshBudget, DIRTY_REFRESH_RATE_LIMIT);
+    }
+
+    private void handleEffectiveLodDistance(int playerCx, int playerCz, int lodDistance) {
+        if (lastEffectiveLodDistance < 0) {
+            lastEffectiveLodDistance = lodDistance;
+            ensureOrderedOffsets(lodDistance);
+            return;
+        }
+        if (lastEffectiveLodDistance == lodDistance) {
+            return;
+        }
+
+        int previousDistance = lastEffectiveLodDistance;
+        int previousResumeRing = scanCompletedForCurrentOffsets
+                ? previousDistance + 1
+                : Math.max(0, softFrontierRadius);
+        if (lodDistance < previousDistance) {
+            pruneAround(playerCx, playerCz, lodDistance + VSSConstants.LOD_DISTANCE_BUFFER);
+            ensureOrderedOffsets(lodDistance);
+            setScanCursorAtRing(Math.min(lodDistance + 1, previousResumeRing));
+        } else {
+            ensureOrderedOffsets(lodDistance);
+            setScanCursorAtRing(Math.min(lodDistance + 1, previousResumeRing));
+        }
+        lastEffectiveLodDistance = lodDistance;
+        scanTickCounter = SCAN_INTERVAL_TICKS - 1;
+    }
+
+    private void suspendGenerationCandidates() {
+        LongOpenHashSet cancelled = new LongOpenHashSet(generationInFlight);
+        for (long packed : cancelled) {
+            cancelInFlightColumn(packed);
+            diskMissedColumns.add(packed);
+            columnTimestamps.put(packed, 0L);
+            clearBackoff(packed);
+        }
+
+        LongOpenHashSet deferredGeneration = new LongOpenHashSet();
+        for (long packed : deferredColumns) {
+            if (!dirtyColumns.contains(packed) && diskMissedColumns.contains(packed)) {
+                deferredGeneration.add(packed);
+            }
+        }
+        for (long packed : deferredGeneration) {
+            deferredColumns.remove(packed);
+            columnTimestamps.put(packed, 0L);
+            clearBackoff(packed);
+        }
+        if (!deferredGeneration.isEmpty()) {
+            deferredQueue.removeIf(packed -> !deferredColumns.contains(packed.longValue()));
+        }
+    }
+
+    private void resumeGenerationCandidatesNearPlayer() {
+        Minecraft minecraft = Minecraft.getInstance();
+        LocalPlayer player = minecraft.player;
+        ClientLevel level = minecraft.level;
+        if (player == null || level == null || player.isRemoved()) {
+            return;
+        }
+
+        int playerCx = player.getBlockX() >> 4;
+        int playerCz = player.getBlockZ() >> 4;
+        int lodDistance = getEffectiveLodDistance();
+        LongOpenHashSet candidates = new LongOpenHashSet(diskMissedColumns);
+        int resumed = 0;
+        for (long packed : candidates) {
+            if (resumed >= MAX_DEFERRED_COLUMNS) {
+                break;
+            }
+            if (inFlight.contains(packed) || dirtyColumns.contains(packed)) {
+                continue;
+            }
+            if (chebyshevDistance(packed, playerCx, playerCz) > lodDistance) {
+                continue;
+            }
+            columnTimestamps.remove(packed);
+            clearBackoff(packed);
+            deferColumn(packed);
+            resumed++;
+        }
+        resetScanCursor();
     }
 
     private void scanAndSend(ClientLevel level, LocalPlayer player) {
@@ -448,6 +569,9 @@ public final class LodRequestManager {
         if (!requestWindow.hasSyncCapacity() || orderedOffsets.length == 0) {
             return count;
         }
+        if (scanCompletedForCurrentOffsets) {
+            return count;
+        }
 
         int scannedCandidates = 0;
         int totalCandidates = orderedOffsets.length;
@@ -456,8 +580,9 @@ public final class LodRequestManager {
                 && requestWindow.hasSyncCapacity()
                 && scannedCandidates < maxScans) {
             if (scanOffsetIndex >= totalCandidates) {
-                scanOffsetIndex = 0;
+                scanCompletedForCurrentOffsets = true;
                 softFrontierRadius = lodDistance;
+                return count;
             }
 
             long offset = orderedOffsets[scanOffsetIndex++];
@@ -744,6 +869,18 @@ public final class LodRequestManager {
         }
     }
 
+    private void cancelInFlightColumn(long packed) {
+        int requestId = positionToRequestId.remove(packed);
+        if (requestId != -1) {
+            requestIdToPosition.remove(requestId);
+            sendCancelPacket(requestId);
+        }
+        requestSendTimes.remove(packed);
+        inFlight.remove(packed);
+        generationInFlight.remove(packed);
+        dirtyRefreshInFlight.remove(packed);
+    }
+
     private long timeoutFor(long packed) {
         if (sessionConfig != null
                 && sessionConfig.generationEnabled()
@@ -942,6 +1079,8 @@ public final class LodRequestManager {
         lastPlayerChunkZ = Integer.MIN_VALUE;
         scanOffsetIndex = 0;
         softFrontierRadius = 0;
+        lastEffectiveLodDistance = -1;
+        scanCompletedForCurrentOffsets = false;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
         syncRequestBudget = 0.0D;
         generationRequestBudget = 0.0D;
@@ -951,6 +1090,22 @@ public final class LodRequestManager {
     private void resetScanCursor() {
         scanOffsetIndex = 0;
         softFrontierRadius = 0;
+        scanCompletedForCurrentOffsets = false;
+        scanTickCounter = SCAN_INTERVAL_TICKS - 1;
+    }
+
+    private void setScanCursorAtRing(int ring) {
+        if (orderedOffsets.length == 0 || ring <= 0) {
+            resetScanCursor();
+            return;
+        }
+        int index = 0;
+        while (index < orderedOffsets.length && offsetRing(orderedOffsets[index]) < ring) {
+            index++;
+        }
+        scanOffsetIndex = index;
+        softFrontierRadius = Math.max(0, Math.min(ring - 1, orderedOffsetDistance));
+        scanCompletedForCurrentOffsets = index >= orderedOffsets.length;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     }
 
