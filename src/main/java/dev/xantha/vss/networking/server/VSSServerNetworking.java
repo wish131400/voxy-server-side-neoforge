@@ -31,6 +31,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
@@ -51,11 +52,13 @@ public final class VSSServerNetworking {
     private static final AtomicLong totalDiskReadFailures = new AtomicLong();
     private static final AtomicInteger pendingDiskReads = new AtomicInteger();
     private static final AtomicInteger pendingPersistentWrites = new AtomicInteger();
+    private static final AtomicLong serverLifecycleEpoch = new AtomicLong();
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final int PRIORITY_SEND_COLUMNS_PER_TICK = 4;
     private static final long PRIORITY_SEND_BYTES_PER_TICK = 256L * 1024L;
     private static volatile long lastRequestDiagnosticNanos;
     private static volatile long lastSendDiagnosticNanos;
+    private static volatile boolean serverStopping;
     private static boolean idleMemoryReleased = true;
     private static final ExecutorService DISK_EXECUTOR = Executors.newFixedThreadPool(
             VSSServerConfig.CONFIG.diskReaderThreads,
@@ -69,14 +72,17 @@ public final class VSSServerNetworking {
     }
 
     public static boolean isRegistered(ServerPlayer player) {
-        return PLAYER_STATES.containsKey(player.getUUID());
+        return !serverStopping && PLAYER_STATES.containsKey(player.getUUID());
     }
 
     static boolean hasRegisteredPlayers() {
-        return !PLAYER_STATES.isEmpty();
+        return !serverStopping && !PLAYER_STATES.isEmpty();
     }
 
     static boolean hasRegisteredPlayers(ServerLevel level) {
+        if (serverStopping) {
+            return false;
+        }
         for (ServerPlayer player : level.players()) {
             if (isRegistered(player)) {
                 return true;
@@ -86,6 +92,9 @@ public final class VSSServerNetworking {
     }
 
     public static void refreshSessionConfigs(MinecraftServer server) {
+        if (serverStopping) {
+            return;
+        }
         for (UUID uuid : PLAYER_STATES.keySet()) {
             ServerPlayer player = server.getPlayerList().getPlayer(uuid);
             if (player != null) {
@@ -95,6 +104,9 @@ public final class VSSServerNetworking {
     }
 
     public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
+        if (serverStopping) {
+            return createSessionConfig(false);
+        }
         VSSServerConfig config = VSSServerConfig.CONFIG;
         boolean compatible = isCompatibleClient(clientProtocolVersion, clientCapabilities);
         boolean enabled = config.enabled && compatible;
@@ -182,7 +194,7 @@ public final class VSSServerNetworking {
 
     public static void handleHandshake(HandshakeC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player == null) {
+        if (player == null || serverStopping) {
             return;
         }
 
@@ -216,7 +228,7 @@ public final class VSSServerNetworking {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         return new SessionConfigS2CPayload(
                 VSSConstants.PROTOCOL_VERSION,
-                enabled,
+                enabled && !serverStopping,
                 config.lodDistanceChunks,
                 serverCapabilities(),
                 config.syncOnLoadRateLimitPerPlayer,
@@ -224,25 +236,28 @@ public final class VSSServerNetworking {
                 config.generationRateLimitPerPlayer,
                 config.generationConcurrencyLimitPerPlayer,
                 config.enableChunkGeneration,
-                config.bytesPerSecondLimitPerPlayer);
+                config.bandwidthBytesPerSecond());
     }
 
     public static void handleBatchRequest(BatchChunkRequestC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player == null || !VSSServerConfig.CONFIG.enabled) {
+        if (player == null || serverStopping || !VSSServerConfig.CONFIG.enabled) {
             return;
         }
         handleBatchRequest(player, payload);
     }
 
     public static void handleIntegratedBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
-        if (player == null || !VSSServerConfig.CONFIG.enabled) {
+        if (player == null || serverStopping || !VSSServerConfig.CONFIG.enabled) {
             return;
         }
         handleBatchRequest(player, payload);
     }
 
     private static void handleBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
+        if (serverStopping) {
+            return;
+        }
         PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
         if (state == null) {
             return;
@@ -384,22 +399,37 @@ public final class VSSServerNetworking {
             boolean preferLoadedColumn,
             boolean allowGeneration,
             boolean priority) {
+        if (serverStopping) {
+            state.clearRequest(requestId);
+            return;
+        }
         UUID playerId = player.getUUID();
         ServerLevel level = player.serverLevel();
         MinecraftServer server = player.server;
+        long lifecycleEpoch = serverLifecycleEpoch.get();
         try {
             totalDiskReadsSubmitted.incrementAndGet();
             pendingDiskReads.incrementAndGet();
             DISK_EXECUTOR.execute(() -> {
+                if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+                    pendingDiskReads.decrementAndGet();
+                    return;
+                }
+
                 PersistentColumnLodStore.Entry storedData = PERSISTENT_COLUMN_STORE.read(
                         server,
                         level.dimension(),
                         cx,
                         cz,
                         dirtyTimestamp > 0L ? dirtyTimestamp : 0L);
+                if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+                    pendingDiskReads.decrementAndGet();
+                    return;
+                }
+
                 EncodedColumnData diskData = null;
                 boolean failed = false;
-                if (storedData == null && !preferLoadedColumn && VSSServerConfig.CONFIG.enableChunkNbtColumnSync) {
+                if (storedData == null && !preferLoadedColumn && shouldReadExistingChunkNbt(allowGeneration)) {
                     try {
                         LoadedColumnData rawDiskData = NbtSectionSerializer.readAndSerializeSections(
                                 level,
@@ -407,7 +437,7 @@ public final class VSSServerNetworking {
                                 cx,
                                 cz,
                                 VSSServerConfig.CONFIG.diskReadTimeoutMillis);
-                        if (rawDiskData != null && rawDiskData.sectionBytes() != null && rawDiskData.sizeBytes() > 0 && rawDiskData.completeColumn()) {
+                        if (rawDiskData != null && rawDiskData.sectionBytes() != null && rawDiskData.sizeBytes() > 0) {
                             diskData = EncodedColumnData.encodeZstd(rawDiskData, columnTimestamp);
                         }
                     } catch (Exception e) {
@@ -419,7 +449,12 @@ public final class VSSServerNetworking {
                 EncodedColumnData result = diskData;
                 PersistentColumnLodStore.Entry storedResult = storedData;
                 boolean readFailed = failed;
+                if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+                    pendingDiskReads.decrementAndGet();
+                    return;
+                }
                 server.execute(() -> finishDiskRead(
+                        lifecycleEpoch,
                         playerId,
                         level,
                         state,
@@ -441,7 +476,13 @@ public final class VSSServerNetworking {
         }
     }
 
+    private static boolean shouldReadExistingChunkNbt(boolean allowGeneration) {
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        return config.enableChunkNbtColumnSync || !allowGeneration || !config.enableChunkGeneration;
+    }
+
     private static void finishDiskRead(
+            long lifecycleEpoch,
             UUID playerId,
             ServerLevel level,
             PlayerRequestState requestState,
@@ -456,6 +497,9 @@ public final class VSSServerNetworking {
             boolean allowGeneration,
             boolean priority) {
         pendingDiskReads.decrementAndGet();
+        if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+            return;
+        }
         if (readFailed) {
             totalDiskReadFailures.incrementAndGet();
         }
@@ -490,7 +534,7 @@ public final class VSSServerNetworking {
                 return;
             }
         }
-        if (diskData == null || !diskData.hasBody() || !diskData.completeColumn()) {
+        if (diskData == null || !diskData.hasBody()) {
             totalDiskReadMisses.incrementAndGet();
             if (allowGeneration && VSSServerConfig.CONFIG.enableChunkGeneration) {
                 submitGeneration(player, requestState, level, requestId, cx, cz);
@@ -511,6 +555,10 @@ public final class VSSServerNetworking {
     }
 
     private static void submitGeneration(ServerPlayer player, PlayerRequestState state, ServerLevel level, int requestId, int cx, int cz) {
+        if (serverStopping) {
+            state.clearRequest(requestId);
+            return;
+        }
         boolean accepted = GENERATION_SERVICE.submitGeneration(player.getUUID(), state, requestId, level, cx, cz);
         if (!accepted) {
             state.clearRequest(requestId);
@@ -524,6 +572,9 @@ public final class VSSServerNetworking {
     }
 
     private static void flushGeneratedColumns(MinecraftServer server) {
+        if (serverStopping) {
+            return;
+        }
         for (ChunkGenerationService.GenerationResult result : GENERATION_SERVICE.tick(server)) {
             PlayerRequestState state = PLAYER_STATES.get(result.playerUuid());
             ServerPlayer player = server.getPlayerList().getPlayer(result.playerUuid());
@@ -565,22 +616,28 @@ public final class VSSServerNetworking {
     }
 
     static void invalidateCachedColumn(ServerLevel level, int cx, int cz) {
+        if (serverStopping) {
+            return;
+        }
         COLUMN_CACHE.invalidate(level.dimension(), cx, cz);
         invalidatePersistentColumn(level.getServer(), level.dimension(), cx, cz);
     }
 
     private static void writePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, EncodedColumnData columnData) {
-        if (!PERSISTENT_COLUMN_STORE.enabled()) {
+        if (serverStopping || !PERSISTENT_COLUMN_STORE.enabled()) {
             return;
         }
         if (pendingPersistentWrites.get() >= VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit) {
             return;
         }
+        long lifecycleEpoch = serverLifecycleEpoch.get();
         pendingPersistentWrites.incrementAndGet();
         try {
             DISK_EXECUTOR.execute(() -> {
                 try {
-                    PERSISTENT_COLUMN_STORE.write(server, dimension, columnData);
+                    if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
+                        PERSISTENT_COLUMN_STORE.write(server, dimension, columnData);
+                    }
                 } finally {
                     pendingPersistentWrites.decrementAndGet();
                 }
@@ -592,21 +649,26 @@ public final class VSSServerNetworking {
     }
 
     private static void invalidatePersistentColumn(MinecraftServer server, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension, int cx, int cz) {
-        if (!PERSISTENT_COLUMN_STORE.enabled()) {
+        if (serverStopping || !PERSISTENT_COLUMN_STORE.enabled()) {
             return;
         }
+        long lifecycleEpoch = serverLifecycleEpoch.get();
         try {
-            DISK_EXECUTOR.execute(() -> PERSISTENT_COLUMN_STORE.invalidate(server, dimension, cx, cz));
+            DISK_EXECUTOR.execute(() -> {
+                if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
+                    PERSISTENT_COLUMN_STORE.invalidate(server, dimension, cx, cz);
+                }
+            });
         } catch (RejectedExecutionException e) {
             VSSLogger.debug("Persistent LOD invalidation rejected: " + e.getMessage());
         }
     }
 
-    private static void queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload) {
-        queueColumn(player, state, payload, false);
-    }
-
     private static void queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload, boolean priority) {
+        if (serverStopping) {
+            state.clearRequest(payload.requestId());
+            return;
+        }
         payload.setAllowZstdEncoding(state.supportsZstdColumns());
         if (!state.enqueue(payload, priority)) {
             VSSNetworking.sendToPlayer(
@@ -649,12 +711,15 @@ public final class VSSServerNetworking {
 
     public static void handleCancel(CancelRequestC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player != null) {
+        if (player != null && !serverStopping) {
             handleIntegratedCancel(player, payload);
         }
     }
 
     public static void handleIntegratedCancel(ServerPlayer player, CancelRequestC2SPayload payload) {
+        if (serverStopping) {
+            return;
+        }
         PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
         if (state != null) {
             state.cancel(payload.requestId());
@@ -664,12 +729,15 @@ public final class VSSServerNetworking {
 
     public static void handleBandwidthUpdate(BandwidthUpdateC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player != null) {
+        if (player != null && !serverStopping) {
             handleIntegratedBandwidthUpdate(player, payload);
         }
     }
 
     public static void handleIntegratedBandwidthUpdate(ServerPlayer player, BandwidthUpdateC2SPayload payload) {
+        if (serverStopping) {
+            return;
+        }
         PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
         if (state != null) {
             state.setDesiredBandwidth(payload.desiredRate());
@@ -677,7 +745,10 @@ public final class VSSServerNetworking {
     }
 
     private static void flushQueuedColumns(MinecraftServer server) {
-        long configuredLimit = VSSServerConfig.CONFIG.bytesPerSecondLimitPerPlayer;
+        if (serverStopping) {
+            return;
+        }
+        long configuredLimit = VSSServerConfig.CONFIG.bandwidthBytesPerSecond();
         for (Map.Entry<UUID, PlayerRequestState> entry : PLAYER_STATES.entrySet()) {
             PlayerRequestState state = entry.getValue();
             ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
@@ -750,8 +821,12 @@ public final class VSSServerNetworking {
             return;
         }
         lastSendDiagnosticNanos = now;
-        VSSLogger.debug("LOD column sent to " + player.getGameProfile().getName()
+        VSSLogger.info("LOD column sent to " + player.getGameProfile().getName()
                 + ": chunk=" + payload.chunkX() + "," + payload.chunkZ()
+                + ", complete=" + payload.completeColumn()
+                + ", rawBytes=" + payload.rawSectionBytesLength()
+                + ", encodedBytes=" + payload.encodedSectionBytesLength()
+                + ", compression=" + payload.encodedCompression()
                 + ", bytes=" + payload.estimatedBytes()
                 + ", queued=" + state.queuedPayloadCount()
                 + ", queuedBytes=" + state.queuedBytes()
@@ -785,6 +860,9 @@ public final class VSSServerNetworking {
 
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
+        if (serverStopping) {
+            return;
+        }
         if (PLAYER_STATES.isEmpty()) {
             releaseIdleMemory();
             return;
@@ -796,9 +874,28 @@ public final class VSSServerNetworking {
     }
 
     @SubscribeEvent
-    public static void onServerStopping(ServerStoppingEvent event) {
-        idleMemoryReleased = false;
-        releaseIdleMemory();
+    public static void onServerStarting(ServerStartingEvent event) {
+        serverLifecycleEpoch.incrementAndGet();
+        serverStopping = false;
+        idleMemoryReleased = true;
         PLAYER_STATES.clear();
+        DirtyColumnBroadcaster.clear();
+        COLUMN_CACHE.clear();
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        serverStopping = true;
+        serverLifecycleEpoch.incrementAndGet();
+        for (PlayerRequestState state : PLAYER_STATES.values()) {
+            state.clearAll();
+        }
+        idleMemoryReleased = false;
+        GENERATION_SERVICE.shutdown();
+        DirtyColumnBroadcaster.clear();
+        COLUMN_CACHE.clear();
+        idleMemoryReleased = true;
+        PLAYER_STATES.clear();
+        VSSLogger.info("Stopped VSS LOD sync and cleared generation tickets during server shutdown");
     }
 }

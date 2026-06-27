@@ -28,6 +28,7 @@ final class ClientColumnProcessor {
     private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 512;
     private static final int MAX_SECTIONS_PER_COLUMN = 64;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
+    private static final long COLUMN_PROCESS_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
     private final ConcurrentLinkedQueue<QueuedColumn> priorityColumnQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<QueuedColumn> columnQueue = new ConcurrentLinkedQueue<>();
@@ -40,6 +41,7 @@ final class ClientColumnProcessor {
     private volatile ExecutorService executor;
     private volatile boolean shuttingDown = true;
     private volatile long lastDropWarnMs;
+    private volatile long lastColumnProcessDiagnosticNanos;
 
     void beginSession() {
         sessionEpoch.incrementAndGet();
@@ -95,6 +97,7 @@ final class ClientColumnProcessor {
                     || !level.dimension().equals(payload.dimension())) {
                 return;
             }
+            logColumnProcess(payload, 0, Integer.MAX_VALUE, Integer.MIN_VALUE, replaceMissingSections);
             VSSApi.dispatchColumn(
                     level,
                     payload.dimension(),
@@ -181,8 +184,12 @@ final class ClientColumnProcessor {
                 try {
                     int sectionCount = Math.max(0, Math.min(buf.readVarInt(), MAX_SECTIONS_PER_COLUMN));
                     VoxelColumnData.SectionData[] sections = new VoxelColumnData.SectionData[sectionCount];
+                    int minSectionY = Integer.MAX_VALUE;
+                    int maxSectionY = Integer.MIN_VALUE;
                     for (int i = 0; i < sectionCount; i++) {
                         int sectionY = buf.readByte();
+                        minSectionY = Math.min(minSectionY, sectionY);
+                        maxSectionY = Math.max(maxSectionY, sectionY);
                         LevelChunkSection section = new LevelChunkSection(biomeRegistry);
                         section.read(buf);
 
@@ -214,6 +221,7 @@ final class ClientColumnProcessor {
                         return;
                     }
                     if (hasConsumers) {
+                        logColumnProcess(payload, sections.length, minSectionY, maxSectionY, queuedColumn.replaceMissingSections());
                         VSSApi.dispatchColumn(
                                 level,
                                 payload.dimension(),
@@ -251,6 +259,27 @@ final class ClientColumnProcessor {
         VSSLogger.debug("Stopped VSS column processor and cleared queued LOD columns");
     }
 
+    private void logColumnProcess(
+            VoxelColumnS2CPayload payload,
+            int sectionCount,
+            int minSectionY,
+            int maxSectionY,
+            boolean replaceMissingSections) {
+        long now = System.nanoTime();
+        if (now - lastColumnProcessDiagnosticNanos < COLUMN_PROCESS_DIAGNOSTIC_INTERVAL_NANOS) {
+            return;
+        }
+        lastColumnProcessDiagnosticNanos = now;
+        String sectionRange = sectionCount > 0 ? minSectionY + ".." + maxSectionY : "empty";
+        VSSLogger.info("LOD column processed: chunk=" + payload.chunkX() + "," + payload.chunkZ()
+                + ", sections=" + sectionCount
+                + ", y=" + sectionRange
+                + ", complete=" + payload.completeColumn()
+                + ", replaceMissing=" + replaceMissingSections
+                + ", rawBytes=" + payload.rawSectionBytesLength()
+                + ", queue=" + getQueuedCount());
+    }
+
     boolean isActive() {
         return !shuttingDown;
     }
@@ -266,6 +295,7 @@ final class ClientColumnProcessor {
     void resetStats() {
         columnsDropped.set(0L);
         lastDropWarnMs = 0L;
+        lastColumnProcessDiagnosticNanos = 0L;
     }
 
     private void clearQueue() {

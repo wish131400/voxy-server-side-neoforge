@@ -47,9 +47,9 @@ final class VSSServerConfigScreen extends Screen {
         }).bounds(inputX, y - 4, inputWidth, 20).build());
         y += rowHeight;
 
-        addField("vss.config.server.bandwidth_mib", config.getPerPlayerBandwidthMiBRounded(), 1,
-                VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                value -> config.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
+        addField("vss.config.server.bandwidth_kbps", config.getPerPlayerBandwidthKbpsRounded(),
+                VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER, VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER,
+                config::setPerPlayerBandwidthKbpsUnsaved,
                 left, inputX, inputWidth, y);
         y += rowHeight;
 

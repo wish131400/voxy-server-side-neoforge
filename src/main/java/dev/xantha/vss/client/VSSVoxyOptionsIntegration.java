@@ -202,14 +202,14 @@ public final class VSSVoxyOptionsIntegration {
                             "LOW",
                             0,
                             0,
-                            100,
+                            100000,
                             1,
                             value -> {
-                                VSSClientConfig.CONFIG.desiredBandwidthMiB = value;
+                                VSSClientConfig.CONFIG.desiredBandwidthKbps = value;
                                 Minecraft.getInstance().execute(VSSClientNetworking::sendBandwidthPreference);
                             },
-                            () -> VSSClientConfig.CONFIG.desiredBandwidthMiB,
-                            VSSVoxyOptionsIntegration::formatMiBAuto,
+                            () -> VSSClientConfig.CONFIG.desiredBandwidthKbps,
+                            VSSVoxyOptionsIntegration::formatKbpsAuto,
                             VSSVoxyOptionsIntegration::saveClientConfig)));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
@@ -245,13 +245,13 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.server_bandwidth",
                             "vss.voxy_options.server_bandwidth.tooltip",
                             "MEDIUM",
-                            2,
+                            500,
+                            VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
+                            VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER,
                             1,
-                            VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                            1,
-                            value -> VSSServerConfig.CONFIG.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
-                            VSSServerConfig.CONFIG::getPerPlayerBandwidthMiBRounded,
-                            VSSVoxyOptionsIntegration::formatMiB,
+                            VSSServerConfig.CONFIG::setPerPlayerBandwidthKbpsUnsaved,
+                            VSSServerConfig.CONFIG::getPerPlayerBandwidthKbpsRounded,
+                            VSSVoxyOptionsIntegration::formatKbps,
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
@@ -273,10 +273,10 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.sync_rate",
                             "vss.voxy_options.sync_rate.tooltip",
                             "MEDIUM",
-                            80,
-                            20,
+                            16,
+                            1,
                             1000,
-                            20,
+                            1,
                             value -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer = value,
                             () -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer,
                             VSSVoxyOptionsIntegration::formatRequestsPerSecond,
@@ -504,14 +504,14 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.desired_bandwidth.tooltip",
                             "LOW",
                             0,
-                            100,
+                            100000,
                             1,
-                            VSSVoxyOptionsIntegration::formatMiBAuto,
+                            VSSVoxyOptionsIntegration::formatKbpsAuto,
                             (VSSClientConfig config, Integer value) -> {
-                                config.desiredBandwidthMiB = value;
+                                config.desiredBandwidthKbps = value;
                                 Minecraft.getInstance().execute(VSSClientNetworking::sendBandwidthPreference);
                             },
-                            config -> config.desiredBandwidthMiB)));
+                            config -> config.desiredBandwidthKbps)));
 
             groups.add(oldGroup(
                     oldBooleanOption(
@@ -535,12 +535,12 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.server_bandwidth",
                             "vss.voxy_options.server_bandwidth.tooltip",
                             "MEDIUM",
+                            VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
+                            VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER,
                             1,
-                            VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB,
-                            1,
-                            VSSVoxyOptionsIntegration::formatMiB,
-                            (VSSServerConfig config, Integer value) -> config.bytesPerSecondLimitPerPlayer = Math.multiplyExact(value, VSSServerConfig.BYTES_PER_MIB),
-                            VSSServerConfig::getPerPlayerBandwidthMiBRounded),
+                            VSSVoxyOptionsIntegration::formatKbps,
+                            VSSServerConfig::setPerPlayerBandwidthKbpsUnsaved,
+                            VSSServerConfig::getPerPlayerBandwidthKbpsRounded),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.server_queue_memory",
@@ -557,9 +557,9 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.sync_rate",
                             "vss.voxy_options.sync_rate.tooltip",
                             "MEDIUM",
-                            20,
+                            1,
                             1000,
-                            20,
+                            1,
                             VSSVoxyOptionsIntegration::formatRequestsPerSecond,
                             (VSSServerConfig config, Integer value) -> config.syncOnLoadRateLimitPerPlayer = value,
                             config -> config.syncOnLoadRateLimitPerPlayer),
@@ -870,14 +870,21 @@ public final class VSSVoxyOptionsIntegration {
                 : Component.translatable("vss.voxy_options.chunks", value);
     }
 
-    private static Component formatMiBAuto(int value) {
+    private static Component formatKbpsAuto(int value) {
         return value == 0
                 ? Component.translatable("vss.voxy_options.server_limit")
-                : Component.translatable("vss.voxy_options.mib_per_second", value);
+                : formatKbps(value);
+    }
+
+    private static Component formatKbps(int value) {
+        if (value >= VSSServerConfig.KBPS_PER_MBPS) {
+            return Component.translatable("vss.voxy_options.mbps", String.format("%.2f", value / (float) VSSServerConfig.KBPS_PER_MBPS));
+        }
+        return Component.translatable("vss.voxy_options.kbps", value);
     }
 
     private static Component formatMiB(int value) {
-        return Component.translatable("vss.voxy_options.mib_per_second", value);
+        return Component.translatable("vss.voxy_options.mib", value);
     }
 
     private static Component formatRequestsPerSecond(int value) {

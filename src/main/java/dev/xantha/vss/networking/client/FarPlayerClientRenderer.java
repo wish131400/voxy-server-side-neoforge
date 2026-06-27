@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.client;
 
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.authlib.GameProfile;
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.xantha.vss.common.VSSConstants;
@@ -23,6 +24,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.player.RemotePlayer;
 import net.minecraft.client.resources.PlayerSkin;
 import net.minecraft.client.renderer.LightTexture;
+import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -46,6 +48,7 @@ import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.client.event.RenderPlayerEvent;
 import net.neoforged.neoforge.entity.IEntityWithComplexSpawn;
+import org.lwjgl.opengl.GL11;
 
 public final class FarPlayerClientRenderer {
     private static final long NANOS_PER_MILLI = 1_000_000L;
@@ -56,7 +59,10 @@ public final class FarPlayerClientRenderer {
     private static final double TELEPORT_DISTANCE_SQR = 32.0D * 32.0D;
     private static final double VANILLA_HANDOFF_DISTANCE_BLOCKS = VSSConstants.FAR_PLAYER_SYNC_START_BLOCKS;
     private static final double VANILLA_HANDOFF_DISTANCE_SQR = VANILLA_HANDOFF_DISTANCE_BLOCKS * VANILLA_HANDOFF_DISTANCE_BLOCKS;
+    private static final double VANILLA_HANDOFF_RELEASE_DISTANCE_BLOCKS = Math.max(8.0D, VANILLA_HANDOFF_DISTANCE_BLOCKS - 8.0D);
+    private static final double VANILLA_HANDOFF_RELEASE_DISTANCE_SQR = VANILLA_HANDOFF_RELEASE_DISTANCE_BLOCKS * VANILLA_HANDOFF_RELEASE_DISTANCE_BLOCKS;
     private static final double VANILLA_HANDOFF_VERTICAL_BLOCKS = VSSConstants.FAR_PLAYER_VERTICAL_HANDOFF_BLOCKS;
+    private static final double VANILLA_HANDOFF_RELEASE_VERTICAL_BLOCKS = Math.max(4.0D, VANILLA_HANDOFF_VERTICAL_BLOCKS - 4.0D);
     private static final int APPROXIMATE_SWING_DURATION_TICKS = 6;
     private static final int ENTITY_ID_BASE = -2_000_000_000;
     private static final int VEHICLE_ENTITY_ID_BASE = -1_500_000_000;
@@ -138,8 +144,11 @@ public final class FarPlayerClientRenderer {
             return;
         }
         FarPlayerState state = FAR_PLAYERS.get(event.getEntity().getUUID());
-        if (state != null && state.hasRenderablePlayer(level)) {
-            event.setCanceled(true);
+        if (state != null) {
+            state.applyVanillaHandoffState(event.getEntity());
+            if (state.hasRenderablePlayer(level)) {
+                event.setCanceled(true);
+            }
         }
     }
 
@@ -203,16 +212,30 @@ public final class FarPlayerClientRenderer {
         long now = System.nanoTime();
         Vec3 cameraPosition = event.getCamera().getPosition();
         MultiBufferSource.BufferSource buffers = mc.renderBuffers().bufferSource();
+        boolean depthTest = GL11.glIsEnabled(GL11.GL_DEPTH_TEST);
+        boolean depthMask = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
+        int depthFunc = GL11.glGetInteger(GL11.GL_DEPTH_FUNC);
         boolean renderedAny = false;
-        for (FarPlayerState state : FAR_PLAYERS.values()) {
-            if (state.level == level && state.hasRenderableObjects(level)) {
-                state.apply(now);
-                state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition);
-                renderedAny = true;
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(true);
+        RenderSystem.depthFunc(GL11.GL_LEQUAL);
+        try {
+            for (FarPlayerState state : FAR_PLAYERS.values()) {
+                if (state.level == level && state.hasRenderableObjects(level)) {
+                    state.apply(now);
+                    state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition);
+                    renderedAny = true;
+                }
             }
-        }
-        if (renderedAny) {
-            buffers.endBatch();
+            if (renderedAny) {
+                buffers.endBatch();
+            }
+        } finally {
+            RenderSystem.depthFunc(depthFunc);
+            RenderSystem.depthMask(depthMask);
+            if (!depthTest) {
+                RenderSystem.disableDepthTest();
+            }
         }
     }
 
@@ -240,6 +263,33 @@ public final class FarPlayerClientRenderer {
 
     private static UUID farVehicleSyntheticUuid(int sourceEntityId, int index, ResourceLocation entityTypeId) {
         return UUID.nameUUIDFromBytes(("vss:far-player-vehicle:" + sourceEntityId + ":" + index + ":" + entityTypeId).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void setFallFlyingFlag(Entity entity, boolean fallFlying) {
+        if ((Object) entity instanceof FallFlyingFlagAccess fallFlyingFlags) {
+            fallFlyingFlags.vss$setFallFlyingFlag(fallFlying);
+        }
+    }
+
+    private static int entityLight(Entity entity) {
+        if (entity == null || entity.level() == null) {
+            return LightTexture.FULL_BRIGHT;
+        }
+        int light = LevelRenderer.getLightColor(entity.level(), entity.blockPosition());
+        if (light == 0 && isCreateContraptionPassenger(entity)) {
+            return LightTexture.pack(4, 15);
+        }
+        return light;
+    }
+
+    private static boolean isCreateContraptionPassenger(Entity entity) {
+        for (Entity vehicle = entity.getVehicle(); vehicle != null; vehicle = vehicle.getVehicle()) {
+            ResourceLocation entityTypeId = BuiltInRegistries.ENTITY_TYPE.getKey(vehicle.getType());
+            if ("create".equals(entityTypeId.getNamespace()) || vehicle.getClass().getName().toLowerCase().contains("contraption")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void maybeLogClientDiagnostics(FarPlayersS2CPayload.Entry[] entries, long now) {
@@ -433,8 +483,8 @@ public final class FarPlayerClientRenderer {
         }
 
         private boolean isInsideVanillaHandoffRange(LocalPlayer localPlayer) {
-            return horizontalDistanceSqr(localPlayer.getX(), localPlayer.getZ(), targetX, targetZ) <= VANILLA_HANDOFF_DISTANCE_SQR
-                    && Math.abs(localPlayer.getY() - targetY) <= VANILLA_HANDOFF_VERTICAL_BLOCKS;
+            return horizontalDistanceSqr(localPlayer.getX(), localPlayer.getZ(), targetX, targetZ) <= VANILLA_HANDOFF_RELEASE_DISTANCE_SQR
+                    && Math.abs(localPlayer.getY() - targetY) <= VANILLA_HANDOFF_RELEASE_VERTICAL_BLOCKS;
         }
 
         private void createEntity(ClientLevel currentLevel) {
@@ -475,7 +525,7 @@ public final class FarPlayerClientRenderer {
                         partialTick,
                         poseStack,
                         buffers,
-                        LightTexture.FULL_BRIGHT);
+                        entityLight(player));
             } finally {
                 manualFarPlayerRender = false;
             }
@@ -533,6 +583,8 @@ public final class FarPlayerClientRenderer {
             player.tickCount++;
             tickSyncedActionState();
             stabilizeMovementState();
+            stabilizeCloakState();
+            stabilizePoseState();
 
             animationX = sample.x;
             animationY = sample.y;
@@ -572,6 +624,8 @@ public final class FarPlayerClientRenderer {
             player.setYBodyRot(sample.bodyYaw);
             player.setYHeadRot(sample.headYaw);
             stabilizeMovementState();
+            stabilizeCloakState();
+            stabilizePoseState();
         }
 
         private PoseSample sample(long now) {
@@ -634,6 +688,7 @@ public final class FarPlayerClientRenderer {
             player.setShiftKeyDown(entry.crouching() || entry.pose() == Pose.CROUCHING);
             player.setSprinting(entry.sprinting());
             player.setSwimming(entry.swimming());
+            setFallFlyingFlag(player, entry.pose() == Pose.FALL_FLYING);
             player.setPose(entry.pose());
             applyUseItemState(entry);
             applySwingState(entry);
@@ -749,6 +804,39 @@ public final class FarPlayerClientRenderer {
             player.oBob = 0.0F;
             player.bob = 0.0F;
             player.walkDistO = player.walkDist;
+        }
+
+        private void stabilizeCloakState() {
+            if (player == null) {
+                return;
+            }
+            player.xCloakO = player.getX();
+            player.yCloakO = player.getY();
+            player.zCloakO = player.getZ();
+            player.xCloak = player.getX();
+            player.yCloak = player.getY();
+            player.zCloak = player.getZ();
+        }
+
+        private void stabilizePoseState() {
+            if (player == null || lastEntry == null) {
+                return;
+            }
+            setFallFlyingFlag(player, lastEntry.pose() == Pose.FALL_FLYING);
+            player.setPose(lastEntry.pose());
+        }
+
+        private void applyVanillaHandoffState(Entity vanillaPlayer) {
+            if (lastEntry == null || vanillaPlayer == null || !uuid.equals(vanillaPlayer.getUUID())) {
+                return;
+            }
+            if (lastEntry.pose() != Pose.FALL_FLYING) {
+                return;
+            }
+            setFallFlyingFlag(vanillaPlayer, true);
+            vanillaPlayer.setSwimming(false);
+            vanillaPlayer.setOnGround(lastEntry.onGround());
+            vanillaPlayer.setPose(Pose.FALL_FLYING);
         }
 
         private static double distanceSqr(double ax, double ay, double az, double bx, double by, double bz) {
@@ -1011,7 +1099,7 @@ public final class FarPlayerClientRenderer {
                     partialTick,
                     poseStack,
                     buffers,
-                    LightTexture.FULL_BRIGHT);
+                    entityLight(vehicle));
         }
 
         private boolean isAtBlockPos(BlockPos pos) {

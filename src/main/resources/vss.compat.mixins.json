@@ -7,7 +7,6 @@
   "mixins": [
     "ftbessentials.TeleportCommandsNoBlockingMixin",
     "minecraft.LevelBlockEntityTickerCompactionMixin",
-    "minecraft.LevelBlockUpdateDirtyColumnMixin",
     "minecraft.LevelChunkClearBlockEntitiesMixin",
     "minecraft.LevelDirtyColumnMixin",
     "minecraft.LevelChunkDirtyColumnMixin",
@@ -15,9 +14,11 @@
   ],
   "client": [
     "client.ClientChunkCacheDropMixin",
+    "client.EntityFallFlyingFlagAccessorMixin",
     "client.LevelRendererFarPlayerChunkMixin",
     "voxy.ModelBakerySubsystemShutdownMixin",
     "voxy.ModelFactoryFluidBakeOrderMixin",
+    "voxy.NormalRenderPipelineDepthMaskMixin",
     "voxy.VoxyRenderSystemDefaultFramebufferMixin"
   ],
   "injectors": {

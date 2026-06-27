@@ -1,7 +1,9 @@
 package dev.xantha.vss.mixin.voxy;
 
+import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
+import net.minecraft.client.Minecraft;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
 import org.spongepowered.asm.mixin.Mixin;
@@ -17,11 +19,25 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class VoxyRenderSystemDefaultFramebufferMixin {
     @Unique
     private static boolean vss$loggedDefaultFramebufferSkip;
+    @Unique
+    private static boolean vss$loggedMainFramebufferRebind;
 
     @Inject(method = "renderOpaque(Lme/cortex/voxy/client/core/rendering/Viewport;)V", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
-    private void vss$skipRenderWhenDefaultFramebufferBound(@Coerce Object viewport, CallbackInfo ci) {
+    private void vss$bindMainFramebufferWhenDefaultBound(@Coerce Object viewport, CallbackInfo ci) {
         if (GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING) != 0) {
             return;
+        }
+
+        RenderTarget mainTarget = Minecraft.getInstance().getMainRenderTarget();
+        if (mainTarget != null) {
+            mainTarget.bindWrite(false);
+            if (GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING) != 0) {
+                if (!vss$loggedMainFramebufferRebind) {
+                    vss$loggedMainFramebufferRebind = true;
+                    VSSLogger.warn("Rebound the Minecraft main framebuffer for Voxy LOD rendering");
+                }
+                return;
+            }
         }
 
         if (!vss$loggedDefaultFramebufferSkip) {

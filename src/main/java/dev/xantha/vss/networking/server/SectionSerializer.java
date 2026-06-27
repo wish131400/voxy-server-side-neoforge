@@ -28,8 +28,8 @@ public final class SectionSerializer {
     private SectionSerializer() {
     }
 
-    static LoadedColumnData emptyColumn(int cx, int cz) {
-        return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, true);
+    static LoadedColumnData emptyColumn(int cx, int cz, boolean completeColumn) {
+        return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, completeColumn);
     }
 
     public static LoadedColumnData serializeColumn(ServerLevel level, LevelChunk chunk, int cx, int cz) {
@@ -81,7 +81,7 @@ public final class SectionSerializer {
     public static LoadedColumnData serializeSnapshot(ColumnSnapshot snapshot) {
         SectionSnapshot[] sections = snapshot.sections();
         if (sections.length == 0) {
-            return emptyColumn(snapshot.chunkX(), snapshot.chunkZ());
+            return emptyColumn(snapshot.chunkX(), snapshot.chunkZ(), snapshot.completeColumn());
         }
 
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));
@@ -135,7 +135,7 @@ public final class SectionSerializer {
 
         if (includedSections.isEmpty()) {
             boolean completeColumn = isCompleteColumn(level, chunk, Integer.MIN_VALUE, true);
-            return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, completeColumn);
+            return emptyColumn(cx, cz, completeColumn);
         }
 
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));

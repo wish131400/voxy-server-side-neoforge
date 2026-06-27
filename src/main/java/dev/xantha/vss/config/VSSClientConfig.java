@@ -7,7 +7,9 @@ public class VSSClientConfig extends JsonConfig {
 
     public boolean receiveServerLods = true;
     public int lodDistanceChunks = 0;
-    public int desiredBandwidthMiB = 0;
+    public int desiredBandwidthKbps = 0;
+    @Deprecated
+    private Integer desiredBandwidthMiB;
     public boolean offThreadSectionProcessing = true;
 
     @Override
@@ -18,7 +20,13 @@ public class VSSClientConfig extends JsonConfig {
     @Override
     protected void validate() {
         lodDistanceChunks = clamp(lodDistanceChunks, 0, MAX_LOD_DISTANCE_CHUNKS);
-        desiredBandwidthMiB = clamp(desiredBandwidthMiB, 0, 100);
+        if (desiredBandwidthMiB != null) {
+            if (desiredBandwidthMiB > 0) {
+                desiredBandwidthKbps = Math.multiplyExact(desiredBandwidthMiB, 1024 * 1024 * 8 / 1000);
+            }
+            desiredBandwidthMiB = null;
+        }
+        desiredBandwidthKbps = clamp(desiredBandwidthKbps, 0, 100000);
     }
 
     public void normalizeAndSave() {

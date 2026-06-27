@@ -448,6 +448,7 @@ final class ChunkGenerationService {
             }
             long columnTimestamp = Math.max(VSSConstants.epochMillis(), minimumTimestamp);
             EncodedColumnData columnData = EncodedColumnData.encodeZstd(rawColumnData, columnTimestamp);
+            String source = generationWork ? "generated" : "loaded-chunk";
             for (GenerationCallback callback : callbacks) {
                 results.add(new GenerationResult(
                         callback.playerUuid(),
@@ -456,7 +457,8 @@ final class ChunkGenerationService {
                         dimension,
                         columnData,
                         false,
-                        callback.priority()));
+                        callback.priority(),
+                        source));
             }
             completed = true;
         } catch (Exception e) {
@@ -680,13 +682,14 @@ final class ChunkGenerationService {
             ResourceKey<Level> dimension,
             EncodedColumnData columnData,
             boolean notGenerated,
-            boolean priority) {
+            boolean priority,
+            String source) {
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension) {
             return notGenerated(playerUuid, requestState, requestId, dimension, false);
         }
 
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension, boolean priority) {
-            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, true, priority);
+            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, true, priority, "not-generated");
         }
     }
 }

@@ -259,8 +259,8 @@ public final class VSSClientNetworking {
         if (!serverEnabled) {
             return;
         }
-        long desiredRate = VSSClientConfig.CONFIG.desiredBandwidthMiB > 0
-                ? (long) VSSClientConfig.CONFIG.desiredBandwidthMiB * 1024L * 1024L
+        long desiredRate = VSSClientConfig.CONFIG.desiredBandwidthKbps > 0
+                ? (long) VSSClientConfig.CONFIG.desiredBandwidthKbps * 1000L / 8L
                 : 0L;
         sendBandwidthUpdate(new BandwidthUpdateC2SPayload(desiredRate));
     }

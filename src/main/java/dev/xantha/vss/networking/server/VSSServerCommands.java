@@ -39,6 +39,35 @@ public final class VSSServerCommands {
                                         .executes(context -> setBandwidthBytes(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "bytes_per_second")))))
+                        .then(Commands.literal("set_bytes")
+                                .then(Commands.argument(
+                                                "bytes_per_second",
+                                                IntegerArgumentType.integer(
+                                                        VSSServerConfig.MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER,
+                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER))
+                                        .executes(context -> setBandwidthBytes(
+                                                context.getSource(),
+                                                IntegerArgumentType.getInteger(context, "bytes_per_second")))))
+                        .then(Commands.literal("set_kbps")
+                                .then(Commands.argument(
+                                                "kbps",
+                                                IntegerArgumentType.integer(
+                                                        VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
+                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER))
+                                        .executes(context -> setBandwidthKbps(
+                                                context.getSource(),
+                                                IntegerArgumentType.getInteger(context, "kbps")))))
+                        .then(Commands.literal("set_mbps")
+                                .then(Commands.argument(
+                                                "mbps",
+                                                IntegerArgumentType.integer(
+                                                        1,
+                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER / VSSServerConfig.KBPS_PER_MBPS))
+                                        .executes(context -> setBandwidthKbps(
+                                                context.getSource(),
+                                                Math.multiplyExact(
+                                                        IntegerArgumentType.getInteger(context, "mbps"),
+                                                        VSSServerConfig.KBPS_PER_MBPS)))))
                         .then(Commands.literal("set_mib")
                                 .then(Commands.argument(
                                                 "mib_per_second",
@@ -289,13 +318,18 @@ public final class VSSServerCommands {
                 .withStyle(ChatFormatting.GREEN)
                 .append(Component.translatable(
                         "vss.command.bandwidth.details",
-                        formatBytes(config.bytesPerSecondLimitPerPlayer),
-                        config.bytesPerSecondLimitPerPlayer)), false);
-        return config.bytesPerSecondLimitPerPlayer;
+                        formatBits(config.getPerPlayerBandwidthKbpsRounded()),
+                        config.bandwidthBytesPerSecond())), false);
+        return config.bandwidthBytesPerSecond();
     }
 
     private static int setBandwidthBytes(CommandSourceStack source, int bytesPerSecond) {
         VSSServerConfig.CONFIG.setPerPlayerBandwidthBytes(bytesPerSecond);
+        return reportUpdated(source);
+    }
+
+    private static int setBandwidthKbps(CommandSourceStack source, int kbps) {
+        VSSServerConfig.CONFIG.setPerPlayerBandwidthKbps(kbps);
         return reportUpdated(source);
     }
 
@@ -308,8 +342,8 @@ public final class VSSServerCommands {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         source.sendSuccess(() -> Component.translatable("vss.command.bandwidth.saved")
                 .withStyle(ChatFormatting.YELLOW)
-                .append(Component.translatable("vss.command.bandwidth.saved.details", formatBytes(config.bytesPerSecondLimitPerPlayer))), true);
-        return config.bytesPerSecondLimitPerPlayer;
+                .append(Component.translatable("vss.command.bandwidth.saved.details", formatBits(config.getPerPlayerBandwidthKbpsRounded()))), true);
+        return config.bandwidthBytesPerSecond();
     }
 
     private static int showQueue(CommandSourceStack source) {
@@ -543,5 +577,12 @@ public final class VSSServerCommands {
             return String.format("%.2f KiB", bytesPerSecond / 1024.0);
         }
         return bytesPerSecond + " B";
+    }
+
+    static String formatBits(int kbps) {
+        if (kbps >= VSSServerConfig.KBPS_PER_MBPS) {
+            return String.format("%.2f Mbps", kbps / (double) VSSServerConfig.KBPS_PER_MBPS);
+        }
+        return kbps + " Kbps";
     }
 }

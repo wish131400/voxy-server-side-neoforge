@@ -25,7 +25,7 @@ import net.minecraft.world.level.storage.LevelResource;
 
 final class PersistentColumnLodStore {
     private static final int FILE_MAGIC = 0x5653534C;
-    private static final int FILE_VERSION_CURRENT = 5;
+    private static final int FILE_VERSION_CURRENT = 6;
     private static final int MAX_COLUMN_BYTES = 2 * 1024 * 1024;
     private static final int MAX_ENCODED_COLUMN_BYTES = MAX_COLUMN_BYTES + 65536;
     private static final String CACHE_DIR = "vss-column-cache";

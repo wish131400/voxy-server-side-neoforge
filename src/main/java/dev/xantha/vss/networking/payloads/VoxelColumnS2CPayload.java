@@ -93,6 +93,21 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         return completeColumn;
     }
 
+    public int rawSectionBytesLength() {
+        return sectionBytes != null ? sectionBytes.length : encodedRawSize;
+    }
+
+    public int encodedSectionBytesLength() {
+        if (encodedSectionBytes != null) {
+            return encodedSectionBytes.length;
+        }
+        return sectionBytes != null ? sectionBytes.length : 0;
+    }
+
+    public int encodedCompression() {
+        return encodedCompression;
+    }
+
     public int estimatedBytes() {
         return wireBodyLength() + VSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
     }
