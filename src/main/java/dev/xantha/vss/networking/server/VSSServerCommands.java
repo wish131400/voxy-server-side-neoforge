@@ -204,6 +204,19 @@ public final class VSSServerCommands {
                                         .executes(context -> setDirtyRefreshInterval(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "tick"))))))
+                .then(Commands.literal("storage")
+                        .executes(context -> showStorage(context.getSource()))
+                        .then(Commands.literal("get")
+                                .executes(context -> showStorage(context.getSource())))
+                        .then(Commands.literal("set_disk_readers")
+                                .then(Commands.argument(
+                                                "threads",
+                                                IntegerArgumentType.integer(
+                                                        VSSServerConfig.MIN_DISK_READER_THREADS,
+                                                        VSSServerConfig.MAX_DISK_READER_THREADS))
+                                        .executes(context -> setDiskReaders(
+                                                context.getSource(),
+                                                IntegerArgumentType.getInteger(context, "threads"))))))
                 .then(Commands.literal("generation")
                         .executes(context -> showGeneration(context.getSource()))
                         .then(Commands.literal("get")
@@ -462,6 +475,31 @@ public final class VSSServerCommands {
                         config.dirtyBroadcastIntervalTicks,
                         DirtyColumnBroadcaster.diagnosticsComponent())), true);
         return config.dirtyBroadcastIntervalTicks;
+    }
+
+    private static int showStorage(CommandSourceStack source) {
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        source.sendSuccess(() -> Component.translatable("vss.command.storage.show")
+                .withStyle(ChatFormatting.GREEN)
+                .append(Component.translatable(
+                        "vss.command.storage.details",
+                        config.diskReaderThreads,
+                        VSSServerNetworking.storageDiagnostics())), false);
+        return config.diskReaderThreads;
+    }
+
+    private static int setDiskReaders(CommandSourceStack source, int threads) {
+        VSSServerConfig.CONFIG.diskReaderThreads = threads;
+        VSSServerConfig.CONFIG.normalizeAndSave();
+        VSSServerNetworking.applyRuntimeConfig();
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        source.sendSuccess(() -> Component.translatable("vss.command.storage.saved")
+                .withStyle(ChatFormatting.YELLOW)
+                .append(Component.translatable(
+                        "vss.command.storage.details",
+                        config.diskReaderThreads,
+                        VSSServerNetworking.storageDiagnostics())), true);
+        return config.diskReaderThreads;
     }
 
     private static int showGeneration(CommandSourceStack source) {

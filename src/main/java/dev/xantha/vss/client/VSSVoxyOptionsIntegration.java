@@ -297,6 +297,20 @@ public final class VSSVoxyOptionsIntegration {
                             value -> VSSServerConfig.CONFIG.dirtyBroadcastIntervalTicks = value,
                             () -> VSSServerConfig.CONFIG.dirtyBroadcastIntervalTicks,
                             VSSVoxyOptionsIntegration::formatTicks,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "disk_reader_threads",
+                            "vss.voxy_options.disk_reader_threads",
+                            "vss.voxy_options.disk_reader_threads.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.DEFAULT_DISK_READER_THREADS,
+                            VSSServerConfig.MIN_DISK_READER_THREADS,
+                            VSSServerConfig.MAX_DISK_READER_THREADS,
+                            1,
+                            value -> VSSServerConfig.CONFIG.diskReaderThreads = value,
+                            () -> VSSServerConfig.CONFIG.diskReaderThreads,
+                            VSSVoxyOptionsIntegration::formatThreads,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
@@ -572,7 +586,18 @@ public final class VSSVoxyOptionsIntegration {
                             1,
                             VSSVoxyOptionsIntegration::formatTicks,
                             (VSSServerConfig config, Integer value) -> config.dirtyBroadcastIntervalTicks = value,
-                            config -> config.dirtyBroadcastIntervalTicks)));
+                            config -> config.dirtyBroadcastIntervalTicks),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.disk_reader_threads",
+                            "vss.voxy_options.disk_reader_threads.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.MIN_DISK_READER_THREADS,
+                            VSSServerConfig.MAX_DISK_READER_THREADS,
+                            1,
+                            VSSVoxyOptionsIntegration::formatThreads,
+                            (VSSServerConfig config, Integer value) -> config.diskReaderThreads = value,
+                            config -> config.diskReaderThreads)));
 
             groups.add(oldGroup(
                     oldIntOption(

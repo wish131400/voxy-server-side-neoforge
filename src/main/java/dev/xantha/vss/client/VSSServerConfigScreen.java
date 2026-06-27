@@ -83,6 +83,11 @@ final class VSSServerConfigScreen extends Screen {
                 value -> config.dirtyBroadcastIntervalTicks = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
+        addField("vss.config.server.disk_reader_threads", config.diskReaderThreads,
+                VSSServerConfig.MIN_DISK_READER_THREADS, VSSServerConfig.MAX_DISK_READER_THREADS,
+                value -> config.diskReaderThreads = value, left, inputX, inputWidth, y);
+        y += rowHeight;
+
         addField("vss.config.server.generation_packing_threads", config.generationPackingThreads, 1, 8,
                 value -> config.generationPackingThreads = value, left, inputX, inputWidth, y);
         y += rowHeight;

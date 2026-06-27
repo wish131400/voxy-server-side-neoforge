@@ -12,6 +12,9 @@ public class VSSServerConfig extends JsonConfig {
     public static final int KBPS_PER_MBPS = 1000;
     public static final int MIN_SEND_QUEUE_BYTES_PER_PLAYER = 4 * BYTES_PER_MIB;
     public static final int MAX_SEND_QUEUE_BYTES_PER_PLAYER = 512 * BYTES_PER_MIB;
+    public static final int DEFAULT_DISK_READER_THREADS = 4;
+    public static final int MIN_DISK_READER_THREADS = 1;
+    public static final int MAX_DISK_READER_THREADS = 16;
     public static final int MIN_DIRTY_BROADCAST_INTERVAL_TICKS = 1;
     public static final int MAX_DIRTY_BROADCAST_INTERVAL_TICKS = 600;
     private static final int OLD_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 0x1400000;
@@ -40,6 +43,7 @@ public class VSSServerConfig extends JsonConfig {
     public boolean bandwidthAndGlobalGenerationDefaultsApplied = false;
     public boolean memoryOptimizedDefaultsApplied = false;
     public boolean lowBandwidthDefaultsApplied = false;
+    public boolean storageThroughputDefaultsApplied = false;
     public boolean enabled = true;
     public int lodDistanceChunks = 128;
     public int bytesPerSecondLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER;
@@ -47,7 +51,7 @@ public class VSSServerConfig extends JsonConfig {
     private Integer bandwidthLimitKbpsPerPlayer;
     public int sendQueueLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
     public int sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
-    public int diskReaderThreads = 1;
+    public int diskReaderThreads = DEFAULT_DISK_READER_THREADS;
     public int diskReadTimeoutMillis = 1500;
     public boolean enableChunkNbtColumnSync = true;
     public boolean enableChunkGeneration = true;
@@ -94,11 +98,12 @@ public class VSSServerConfig extends JsonConfig {
         applyBandwidthAndGlobalGenerationDefaultMigration();
         applyMemoryOptimizedDefaults();
         applyLowBandwidthDefaults();
+        applyStorageThroughputDefaults();
         lodDistanceChunks = clamp(lodDistanceChunks, MIN_LOD_DISTANCE_CHUNKS, MAX_LOD_DISTANCE_CHUNKS);
         bytesPerSecondLimitPerPlayer = clamp(bytesPerSecondLimitPerPlayer, MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER, MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER);
         sendQueueLimitPerPlayer = clamp(sendQueueLimitPerPlayer, 1, 100000);
         sendQueueBytesLimitPerPlayer = clamp(sendQueueBytesLimitPerPlayer, MIN_SEND_QUEUE_BYTES_PER_PLAYER, MAX_SEND_QUEUE_BYTES_PER_PLAYER);
-        diskReaderThreads = clamp(diskReaderThreads, 1, 8);
+        diskReaderThreads = clamp(diskReaderThreads, MIN_DISK_READER_THREADS, MAX_DISK_READER_THREADS);
         diskReadTimeoutMillis = clamp(diskReadTimeoutMillis, 100, 60000);
         syncOnLoadRateLimitPerPlayer = clamp(syncOnLoadRateLimitPerPlayer, 1, 1000);
         syncOnLoadConcurrencyLimitPerPlayer = clamp(syncOnLoadConcurrencyLimitPerPlayer, 1, 1000);
@@ -282,6 +287,16 @@ public class VSSServerConfig extends JsonConfig {
             generationRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
         }
         lowBandwidthDefaultsApplied = true;
+    }
+
+    private void applyStorageThroughputDefaults() {
+        if (storageThroughputDefaultsApplied) {
+            return;
+        }
+        if (diskReaderThreads == 1) {
+            diskReaderThreads = DEFAULT_DISK_READER_THREADS;
+        }
+        storageThroughputDefaultsApplied = true;
     }
 
     public void normalizeAndSave() {

@@ -19,9 +19,10 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.network.chat.Component;
@@ -61,15 +62,57 @@ public final class VSSServerNetworking {
     private static volatile long lastSendDiagnosticNanos;
     private static volatile boolean serverStopping;
     private static boolean idleMemoryReleased = true;
-    private static final ExecutorService DISK_EXECUTOR = Executors.newFixedThreadPool(
-            VSSServerConfig.CONFIG.diskReaderThreads,
-            task -> {
-                Thread thread = new Thread(task, "VSS-DiskReader");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private static final ThreadPoolExecutor DISK_READ_EXECUTOR = createDiskExecutor(
+            "VSS-DiskReader",
+            VSSServerConfig.CONFIG.diskReaderThreads);
+    private static final ThreadPoolExecutor DISK_WRITE_EXECUTOR = createDiskExecutor("VSS-DiskWriter", 1);
 
     private VSSServerNetworking() {
+    }
+
+    private static ThreadPoolExecutor createDiskExecutor(String threadName, int threads) {
+        int clampedThreads = Math.max(
+                VSSServerConfig.MIN_DISK_READER_THREADS,
+                Math.min(VSSServerConfig.MAX_DISK_READER_THREADS, threads));
+        AtomicInteger threadId = new AtomicInteger();
+        return new ThreadPoolExecutor(
+                clampedThreads,
+                clampedThreads,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                task -> {
+                    Thread thread = new Thread(task, threadName + "-" + threadId.incrementAndGet());
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private static void resizeDiskReadExecutor() {
+        int desiredThreads = Math.max(
+                VSSServerConfig.MIN_DISK_READER_THREADS,
+                Math.min(VSSServerConfig.MAX_DISK_READER_THREADS, VSSServerConfig.CONFIG.diskReaderThreads));
+        int currentThreads = DISK_READ_EXECUTOR.getCorePoolSize();
+        if (currentThreads == desiredThreads) {
+            return;
+        }
+        if (desiredThreads > currentThreads) {
+            DISK_READ_EXECUTOR.setMaximumPoolSize(desiredThreads);
+            DISK_READ_EXECUTOR.setCorePoolSize(desiredThreads);
+        } else {
+            DISK_READ_EXECUTOR.setCorePoolSize(desiredThreads);
+            DISK_READ_EXECUTOR.setMaximumPoolSize(desiredThreads);
+        }
+        VSSLogger.info("VSS disk reader threads resized to " + desiredThreads);
+    }
+
+    private static void decrementPendingDiskReads() {
+        pendingDiskReads.updateAndGet(value -> Math.max(0, value - 1));
+    }
+
+    private static void decrementPendingPersistentWrites() {
+        pendingPersistentWrites.updateAndGet(value -> Math.max(0, value - 1));
     }
 
     public static boolean isRegistered(ServerPlayer player) {
@@ -105,8 +148,13 @@ public final class VSSServerNetworking {
     }
 
     public static void bumpAndRefreshSessionConfigs(MinecraftServer server) {
+        applyRuntimeConfig();
         configRevision.incrementAndGet();
         refreshSessionConfigs(server);
+    }
+
+    public static void applyRuntimeConfig() {
+        resizeDiskReadExecutor();
     }
 
     public static SessionConfigS2CPayload refreshIntegratedHostSession(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
@@ -137,6 +185,14 @@ public final class VSSServerNetworking {
 
     static String generationDiagnostics() {
         return GENERATION_SERVICE.diagnostics();
+    }
+
+    static String storageDiagnostics() {
+        return "diskReaders=" + DISK_READ_EXECUTOR.getCorePoolSize()
+                + ", diskReadQueue=" + DISK_READ_EXECUTOR.getQueue().size()
+                + ", diskWriteQueue=" + DISK_WRITE_EXECUTOR.getQueue().size()
+                + ", diskPending=" + pendingDiskReads.get()
+                + ", persistentWritePending=" + pendingPersistentWrites.get();
     }
 
     static Component generationDiagnosticsComponent() {
@@ -430,9 +486,9 @@ public final class VSSServerNetworking {
         try {
             totalDiskReadsSubmitted.incrementAndGet();
             pendingDiskReads.incrementAndGet();
-            DISK_EXECUTOR.execute(() -> {
+            DISK_READ_EXECUTOR.execute(() -> {
                 if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
-                    pendingDiskReads.decrementAndGet();
+                    decrementPendingDiskReads();
                     return;
                 }
 
@@ -443,7 +499,7 @@ public final class VSSServerNetworking {
                         cz,
                         dirtyTimestamp > 0L ? dirtyTimestamp : 0L);
                 if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
-                    pendingDiskReads.decrementAndGet();
+                    decrementPendingDiskReads();
                     return;
                 }
 
@@ -470,7 +526,7 @@ public final class VSSServerNetworking {
                 PersistentColumnLodStore.Entry storedResult = storedData;
                 boolean readFailed = failed;
                 if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
-                    pendingDiskReads.decrementAndGet();
+                    decrementPendingDiskReads();
                     return;
                 }
                 server.execute(() -> finishDiskRead(
@@ -490,7 +546,7 @@ public final class VSSServerNetworking {
                         priority));
             });
         } catch (RejectedExecutionException e) {
-            pendingDiskReads.decrementAndGet();
+            decrementPendingDiskReads();
             state.clearRequest(requestId);
             VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(new byte[] {VSSConstants.RESPONSE_RATE_LIMITED}, new int[] {requestId}, 1));
         }
@@ -516,7 +572,7 @@ public final class VSSServerNetworking {
             boolean preferLoadedColumn,
             boolean allowGeneration,
             boolean priority) {
-        pendingDiskReads.decrementAndGet();
+        decrementPendingDiskReads();
         if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
             return;
         }
@@ -653,17 +709,17 @@ public final class VSSServerNetworking {
         long lifecycleEpoch = serverLifecycleEpoch.get();
         pendingPersistentWrites.incrementAndGet();
         try {
-            DISK_EXECUTOR.execute(() -> {
+            DISK_WRITE_EXECUTOR.execute(() -> {
                 try {
                     if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
                         PERSISTENT_COLUMN_STORE.write(server, dimension, columnData);
                     }
                 } finally {
-                    pendingPersistentWrites.decrementAndGet();
+                    decrementPendingPersistentWrites();
                 }
             });
         } catch (RejectedExecutionException e) {
-            pendingPersistentWrites.decrementAndGet();
+            decrementPendingPersistentWrites();
             VSSLogger.debug("Persistent LOD write rejected: " + e.getMessage());
         }
     }
@@ -674,7 +730,7 @@ public final class VSSServerNetworking {
         }
         long lifecycleEpoch = serverLifecycleEpoch.get();
         try {
-            DISK_EXECUTOR.execute(() -> {
+            DISK_WRITE_EXECUTOR.execute(() -> {
                 if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
                     PERSISTENT_COLUMN_STORE.invalidate(server, dimension, cx, cz);
                 }
@@ -897,16 +953,25 @@ public final class VSSServerNetworking {
     public static void onServerStarting(ServerStartingEvent event) {
         serverLifecycleEpoch.incrementAndGet();
         serverStopping = false;
+        applyRuntimeConfig();
         idleMemoryReleased = true;
         PLAYER_STATES.clear();
         DirtyColumnBroadcaster.clear();
         COLUMN_CACHE.clear();
+        DISK_READ_EXECUTOR.getQueue().clear();
+        DISK_WRITE_EXECUTOR.getQueue().clear();
+        pendingDiskReads.set(0);
+        pendingPersistentWrites.set(0);
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
         serverStopping = true;
         serverLifecycleEpoch.incrementAndGet();
+        DISK_READ_EXECUTOR.getQueue().clear();
+        DISK_WRITE_EXECUTOR.getQueue().clear();
+        pendingDiskReads.set(0);
+        pendingPersistentWrites.set(0);
         for (PlayerRequestState state : PLAYER_STATES.values()) {
             state.clearAll();
         }
