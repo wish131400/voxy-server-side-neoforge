@@ -22,6 +22,7 @@ import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.player.RemotePlayer;
+import net.minecraft.client.resources.DefaultPlayerSkin;
 import net.minecraft.client.resources.PlayerSkin;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.LevelRenderer;
@@ -1135,9 +1136,14 @@ public final class FarPlayerClientRenderer {
         }
 
         @Override
+        protected PlayerInfo getPlayerInfo() {
+            return getSourcePlayerInfo();
+        }
+
+        @Override
         public PlayerSkin getSkin() {
             PlayerInfo playerInfo = getSourcePlayerInfo();
-            return playerInfo != null ? playerInfo.getSkin() : super.getSkin();
+            return playerInfo != null ? playerInfo.getSkin() : DefaultPlayerSkin.get(sourceUuid);
         }
 
         @Override
