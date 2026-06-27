@@ -37,6 +37,8 @@ public final class LodRequestManager {
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
     private static final int SOFT_FRONTIER_LEAD_CHUNKS = 8;
+    private static final int FAST_MOVE_CHUNK_THRESHOLD = 4;
+    private static final int FAST_MOVE_KEEP_RADIUS_CHUNKS = 16;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
@@ -107,7 +109,15 @@ public final class LodRequestManager {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         if (playerCx != lastPlayerChunkX || playerCz != lastPlayerChunkZ) {
-            pruneAround(playerCx, playerCz, getEffectiveLodDistance() + VSSConstants.LOD_DISTANCE_BUFFER);
+            int lodDistance = getEffectiveLodDistance();
+            int moveDistance = lastPlayerChunkX == Integer.MIN_VALUE
+                    ? 0
+                    : Math.max(Math.abs(playerCx - lastPlayerChunkX), Math.abs(playerCz - lastPlayerChunkZ));
+            pruneAround(playerCx, playerCz, lodDistance + VSSConstants.LOD_DISTANCE_BUFFER);
+            if (moveDistance >= FAST_MOVE_CHUNK_THRESHOLD) {
+                pruneLowPriorityRequestsAround(playerCx, playerCz,
+                        Math.min(lodDistance, FAST_MOVE_KEEP_RADIUS_CHUNKS));
+            }
             resetScanCursor();
             lastPlayerChunkX = playerCx;
             lastPlayerChunkZ = playerCz;
@@ -447,12 +457,12 @@ public final class LodRequestManager {
                 && scannedCandidates < maxScans) {
             if (scanOffsetIndex >= totalCandidates) {
                 scanOffsetIndex = 0;
-                softFrontierRadius = maxFrontierRadius(lodDistance);
+                softFrontierRadius = lodDistance;
             }
 
             long offset = orderedOffsets[scanOffsetIndex++];
             scannedCandidates++;
-            updateSoftFrontier(offsetDistanceSquared(offset), lodDistance);
+            updateSoftFrontier(offsetRing(offset), lodDistance);
 
             int cx = playerCx + decodeOffsetX(offset);
             int cz = playerCz + decodeOffsetZ(offset);
@@ -495,9 +505,9 @@ public final class LodRequestManager {
             long now) {
         int centerX = PositionUtil.unpackX(centerPacked);
         int centerZ = PositionUtil.unpackZ(centerPacked);
-        long maxNormalDistanceSquared = softFrontierDistanceSquared(lodDistance);
+        int maxClusterRing = chebyshevDistance(centerPacked, playerCx, playerCz);
         count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
-                allowGeneration, count, maxCount, requestWindow, now, maxNormalDistanceSquared);
+                allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
         for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasSyncCapacity(); dz++) {
             for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasSyncCapacity(); dx++) {
                 if (dx == 0 && dz == 0) {
@@ -505,7 +515,7 @@ public final class LodRequestManager {
                 }
                 long packed = PositionUtil.packPosition(centerX + dx, centerZ + dz);
                 count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
-                        allowGeneration, count, maxCount, requestWindow, now, maxNormalDistanceSquared);
+                        allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
             }
         }
         return count;
@@ -524,14 +534,15 @@ public final class LodRequestManager {
             int maxCount,
             RequestWindow requestWindow,
             long now,
-            long maxNormalDistanceSquared) {
+            int maxClusterRing) {
         if (count >= maxCount || !requestWindow.hasSyncCapacity()) {
             return count;
         }
         int cx = PositionUtil.unpackX(packed);
         int cz = PositionUtil.unpackZ(packed);
-        if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) > lodDistance
-                || distanceSquared(packed, playerCx, playerCz) > maxNormalDistanceSquared
+        int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
+        if (ring > lodDistance
+                || ring > maxClusterRing
                 || !shouldRequestColumn(packed, now)) {
             return count;
         }
@@ -743,6 +754,46 @@ public final class LodRequestManager {
         return SYNC_REQUEST_TIMEOUT_NANOS;
     }
 
+    private void pruneLowPriorityRequestsAround(int playerCx, int playerCz, int keepDistance) {
+        LongOpenHashSet staleRequests = new LongOpenHashSet();
+        for (long packed : inFlight) {
+            if (!dirtyRefreshInFlight.contains(packed)
+                    && chebyshevDistance(packed, playerCx, playerCz) > keepDistance) {
+                staleRequests.add(packed);
+            }
+        }
+        for (long packed : staleRequests) {
+            int requestId = positionToRequestId.remove(packed);
+            if (requestId != -1) {
+                requestIdToPosition.remove(requestId);
+                sendCancelPacket(requestId);
+            }
+            requestSendTimes.remove(packed);
+            inFlight.remove(packed);
+            generationInFlight.remove(packed);
+            diskMissedColumns.remove(packed);
+            retryAfterNanos.remove(packed);
+            retryAttempts.remove(packed);
+        }
+
+        LongOpenHashSet staleDeferred = new LongOpenHashSet();
+        for (long packed : deferredColumns) {
+            if (!dirtyColumns.contains(packed)
+                    && chebyshevDistance(packed, playerCx, playerCz) > keepDistance) {
+                staleDeferred.add(packed);
+            }
+        }
+        for (long packed : staleDeferred) {
+            deferredColumns.remove(packed);
+            diskMissedColumns.remove(packed);
+            retryAfterNanos.remove(packed);
+            retryAttempts.remove(packed);
+        }
+        if (!staleDeferred.isEmpty()) {
+            deferredQueue.removeIf(packed -> !deferredColumns.contains(packed.longValue()));
+        }
+    }
+
     private void pruneAround(int playerCx, int playerCz, int pruneDistance) {
         LongOpenHashSet staleColumns = new LongOpenHashSet();
         for (long packed : columnTimestamps.keySet()) {
@@ -827,6 +878,12 @@ public final class LodRequestManager {
             return leftDirty ? -1 : 1;
         }
 
+        int leftRing = chebyshevDistance(left, playerCx, playerCz);
+        int rightRing = chebyshevDistance(right, playerCx, playerCz);
+        if (leftRing != rightRing) {
+            return Integer.compare(leftRing, rightRing);
+        }
+
         long leftDistanceSquared = distanceSquared(left, playerCx, playerCz);
         long rightDistanceSquared = distanceSquared(right, playerCx, playerCz);
         if (leftDistanceSquared != rightDistanceSquared) {
@@ -851,6 +908,11 @@ public final class LodRequestManager {
         long dx = (long) PositionUtil.unpackX(packed) - playerCx;
         long dz = (long) PositionUtil.unpackZ(packed) - playerCz;
         return dx * dx + dz * dz;
+    }
+
+    private static int chebyshevDistance(long packed, int playerCx, int playerCz) {
+        return PositionUtil.chebyshevDistance(PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed),
+                playerCx, playerCz);
     }
 
     private void sendCancelPacket(int requestId) {
@@ -900,38 +962,35 @@ public final class LodRequestManager {
         int side = lodDistance * 2 + 1;
         long[] offsets = new long[side * side];
         int index = 0;
-        for (int dz = -lodDistance; dz <= lodDistance; dz++) {
-            for (int dx = -lodDistance; dx <= lodDistance; dx++) {
-                offsets[index++] = encodeOffset(dx, dz);
+        offsets[index++] = encodeOffset(0, 0);
+        for (int ring = 1; ring <= lodDistance; ring++) {
+            int ringStart = index;
+            for (int dz = -ring; dz <= ring; dz++) {
+                offsets[index++] = encodeOffset(-ring, dz);
+                offsets[index++] = encodeOffset(ring, dz);
             }
+            for (int dx = -ring + 1; dx <= ring - 1; dx++) {
+                offsets[index++] = encodeOffset(dx, -ring);
+                offsets[index++] = encodeOffset(dx, ring);
+            }
+            Arrays.sort(offsets, ringStart, index);
         }
-        Arrays.sort(offsets);
         orderedOffsets = offsets;
         orderedOffsetDistance = lodDistance;
         resetScanCursor();
     }
 
     private boolean isWithinSoftFrontier(long packed, int playerCx, int playerCz, int lodDistance) {
-        return distanceSquared(packed, playerCx, playerCz) <= softFrontierDistanceSquared(lodDistance);
-    }
-
-    private long softFrontierDistanceSquared(int lodDistance) {
         int radius = Math.min(maxFrontierRadius(lodDistance), softFrontierRadius + SOFT_FRONTIER_LEAD_CHUNKS);
-        return (long) radius * radius;
+        return chebyshevDistance(packed, playerCx, playerCz) <= radius;
     }
 
-    private void updateSoftFrontier(long distanceSquared, int lodDistance) {
-        softFrontierRadius = Math.min(maxFrontierRadius(lodDistance),
-                Math.max(softFrontierRadius, ceilSqrt(distanceSquared)));
+    private void updateSoftFrontier(int ring, int lodDistance) {
+        softFrontierRadius = Math.min(maxFrontierRadius(lodDistance), Math.max(softFrontierRadius, ring));
     }
 
     private static int maxFrontierRadius(int lodDistance) {
-        return ceilSqrt(2L * lodDistance * lodDistance);
-    }
-
-    private static int ceilSqrt(long value) {
-        int root = (int) Math.sqrt(value);
-        return (long) root * root == value ? root : root + 1;
+        return lodDistance;
     }
 
     private static long encodeOffset(int dx, int dz) {
@@ -949,8 +1008,8 @@ public final class LodRequestManager {
         return (short) (offset & 0xFFFF);
     }
 
-    private static long offsetDistanceSquared(long offset) {
-        return offset >>> 32;
+    private static int offsetRing(long offset) {
+        return Math.max(Math.abs(decodeOffsetX(offset)), Math.abs(decodeOffsetZ(offset)));
     }
 
     private boolean isCoolingDown(long packed, long now) {
