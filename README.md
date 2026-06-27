@@ -1,168 +1,221 @@
 # Voxy Server Side NeoForge
 
-NeoForge 1.21.1 服务端远景同步 mod。服务端把已有、缓存过或允许生成的 LOD 数据发给安装了 Voxy 的客户端，让远景按玩家位置从近到远补齐。
+NeoForge 1.21.1 server-side LOD sync mod for Voxy. The server sends existing, cached, or server-generated LOD columns to clients with Voxy installed, so distant terrain can fill from the player outward instead of relying on each client to generate it locally.
 
-## 安装
+## Status
 
-服务器：
+- Minecraft: `1.21.1`
+- Loader: NeoForge `21.1.x`
+- Current mod version: `0.2.5-neoforge-1.21.1`
+- VSS protocol: `30`
+- Client renderer target: Voxy with Sodium-compatible rendering
+
+Client and server VSS protocol versions must match. If they do not match, the player can still join the server, but VSS LOD sync is disabled for that session.
+
+## Install
+
+Server:
 
 - NeoForge `21.1.x`
-- 本 mod
-- 可选：ZstdNet 或其他提供 `com.github.luben.zstd.Zstd` 的 zstd 库
+- This mod
+- Recommended: ZstdNet or another bundled provider of `com.github.luben.zstd.Zstd`
 
-客户端：
+Client:
 
 - NeoForge `21.1.x`
-- 本 mod
+- This mod
 - Voxy
-- Sodium 兼容环境
-- 可选：ZstdNet
+- Sodium-compatible renderer stack
+- Recommended: ZstdNet
 
-客户端和服务端的 VSS 协议版本必须一致，否则会进服但不启用 VSS 远景同步。
+Zstd capability is negotiated by VSS during handshake. This is mostly a clear error path for missing or mismatched packs, because normal modpack usage should install the same zstd support on both sides.
 
-## 同步逻辑
+## Sync Model
 
-客户端在同步范围内按玩家为中心从近到远请求 LOD。服务端处理顺序：
+The client requests columns in a Chebyshev ring frontier around the player:
 
 ```text
-内存缓存 -> 持久化磁盘缓存 -> 已加载区块 -> 可选原版 NBT -> 可选区块生成
+ring = max(abs(dx), abs(dz))
 ```
 
-已经加载过且被标记为变动的 LOD 会优先刷新。完整列校验会阻止不完整 LOD 覆盖客户端缺失 section，避免远景裂谷、黑洞、假空洞长期残留。
+That keeps scan order stable, cheap, and visually centered. Already requested or in-flight columns are deduplicated, and low-priority old work can be dropped when it is no longer relevant to the player's current position.
 
-缺失 LOD 生成会触发服务端区块加载/世界生成；已有 VSS 缓存命中不会触发生成。
+Server-side lookup order:
 
-## 默认值
+```text
+memory cache -> persistent .vcl cache -> loaded chunk snapshot -> optional chunk NBT -> optional chunk generation
+```
 
-当前默认值偏向稳内存：
+Changed columns inside already visited areas are refreshed with priority. Complete-column validation prevents partial LOD data from permanently overwriting missing client sections.
 
-| 项目 | 默认值 |
+If `enableChunkGeneration=false`, VSS still serves columns that already exist in memory cache, persistent `.vcl` cache, loaded chunk snapshots, or optional chunk NBT. It just stops creating missing world chunks for new LOD.
+
+## Persistence And Compression
+
+Complete LOD columns are persisted per world:
+
+```text
+<world>/data/vss-column-cache/<dimension>/<region>/<chunkX>_<chunkZ>.vcl
+```
+
+For example:
+
+```text
+saves/New World/data/vss-column-cache/minecraft_overworld/0_0/12_8.vcl
+```
+
+Each `.vcl` file has a small VSS header, followed by a zstd frame body. The same encoded zstd body is reused for:
+
+- disk persistence
+- server memory column cache
+- normal network payloads
+
+This avoids keeping raw section bytes in the hot cache and avoids recompressing hot LOD columns before sending. The client still decompresses received columns before handing them to Voxy.
+
+## Default Config
+
+Current defaults are tuned for low bandwidth and moderate memory use:
+
+| Item | Default |
 | --- | ---: |
-| 服务端同步距离 | `128` 区块 |
-| 每玩家带宽 | `2 MiB/s` |
-| 每玩家发送队列 | `500` 列 / `16 MiB` |
-| 已有 LOD 请求 | `80` 列/秒，`16` 并发 |
-| 缺失生成请求 | `20` 列/秒 |
-| 单玩家生成并发 | `4` |
-| 全服生成并发 | `32` |
-| 每 tick 启动生成 | `2` |
-| 每 tick 提交打包 | `4` |
-| 变动刷新广播 | `10` tick |
-| 远处玩家同步 | 开启，`10` tick |
-| 内存 LOD 缓存 | `4096` 列 / `32 MiB` |
-| 持久化 LOD 缓存 | 开启，`512 MiB` / `250000` 列 |
-| LOD 压缩 | 磁盘和网络开启，zstd 可用时等级 `7` |
+| Server LOD distance | `128` chunks |
+| Per-player bandwidth | `500 Kbps` |
+| Per-player send queue | `256` columns / `4 MiB` |
+| Existing LOD request rate | `16` columns/s |
+| Existing LOD request concurrency | `16` |
+| Missing LOD generation rate | `8` columns/s |
+| Per-player generation concurrency | `4` |
+| Global generation concurrency | `32` |
+| Generation starts per tick | `2` |
+| Generation completions per tick | `4` |
+| Disk reader threads | `4` |
+| Disk read timeout | `1500 ms` |
+| Memory column cache | `4096` columns / `32 MiB` |
+| Persistent column cache | `512 MiB` / `250000` columns |
+| Persistent/network column compression | zstd when available |
+| Dirty refresh interval | `10` ticks |
+| Far player sync | enabled, `10` ticks |
 
-## 配置
+Old MiB/s-style bandwidth config is migrated to Kbps on load. Display text uses Kbps below `1000`, and Mbps at or above `1000`.
 
-服务端：
+## Config Files
+
+Server:
 
 ```text
 config/vss-server-config.json
 ```
 
-客户端：
+Client:
 
 ```text
 config/vss-client-config.json
 ```
 
-常用服务端配置：
+Important server options:
 
-| 配置项 | 作用 |
+| Key | Meaning |
 | --- | --- |
-| `lodDistanceChunks` | 服务端允许同步的最大 LOD 距离。 |
-| `bytesPerSecondLimitPerPlayer` | 每名玩家的 VSS 上传限速。 |
-| `sendQueueLimitPerPlayer` / `sendQueueBytesLimitPerPlayer` | 每名玩家待发送 LOD 队列上限。 |
-| `syncOnLoadRateLimitPerPlayer` / `syncOnLoadConcurrencyLimitPerPlayer` | 已有 LOD 的请求速率和并发。 |
-| `enableChunkGeneration` | 缺失 LOD 时是否允许服务端生成区块。 |
-| `generationConcurrencyLimitPerPlayer` / `generationConcurrencyLimitGlobal` | 缺失区块生成并发。 |
-| `generationStartsPerTickLimit` / `generationCompletionsPerTickLimit` | 每 tick 生成启动和打包提交上限。 |
-| `enableChunkNbtColumnSync` | 是否尝试从原版区块 NBT 打包已有区块。默认关闭。 |
-| `enablePersistentColumnCache` | 是否把完整 LOD 持久化到服务器磁盘。 |
-| `persistentColumnCacheMaxMiB` / `persistentColumnCacheMaxEntries` | 持久化缓存清理上限。 |
-| `enablePersistentColumnCompression` / `enableNetworkColumnCompression` | VSS 自带磁盘/网络 LOD 压缩。 |
-| `dirtyBroadcastIntervalTicks` | 区块变化后通知客户端刷新 LOD 的间隔。 |
-| `farPlayerSyncEnabled` / `farPlayerSyncIntervalTicks` | 远处玩家显示和同步间隔。 |
+| `enabled` | Master switch for VSS server sync. |
+| `lodDistanceChunks` | Maximum server-side LOD sync radius. |
+| `bytesPerSecondLimitPerPlayer` | Effective per-player byte limit. Commands and UI expose this as Kbps/Mbps. |
+| `sendQueueLimitPerPlayer` / `sendQueueBytesLimitPerPlayer` | Per-player queued payload limits. |
+| `diskReaderThreads` | Parallel workers for persistent cache and optional chunk NBT reads. |
+| `syncOnLoadRateLimitPerPlayer` / `syncOnLoadConcurrencyLimitPerPlayer` | Rate and concurrency for already existing LOD. |
+| `enableChunkGeneration` | Whether missing LOD may trigger server chunk/world generation. |
+| `generationRateLimitPerPlayer` / `generationConcurrencyLimitPerPlayer` / `generationConcurrencyLimitGlobal` | Missing-column generation throttles. |
+| `generationStartsPerTickLimit` / `generationCompletionsPerTickLimit` | Main-thread generation pacing. |
+| `enableChunkNbtColumnSync` | Whether VSS may pack LOD from existing chunk NBT. |
+| `enableColumnCache` / `columnCacheMaxBytes` | Hot in-memory encoded column cache. |
+| `enablePersistentColumnCache` / `persistentColumnCacheMaxMiB` | Per-world `.vcl` cache. |
+| `enablePersistentColumnCompression` / `enableNetworkColumnCompression` | Compression toggles for persisted and network LOD. |
+| `dirtyBroadcastIntervalTicks` | How often changed columns are announced for refresh. |
+| `farPlayerSyncEnabled` / `farPlayerSyncIntervalTicks` | Far player position/vehicle sync. |
 
-常用客户端配置：
+Important client options:
 
-| 配置项 | 作用 |
+| Key | Meaning |
 | --- | --- |
-| `receiveServerLods` | 是否接收服务端 LOD。 |
-| `lodDistanceChunks` | 客户端请求距离。`0` 表示自动取服务端、Voxy、客户端上限的较小值。 |
-| `desiredBandwidthMiB` | 客户端希望的下载限速。`0` 表示使用服务端上限。 |
-| `offThreadSectionProcessing` | 后台处理收到的 LOD 数据，减少客户端主线程压力。 |
+| `receiveServerLods` | Whether the client receives VSS LOD. |
+| `lodDistanceChunks` | Client request distance. `0` means automatic: min(server, Voxy, client hard cap). |
+| `desiredBandwidthKbps` | Client-requested bandwidth cap. `0` means use the server limit. |
+| `offThreadSectionProcessing` | Process received LOD off the render thread before Voxy ingest. |
 
-## 持久化和压缩
-
-完整 LOD 列会写入：
+## Commands
 
 ```text
-<world>/data/vss-column-cache/
-```
-
-持久化缓存只保存完整列，旧格式或不完整数据会被忽略或删除。zstd 可用时，VSS 的磁盘和网络 LOD 压缩使用等级 `7`；不可用时会回退到 deflate 或原始数据。
-
-ZstdNet 可以继续压缩整体网络流量，但如果 VSS payload 已经压缩，ZstdNet HUD 的压缩率变化不一定等于实际节省比例。
-
-## 常用指令
-
-```text
-/vss 状态
 /vss stats
-/vss 带宽 查看
-/vss 带宽 设置MiB <MiB/s>
-/vss 距离 查看
-/vss 距离 设置 <区块>
-/vss 队列 查看
-/vss 队列 设置数量 <列数>
-/vss 队列 设置MiB <MiB>
-/vss 刷新 查看
-/vss 刷新 设置间隔 <tick>
-/vss 生成 查看
-/vss 生成 状态
-/vss 生成 开启
-/vss 生成 关闭
+/vss bandwidth get
+/vss bandwidth set_kbps <kbps>
+/vss bandwidth set_mbps <mbps>
+/vss bandwidth set_bytes <bytes_per_second>
+/vss bandwidth set_mib <MiB_per_second>
+/vss distance get
+/vss distance set <chunks>
+/vss queue get
+/vss queue set_count <columns>
+/vss queue set_mib <MiB>
+/vss storage get
+/vss storage set_readers <threads>
+/vss dirty get
+/vss dirty set_interval <ticks>
+/vss generation get
+/vss generation enable
+/vss generation disable
 /vss generation stats
-/vss 远处玩家 查看
-/vss 远处玩家 开启
-/vss 远处玩家 关闭
+/vss far_players get
+/vss far_players enable
+/vss far_players disable
 ```
 
-英文别名也可用，例如 `/vss bandwidth get`、`/vss distance set <chunks>`、`/vss generation stats`。
+Chinese aliases are also registered. The Chinese bandwidth setter now uses Kbps by default, matching player-facing network settings.
 
-## 排查
+## Integrated Server And LAN
 
-远景已有数据加载慢：
+Singleplayer and LAN hosts use the same server-side VSS logic as a dedicated server. The local host routes VSS requests directly to the integrated server player, while LAN visitors use normal networking. This keeps the generation/cache path aligned between dedicated servers, singleplayer, and LAN.
 
-- 提高 `bytesPerSecondLimitPerPlayer`
-- 提高 `syncOnLoadRateLimitPerPlayer`
-- 提高 `syncOnLoadConcurrencyLimitPerPlayer`
+The local host still pays for both halves in one JVM: Minecraft client, integrated server, VSS server logic, Voxy render data, OpenGL/LWJGL native memory, and modpack caches.
 
-缺失远景补得慢：
+## NeoForge Notes
 
-- 确认 `enableChunkGeneration=true`
-- 提高生成并发或 `generationStartsPerTickLimit`
-- 观察 `/vss generation stats`
+- The 1.21.1 port is aligned with the Forge 1.20.1 0.2.5 behavior for request ordering, bandwidth commands, zstd column reuse, persistent cache, config refresh, and integrated-host routing.
+- Client UI integration targets the current Voxy/Sodium-style options path and keeps server-side VSS controls available from the Voxy options screen when supported.
+- The port includes guards for client-only classes so dedicated servers do not load `net.minecraft.client.Minecraft`.
 
-服务端内存/CPU 高：
+## Troubleshooting
 
-- 降低 `lodDistanceChunks`
-- 降低生成并发
-- 降低或关闭 `enableChunkGeneration`
+Existing cached LOD loads too slowly:
 
-客户端任务管理器内存比 sparkc 高很多：
+- Increase `/vss bandwidth set_kbps`.
+- Increase `syncOnLoadRateLimitPerPlayer`.
+- Increase `syncOnLoadConcurrencyLimitPerPlayer`.
+- Increase `diskReaderThreads` if persistent cache reads are the bottleneck.
 
-- sparkc 主要看 Java heap
-- 任务管理器还包含 JVM 已提交堆、Voxy/OpenGL/LWJGL 显存和 native buffer
-- 需要 native 分类时启动参数加 `-XX:NativeMemoryTracking=summary`
+Missing LOD generates too slowly:
 
-Voxy 关闭再打开后：
+- Confirm `enableChunkGeneration=true`.
+- Increase `generationRateLimitPerPlayer`.
+- Increase `generationConcurrencyLimitPerPlayer` or `generationStartsPerTickLimit`.
+- Watch `/vss generation stats`.
 
-- VSS 会触发重新同步，日志应出现 `VSS LOD resync requested: Voxy became available again`
-- Voxy 自己仍需要重建 render system 和 mesh，不会瞬间全部出现
+Changing distance or generation settings seems delayed:
 
-## 许可证
+- Config commands refresh the active VSS session and request state.
+- Persistent-cache cold scans are disk-bound; increase `diskReaderThreads` gradually if the disk can keep up.
+- The client does not need to restart, but Voxy may still need time to rebuild render data.
 
-MIT。详见 `LICENSE`。
+Task Manager memory is much higher than Java heap:
+
+- Java heap tools show only heap.
+- Task Manager also includes committed heap headroom, metaspace, code cache, GC structures, Voxy/OpenGL/LWJGL native buffers, mapped files, and driver allocations.
+- Start with `-XX:NativeMemoryTracking=summary` and inspect with `jcmd <pid> VM.native_memory summary` when native memory needs to be separated.
+
+## Notes
+
+- VSS `.vcl` cache is per world and per dimension.
+- A `512 MiB` persistent cache currently stores roughly a `160` chunk radius in average tested terrain, but modded terrain can vary.
+- VSS serves already persisted LOD to other players once one player has generated or cached it.
+
+## License
+
+MIT. See `LICENSE`.
