@@ -109,6 +109,10 @@ public final class VSSServerNetworking {
         refreshSessionConfigs(server);
     }
 
+    public static SessionConfigS2CPayload refreshIntegratedHostSession(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
+        return registerIntegratedHost(player, clientProtocolVersion, clientCapabilities);
+    }
+
     public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
         if (serverStopping) {
             return createSessionConfig(false);
@@ -117,11 +121,14 @@ public final class VSSServerNetworking {
         boolean compatible = isCompatibleClient(clientProtocolVersion, clientCapabilities);
         boolean enabled = config.enabled && compatible;
         if (compatible && enabled) {
-            PlayerRequestState state = new PlayerRequestState();
+            PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
+            if (state == null) {
+                state = new PlayerRequestState();
+                PLAYER_STATES.put(player.getUUID(), state);
+                VSSLogger.info("Integrated host " + player.getGameProfile().getName() + " registered for VSS LOD sync");
+            }
             state.setClientCapabilities(clientCapabilities);
-            PLAYER_STATES.put(player.getUUID(), state);
             idleMemoryReleased = false;
-            VSSLogger.info("Integrated host " + player.getGameProfile().getName() + " registered for VSS LOD sync");
         } else if (!compatible) {
             logIncompatibleClient("Integrated host " + player.getGameProfile().getName(), clientProtocolVersion, clientCapabilities);
         }
@@ -257,6 +264,12 @@ public final class VSSServerNetworking {
     public static void handleIntegratedBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
         if (player == null || serverStopping || !VSSServerConfig.CONFIG.enabled) {
             return;
+        }
+        if (!PLAYER_STATES.containsKey(player.getUUID())) {
+            registerIntegratedHost(
+                    player,
+                    VSSConstants.PROTOCOL_VERSION,
+                    VSSConstants.CAPABILITY_VOXEL_COLUMNS | VSSConstants.CAPABILITY_ZSTD_COLUMNS);
         }
         handleBatchRequest(player, payload);
     }

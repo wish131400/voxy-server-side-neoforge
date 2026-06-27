@@ -41,10 +41,13 @@ public final class VSSClientNetworking {
     private static final AtomicLong bytesReceived = new AtomicLong();
     private static final int HANDSHAKE_RETRY_INTERVAL_TICKS = 40;
     private static final int HANDSHAKE_FAILED_RETRY_INTERVAL_TICKS = 20;
+    private static final int INTEGRATED_HOST_SESSION_REFRESH_INTERVAL_TICKS = 20;
     private static final long COLUMN_RECEIVE_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final long INTEGRATED_HOST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static volatile long lastColumnReceiveDiagnosticNanos;
     private static volatile long lastIntegratedHostDiagnosticNanos;
+    private static volatile long lastSessionConfigRevision = Long.MIN_VALUE;
+    private static int integratedHostSessionRefreshTicks;
 
     private VSSClientNetworking() {
     }
@@ -104,6 +107,7 @@ public final class VSSClientNetworking {
         handshakeRetryTicks = 0;
         serverEnabled = payload.enabled();
         serverLodDistance = payload.lodDistanceChunks();
+        lastSessionConfigRevision = payload.configRevision();
         if (payload.enabled()) {
             LodRequestManager manager = requestManager;
             boolean newSession = manager == null || !wasEnabled;
@@ -242,6 +246,8 @@ public final class VSSClientNetworking {
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
+        integratedHostSessionRefreshTicks = 0;
+        lastSessionConfigRevision = Long.MIN_VALUE;
         requestManager = null;
         if (!VSSClientConfig.CONFIG.receiveServerLods) {
             return;
@@ -259,6 +265,7 @@ public final class VSSClientNetworking {
     public static void onClientTick(ClientTickEvent.Post event) {
         ensureHandshakePending();
         tryPendingHandshake();
+        refreshIntegratedHostSessionIfNeeded();
         LodRequestManager manager = requestManager;
         if (manager != null && serverEnabled) {
             manager.tick();
@@ -424,6 +431,46 @@ public final class VSSClientNetworking {
         }
     }
 
+    private static void refreshIntegratedHostSessionIfNeeded() {
+        if (!serverEnabled || requestManager == null || !VSSClientConfig.CONFIG.receiveServerLods || !isClientWorldReady()) {
+            integratedHostSessionRefreshTicks = 0;
+            return;
+        }
+        if (++integratedHostSessionRefreshTicks < INTEGRATED_HOST_SESSION_REFRESH_INTERVAL_TICKS) {
+            return;
+        }
+        integratedHostSessionRefreshTicks = 0;
+
+        Minecraft minecraft = Minecraft.getInstance();
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        LocalPlayer localPlayer = minecraft.player;
+        if (integratedServerPlayer(server, localPlayer) == null) {
+            return;
+        }
+
+        server.execute(() -> {
+            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(localPlayer.getUUID());
+            if (serverPlayer == null) {
+                return;
+            }
+            SessionConfigS2CPayload config = VSSServerNetworking.refreshIntegratedHostSession(
+                    serverPlayer,
+                    VSSConstants.PROTOCOL_VERSION,
+                    clientCapabilities());
+            minecraft.execute(() -> {
+                if (!isClientWorldReady()) {
+                    return;
+                }
+                if (config.configRevision() != lastSessionConfigRevision) {
+                    VSSLogger.info("VSS integrated host session refreshed: distance=" + config.lodDistanceChunks()
+                            + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled")
+                            + ", revision=" + config.configRevision());
+                    handleSessionConfig(config);
+                }
+            });
+        });
+    }
+
     private static int clientCapabilities() {
         int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
         if (LodByteCompression.isZstdAvailable()) {
@@ -458,6 +505,8 @@ public final class VSSClientNetworking {
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
+        integratedHostSessionRefreshTicks = 0;
+        lastSessionConfigRevision = Long.MIN_VALUE;
         if (manager != null) {
             manager.disconnect();
         }
