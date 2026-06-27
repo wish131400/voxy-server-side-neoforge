@@ -53,6 +53,7 @@ public final class VSSServerNetworking {
     private static final AtomicInteger pendingDiskReads = new AtomicInteger();
     private static final AtomicInteger pendingPersistentWrites = new AtomicInteger();
     private static final AtomicLong serverLifecycleEpoch = new AtomicLong();
+    private static final AtomicLong configRevision = new AtomicLong(1L);
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final int PRIORITY_SEND_COLUMNS_PER_TICK = 4;
     private static final long PRIORITY_SEND_BYTES_PER_TICK = 256L * 1024L;
@@ -101,6 +102,11 @@ public final class VSSServerNetworking {
                 sendSessionConfig(player);
             }
         }
+    }
+
+    public static void bumpAndRefreshSessionConfigs(MinecraftServer server) {
+        configRevision.incrementAndGet();
+        refreshSessionConfigs(server);
     }
 
     public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
@@ -236,7 +242,8 @@ public final class VSSServerNetworking {
                 config.generationRateLimitPerPlayer,
                 config.generationConcurrencyLimitPerPlayer,
                 config.enableChunkGeneration,
-                config.bandwidthBytesPerSecond());
+                config.bandwidthBytesPerSecond(),
+                configRevision.get());
     }
 
     public static void handleBatchRequest(BatchChunkRequestC2SPayload payload, IPayloadContext context) {

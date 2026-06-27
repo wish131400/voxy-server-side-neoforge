@@ -340,6 +340,7 @@ public final class VSSServerCommands {
 
     private static int reportUpdated(CommandSourceStack source) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.bandwidth.saved")
                 .withStyle(ChatFormatting.YELLOW)
                 .append(Component.translatable("vss.command.bandwidth.saved.details", formatBits(config.getPerPlayerBandwidthKbpsRounded()))), true);
@@ -371,6 +372,7 @@ public final class VSSServerCommands {
 
     private static int reportQueueUpdated(CommandSourceStack source) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.queue.saved")
                 .withStyle(ChatFormatting.YELLOW)
                 .append(Component.translatable(
@@ -393,7 +395,7 @@ public final class VSSServerCommands {
     private static int setDistance(CommandSourceStack source, int chunks) {
         VSSServerConfig.CONFIG.lodDistanceChunks = chunks;
         VSSServerConfig.CONFIG.normalizeAndSave();
-        VSSServerNetworking.refreshSessionConfigs(source.getServer());
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         VSSServerConfig config = VSSServerConfig.CONFIG;
         source.sendSuccess(() -> Component.translatable("vss.command.distance.saved")
                 .withStyle(ChatFormatting.YELLOW)
@@ -500,7 +502,7 @@ public final class VSSServerCommands {
     private static int setGenerationEnabled(CommandSourceStack source, boolean enabled) {
         VSSServerConfig.CONFIG.enableChunkGeneration = enabled;
         VSSServerConfig.CONFIG.normalizeAndSave();
-        VSSServerNetworking.refreshSessionConfigs(source.getServer());
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.generation.toggle")
                 .withStyle(ChatFormatting.YELLOW)
                 .append(enabled
@@ -554,7 +556,7 @@ public final class VSSServerCommands {
 
     private static int reportGenerationUpdated(CommandSourceStack source) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
-        VSSServerNetworking.refreshSessionConfigs(source.getServer());
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.generation.saved")
                 .withStyle(ChatFormatting.YELLOW)
                 .append(Component.translatable(

@@ -98,15 +98,23 @@ public final class VSSClientNetworking {
             return;
         }
 
+        boolean wasEnabled = serverEnabled;
         waitingForHandshake = false;
         handshakeSent = true;
         handshakeRetryTicks = 0;
         serverEnabled = payload.enabled();
         serverLodDistance = payload.lodDistanceChunks();
         if (payload.enabled()) {
-            COLUMN_PROCESSOR.beginSession();
-            LodRequestManager manager = new LodRequestManager();
-            manager.onSessionConfig(payload);
+            LodRequestManager manager = requestManager;
+            boolean newSession = manager == null || !wasEnabled;
+            if (newSession) {
+                COLUMN_PROCESSOR.beginSession();
+                manager = new LodRequestManager();
+            }
+            boolean requestStateReset = manager.onSessionConfig(payload);
+            if (requestStateReset && !newSession) {
+                COLUMN_PROCESSOR.beginSession();
+            }
             requestManager = manager;
             sendBandwidthPreference();
 
@@ -118,6 +126,8 @@ public final class VSSClientNetworking {
 
             VSSLogger.info("VSS LOD session ready: distance=" + payload.lodDistanceChunks()
                     + " chunks, generation=" + (payload.generationEnabled() ? "enabled" : "disabled")
+                    + ", revision=" + payload.configRevision()
+                    + ", reset=" + requestStateReset
                     + ", consumers=" + hasConsumers);
         } else {
             LodRequestManager manager = requestManager;
@@ -388,7 +398,8 @@ public final class VSSClientNetworking {
                     clientCapabilities());
             minecraft.execute(() -> {
                 VSSLogger.info("VSS integrated host session ready: distance=" + config.lodDistanceChunks()
-                        + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled"));
+                        + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled")
+                        + ", revision=" + config.configRevision());
                 handleSessionConfig(config);
             });
         });

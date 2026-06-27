@@ -1,6 +1,7 @@
 package dev.xantha.vss.client;
 
 import dev.xantha.vss.config.VSSServerConfig;
+import dev.xantha.vss.networking.server.VSSServerNetworking;
 import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.ChatFormatting;
@@ -118,6 +119,9 @@ final class VSSServerConfigScreen extends Screen {
             }
         }
         config.normalizeAndSave();
+        if (minecraft != null && minecraft.getSingleplayerServer() != null) {
+            VSSServerNetworking.bumpAndRefreshSessionConfigs(minecraft.getSingleplayerServer());
+        }
         status = Component.translatable("vss.config.server.saved").withStyle(ChatFormatting.GREEN);
         return true;
     }

@@ -13,6 +13,7 @@ public final class VSSClientBootstrap {
     public static void init(ModContainer modContainer) {
         VSSClientConfigScreens.register(modContainer);
         VSSSodiumOptionsEventBridge.register();
+        VSSEmbeddiumOptionsEventBridge.register();
         ModCompat.init();
         NeoForge.EVENT_BUS.register(VSSClientNetworking.class);
         NeoForge.EVENT_BUS.register(FarPlayerClientRenderer.class);

@@ -79,9 +79,13 @@ public final class LodRequestManager {
         dirtyColumnTimestamps.defaultReturnValue(0L);
     }
 
-    public void onSessionConfig(SessionConfigS2CPayload config) {
+    public boolean onSessionConfig(SessionConfigS2CPayload config) {
+        boolean shouldReset = shouldResetForSessionConfig(config);
         sessionConfig = config;
-        resetRequestState();
+        if (shouldReset) {
+            resetRequestStateAfterConfigChange();
+        }
+        return shouldReset;
     }
 
     public void tick() {
@@ -261,16 +265,34 @@ public final class LodRequestManager {
     }
 
     public void forceResync() {
+        resetRequestStateAfterConfigChange();
+    }
+
+    public int getPendingCount() {
+        return inFlight.size();
+    }
+
+    private boolean shouldResetForSessionConfig(SessionConfigS2CPayload config) {
+        if (sessionConfig == null) {
+            return true;
+        }
+        return sessionConfig.enabled() != config.enabled()
+                || sessionConfig.lodDistanceChunks() != config.lodDistanceChunks()
+                || sessionConfig.syncOnLoadRateLimitPerPlayer() != config.syncOnLoadRateLimitPerPlayer()
+                || sessionConfig.syncOnLoadConcurrencyLimitPerPlayer() != config.syncOnLoadConcurrencyLimitPerPlayer()
+                || sessionConfig.generationRateLimitPerPlayer() != config.generationRateLimitPerPlayer()
+                || sessionConfig.generationConcurrencyLimitPerPlayer() != config.generationConcurrencyLimitPerPlayer()
+                || sessionConfig.generationEnabled() != config.generationEnabled()
+                || sessionConfig.configRevision() != config.configRevision();
+    }
+
+    private void resetRequestStateAfterConfigChange() {
         int preservedNextRequestId = nextRequestId;
         for (int requestId : requestIdToPosition.keySet()) {
             sendCancelPacket(requestId);
         }
         resetRequestState();
         nextRequestId = preservedNextRequestId;
-    }
-
-    public int getPendingCount() {
-        return inFlight.size();
     }
 
     private void scanAndSend(ClientLevel level, LocalPlayer player) {

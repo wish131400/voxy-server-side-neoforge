@@ -42,8 +42,6 @@ public final class VSSVoxyOptionsIntegration {
     private static final String SODIUM08_OPTION_IMPACT = "net.caffeinemc.mods.sodium.api.config.option.OptionImpact";
     private static final String SODIUM08_VALUE_FORMATTER = "net.caffeinemc.mods.sodium.api.config.option.ControlValueFormatter";
 
-    private static Object oldVssOptionPage;
-
     private VSSVoxyOptionsIntegration() {
     }
 
@@ -118,7 +116,8 @@ public final class VSSVoxyOptionsIntegration {
             if (pages instanceof List<?> list) {
                 addPage(list);
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable e) {
+            VSSLogger.warn("Failed to add VSS options page to Sodium options screen", e);
         }
     }
 
@@ -128,23 +127,27 @@ public final class VSSVoxyOptionsIntegration {
             return;
         }
 
-        Object page = oldPage();
-        if (page == null) {
-            return;
-        }
+        try {
+            Object page = oldPage();
+            if (page == null) {
+                return;
+            }
 
-        String name = pageName(page);
-        if (((List) pages).contains(page) || containsPageNamed(pages, name)) {
-            return;
-        }
+            String name = pageName(page);
+            if (containsPageNamed(pages, name)) {
+                return;
+            }
 
-        int insertAt = findVoxyPageIndex(pages) + 1;
-        if (insertAt <= 0) {
-            insertAt = pages.size();
-        }
+            int insertAt = findVoxyPageIndex(pages) + 1;
+            if (insertAt <= 0) {
+                insertAt = pages.size();
+            }
 
-        ((List) pages).add(insertAt, page);
-        VSSLogger.info("Added Voxy Server Side options page to Sodium options");
+            ((List) pages).add(insertAt, page);
+            VSSLogger.info("Added Voxy Server Side options page to Sodium options");
+        } catch (Throwable e) {
+            VSSLogger.warn("Failed to build VSS options page; leaving video settings unchanged", e);
+        }
     }
 
     private static void addSodium08Config(Object configBuilder) {
@@ -307,7 +310,7 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             4,
                             1,
-                            64,
+                            1000,
                             1,
                             value -> VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer = value,
                             () -> VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer,
@@ -321,7 +324,7 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             32,
                             1,
-                            128,
+                            1000,
                             1,
                             value -> VSSServerConfig.CONFIG.generationConcurrencyLimitGlobal = value,
                             () -> VSSServerConfig.CONFIG.generationConcurrencyLimitGlobal,
@@ -335,7 +338,7 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             2,
                             1,
-                            32,
+                            256,
                             1,
                             value -> VSSServerConfig.CONFIG.generationStartsPerTickLimit = value,
                             () -> VSSServerConfig.CONFIG.generationStartsPerTickLimit,
@@ -349,7 +352,7 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             4,
                             1,
-                            32,
+                            256,
                             1,
                             value -> VSSServerConfig.CONFIG.generationCompletionsPerTickLimit = value,
                             () -> VSSServerConfig.CONFIG.generationCompletionsPerTickLimit,
@@ -377,7 +380,7 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             32,
                             1,
-                            256,
+                            1024,
                             1,
                             value -> VSSServerConfig.CONFIG.generationPackingQueueLimit = value,
                             () -> VSSServerConfig.CONFIG.generationPackingQueueLimit,
@@ -390,9 +393,9 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_timeout.tooltip",
                             "MEDIUM",
                             45,
-                            5,
-                            120,
-                            5,
+                            1,
+                            600,
+                            1,
                             value -> VSSServerConfig.CONFIG.generationTimeoutSeconds = value,
                             () -> VSSServerConfig.CONFIG.generationTimeoutSeconds,
                             VSSVoxyOptionsIntegration::formatSeconds,
@@ -461,10 +464,6 @@ public final class VSSVoxyOptionsIntegration {
     }
 
     private static Object oldPage() {
-        if (oldVssOptionPage != null) {
-            return oldVssOptionPage;
-        }
-
         try {
             List<Object> groups = new ArrayList<>();
             Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
@@ -582,7 +581,7 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_player_concurrency.tooltip",
                             "HIGH",
                             1,
-                            64,
+                            1000,
                             1,
                             VSSVoxyOptionsIntegration::formatColumns,
                             (VSSServerConfig config, Integer value) -> config.generationConcurrencyLimitPerPlayer = value,
@@ -593,7 +592,7 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_global_concurrency.tooltip",
                             "HIGH",
                             1,
-                            128,
+                            1000,
                             1,
                             VSSVoxyOptionsIntegration::formatColumns,
                             (VSSServerConfig config, Integer value) -> config.generationConcurrencyLimitGlobal = value,
@@ -604,7 +603,7 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_starts_per_tick.tooltip",
                             "HIGH",
                             1,
-                            32,
+                            256,
                             1,
                             VSSVoxyOptionsIntegration::formatColumns,
                             (VSSServerConfig config, Integer value) -> config.generationStartsPerTickLimit = value,
@@ -615,7 +614,7 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_completions_per_tick.tooltip",
                             "HIGH",
                             1,
-                            32,
+                            256,
                             1,
                             VSSVoxyOptionsIntegration::formatColumns,
                             (VSSServerConfig config, Integer value) -> config.generationCompletionsPerTickLimit = value,
@@ -637,7 +636,7 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_packing_queue.tooltip",
                             "HIGH",
                             1,
-                            256,
+                            1024,
                             1,
                             VSSVoxyOptionsIntegration::formatColumns,
                             (VSSServerConfig config, Integer value) -> config.generationPackingQueueLimit = value,
@@ -647,16 +646,15 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation_timeout",
                             "vss.voxy_options.generation_timeout.tooltip",
                             "MEDIUM",
-                            5,
-                            120,
-                            5,
+                            1,
+                            600,
+                            1,
                             VSSVoxyOptionsIntegration::formatSeconds,
                             (VSSServerConfig config, Integer value) -> config.generationTimeoutSeconds = value,
                             config -> config.generationTimeoutSeconds)));
 
             Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
-            oldVssOptionPage = pageConstructor.newInstance(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
-            return oldVssOptionPage;
+            return pageConstructor.newInstance(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
         } catch (Throwable t) {
             VSSLogger.warn("Failed to build VSS Sodium options page", t);
             return null;
@@ -915,7 +913,7 @@ public final class VSSVoxyOptionsIntegration {
         VSSServerConfig.CONFIG.normalizeAndSave();
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.getSingleplayerServer() != null) {
-            VSSServerNetworking.refreshSessionConfigs(minecraft.getSingleplayerServer());
+            VSSServerNetworking.bumpAndRefreshSessionConfigs(minecraft.getSingleplayerServer());
         }
     }
 
