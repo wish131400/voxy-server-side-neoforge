@@ -42,7 +42,9 @@ public final class VSSClientNetworking {
     private static final int HANDSHAKE_RETRY_INTERVAL_TICKS = 40;
     private static final int HANDSHAKE_FAILED_RETRY_INTERVAL_TICKS = 20;
     private static final long COLUMN_RECEIVE_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
+    private static final long INTEGRATED_HOST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static volatile long lastColumnReceiveDiagnosticNanos;
+    private static volatile long lastIntegratedHostDiagnosticNanos;
 
     private VSSClientNetworking() {
     }
@@ -270,14 +272,18 @@ public final class VSSClientNetworking {
     }
 
     static void sendBatchRequest(BatchChunkRequestC2SPayload payload) {
-        if (trySendToIntegratedServer(serverPlayer -> VSSServerNetworking.handleIntegratedBatchRequest(serverPlayer, payload))) {
+        if (trySendToIntegratedServer(
+                "LOD batch request count=" + payload.count(),
+                serverPlayer -> VSSServerNetworking.handleIntegratedBatchRequest(serverPlayer, payload))) {
             return;
         }
         VSSNetworking.sendToServer(payload);
     }
 
     static void sendCancelRequest(CancelRequestC2SPayload payload) {
-        if (trySendToIntegratedServer(serverPlayer -> VSSServerNetworking.handleIntegratedCancel(serverPlayer, payload))) {
+        if (trySendToIntegratedServer(
+                "cancel request id=" + payload.requestId(),
+                serverPlayer -> VSSServerNetworking.handleIntegratedCancel(serverPlayer, payload))) {
             return;
         }
         VSSNetworking.sendToServer(payload);
@@ -285,7 +291,9 @@ public final class VSSClientNetworking {
 
     private static void sendBandwidthUpdate(BandwidthUpdateC2SPayload payload) {
         try {
-            if (trySendToIntegratedServer(serverPlayer -> VSSServerNetworking.handleIntegratedBandwidthUpdate(serverPlayer, payload))) {
+            if (trySendToIntegratedServer(
+                    "bandwidth update",
+                    serverPlayer -> VSSServerNetworking.handleIntegratedBandwidthUpdate(serverPlayer, payload))) {
                 return;
             }
             VSSNetworking.sendToServer(payload);
@@ -294,18 +302,21 @@ public final class VSSClientNetworking {
         }
     }
 
-    private static boolean trySendToIntegratedServer(java.util.function.Consumer<ServerPlayer> consumer) {
+    private static boolean trySendToIntegratedServer(String action, java.util.function.Consumer<ServerPlayer> consumer) {
         Minecraft minecraft = Minecraft.getInstance();
         IntegratedServer server = minecraft.getSingleplayerServer();
         LocalPlayer localPlayer = minecraft.player;
-        if (server == null || localPlayer == null) {
+        if (integratedServerPlayer(server, localPlayer) == null) {
             return false;
         }
 
+        logIntegratedHostDirect("Integrated host direct C2S: " + action);
         server.execute(() -> {
             ServerPlayer serverPlayer = server.getPlayerList().getPlayer(localPlayer.getUUID());
             if (serverPlayer != null) {
                 consumer.accept(serverPlayer);
+            } else {
+                VSSLogger.debug("Integrated host direct C2S skipped because the local server player is not ready");
             }
         });
         return true;
@@ -320,7 +331,7 @@ public final class VSSClientNetworking {
             return;
         }
         IntegratedServer integratedServer = mc.getSingleplayerServer();
-        if (integratedServer != null) {
+        if (integratedServerPlayer(integratedServer, mc.player) != null) {
             tryIntegratedServerHandshake(mc, integratedServer);
             return;
         }
@@ -375,8 +386,21 @@ public final class VSSClientNetworking {
                     serverPlayer,
                     VSSConstants.PROTOCOL_VERSION,
                     clientCapabilities());
-            minecraft.execute(() -> handleSessionConfig(config));
+            minecraft.execute(() -> {
+                VSSLogger.info("VSS integrated host session ready: distance=" + config.lodDistanceChunks()
+                        + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled"));
+                handleSessionConfig(config);
+            });
         });
+    }
+
+    private static void logIntegratedHostDirect(String message) {
+        long now = System.nanoTime();
+        if (now - lastIntegratedHostDiagnosticNanos < INTEGRATED_HOST_DIAGNOSTIC_INTERVAL_NANOS) {
+            return;
+        }
+        lastIntegratedHostDiagnosticNanos = now;
+        VSSLogger.debug(message);
     }
 
     private static boolean sendHandshake(String failurePrefix) {
@@ -395,6 +419,13 @@ public final class VSSClientNetworking {
             clientCaps |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
         }
         return clientCaps;
+    }
+
+    private static ServerPlayer integratedServerPlayer(IntegratedServer server, LocalPlayer localPlayer) {
+        if (server == null || localPlayer == null) {
+            return null;
+        }
+        return server.getPlayerList().getPlayer(localPlayer.getUUID());
     }
 
     private static boolean isClientWorldReady() {
@@ -426,6 +457,7 @@ public final class VSSClientNetworking {
             columnsReceived.set(0);
             bytesReceived.set(0);
             lastColumnReceiveDiagnosticNanos = 0L;
+            lastIntegratedHostDiagnosticNanos = 0L;
         }
     }
 
