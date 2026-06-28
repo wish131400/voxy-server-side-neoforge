@@ -20,6 +20,7 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.fml.ModList;
@@ -47,6 +48,14 @@ public final class VSSVoxyOptionsIntegration {
 
     public static boolean isSodiumPresent() {
         return classExists(OLD_OPTION_PAGE) || classExists(SODIUM08_CONFIG_ENTRY_POINT);
+    }
+
+    public static Screen createSodiumConfigScreen(Screen parent) {
+        Screen sodium08Screen = createSodium08ConfigScreen(parent);
+        if (sodium08Screen != null) {
+            return sodium08Screen;
+        }
+        return createOldSodiumConfigScreen(parent);
     }
 
     public static boolean registerSodiumOptionsApiBridge() {
@@ -241,7 +250,49 @@ public final class VSSVoxyOptionsIntegration {
 
             invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
+                    "vss.voxy_options.group.far_players",
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "far_player_sync",
+                            "vss.voxy_options.far_player_sync",
+                            "vss.voxy_options.far_player_sync.tooltip",
+                            "LOW",
+                            true,
+                            value -> VSSServerConfig.CONFIG.farPlayerSyncEnabled = value,
+                            () -> VSSServerConfig.CONFIG.farPlayerSyncEnabled,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "far_player_sync_interval",
+                            "vss.voxy_options.far_player_sync_interval",
+                            "vss.voxy_options.far_player_sync_interval.tooltip",
+                            "LOW",
+                            10,
+                            1,
+                            100,
+                            1,
+                            value -> VSSServerConfig.CONFIG.farPlayerSyncIntervalTicks = value,
+                            () -> VSSServerConfig.CONFIG.farPlayerSyncIntervalTicks,
+                            VSSVoxyOptionsIntegration::formatTicks,
+                            VSSVoxyOptionsIntegration::saveServerConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
                     "vss.voxy_options.group.server_limits",
+                    sodium08IntOption(
+                            configBuilder,
+                            "server_lod_distance",
+                            "vss.voxy_options.server_lod_distance",
+                            "vss.voxy_options.server_lod_distance.tooltip",
+                            "MEDIUM",
+                            128,
+                            VSSServerConfig.MIN_LOD_DISTANCE_CHUNKS,
+                            VSSServerConfig.MAX_LOD_DISTANCE_CHUNKS,
+                            1,
+                            value -> VSSServerConfig.CONFIG.lodDistanceChunks = value,
+                            () -> VSSServerConfig.CONFIG.lodDistanceChunks,
+                            VSSVoxyOptionsIntegration::formatChunks,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
                             "server_bandwidth",
@@ -255,6 +306,20 @@ public final class VSSVoxyOptionsIntegration {
                             VSSServerConfig.CONFIG::setPerPlayerBandwidthKbpsUnsaved,
                             VSSServerConfig.CONFIG::getPerPlayerBandwidthKbpsRounded,
                             VSSVoxyOptionsIntegration::formatKbps,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "server_queue_count",
+                            "vss.voxy_options.server_queue_count",
+                            "vss.voxy_options.server_queue_count.tooltip",
+                            "MEDIUM",
+                            256,
+                            1,
+                            100000,
+                            1,
+                            value -> VSSServerConfig.CONFIG.sendQueueLimitPerPlayer = value,
+                            () -> VSSServerConfig.CONFIG.sendQueueLimitPerPlayer,
+                            VSSVoxyOptionsIntegration::formatColumns,
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
@@ -283,6 +348,20 @@ public final class VSSVoxyOptionsIntegration {
                             value -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer = value,
                             () -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer,
                             VSSVoxyOptionsIntegration::formatRequestsPerSecond,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "sync_concurrency",
+                            "vss.voxy_options.sync_concurrency",
+                            "vss.voxy_options.sync_concurrency.tooltip",
+                            "MEDIUM",
+                            16,
+                            1,
+                            1000,
+                            1,
+                            value -> VSSServerConfig.CONFIG.syncOnLoadConcurrencyLimitPerPlayer = value,
+                            () -> VSSServerConfig.CONFIG.syncOnLoadConcurrencyLimitPerPlayer,
+                            VSSVoxyOptionsIntegration::formatColumns,
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
@@ -543,6 +622,37 @@ public final class VSSVoxyOptionsIntegration {
                             config -> config.enableChunkGeneration)));
 
             groups.add(oldGroup(
+                    oldBooleanOption(
+                            serverStorage,
+                            "vss.voxy_options.far_player_sync",
+                            "vss.voxy_options.far_player_sync.tooltip",
+                            "LOW",
+                            (VSSServerConfig config, Boolean value) -> config.farPlayerSyncEnabled = value,
+                            config -> config.farPlayerSyncEnabled),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.far_player_sync_interval",
+                            "vss.voxy_options.far_player_sync_interval.tooltip",
+                            "LOW",
+                            1,
+                            100,
+                            1,
+                            VSSVoxyOptionsIntegration::formatTicks,
+                            (VSSServerConfig config, Integer value) -> config.farPlayerSyncIntervalTicks = value,
+                            config -> config.farPlayerSyncIntervalTicks)));
+
+            groups.add(oldGroup(
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.server_lod_distance",
+                            "vss.voxy_options.server_lod_distance.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.MIN_LOD_DISTANCE_CHUNKS,
+                            VSSServerConfig.MAX_LOD_DISTANCE_CHUNKS,
+                            1,
+                            VSSVoxyOptionsIntegration::formatChunks,
+                            (VSSServerConfig config, Integer value) -> config.lodDistanceChunks = value,
+                            config -> config.lodDistanceChunks),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.server_bandwidth",
@@ -554,6 +664,17 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatKbps,
                             VSSServerConfig::setPerPlayerBandwidthKbpsUnsaved,
                             VSSServerConfig::getPerPlayerBandwidthKbpsRounded),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.server_queue_count",
+                            "vss.voxy_options.server_queue_count.tooltip",
+                            "MEDIUM",
+                            1,
+                            100000,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.sendQueueLimitPerPlayer = value,
+                            config -> config.sendQueueLimitPerPlayer),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.server_queue_memory",
@@ -576,6 +697,17 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatRequestsPerSecond,
                             (VSSServerConfig config, Integer value) -> config.syncOnLoadRateLimitPerPlayer = value,
                             config -> config.syncOnLoadRateLimitPerPlayer),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.sync_concurrency",
+                            "vss.voxy_options.sync_concurrency.tooltip",
+                            "MEDIUM",
+                            1,
+                            1000,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.syncOnLoadConcurrencyLimitPerPlayer = value,
+                            config -> config.syncOnLoadConcurrencyLimitPerPlayer),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.dirty_broadcast_interval",
@@ -857,6 +989,72 @@ public final class VSSVoxyOptionsIntegration {
         }
     }
 
+    private static Screen createSodium08ConfigScreen(Screen parent) {
+        try {
+            Class<?> configManagerClass = Class.forName(SODIUM08_CONFIG_MANAGER);
+            Object config = sodium08Config(configManagerClass);
+            Object modOptions = findSodium08ModOptions(config);
+
+            if (modOptions == null) {
+                invokeStatic(configManagerClass, "registerConfigsLate");
+                config = sodium08Config(configManagerClass);
+                modOptions = findSodium08ModOptions(config);
+                if (modOptions == null) {
+                    return null;
+                }
+            }
+
+            Object pages = invokeByName(modOptions, "pages");
+            if (!(pages instanceof List<?> pageList) || pageList.isEmpty()) {
+                return null;
+            }
+
+            Object page = pageList.get(0);
+            Class<?> videoSettingsScreen = Class.forName("net.caffeinemc.mods.sodium.client.gui.VideoSettingsScreen");
+            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent, page);
+            return screen instanceof Screen sodiumScreen ? sodiumScreen : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object sodium08Config(Class<?> configManagerClass) throws ReflectiveOperationException {
+        Field configField = configManagerClass.getField("CONFIG");
+        return configField.get(null);
+    }
+
+    private static Object findSodium08ModOptions(Object config) throws ReflectiveOperationException {
+        if (config == null) {
+            return null;
+        }
+        Object modOptions = invokeByName(config, "getModOptions");
+        if (!(modOptions instanceof List<?> list)) {
+            return null;
+        }
+        for (Object entry : list) {
+            Object configId = invokeByName(entry, "configId");
+            if (VSSConstants.MOD_ID.equals(configId)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static Screen createOldSodiumConfigScreen(Screen parent) {
+        try {
+            Object page = oldPage();
+            if (page == null) {
+                return null;
+            }
+
+            Class<?> videoSettingsScreen = Class.forName("net.caffeinemc.mods.sodium.client.gui.SodiumOptionsGUI");
+            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent, page);
+            return screen instanceof Screen sodiumScreen ? sodiumScreen : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     private static Field findPagesField(Class<?> type) {
         Class<?> cursor = type;
         while (cursor != null) {
@@ -891,6 +1089,10 @@ public final class VSSVoxyOptionsIntegration {
         return value == 0
                 ? Component.translatable("vss.voxy_options.auto")
                 : Component.translatable("vss.voxy_options.chunks", value);
+    }
+
+    private static Component formatChunks(int value) {
+        return Component.translatable("vss.voxy_options.chunks", value);
     }
 
     private static Component formatKbpsAuto(int value) {

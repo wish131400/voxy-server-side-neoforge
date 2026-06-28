@@ -141,11 +141,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
         buf.writeLong(payload.columnTimestamp);
         buf.writeBoolean(payload.completeColumn);
-        LodByteCompression.Result encoded = payload.encodedSectionBytes != null
-                ? new LodByteCompression.Result(payload.encodedSectionBytes, payload.encodedCompression, payload.encodedRawSize)
-                : VSSServerConfig.CONFIG.enableNetworkColumnCompression
-                    ? LodByteCompression.compressForNetwork(payload.sectionBytes, payload.allowZstdEncoding)
-                    : LodByteCompression.Result.raw(payload.sectionBytes);
+        LodByteCompression.Result encoded = encodedForClient(payload);
         if (encoded.method() == LodByteCompression.METHOD_ZSTD && !payload.allowZstdEncoding) {
             throw new IllegalStateException("Cannot send Zstd LOD column to a client without Zstd capability");
         }
@@ -177,6 +173,27 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             throw new IllegalArgumentException("Invalid compressed voxel column payload", e);
         }
         return new VoxelColumnS2CPayload(requestId, cx, cz, dim, timestamp, sections, completeColumn);
+    }
+
+    private static LodByteCompression.Result encodedForClient(VoxelColumnS2CPayload payload) {
+        if (payload.encodedSectionBytes == null) {
+            return VSSServerConfig.CONFIG.enableNetworkColumnCompression
+                    ? LodByteCompression.compressForNetwork(payload.sectionBytes, payload.allowZstdEncoding)
+                    : LodByteCompression.Result.raw(payload.sectionBytes);
+        }
+
+        LodByteCompression.Result encoded = new LodByteCompression.Result(
+                payload.encodedSectionBytes,
+                payload.encodedCompression,
+                payload.encodedRawSize);
+        if (encoded.method() != LodByteCompression.METHOD_ZSTD || payload.allowZstdEncoding) {
+            return encoded;
+        }
+
+        byte[] sections = payload.decompressedSections();
+        return VSSServerConfig.CONFIG.enableNetworkColumnCompression
+                ? LodByteCompression.compressForNetwork(sections, false)
+                : LodByteCompression.Result.raw(sections);
     }
 
     private static int dimensionToOrdinal(ResourceKey<Level> dim) {

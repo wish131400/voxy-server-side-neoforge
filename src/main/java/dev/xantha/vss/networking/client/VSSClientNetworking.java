@@ -90,13 +90,8 @@ public final class VSSClientNetworking {
             discardSession();
             return;
         }
-        if (payload.enabled() && (payload.serverCapabilities() & VSSConstants.CAPABILITY_ZSTD_COLUMNS) == 0) {
-            VSSLogger.warn("VSS LOD session rejected: server does not advertise Zstd column support");
-            discardSession();
-            return;
-        }
-        if (payload.enabled() && !LodByteCompression.isZstdAvailable()) {
-            VSSLogger.warn("VSS LOD session rejected: client Zstd support is unavailable");
+        if (payload.enabled() && (payload.serverCapabilities() & VSSConstants.CAPABILITY_VOXEL_COLUMNS) == 0) {
+            VSSLogger.warn("VSS LOD session rejected: server does not advertise voxel column support");
             discardSession();
             return;
         }

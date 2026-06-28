@@ -6,14 +6,17 @@
   "compatibilityLevel": "JAVA_17",
   "mixins": [
     "ftbessentials.TeleportCommandsNoBlockingMixin",
+    "minecraft.ChunkMapEntityTrackingAccessor",
     "minecraft.LevelBlockEntityTickerCompactionMixin",
     "minecraft.LevelChunkClearBlockEntitiesMixin",
     "minecraft.LevelDirtyColumnMixin",
     "minecraft.LevelChunkDirtyColumnMixin",
-    "minecraft.LevelChunkRebindableTickerAccessor"
+    "minecraft.LevelChunkRebindableTickerAccessor",
+    "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
     "client.ClientChunkCacheDropMixin",
+    "client.ClientLevelFarPlayerLeaveEventMixin",
     "client.EntityFallFlyingFlagAccessorMixin",
     "client.LevelRendererFarPlayerChunkMixin",
     "voxy.ModelBakerySubsystemShutdownMixin",

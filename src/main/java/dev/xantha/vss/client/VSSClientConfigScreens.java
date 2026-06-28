@@ -14,6 +14,10 @@ public final class VSSClientConfigScreens {
     }
 
     private static Screen createConfigScreen(ModContainer container, Screen parent) {
+        Screen sodiumScreen = VSSVoxyOptionsIntegration.createSodiumConfigScreen(parent);
+        if (sodiumScreen != null) {
+            return sodiumScreen;
+        }
         return new VSSServerConfigScreen(parent, VSSServerConfig.CONFIG);
     }
 }

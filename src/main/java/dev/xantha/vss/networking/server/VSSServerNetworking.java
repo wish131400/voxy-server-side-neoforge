@@ -190,12 +190,14 @@ public final class VSSServerNetworking {
         return GENERATION_SERVICE.diagnostics();
     }
 
-    static String storageDiagnostics() {
-        return "diskReaders=" + DISK_READ_EXECUTOR.getCorePoolSize()
-                + ", diskReadQueue=" + DISK_READ_EXECUTOR.getQueue().size()
-                + ", diskWriteQueue=" + DISK_WRITE_EXECUTOR.getQueue().size()
-                + ", diskPending=" + pendingDiskReads.get()
-                + ", persistentWritePending=" + pendingPersistentWrites.get();
+    static Component storageDiagnostics() {
+        return Component.translatable(
+                "vss.command.storage.runtime",
+                DISK_READ_EXECUTOR.getCorePoolSize(),
+                DISK_READ_EXECUTOR.getQueue().size(),
+                DISK_WRITE_EXECUTOR.getQueue().size(),
+                pendingDiskReads.get(),
+                pendingPersistentWrites.get());
     }
 
     static Component generationDiagnosticsComponent() {
@@ -517,7 +519,7 @@ public final class VSSServerNetworking {
                                 cz,
                                 VSSServerConfig.CONFIG.diskReadTimeoutMillis);
                         if (rawDiskData != null && rawDiskData.sectionBytes() != null && rawDiskData.sizeBytes() > 0) {
-                            diskData = EncodedColumnData.encodeZstd(rawDiskData, columnTimestamp);
+                            diskData = EncodedColumnData.encode(rawDiskData, columnTimestamp);
                         }
                     } catch (Exception e) {
                         failed = true;
@@ -809,8 +811,7 @@ public final class VSSServerNetworking {
 
     private static boolean isCompatibleClient(int clientProtocolVersion, int clientCapabilities) {
         return clientProtocolVersion == VSSConstants.PROTOCOL_VERSION
-                && LodByteCompression.isZstdAvailable()
-                && (clientCapabilities & VSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0;
+                && (clientCapabilities & VSSConstants.CAPABILITY_VOXEL_COLUMNS) != 0;
     }
 
     private static void logIncompatibleClient(String name, int clientProtocolVersion, int clientCapabilities) {
@@ -819,12 +820,8 @@ public final class VSSServerNetworking {
                     + " (server requires " + VSSConstants.PROTOCOL_VERSION + ")");
             return;
         }
-        if (!LodByteCompression.isZstdAvailable()) {
-            VSSLogger.warn("VSS LOD sync disabled for " + name + ": server Zstd support is unavailable");
-            return;
-        }
-        if ((clientCapabilities & VSSConstants.CAPABILITY_ZSTD_COLUMNS) == 0) {
-            VSSLogger.warn("VSS LOD sync disabled for " + name + ": client does not advertise Zstd column support");
+        if ((clientCapabilities & VSSConstants.CAPABILITY_VOXEL_COLUMNS) == 0) {
+            VSSLogger.warn("VSS LOD sync disabled for " + name + ": client does not advertise voxel column support");
         }
     }
 

@@ -49,6 +49,7 @@ public final class FarPlayerBroadcaster {
     public static void onServerTick(ServerTickEvent.Post event) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         if (!config.enabled || !config.farPlayerSyncEnabled || !VSSServerNetworking.hasRegisteredPlayers()) {
+            NorthstarRocketCompat.removeAll();
             return;
         }
         if (++tickCounter < config.farPlayerSyncIntervalTicks) {
@@ -62,81 +63,90 @@ public final class FarPlayerBroadcaster {
     public static void onServerStopping(ServerStoppingEvent event) {
         tickCounter = 0;
         VEHICLE_SYNC_CACHES.clear();
+        NorthstarRocketCompat.removeAll();
     }
 
     private static void broadcast(MinecraftServer server, VSSServerConfig config) {
         List<ServerPlayer> players = server.getPlayerList().getPlayers();
         if (players.size() < 2) {
             VEHICLE_SYNC_CACHES.clear();
+            NorthstarRocketCompat.removeAll();
             return;
         }
         pruneVehicleCaches(players);
+        NorthstarRocketCompat.pruneViewers(players);
 
         double maxHorizontalDistanceSqr = square(config.lodDistanceChunks * 16.0D);
         for (ServerPlayer viewer : players) {
             if (!VSSServerNetworking.isRegistered(viewer)) {
+                NorthstarRocketCompat.clear(viewer);
                 continue;
             }
 
+            NorthstarRocketCompat.beginViewer(viewer);
             List<FarPlayersS2CPayload.Entry> entries = new ArrayList<>();
             int skippedUnavailable = 0;
             int skippedDistance = 0;
             int vehicleSnapshotsSent = 0;
-            for (ServerPlayer target : players) {
-                if (target == viewer) {
-                    continue;
-                }
-                if (target.isSpectator() || !target.serverLevel().dimension().equals(viewer.serverLevel().dimension())) {
-                    skippedUnavailable++;
-                    continue;
+            try {
+                for (ServerPlayer target : players) {
+                    if (target == viewer) {
+                        continue;
+                    }
+                    if (target.isSpectator() || !target.serverLevel().dimension().equals(viewer.serverLevel().dimension())) {
+                        skippedUnavailable++;
+                        continue;
+                    }
+
+                    double horizontalDistanceSqr = horizontalDistanceSqr(target, viewer);
+                    if (horizontalDistanceSqr > maxHorizontalDistanceSqr) {
+                        skippedDistance++;
+                        continue;
+                    }
+
+                    FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target);
+                    vehicleSnapshotsSent += vehicles.length;
+                    entries.add(new FarPlayersS2CPayload.Entry(
+                            target.getUUID(),
+                            target.getGameProfile().getName(),
+                            target.getX(),
+                            target.getY(),
+                            target.getZ(),
+                            target.getYRot(),
+                            target.getXRot(),
+                            target.getYHeadRot(),
+                            target.yBodyRot,
+                            target.isCrouching(),
+                            target.isSprinting(),
+                            syncedPose(target),
+                            orDefault(target.getMainArm(), HumanoidArm.RIGHT),
+                            target.isUsingItem(),
+                            target.isUsingItem() ? orDefault(target.getUsedItemHand(), InteractionHand.MAIN_HAND) : InteractionHand.MAIN_HAND,
+                            target.isUsingItem() ? target.getUseItemRemainingTicks() : 0,
+                            target.swinging,
+                            orDefault(target.swingingArm, InteractionHand.MAIN_HAND),
+                            target.isSwimming(),
+                            target.isInvisible(),
+                            target.isCurrentlyGlowing(),
+                            target.onGround(),
+                            target.isOnFire(),
+                            copyItem(target, EquipmentSlot.MAINHAND),
+                            copyItem(target, EquipmentSlot.OFFHAND),
+                            copyItem(target, EquipmentSlot.HEAD),
+                            copyItem(target, EquipmentSlot.CHEST),
+                            copyItem(target, EquipmentSlot.LEGS),
+                            copyItem(target, EquipmentSlot.FEET),
+                            vehicles));
+                    if (entries.size() >= VSSConstants.MAX_FAR_PLAYER_ENTRIES) {
+                        break;
+                    }
                 }
 
-                double horizontalDistanceSqr = horizontalDistanceSqr(target, viewer);
-                if (horizontalDistanceSqr > maxHorizontalDistanceSqr) {
-                    skippedDistance++;
-                    continue;
-                }
-
-                FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target);
-                vehicleSnapshotsSent += vehicles.length;
-                entries.add(new FarPlayersS2CPayload.Entry(
-                        target.getUUID(),
-                        target.getGameProfile().getName(),
-                        target.getX(),
-                        target.getY(),
-                        target.getZ(),
-                        target.getYRot(),
-                        target.getXRot(),
-                        target.getYHeadRot(),
-                        target.yBodyRot,
-                        target.isCrouching(),
-                        target.isSprinting(),
-                        orDefault(target.getPose(), Pose.STANDING),
-                        orDefault(target.getMainArm(), HumanoidArm.RIGHT),
-                        target.isUsingItem(),
-                        target.isUsingItem() ? orDefault(target.getUsedItemHand(), InteractionHand.MAIN_HAND) : InteractionHand.MAIN_HAND,
-                        target.isUsingItem() ? target.getUseItemRemainingTicks() : 0,
-                        target.swinging,
-                        orDefault(target.swingingArm, InteractionHand.MAIN_HAND),
-                        target.isSwimming(),
-                        target.isInvisible(),
-                        target.isCurrentlyGlowing(),
-                        target.onGround(),
-                        target.isOnFire(),
-                        copyItem(target, EquipmentSlot.MAINHAND),
-                        copyItem(target, EquipmentSlot.OFFHAND),
-                        copyItem(target, EquipmentSlot.HEAD),
-                        copyItem(target, EquipmentSlot.CHEST),
-                        copyItem(target, EquipmentSlot.LEGS),
-                        copyItem(target, EquipmentSlot.FEET),
-                        vehicles));
-                if (entries.size() >= VSSConstants.MAX_FAR_PLAYER_ENTRIES) {
-                    break;
-                }
+                VSSNetworking.sendToPlayer(viewer, safePayload(viewer, entries));
+                maybeLogBroadcast(viewer, players.size(), entries.size(), vehicleSnapshotsSent, skippedUnavailable, skippedDistance);
+            } finally {
+                NorthstarRocketCompat.finishViewer(viewer);
             }
-
-            VSSNetworking.sendToPlayer(viewer, safePayload(viewer, entries));
-            maybeLogBroadcast(viewer, players.size(), entries.size(), vehicleSnapshotsSent, skippedUnavailable, skippedDistance);
         }
     }
 
@@ -234,6 +244,7 @@ public final class FarPlayerBroadcaster {
                     vehicle.onFire(),
                     vehicle.invisible(),
                     vehicle.glowing(),
+                    vehicle.rocketFinalLiftVelocity(),
                     false,
                     null,
                     new byte[0]));
@@ -314,6 +325,14 @@ public final class FarPlayerBroadcaster {
         return value != null ? value : fallback;
     }
 
+    private static Pose syncedPose(ServerPlayer player) {
+        Pose pose = orDefault(player.getPose(), Pose.STANDING);
+        if (pose == Pose.FALL_FLYING && !player.isFallFlying()) {
+            return Pose.STANDING;
+        }
+        return pose;
+    }
+
     private static ItemStack copyItem(ServerPlayer player, EquipmentSlot slot) {
         ItemStack stack = player.getItemBySlot(slot);
         return stack != null ? stack.copy() : ItemStack.EMPTY;
@@ -325,6 +344,8 @@ public final class FarPlayerBroadcaster {
             clearVehicleCache(viewer, target);
             return new FarPlayersS2CPayload.VehicleSnapshot[0];
         }
+
+        NorthstarRocketCompat.sync(viewer, target, chain);
 
         VehicleSyncCache cache = vehicleCache(viewer, target);
         long now = System.nanoTime();
@@ -398,6 +419,7 @@ public final class FarPlayerBroadcaster {
                 vehicle.isOnFire(),
                 vehicle.isInvisible(),
                 vehicle.isCurrentlyGlowing(),
+                NorthstarRocketCompat.finalLiftVelocity(vehicle),
                 fullData,
                 fullData ? captureEntityData(vehicle) : null,
                 fullData ? captureSpawnData(vehicle) : new byte[0]);

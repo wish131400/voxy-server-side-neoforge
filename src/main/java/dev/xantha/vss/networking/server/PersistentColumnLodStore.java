@@ -87,7 +87,7 @@ final class PersistentColumnLodStore {
                     || storedCz != cz
                     || !completeColumn
                     || timestamp < minimumTimestamp
-                    || method != LodByteCompression.METHOD_ZSTD
+                    || !isReadableCompression(method)
                     || rawSize <= 0
                     || rawSize > MAX_COLUMN_BYTES
                     || schemaVersion != EncodedColumnData.SCHEMA_VERSION
@@ -129,7 +129,7 @@ final class PersistentColumnLodStore {
                 || columnData == null
                 || columnData.encodedBytes() == null
                 || !columnData.completeColumn()
-                || columnData.compression() != LodByteCompression.METHOD_ZSTD
+                || !isPersistentCompression(columnData.compression())
                 || columnData.rawSize() <= 0
                 || columnData.rawSize() > MAX_COLUMN_BYTES
                 || columnData.encodedBytes().length <= 0
@@ -191,6 +191,16 @@ final class PersistentColumnLodStore {
                 invalidations,
                 cleanupRuns,
                 cleanupDeleted);
+    }
+
+    private static boolean isReadableCompression(int method) {
+        return method == LodByteCompression.METHOD_DEFLATE
+                || method == LodByteCompression.METHOD_ZSTD && LodByteCompression.isZstdAvailable();
+    }
+
+    private static boolean isPersistentCompression(int method) {
+        return method == LodByteCompression.METHOD_DEFLATE
+                || method == LodByteCompression.METHOD_ZSTD;
     }
 
     private void cleanupIfNeeded(MinecraftServer server) {

@@ -13,12 +13,12 @@ public record EncodedColumnData(
         boolean completeColumn) {
     public static final int SCHEMA_VERSION = 1;
 
-    public static EncodedColumnData encodeZstd(LoadedColumnData rawColumn, long columnStamp) throws IOException {
+    public static EncodedColumnData encode(LoadedColumnData rawColumn, long columnStamp) throws IOException {
         if (rawColumn == null || rawColumn.sectionBytes() == null) {
             throw new IOException("Missing raw LOD column data");
         }
 
-        LodByteCompression.Result encoded = LodByteCompression.compressZstdRequired(rawColumn.sectionBytes());
+        LodByteCompression.Result encoded = LodByteCompression.compressForStorage(rawColumn.sectionBytes());
         return new EncodedColumnData(
                 rawColumn.chunkX(),
                 rawColumn.chunkZ(),
@@ -28,6 +28,10 @@ public record EncodedColumnData(
                 columnStamp,
                 SCHEMA_VERSION,
                 rawColumn.completeColumn());
+    }
+
+    public static EncodedColumnData encodeZstd(LoadedColumnData rawColumn, long columnStamp) throws IOException {
+        return encode(rawColumn, columnStamp);
     }
 
     public EncodedColumnData withColumnStamp(long columnStamp) {

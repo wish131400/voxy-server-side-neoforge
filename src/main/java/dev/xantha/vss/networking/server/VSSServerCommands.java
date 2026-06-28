@@ -217,6 +217,19 @@ public final class VSSServerCommands {
                                         .executes(context -> setDiskReaders(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "threads"))))))
+                .then(Commands.literal("存储")
+                        .executes(context -> showStorage(context.getSource()))
+                        .then(Commands.literal("查看")
+                                .executes(context -> showStorage(context.getSource())))
+                        .then(Commands.literal("设置读盘线程")
+                                .then(Commands.argument(
+                                                "线程数",
+                                                IntegerArgumentType.integer(
+                                                        VSSServerConfig.MIN_DISK_READER_THREADS,
+                                                        VSSServerConfig.MAX_DISK_READER_THREADS))
+                                        .executes(context -> setDiskReaders(
+                                                context.getSource(),
+                                                IntegerArgumentType.getInteger(context, "线程数"))))))
                 .then(Commands.literal("generation")
                         .executes(context -> showGeneration(context.getSource()))
                         .then(Commands.literal("get")
