@@ -89,7 +89,7 @@ Current defaults are tuned for low bandwidth and moderate memory use:
 | --- | ---: |
 | Server LOD distance | `128` chunks |
 | Per-player bandwidth | `500 Kbps` |
-| Per-player send queue | `256` columns / `4 MiB` |
+| Per-player send queue | `512` columns / `8 MiB` |
 | Existing LOD request rate | `16` columns/s |
 | Existing LOD request concurrency | `16` |
 | Missing LOD generation rate | `8` columns/s |
@@ -309,7 +309,7 @@ saves/New World/data/vss-column-cache/minecraft_overworld/0_0/12_8.vcl
 | --- | ---: |
 | 服务端 LOD 距离 | `128` chunks |
 | 每玩家带宽 | `500 Kbps` |
-| 每玩家发送队列 | `256` columns / `4 MiB` |
+| 每玩家发送队列 | `512` columns / `8 MiB` |
 | 已有 LOD 请求速率 | `16` columns/s |
 | 已有 LOD 请求并发 | `16` |
 | 缺失 LOD 生成速率 | `8` columns/s |
