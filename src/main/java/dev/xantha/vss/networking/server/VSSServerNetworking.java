@@ -62,10 +62,9 @@ public final class VSSServerNetworking {
     private static volatile long lastSendDiagnosticNanos;
     private static volatile boolean serverStopping;
     private static boolean idleMemoryReleased = true;
-    private static final ThreadPoolExecutor DISK_READ_EXECUTOR = createDiskExecutor(
-            "VSS-DiskReader",
-            VSSServerConfig.CONFIG.diskReaderThreads);
-    private static final ThreadPoolExecutor DISK_WRITE_EXECUTOR = createDiskExecutor("VSS-DiskWriter", 1);
+    private static final Object DISK_EXECUTOR_LOCK = new Object();
+    private static volatile ThreadPoolExecutor diskReadExecutor;
+    private static volatile ThreadPoolExecutor diskWriteExecutor;
 
     private VSSServerNetworking() {
     }
@@ -91,22 +90,105 @@ public final class VSSServerNetworking {
         return executor;
     }
 
+    private static ThreadPoolExecutor diskReadExecutor() {
+        return diskExecutor(true);
+    }
+
+    private static ThreadPoolExecutor diskWriteExecutor() {
+        return diskExecutor(false);
+    }
+
+    private static ThreadPoolExecutor diskExecutor(boolean readExecutor) {
+        ThreadPoolExecutor executor = readExecutor ? diskReadExecutor : diskWriteExecutor;
+        if (isExecutorRunning(executor)) {
+            return executor;
+        }
+        if (serverStopping) {
+            throw new RejectedExecutionException("VSS server is stopping");
+        }
+        synchronized (DISK_EXECUTOR_LOCK) {
+            executor = readExecutor ? diskReadExecutor : diskWriteExecutor;
+            if (isExecutorRunning(executor)) {
+                return executor;
+            }
+            ThreadPoolExecutor created = readExecutor
+                    ? createDiskExecutor("VSS-DiskReader", VSSServerConfig.CONFIG.diskReaderThreads)
+                    : createDiskExecutor("VSS-DiskWriter", 1);
+            if (readExecutor) {
+                diskReadExecutor = created;
+            } else {
+                diskWriteExecutor = created;
+            }
+            return created;
+        }
+    }
+
+    private static boolean isExecutorRunning(ThreadPoolExecutor executor) {
+        return executor != null && !executor.isShutdown() && !executor.isTerminated();
+    }
+
+    private static void restartDiskExecutors() {
+        ThreadPoolExecutor oldRead;
+        ThreadPoolExecutor oldWrite;
+        synchronized (DISK_EXECUTOR_LOCK) {
+            oldRead = diskReadExecutor;
+            oldWrite = diskWriteExecutor;
+            diskReadExecutor = createDiskExecutor("VSS-DiskReader", VSSServerConfig.CONFIG.diskReaderThreads);
+            diskWriteExecutor = createDiskExecutor("VSS-DiskWriter", 1);
+        }
+        shutdownDiskExecutor(oldRead);
+        shutdownDiskExecutor(oldWrite);
+    }
+
+    private static void shutdownDiskExecutors() {
+        ThreadPoolExecutor oldRead;
+        ThreadPoolExecutor oldWrite;
+        synchronized (DISK_EXECUTOR_LOCK) {
+            oldRead = diskReadExecutor;
+            oldWrite = diskWriteExecutor;
+            diskReadExecutor = null;
+            diskWriteExecutor = null;
+        }
+        shutdownDiskExecutor(oldRead);
+        shutdownDiskExecutor(oldWrite);
+    }
+
+    private static void shutdownDiskExecutor(ThreadPoolExecutor executor) {
+        if (executor == null) {
+            return;
+        }
+        executor.getQueue().clear();
+        executor.shutdownNow();
+    }
+
+    private static int diskExecutorThreads(ThreadPoolExecutor executor) {
+        return isExecutorRunning(executor) ? executor.getCorePoolSize() : 0;
+    }
+
+    private static int diskExecutorQueueSize(ThreadPoolExecutor executor) {
+        return executor != null ? executor.getQueue().size() : 0;
+    }
+
     private static void resizeDiskReadExecutor() {
+        if (serverStopping) {
+            return;
+        }
         int desiredThreads = Math.max(
                 VSSServerConfig.MIN_DISK_READER_THREADS,
                 Math.min(VSSServerConfig.MAX_DISK_READER_THREADS, VSSServerConfig.CONFIG.diskReaderThreads));
-        int currentThreads = DISK_READ_EXECUTOR.getCorePoolSize();
+        ThreadPoolExecutor executor = diskReadExecutor();
+        int currentThreads = executor.getCorePoolSize();
         if (currentThreads == desiredThreads) {
             return;
         }
         if (desiredThreads > currentThreads) {
-            DISK_READ_EXECUTOR.setMaximumPoolSize(desiredThreads);
-            DISK_READ_EXECUTOR.setCorePoolSize(desiredThreads);
+            executor.setMaximumPoolSize(desiredThreads);
+            executor.setCorePoolSize(desiredThreads);
         } else {
-            DISK_READ_EXECUTOR.setCorePoolSize(desiredThreads);
-            DISK_READ_EXECUTOR.setMaximumPoolSize(desiredThreads);
+            executor.setCorePoolSize(desiredThreads);
+            executor.setMaximumPoolSize(desiredThreads);
         }
-        DISK_READ_EXECUTOR.prestartAllCoreThreads();
+        executor.prestartAllCoreThreads();
         VSSLogger.info("VSS disk reader threads resized to " + desiredThreads);
     }
 
@@ -191,11 +273,13 @@ public final class VSSServerNetworking {
     }
 
     static Component storageDiagnostics() {
+        ThreadPoolExecutor readExecutor = diskReadExecutor;
+        ThreadPoolExecutor writeExecutor = diskWriteExecutor;
         return Component.translatable(
                 "vss.command.storage.runtime",
-                DISK_READ_EXECUTOR.getCorePoolSize(),
-                DISK_READ_EXECUTOR.getQueue().size(),
-                DISK_WRITE_EXECUTOR.getQueue().size(),
+                diskExecutorThreads(readExecutor),
+                diskExecutorQueueSize(readExecutor),
+                diskExecutorQueueSize(writeExecutor),
                 pendingDiskReads.get(),
                 pendingPersistentWrites.get());
     }
@@ -491,7 +575,7 @@ public final class VSSServerNetworking {
         try {
             totalDiskReadsSubmitted.incrementAndGet();
             pendingDiskReads.incrementAndGet();
-            DISK_READ_EXECUTOR.execute(() -> {
+            diskReadExecutor().execute(() -> {
                 if (serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
                     decrementPendingDiskReads();
                     return;
@@ -724,7 +808,7 @@ public final class VSSServerNetworking {
         long lifecycleEpoch = serverLifecycleEpoch.get();
         pendingPersistentWrites.incrementAndGet();
         try {
-            DISK_WRITE_EXECUTOR.execute(() -> {
+            diskWriteExecutor().execute(() -> {
                 try {
                     if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
                         PERSISTENT_COLUMN_STORE.write(server, dimension, columnData);
@@ -745,7 +829,7 @@ public final class VSSServerNetworking {
         }
         long lifecycleEpoch = serverLifecycleEpoch.get();
         try {
-            DISK_WRITE_EXECUTOR.execute(() -> {
+            diskWriteExecutor().execute(() -> {
                 if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
                     PERSISTENT_COLUMN_STORE.invalidate(server, dimension, cx, cz);
                 }
@@ -1007,14 +1091,13 @@ public final class VSSServerNetworking {
     public static void onServerStarting(ServerStartingEvent event) {
         serverLifecycleEpoch.incrementAndGet();
         serverStopping = false;
+        restartDiskExecutors();
         applyRuntimeConfig();
         idleMemoryReleased = true;
         PLAYER_STATES.clear();
         DirtyColumnBroadcaster.clear();
         COLUMN_CACHE.clear();
         PERSISTENT_COLUMN_STORE.clearMemory();
-        DISK_READ_EXECUTOR.getQueue().clear();
-        DISK_WRITE_EXECUTOR.getQueue().clear();
         pendingDiskReads.set(0);
         pendingPersistentWrites.set(0);
     }
@@ -1023,8 +1106,7 @@ public final class VSSServerNetworking {
     public static void onServerStopping(ServerStoppingEvent event) {
         serverStopping = true;
         serverLifecycleEpoch.incrementAndGet();
-        DISK_READ_EXECUTOR.getQueue().clear();
-        DISK_WRITE_EXECUTOR.getQueue().clear();
+        shutdownDiskExecutors();
         pendingDiskReads.set(0);
         pendingPersistentWrites.set(0);
         for (PlayerRequestState state : PLAYER_STATES.values()) {

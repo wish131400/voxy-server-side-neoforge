@@ -6,6 +6,7 @@ import java.lang.reflect.Method;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.locks.Lock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
@@ -19,16 +20,31 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(targets = "me.cortex.voxy.client.core.model.ModelFactory", remap = false)
 public abstract class ModelFactoryFluidBakeOrderMixin {
     @Unique
+    private static final int vss$AIR_BLOCK_STATE_ID = 0;
+
+    @Unique
     private static final Set<Integer> vss$loggedFluidDefers = ConcurrentHashMap.newKeySet();
 
     @Unique
+    private static final Set<Integer> vss$loggedSelfFluidFallbacks = ConcurrentHashMap.newKeySet();
+
+    @Unique
     private static volatile boolean vss$loggedCompatReflectionFailure;
+
+    @Unique
+    private boolean vss$addingFluidDependency;
 
     @Unique
     private Field vss$bakeQueueField;
 
     @Unique
     private Field vss$idMappingsField;
+
+    @Unique
+    private Field vss$blockStatesInFlightField;
+
+    @Unique
+    private Field vss$blockStatesInFlightLockField;
 
     @Unique
     private Field vss$mapperField;
@@ -47,6 +63,9 @@ public abstract class ModelFactoryFluidBakeOrderMixin {
 
     @Inject(method = "processModelResult", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
     private void vss$deferWaterloggedBakeUntilFluidModelExists(CallbackInfoReturnable<Boolean> cir) {
+        if (this.vss$addingFluidDependency) {
+            return;
+        }
         try {
             ConcurrentLinkedDeque bakeQueue = vss$getBakeQueue();
             Object bake = bakeQueue.peek();
@@ -59,29 +78,73 @@ public abstract class ModelFactoryFluidBakeOrderMixin {
                 return;
             }
 
+            int blockId = vss$getBakeBlockId(bake);
             int fluidStateId = vss$getBlockStateId(state.getFluidState().createLegacyBlock());
             int[] idMappings = vss$getIdMappings();
             if (fluidStateId < 0 || fluidStateId >= idMappings.length || idMappings[fluidStateId] != -1) {
                 return;
             }
 
-            vss$addEntry(fluidStateId);
-            Object deferred = bakeQueue.poll();
-            if (deferred != null) {
-                bakeQueue.add(deferred);
+            if (fluidStateId == blockId) {
+                if (vss$mapSelfDependentFluidToFallback(bakeQueue, bake, blockId, state, idMappings)) {
+                    cir.setReturnValue(!bakeQueue.isEmpty());
+                } else {
+                    cir.setReturnValue(false);
+                }
+                return;
             }
 
-            int blockId = vss$getBakeBlockId(bake);
+            this.vss$addingFluidDependency = true;
+            try {
+                vss$addEntry(fluidStateId);
+            } finally {
+                this.vss$addingFluidDependency = false;
+            }
+
+            Object deferred = bakeQueue.peek() == bake ? bakeQueue.poll() : null;
+            if (deferred != null) {
+                bakeQueue.add(deferred);
+            } else {
+                return;
+            }
+
             if (vss$loggedFluidDefers.add(blockId)) {
                 VSSLogger.debug("Deferred Voxy LOD model bake until its fluid model is ready: " + state);
             }
-            cir.setReturnValue(!bakeQueue.isEmpty());
+            cir.setReturnValue(false);
         } catch (Throwable t) {
             if (!vss$loggedCompatReflectionFailure) {
                 vss$loggedCompatReflectionFailure = true;
                 VSSLogger.warn("VSS Voxy fluid bake-order compat failed; falling back to Voxy default behavior", t);
             }
         }
+    }
+
+    @Unique
+    private boolean vss$mapSelfDependentFluidToFallback(ConcurrentLinkedDeque bakeQueue, Object bake, int blockId, BlockState state, int[] idMappings)
+            throws ReflectiveOperationException {
+        if (vss$AIR_BLOCK_STATE_ID >= idMappings.length || idMappings[vss$AIR_BLOCK_STATE_ID] == -1) {
+            Object deferred = bakeQueue.peek() == bake ? bakeQueue.poll() : null;
+            if (deferred != null) {
+                bakeQueue.add(deferred);
+            }
+            if (vss$loggedFluidDefers.add(blockId)) {
+                VSSLogger.debug("Deferred self-dependent Voxy fluid LOD model until fallback model is ready: " + state);
+            }
+            return false;
+        }
+
+        Object removed = bakeQueue.peek() == bake ? bakeQueue.poll() : null;
+        if (removed == null) {
+            return false;
+        }
+
+        idMappings[blockId] = idMappings[vss$AIR_BLOCK_STATE_ID];
+        vss$removeInFlight(blockId);
+        if (vss$loggedSelfFluidFallbacks.add(blockId)) {
+            VSSLogger.warn("Mapped self-dependent Voxy fluid LOD model to transparent fallback to avoid a bake loop: " + state);
+        }
+        return true;
     }
 
     @Unique
@@ -103,6 +166,22 @@ public abstract class ModelFactoryFluidBakeOrderMixin {
             this.vss$idMappingsField = vss$field("idMappings");
         }
         return (int[]) this.vss$idMappingsField.get(this);
+    }
+
+    @Unique
+    private Object vss$getBlockStatesInFlight() throws ReflectiveOperationException {
+        if (this.vss$blockStatesInFlightField == null) {
+            this.vss$blockStatesInFlightField = vss$field("blockStatesInFlight");
+        }
+        return this.vss$blockStatesInFlightField.get(this);
+    }
+
+    @Unique
+    private Lock vss$getBlockStatesInFlightLock() throws ReflectiveOperationException {
+        if (this.vss$blockStatesInFlightLockField == null) {
+            this.vss$blockStatesInFlightLockField = vss$field("blockStatesInFlightLock");
+        }
+        return (Lock) this.vss$blockStatesInFlightLockField.get(this);
     }
 
     @Unique
@@ -146,6 +225,19 @@ public abstract class ModelFactoryFluidBakeOrderMixin {
             this.vss$mapperGetIdForBlockStateMethod.setAccessible(true);
         }
         return (Integer) this.vss$mapperGetIdForBlockStateMethod.invoke(vss$getMapper(), state);
+    }
+
+    @Unique
+    private void vss$removeInFlight(int blockId) throws ReflectiveOperationException {
+        Lock lock = vss$getBlockStatesInFlightLock();
+        lock.lock();
+        try {
+            Method remove = vss$getBlockStatesInFlight().getClass().getMethod("remove", int.class);
+            remove.setAccessible(true);
+            remove.invoke(vss$getBlockStatesInFlight(), blockId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Unique
