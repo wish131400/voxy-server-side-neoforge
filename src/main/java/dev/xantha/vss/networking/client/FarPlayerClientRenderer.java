@@ -69,6 +69,7 @@ public final class FarPlayerClientRenderer {
     private static final int VEHICLE_ENTITY_ID_BASE = -1_500_000_000;
     private static final ResourceLocation NORTHSTAR_ROCKET_CONTRAPTION = ResourceLocation.fromNamespaceAndPath("northstar", "rocket_contraption");
     private static final Map<UUID, FarPlayerState> FAR_PLAYERS = new HashMap<>();
+    private static final Map<VehicleKey, FarVehicleState> FAR_VEHICLES = new HashMap<>();
     private static final Set<ResourceLocation> FAILED_VEHICLE_TYPES = new HashSet<>();
     private static long nextClientDiagnosticNanos;
     private static boolean manualFarPlayerRender;
@@ -88,6 +89,10 @@ public final class FarPlayerClientRenderer {
         Set<UUID> seen = new HashSet<>();
         for (FarPlayersS2CPayload.Entry entry : payload.entries()) {
             if (entry.uuid().equals(localPlayer.getUUID())) {
+                FarPlayerState selfState = FAR_PLAYERS.remove(entry.uuid());
+                if (selfState != null) {
+                    selfState.removeAll();
+                }
                 continue;
             }
             seen.add(entry.uuid());
@@ -116,6 +121,7 @@ public final class FarPlayerClientRenderer {
             state.removeAll();
         }
         FAR_PLAYERS.clear();
+        clearSharedVehicles();
     }
 
     public static boolean isSyntheticFarPlayer(Entity entity) {
@@ -167,6 +173,7 @@ public final class FarPlayerClientRenderer {
         }
 
         long now = System.nanoTime();
+        Set<FarVehicleState> tickedVehicles = new HashSet<>();
         Iterator<Map.Entry<UUID, FarPlayerState>> iterator = FAR_PLAYERS.entrySet().iterator();
         while (iterator.hasNext()) {
             FarPlayerState state = iterator.next().getValue();
@@ -178,7 +185,7 @@ public final class FarPlayerClientRenderer {
 
             if (state.level == level) {
                 state.ensureEntityState(level);
-                state.tickAnimation(now);
+                state.tickAnimation(now, tickedVehicles);
             }
         }
     }
@@ -200,9 +207,10 @@ public final class FarPlayerClientRenderer {
         }
 
         long now = System.nanoTime();
+        Set<FarVehicleState> appliedVehicles = new HashSet<>();
         for (FarPlayerState state : FAR_PLAYERS.values()) {
             if (state.level == level && state.hasRenderableObjects(level)) {
-                state.apply(now);
+                state.apply(now, appliedVehicles);
             }
         }
     }
@@ -225,10 +233,12 @@ public final class FarPlayerClientRenderer {
         RenderSystem.depthMask(true);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         try {
+            Set<FarVehicleState> appliedVehicles = new HashSet<>();
+            Set<FarVehicleState> renderedVehicles = new HashSet<>();
             for (FarPlayerState state : FAR_PLAYERS.values()) {
                 if (state.level == level && state.hasRenderableObjects(level)) {
-                    state.apply(now);
-                    state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition);
+                    state.apply(now, appliedVehicles);
+                    state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition, renderedVehicles);
                     renderedAny = true;
                 }
             }
@@ -268,6 +278,39 @@ public final class FarPlayerClientRenderer {
 
     private static UUID farVehicleSyntheticUuid(int sourceEntityId, int index, ResourceLocation entityTypeId) {
         return UUID.nameUUIDFromBytes(("vss:far-player-vehicle:" + sourceEntityId + ":" + index + ":" + entityTypeId).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static FarVehicleState acquireVehicle(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot, int index) {
+        VehicleKey key = new VehicleKey(snapshot.sourceEntityId(), snapshot.entityTypeId(), index);
+        FarVehicleState state = FAR_VEHICLES.get(key);
+        if (state != null && !state.canReuse(level)) {
+            FAR_VEHICLES.remove(key);
+            state.remove();
+            state = null;
+        }
+        if (state == null) {
+            state = new FarVehicleState(key);
+            FAR_VEHICLES.put(key, state);
+        }
+        state.retain();
+        return state;
+    }
+
+    private static void releaseVehicle(FarVehicleState state) {
+        if (state == null) {
+            return;
+        }
+        if (state.release()) {
+            FAR_VEHICLES.remove(state.key(), state);
+            state.remove();
+        }
+    }
+
+    private static void clearSharedVehicles() {
+        for (FarVehicleState vehicle : FAR_VEHICLES.values()) {
+            vehicle.remove();
+        }
+        FAR_VEHICLES.clear();
     }
 
     private static boolean isNorthstarRocket(ResourceLocation entityTypeId) {
@@ -319,7 +362,11 @@ public final class FarPlayerClientRenderer {
             if (state.hasRenderablePlayer(Minecraft.getInstance().level)) {
                 activeEntities++;
             }
-            activeVehicles += state.activeVehicleCount();
+        }
+        for (FarVehicleState vehicle : FAR_VEHICLES.values()) {
+            if (vehicle.isRenderable()) {
+                activeVehicles++;
+            }
         }
         nextClientDiagnosticNanos = now + DIAGNOSTIC_INTERVAL_NANOS;
         VSSLogger.debug("Far players received: entries=" + receivedEntries
@@ -402,6 +449,11 @@ public final class FarPlayerClientRenderer {
             }
 
             lastEntry = entry;
+            if (isInsideVanillaHandoffRange(newLevel)) {
+                removeAll();
+                lastSeenNanos = now;
+                return;
+            }
             ensureEntityState(newLevel);
             updateVehicles(newLevel, entry.vehicles(), now);
             applyStateFlags(entry);
@@ -516,11 +568,19 @@ public final class FarPlayerClientRenderer {
                     + player.getBlockX() + "," + player.getBlockY() + "," + player.getBlockZ());
         }
 
-        private void renderManually(PoseStack poseStack, MultiBufferSource.BufferSource buffers, float partialTick, Vec3 cameraPosition) {
+        private void renderManually(
+                PoseStack poseStack,
+                MultiBufferSource.BufferSource buffers,
+                float partialTick,
+                Vec3 cameraPosition,
+                Set<FarVehicleState> renderedVehicles) {
             manualFarPlayerRender = true;
             try {
                 for (int i = vehicles.size() - 1; i >= 0; i--) {
-                    vehicles.get(i).renderManually(poseStack, buffers, partialTick, cameraPosition);
+                    FarVehicleState vehicle = vehicles.get(i);
+                    if (renderedVehicles.add(vehicle)) {
+                        vehicle.renderManually(poseStack, buffers, partialTick, cameraPosition);
+                    }
                 }
                 if (player == null || player.isRemoved()) {
                     return;
@@ -566,14 +626,16 @@ public final class FarPlayerClientRenderer {
                 player.stopRiding();
             }
             for (FarVehicleState vehicle : vehicles) {
-                vehicle.remove();
+                releaseVehicle(vehicle);
             }
             vehicles.clear();
         }
 
-        private void tickAnimation(long now) {
+        private void tickAnimation(long now, Set<FarVehicleState> tickedVehicles) {
             for (FarVehicleState vehicle : vehicles) {
-                vehicle.tick();
+                if (tickedVehicles.add(vehicle)) {
+                    vehicle.tick();
+                }
             }
             if (player == null || player.isRemoved()) {
                 return;
@@ -601,9 +663,11 @@ public final class FarPlayerClientRenderer {
             hasAnimationPosition = true;
         }
 
-        private void apply(long now) {
+        private void apply(long now, Set<FarVehicleState> appliedVehicles) {
             for (FarVehicleState vehicle : vehicles) {
-                vehicle.apply(now);
+                if (appliedVehicles.add(vehicle)) {
+                    vehicle.apply(now);
+                }
             }
             if (player == null || player.isRemoved()) {
                 return;
@@ -712,24 +776,25 @@ public final class FarPlayerClientRenderer {
             }
 
             while (vehicles.size() > snapshots.length) {
-                vehicles.remove(vehicles.size() - 1).remove();
+                releaseVehicle(vehicles.remove(vehicles.size() - 1));
             }
 
             for (int i = 0; i < snapshots.length; i++) {
                 FarPlayersS2CPayload.VehicleSnapshot snapshot = snapshots[i];
                 if (snapshot == null || snapshot.entityTypeId() == null) {
                     while (vehicles.size() > i) {
-                        vehicles.remove(vehicles.size() - 1).remove();
+                        releaseVehicle(vehicles.remove(vehicles.size() - 1));
                     }
                     break;
                 }
 
-                FarVehicleState vehicleState;
+                FarVehicleState vehicleState = acquireVehicle(currentLevel, snapshot, i);
                 if (vehicles.size() <= i) {
-                    vehicleState = new FarVehicleState(i);
                     vehicles.add(vehicleState);
+                } else if (vehicles.get(i) != vehicleState) {
+                    releaseVehicle(vehicles.set(i, vehicleState));
                 } else {
-                    vehicleState = vehicles.get(i);
+                    releaseVehicle(vehicleState);
                 }
                 vehicleState.update(currentLevel, snapshot, now, lastSeenNanos);
             }
@@ -854,7 +919,9 @@ public final class FarPlayerClientRenderer {
     }
 
     private static final class FarVehicleState {
-        private final int index;
+        private final VehicleKey key;
+        private int references;
+        private ClientLevel level;
         private Entity vehicle;
         private ResourceLocation vehicleTypeId;
         private boolean externalEntity;
@@ -877,8 +944,27 @@ public final class FarPlayerClientRenderer {
         private float rocketFinalLiftVelocity;
         private int rocketParticleTicks;
 
-        private FarVehicleState(int index) {
-            this.index = index;
+        private FarVehicleState(VehicleKey key) {
+            this.key = key;
+        }
+
+        private VehicleKey key() {
+            return key;
+        }
+
+        private boolean canReuse(ClientLevel currentLevel) {
+            return level == null || level == currentLevel;
+        }
+
+        private void retain() {
+            references++;
+        }
+
+        private boolean release() {
+            if (references > 0) {
+                references--;
+            }
+            return references == 0;
         }
 
         private Entity entity() {
@@ -890,12 +976,14 @@ public final class FarPlayerClientRenderer {
         }
 
         private void update(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot, long now, long lastSeenNanos) {
-            boolean needsCreate = vehicle == null
+            boolean needsCreate = this.level != level
+                    || vehicle == null
                     || vehicle.isRemoved()
                     || !snapshot.entityTypeId().equals(vehicleTypeId)
                     || (externalEntity && vehicle.getId() != snapshot.sourceEntityId());
             if (needsCreate) {
                 remove();
+                this.level = level;
                 create(level, snapshot);
                 snapTo(snapshot);
             } else {
@@ -933,17 +1021,22 @@ public final class FarPlayerClientRenderer {
 
         private void create(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot) {
             rocketParticleTicks = 0;
-            if (isNorthstarRocket(snapshot.entityTypeId())) {
-                vehicle = level.getEntity(snapshot.sourceEntityId());
+            Entity existingVehicle = level.getEntity(snapshot.sourceEntityId());
+            ResourceLocation existingTypeId = existingVehicle == null
+                    ? null
+                    : BuiltInRegistries.ENTITY_TYPE.getKey(existingVehicle.getType());
+            if (existingVehicle != null
+                    && !existingVehicle.isRemoved()
+                    && snapshot.entityTypeId().equals(existingTypeId)) {
+                vehicle = existingVehicle;
                 vehicleTypeId = snapshot.entityTypeId();
-                externalEntity = vehicle != null && !vehicle.isRemoved();
-                if (externalEntity) {
-                    vehicle.noCulling = true;
-                    return;
-                }
-                vehicle = null;
-                vehicleTypeId = null;
+                externalEntity = true;
+                vehicle.noCulling = true;
+                return;
             }
+            vehicle = null;
+            vehicleTypeId = null;
+            externalEntity = false;
 
             EntityType<?> type = BuiltInRegistries.ENTITY_TYPE.getOptional(snapshot.entityTypeId()).orElse(null);
             if (type == null) {
@@ -1014,8 +1107,8 @@ public final class FarPlayerClientRenderer {
             if (externalEntity) {
                 return;
             }
-            vehicle.setId(farVehicleEntityId(snapshot.sourceEntityId(), index));
-            vehicle.setUUID(farVehicleSyntheticUuid(snapshot.sourceEntityId(), index, snapshot.entityTypeId()));
+            vehicle.setId(farVehicleEntityId(snapshot.sourceEntityId(), key.index()));
+            vehicle.setUUID(farVehicleSyntheticUuid(snapshot.sourceEntityId(), key.index(), snapshot.entityTypeId()));
             vehicle.setNoGravity(true);
             vehicle.noCulling = true;
         }
@@ -1038,6 +1131,10 @@ public final class FarPlayerClientRenderer {
         private void apply(long now) {
             VehiclePoseSample sample = sample(now);
             if (vehicle == null || vehicle.isRemoved() || sample == null) {
+                return;
+            }
+            if (externalEntity) {
+                vehicle.noCulling = true;
                 return;
             }
             double oldX = vehicle.getX();
@@ -1063,10 +1160,6 @@ public final class FarPlayerClientRenderer {
             if (vehicle instanceof LivingEntity livingEntity) {
                 livingEntity.setYBodyRot(sample.bodyYaw);
                 livingEntity.setYHeadRot(sample.headYaw);
-            }
-            if (externalEntity) {
-                vehicle.noCulling = true;
-                vehicle.setDeltaMovement(sample.x - oldX, sample.y - oldY, sample.z - oldZ);
             }
         }
 
@@ -1127,7 +1220,7 @@ public final class FarPlayerClientRenderer {
         }
 
         private void renderManually(PoseStack poseStack, MultiBufferSource.BufferSource buffers, float partialTick, Vec3 cameraPosition) {
-            if (vehicle == null || vehicle.isRemoved()) {
+            if (vehicle == null || vehicle.isRemoved() || externalEntity) {
                 return;
             }
             Minecraft.getInstance().getEntityRenderDispatcher().render(
@@ -1159,6 +1252,7 @@ public final class FarPlayerClientRenderer {
                 }
             }
             vehicle = null;
+            level = null;
             vehicleTypeId = null;
             externalEntity = false;
             rocketFinalLiftVelocity = 0.0F;
@@ -1207,5 +1301,8 @@ public final class FarPlayerClientRenderer {
     }
 
     private record VehiclePoseSample(double x, double y, double z, float yaw, float pitch, float headYaw, float bodyYaw) {
+    }
+
+    private record VehicleKey(int sourceEntityId, ResourceLocation entityTypeId, int index) {
     }
 }

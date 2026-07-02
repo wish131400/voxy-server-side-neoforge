@@ -3,17 +3,20 @@ package dev.xantha.vss.networking.server;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.ArrayDeque;
-import java.util.Collection;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.Level;
 
 final class PlayerRequestState {
     private final Set<Integer> cancelled = new HashSet<>();
-    private final Map<Integer, Long> requestPositions = new HashMap<>();
-    private final Set<Long> activePositions = new HashSet<>();
+    private final Map<Integer, RequestPosition> requestPositions = new HashMap<>();
+    private final Set<RequestPosition> activePositions = new HashSet<>();
     private final Queue<QueuedPayload> prioritySendQueue = new ArrayDeque<>();
     private final Queue<QueuedPayload> sendQueue = new ArrayDeque<>();
     private int priorityQueuedPayloads;
@@ -23,10 +26,14 @@ final class PlayerRequestState {
     private long lastRefillNanos = System.nanoTime();
     private long totalBytesSent;
     private int clientCapabilities;
+    private int orderedForPlayerCx = Integer.MIN_VALUE;
+    private int orderedForPlayerCz = Integer.MIN_VALUE;
+    private long nextQueueSequence;
+    private boolean queueOrderDirty = true;
 
     void cancel(int requestId) {
         cancelled.add(requestId);
-        Long position = requestPositions.remove(requestId);
+        RequestPosition position = requestPositions.remove(requestId);
         if (position != null) {
             activePositions.remove(position);
         }
@@ -40,16 +47,17 @@ final class PlayerRequestState {
         return wasCancelled;
     }
 
-    boolean beginRequest(int requestId, long position) {
-        if (!activePositions.add(position)) {
+    boolean beginRequest(int requestId, ResourceKey<Level> dimension, long position) {
+        RequestPosition requestPosition = new RequestPosition(dimension, position);
+        if (!activePositions.add(requestPosition)) {
             return false;
         }
-        requestPositions.put(requestId, position);
+        requestPositions.put(requestId, requestPosition);
         return true;
     }
 
     void clearRequest(int requestId) {
-        Long position = requestPositions.remove(requestId);
+        RequestPosition position = requestPositions.remove(requestId);
         if (position != null) {
             activePositions.remove(position);
         }
@@ -69,12 +77,13 @@ final class PlayerRequestState {
         }
 
         if (priority) {
-            prioritySendQueue.add(new QueuedPayload(payload, estimatedBytes, true));
+            prioritySendQueue.add(new QueuedPayload(payload, estimatedBytes, true, nextQueueSequence++));
             priorityQueuedPayloads++;
         } else {
-            sendQueue.add(new QueuedPayload(payload, estimatedBytes, false));
+            sendQueue.add(new QueuedPayload(payload, estimatedBytes, false, nextQueueSequence++));
         }
         queuedBytes += estimatedBytes;
+        queueOrderDirty = true;
         return true;
     }
 
@@ -87,65 +96,84 @@ final class PlayerRequestState {
                 clearRequest(removed.payload().requestId());
             }
         }
+        queueOrderDirty = true;
+    }
+
+    void prepareSendOrder(int playerCx, int playerCz) {
+        if (!queueOrderDirty && playerCx == orderedForPlayerCx && playerCz == orderedForPlayerCz) {
+            return;
+        }
+
+        reorderQueue(prioritySendQueue, playerCx, playerCz);
+        reorderQueue(sendQueue, playerCx, playerCz);
+        orderedForPlayerCx = playerCx;
+        orderedForPlayerCz = playerCz;
+        queueOrderDirty = false;
     }
 
     QueuedPayload peekPriorityQueuedPayload(int playerCx, int playerCz) {
-        return nearestQueuedPayload(prioritySendQueue, playerCx, playerCz, false);
+        prepareSendOrder(playerCx, playerCz);
+        return prioritySendQueue.peek();
     }
 
     QueuedPayload peekQueuedPayload(int playerCx, int playerCz) {
-        QueuedPayload priorityPayload = nearestQueuedPayload(prioritySendQueue, playerCx, playerCz, false);
-        return priorityPayload != null ? priorityPayload : nearestQueuedPayload(sendQueue, playerCx, playerCz, false);
+        prepareSendOrder(playerCx, playerCz);
+        QueuedPayload priorityPayload = prioritySendQueue.peek();
+        return priorityPayload != null ? priorityPayload : sendQueue.peek();
     }
 
-    QueuedPayload pollPriorityQueuedPayload(int playerCx, int playerCz) {
-        QueuedPayload payload = nearestQueuedPayload(prioritySendQueue, playerCx, playerCz, true);
-        if (payload != null) {
-            priorityQueuedPayloads = Math.max(0, priorityQueuedPayloads - 1);
-            queuedBytes = Math.max(0L, queuedBytes - payload.estimatedBytes());
+    QueuedPayload pollPriorityQueuedPayload(QueuedPayload payload) {
+        if (payload == null) {
+            return null;
         }
+        QueuedPayload removed = prioritySendQueue.peek() == payload ? prioritySendQueue.poll() : null;
+        if (removed == null && !prioritySendQueue.remove(payload)) {
+            return null;
+        }
+        priorityQueuedPayloads = Math.max(0, priorityQueuedPayloads - 1);
+        queuedBytes = Math.max(0L, queuedBytes - payload.estimatedBytes());
         return payload;
     }
 
-    QueuedPayload pollQueuedPayload(int playerCx, int playerCz) {
-        QueuedPayload payload = nearestQueuedPayload(prioritySendQueue, playerCx, playerCz, true);
-        if (payload != null) {
+    QueuedPayload pollQueuedPayload(QueuedPayload payload) {
+        if (payload == null) {
+            return null;
+        }
+        if (payload.priority()) {
+            QueuedPayload removed = prioritySendQueue.peek() == payload ? prioritySendQueue.poll() : null;
+            if (removed == null && !prioritySendQueue.remove(payload)) {
+                return null;
+            }
             priorityQueuedPayloads = Math.max(0, priorityQueuedPayloads - 1);
         } else {
-            payload = nearestQueuedPayload(sendQueue, playerCx, playerCz, true);
+            QueuedPayload removed = sendQueue.peek() == payload ? sendQueue.poll() : null;
+            if (removed == null && !sendQueue.remove(payload)) {
+                return null;
+            }
         }
-        if (payload != null) {
-            queuedBytes = Math.max(0L, queuedBytes - payload.estimatedBytes());
-        }
+        queuedBytes = Math.max(0L, queuedBytes - payload.estimatedBytes());
         return payload;
     }
 
-    private QueuedPayload nearestQueuedPayload(
-            Collection<QueuedPayload> queue,
-            int playerCx,
-            int playerCz,
-            boolean remove) {
-        QueuedPayload best = null;
-        int bestChebyshev = Integer.MAX_VALUE;
-        long bestDistanceSquared = Long.MAX_VALUE;
-        for (QueuedPayload candidate : queue) {
-            VoxelColumnS2CPayload payload = candidate.payload();
-            int dx = payload.chunkX() - playerCx;
-            int dz = payload.chunkZ() - playerCz;
-            int chebyshev = Math.max(Math.abs(dx), Math.abs(dz));
-            long distanceSquared = (long) dx * dx + (long) dz * dz;
-            if (best == null
-                    || chebyshev < bestChebyshev
-                    || (chebyshev == bestChebyshev && distanceSquared < bestDistanceSquared)) {
-                best = candidate;
-                bestChebyshev = chebyshev;
-                bestDistanceSquared = distanceSquared;
-            }
+    private static void reorderQueue(Queue<QueuedPayload> queue, int playerCx, int playerCz) {
+        if (queue.size() <= 1) {
+            return;
         }
-        if (remove && best != null) {
-            queue.remove(best);
-        }
-        return best;
+
+        ArrayList<QueuedPayload> ordered = new ArrayList<>(queue);
+        ordered.sort(sendOrderComparator(playerCx, playerCz));
+        queue.clear();
+        queue.addAll(ordered);
+    }
+
+    private static Comparator<QueuedPayload> sendOrderComparator(int playerCx, int playerCz) {
+        return Comparator
+                .comparingInt((QueuedPayload candidate) -> chebyshevDistance(candidate.payload(), playerCx, playerCz))
+                .thenComparingLong(QueuedPayload::sequence);
+    }
+
+    private static int chebyshevDistance(VoxelColumnS2CPayload payload, int playerCx, int playerCz) {
+        return Math.max(Math.abs(payload.chunkX() - playerCx), Math.abs(payload.chunkZ() - playerCz));
     }
 
     int queuedPayloadCount() {
@@ -198,6 +226,9 @@ final class PlayerRequestState {
         sendQueue.clear();
         priorityQueuedPayloads = 0;
         queuedBytes = 0L;
+        queueOrderDirty = true;
+        orderedForPlayerCx = Integer.MIN_VALUE;
+        orderedForPlayerCz = Integer.MIN_VALUE;
     }
 
     private void refill(long configuredLimit) {
@@ -220,6 +251,9 @@ final class PlayerRequestState {
         return Math.min(safeConfiguredLimit, desiredBandwidth);
     }
 
-    record QueuedPayload(VoxelColumnS2CPayload payload, int estimatedBytes, boolean priority) {
+    private record RequestPosition(ResourceKey<Level> dimension, long packedPosition) {
+    }
+
+    record QueuedPayload(VoxelColumnS2CPayload payload, int estimatedBytes, boolean priority, long sequence) {
     }
 }

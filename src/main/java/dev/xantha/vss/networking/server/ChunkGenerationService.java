@@ -9,10 +9,12 @@ import dev.xantha.vss.config.VSSServerConfig;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -39,6 +41,8 @@ final class ChunkGenerationService {
     private final LinkedHashMap<PendingGenerationKey, PendingGeneration> queued = new LinkedHashMap<>();
     private final Map<UUID, Integer> perPlayerActiveCount = new HashMap<>();
     private final Map<UUID, Integer> perPlayerQueuedCount = new HashMap<>();
+    private final Map<RequestKey, GenerationLocation> requestIndex = new HashMap<>();
+    private final Map<UUID, Set<RequestKey>> playerRequestIndex = new HashMap<>();
     private final ConcurrentLinkedQueue<PackingResult> completedPackingResults = new ConcurrentLinkedQueue<>();
     private final VSSServerConfig config;
     private ThreadPoolExecutor packingExecutor;
@@ -63,7 +67,9 @@ final class ChunkGenerationService {
         PendingGenerationKey key = new PendingGenerationKey(level.dimension(), cx, cz);
         PendingGeneration existing = active.get(key);
         if (existing != null) {
-            existing.callbacks.add(new GenerationCallback(playerUuid, requestState, requestId, false));
+            GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, false);
+            existing.callbacks.add(callback);
+            indexCallback(key, callback, true);
             incrementCount(playerUuid);
             return true;
         }
@@ -73,7 +79,9 @@ final class ChunkGenerationService {
             if (!canQueue(playerUuid)) {
                 return false;
             }
-            queuedGeneration.callbacks.add(new GenerationCallback(playerUuid, requestState, requestId, false));
+            GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, false);
+            queuedGeneration.callbacks.add(callback);
+            indexCallback(key, callback, false);
             incrementQueuedCount(playerUuid);
             return true;
         }
@@ -89,6 +97,7 @@ final class ChunkGenerationService {
             }
             queued.put(key, generation);
             incrementQueuedCount(playerUuid);
+            indexGeneration(key, generation, false);
             totalQueued++;
         }
         return true;
@@ -165,6 +174,7 @@ final class ChunkGenerationService {
                             callback.playerUuid(), callback.requestState(), callback.requestId(), generation.level.dimension()));
                     decrementCount(callback.playerUuid());
                 }
+                unindexGeneration(generation);
                 removeTicket(generation);
                 iterator.remove();
                 totalTimeouts++;
@@ -192,6 +202,7 @@ final class ChunkGenerationService {
                 }
             }
 
+            unindexGeneration(generation);
             removeTicket(generation);
             iterator.remove();
         }
@@ -199,10 +210,16 @@ final class ChunkGenerationService {
     }
 
     void cancelRequest(UUID playerUuid, int requestId) {
+        RequestKey requestKey = new RequestKey(playerUuid, requestId);
+        if (cancelIndexedRequest(requestKey, true)) {
+            return;
+        }
+
         Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> queuedIterator = queued.entrySet().iterator();
         while (queuedIterator.hasNext()) {
             PendingGeneration generation = queuedIterator.next().getValue();
             if (removeCallback(generation.callbacks, playerUuid, requestId)) {
+                unindexCallback(playerUuid, requestId);
                 decrementQueuedCount(playerUuid);
                 if (generation.callbacks.isEmpty()) {
                     queuedIterator.remove();
@@ -215,6 +232,7 @@ final class ChunkGenerationService {
         while (activeIterator.hasNext()) {
             PendingGeneration generation = activeIterator.next().getValue();
             if (removeCallback(generation.callbacks, playerUuid, requestId)) {
+                unindexCallback(playerUuid, requestId);
                 decrementCount(playerUuid);
                 if (generation.callbacks.isEmpty()) {
                     removeTicket(generation);
@@ -227,13 +245,24 @@ final class ChunkGenerationService {
     }
 
     void removePlayer(UUID playerUuid) {
-        perPlayerActiveCount.remove(playerUuid);
-        perPlayerQueuedCount.remove(playerUuid);
+        Set<RequestKey> indexedRequests = playerRequestIndex.remove(playerUuid);
+        if (indexedRequests != null) {
+            for (RequestKey requestKey : List.copyOf(indexedRequests)) {
+                cancelIndexedRequest(requestKey, false);
+            }
+        }
 
         Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> queuedIterator = queued.entrySet().iterator();
         while (queuedIterator.hasNext()) {
             PendingGeneration generation = queuedIterator.next().getValue();
-            generation.callbacks.removeIf(callback -> callback.playerUuid().equals(playerUuid));
+            generation.callbacks.removeIf(callback -> {
+                if (!callback.playerUuid().equals(playerUuid)) {
+                    return false;
+                }
+                unindexCallback(callback.playerUuid(), callback.requestId());
+                decrementQueuedCount(callback.playerUuid());
+                return true;
+            });
             if (generation.callbacks.isEmpty()) {
                 queuedIterator.remove();
             }
@@ -242,13 +271,22 @@ final class ChunkGenerationService {
         Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> iterator = active.entrySet().iterator();
         while (iterator.hasNext()) {
             PendingGeneration generation = iterator.next().getValue();
-            generation.callbacks.removeIf(callback -> callback.playerUuid().equals(playerUuid));
+            generation.callbacks.removeIf(callback -> {
+                if (!callback.playerUuid().equals(playerUuid)) {
+                    return false;
+                }
+                unindexCallback(callback.playerUuid(), callback.requestId());
+                decrementCount(callback.playerUuid());
+                return true;
+            });
             if (!generation.callbacks.isEmpty()) {
                 continue;
             }
             removeTicket(generation);
             iterator.remove();
         }
+        perPlayerActiveCount.remove(playerUuid);
+        perPlayerQueuedCount.remove(playerUuid);
         promoteQueued();
     }
 
@@ -263,6 +301,8 @@ final class ChunkGenerationService {
         queued.clear();
         perPlayerActiveCount.clear();
         perPlayerQueuedCount.clear();
+        requestIndex.clear();
+        playerRequestIndex.clear();
     }
 
     void shutdown() {
@@ -390,6 +430,7 @@ final class ChunkGenerationService {
         for (GenerationCallback callback : generation.callbacks) {
             incrementCount(callback.playerUuid());
         }
+        indexGeneration(key, generation, true);
         totalSubmitted++;
     }
 
@@ -607,6 +648,7 @@ final class ChunkGenerationService {
                         callback.requestId(),
                         generation.level.dimension()));
                 callbackIterator.remove();
+                unindexCallback(callback.playerUuid(), callback.requestId());
                 if (activeGenerations) {
                     decrementCount(callback.playerUuid());
                 } else {
@@ -638,7 +680,80 @@ final class ChunkGenerationService {
         return PositionUtil.chebyshevDistance(generation.pos.x, generation.pos.z, playerCx, playerCz) > maxDistance;
     }
 
+    private boolean cancelIndexedRequest(RequestKey requestKey, boolean promoteAfterActiveRemoval) {
+        GenerationLocation location = requestIndex.get(requestKey);
+        if (location == null) {
+            return false;
+        }
+
+        LinkedHashMap<PendingGenerationKey, PendingGeneration> generations = location.active() ? active : queued;
+        PendingGeneration generation = generations.get(location.key());
+        if (generation == null) {
+            unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+            return false;
+        }
+
+        if (!removeCallback(generation.callbacks, requestKey.playerUuid(), requestKey.requestId())) {
+            unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+            return false;
+        }
+
+        unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+        if (location.active()) {
+            decrementCount(requestKey.playerUuid());
+        } else {
+            decrementQueuedCount(requestKey.playerUuid());
+        }
+        if (generation.callbacks.isEmpty()) {
+            if (location.active()) {
+                removeTicket(generation);
+            }
+            generations.remove(location.key());
+            if (location.active() && promoteAfterActiveRemoval) {
+                promoteQueued();
+            }
+        }
+        return true;
+    }
+
+    private void indexGeneration(PendingGenerationKey key, PendingGeneration generation, boolean activeGeneration) {
+        for (GenerationCallback callback : generation.callbacks) {
+            indexCallback(key, callback, activeGeneration);
+        }
+    }
+
+    private void unindexGeneration(PendingGeneration generation) {
+        for (GenerationCallback callback : generation.callbacks) {
+            unindexCallback(callback.playerUuid(), callback.requestId());
+        }
+    }
+
+    private void indexCallback(PendingGenerationKey key, GenerationCallback callback, boolean activeGeneration) {
+        RequestKey requestKey = new RequestKey(callback.playerUuid(), callback.requestId());
+        requestIndex.put(requestKey, new GenerationLocation(key, activeGeneration));
+        playerRequestIndex.computeIfAbsent(callback.playerUuid(), ignored -> new HashSet<>()).add(requestKey);
+    }
+
+    private void unindexCallback(UUID playerUuid, int requestId) {
+        RequestKey requestKey = new RequestKey(playerUuid, requestId);
+        requestIndex.remove(requestKey);
+        Set<RequestKey> playerRequests = playerRequestIndex.get(playerUuid);
+        if (playerRequests == null) {
+            return;
+        }
+        playerRequests.remove(requestKey);
+        if (playerRequests.isEmpty()) {
+            playerRequestIndex.remove(playerUuid);
+        }
+    }
+
     private record PendingGenerationKey(ResourceKey<Level> dimension, int cx, int cz) {
+    }
+
+    private record RequestKey(UUID playerUuid, int requestId) {
+    }
+
+    private record GenerationLocation(PendingGenerationKey key, boolean active) {
     }
 
     private static final class PendingGeneration {

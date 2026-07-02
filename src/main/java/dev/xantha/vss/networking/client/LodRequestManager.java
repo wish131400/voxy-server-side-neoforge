@@ -14,9 +14,9 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -37,8 +37,12 @@ public final class LodRequestManager {
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
     private static final int SOFT_FRONTIER_LEAD_CHUNKS = 8;
+    private static final int VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS = 2;
     private static final int FAST_MOVE_CHUNK_THRESHOLD = 4;
     private static final int FAST_MOVE_KEEP_RADIUS_CHUNKS = 16;
+    private static final int MOVING_FRONTIER_TRAIL_CHUNKS = 16;
+    private static final int STATIONARY_REFRESH_DELAY_TICKS = 20;
+    private static final int MAX_STATIONARY_REFRESH_CANDIDATES_PER_TICK = 2048;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
@@ -50,6 +54,7 @@ public final class LodRequestManager {
     private final Long2IntOpenHashMap positionToRequestId = new Long2IntOpenHashMap();
     private final Int2LongOpenHashMap requestIdToPosition = new Int2LongOpenHashMap();
     private final Long2LongOpenHashMap requestSendTimes = new Long2LongOpenHashMap();
+    private final PriorityQueue<RequestDeadline> requestDeadlines = new PriorityQueue<>();
     private final LongOpenHashSet generationInFlight = new LongOpenHashSet();
     private final LongOpenHashSet dirtyRefreshInFlight = new LongOpenHashSet();
     private final Long2LongOpenHashMap retryAfterNanos = new Long2LongOpenHashMap();
@@ -60,6 +65,8 @@ public final class LodRequestManager {
     private ResourceKey<Level> lastDimension;
     private int lastPlayerChunkX = Integer.MIN_VALUE;
     private int lastPlayerChunkZ = Integer.MIN_VALUE;
+    private int lastPlayerBlockX = Integer.MIN_VALUE;
+    private int lastPlayerBlockZ = Integer.MIN_VALUE;
     private int nextRequestId;
     private int scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     private int orderedOffsetDistance = -1;
@@ -71,6 +78,13 @@ public final class LodRequestManager {
     private double syncRequestBudget;
     private double generationRequestBudget;
     private double dirtyRefreshBudget;
+    private int stationaryTicks;
+    private boolean stationaryRefreshArmed;
+    private boolean stationaryRefreshActive;
+    private int stationaryRefreshCenterX = Integer.MIN_VALUE;
+    private int stationaryRefreshCenterZ = Integer.MIN_VALUE;
+    private int stationaryRefreshDistance = -1;
+    private int stationaryRefreshOffsetIndex;
     private long lastRequestDiagnosticNanos;
 
     public LodRequestManager() {
@@ -122,23 +136,33 @@ public final class LodRequestManager {
             resetRequestState();
         }
         lastDimension = level.dimension();
-        int playerCx = player.getBlockX() >> 4;
-        int playerCz = player.getBlockZ() >> 4;
+        int playerBlockX = player.getBlockX();
+        int playerBlockZ = player.getBlockZ();
+        int playerCx = playerBlockX >> 4;
+        int playerCz = playerBlockZ >> 4;
         int lodDistance = getEffectiveLodDistance();
         handleEffectiveLodDistance(playerCx, playerCz, lodDistance);
         if (playerCx != lastPlayerChunkX || playerCz != lastPlayerChunkZ) {
             int moveDistance = lastPlayerChunkX == Integer.MIN_VALUE
                     ? 0
                     : Math.max(Math.abs(playerCx - lastPlayerChunkX), Math.abs(playerCz - lastPlayerChunkZ));
+            int previousPlayerChunkX = lastPlayerChunkX;
+            int previousPlayerChunkZ = lastPlayerChunkZ;
             pruneAround(playerCx, playerCz, lodDistance + VSSConstants.LOD_DISTANCE_BUFFER);
-            if (moveDistance >= FAST_MOVE_CHUNK_THRESHOLD) {
+            if (lastPlayerChunkX == Integer.MIN_VALUE || moveDistance >= FAST_MOVE_CHUNK_THRESHOLD) {
                 pruneLowPriorityRequestsAround(playerCx, playerCz,
                         Math.min(lodDistance, FAST_MOVE_KEEP_RADIUS_CHUNKS));
+                resetScanCursor();
+            } else {
+                int frontierDistance = Math.min(lodDistance,
+                        Math.max(0, softFrontierRadius - MOVING_FRONTIER_TRAIL_CHUNKS));
+                deferNewlyVisibleColumns(previousPlayerChunkX, previousPlayerChunkZ, playerCx, playerCz, frontierDistance);
+                scanTickCounter = SCAN_INTERVAL_TICKS - 1;
             }
-            resetScanCursor();
             lastPlayerChunkX = playerCx;
             lastPlayerChunkZ = playerCz;
         }
+        updateStationaryRefreshState(playerBlockX, playerBlockZ, playerCx, playerCz, lodDistance);
         timeoutSweep();
 
         if (++scanTickCounter < SCAN_INTERVAL_TICKS) {
@@ -189,7 +213,11 @@ public final class LodRequestManager {
                 }
                 clearBackoff(packed);
                 dirtyColumns.add(packed);
-                deferColumn(packed, true);
+                if (shouldRefreshDirtyImmediately()) {
+                    deferColumn(packed, true);
+                } else {
+                    armStationaryRefresh();
+                }
             } else {
                 dirtyColumnTimestamps.remove(packed);
                 dirtyColumns.remove(packed);
@@ -426,6 +454,174 @@ public final class LodRequestManager {
         resetScanCursor();
     }
 
+    private void deferNewlyVisibleColumns(
+            int previousPlayerCx,
+            int previousPlayerCz,
+            int playerCx,
+            int playerCz,
+            int radius) {
+        if (radius <= 0) {
+            return;
+        }
+
+        int minX = playerCx - radius;
+        int maxX = playerCx + radius;
+        int minZ = playerCz - radius;
+        int maxZ = playerCz + radius;
+
+        if (playerCx > previousPlayerCx) {
+            int startX = Math.max(minX, previousPlayerCx + radius + 1);
+            deferNewlyVisibleStrip(startX, maxX, minZ, maxZ, previousPlayerCx, previousPlayerCz, playerCx, playerCz, radius);
+        } else if (playerCx < previousPlayerCx) {
+            int endX = Math.min(maxX, previousPlayerCx - radius - 1);
+            deferNewlyVisibleStrip(minX, endX, minZ, maxZ, previousPlayerCx, previousPlayerCz, playerCx, playerCz, radius);
+        }
+
+        if (playerCz > previousPlayerCz) {
+            int startZ = Math.max(minZ, previousPlayerCz + radius + 1);
+            deferNewlyVisibleStrip(minX, maxX, startZ, maxZ, previousPlayerCx, previousPlayerCz, playerCx, playerCz, radius);
+        } else if (playerCz < previousPlayerCz) {
+            int endZ = Math.min(maxZ, previousPlayerCz - radius - 1);
+            deferNewlyVisibleStrip(minX, maxX, minZ, endZ, previousPlayerCx, previousPlayerCz, playerCx, playerCz, radius);
+        }
+    }
+
+    private void deferNewlyVisibleStrip(
+            int minX,
+            int maxX,
+            int minZ,
+            int maxZ,
+            int previousPlayerCx,
+            int previousPlayerCz,
+            int playerCx,
+            int playerCz,
+            int radius) {
+        if (minX > maxX || minZ > maxZ) {
+            return;
+        }
+        for (int cx = minX; cx <= maxX; cx++) {
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) > radius
+                        || PositionUtil.chebyshevDistance(cx, cz, previousPlayerCx, previousPlayerCz) <= radius) {
+                    continue;
+                }
+
+                long packed = PositionUtil.packPosition(cx, cz);
+                if (inFlight.contains(packed) || hasKnownColumn(packed)) {
+                    continue;
+                }
+                deferColumn(packed);
+            }
+        }
+    }
+
+    private void updateStationaryRefreshState(int playerBlockX, int playerBlockZ, int playerCx, int playerCz, int lodDistance) {
+        if (lastPlayerBlockX == Integer.MIN_VALUE) {
+            lastPlayerBlockX = playerBlockX;
+            lastPlayerBlockZ = playerBlockZ;
+            stationaryTicks = 0;
+            return;
+        }
+
+        if (playerBlockX != lastPlayerBlockX || playerBlockZ != lastPlayerBlockZ) {
+            lastPlayerBlockX = playerBlockX;
+            lastPlayerBlockZ = playerBlockZ;
+            stationaryTicks = 0;
+            stationaryRefreshArmed = true;
+            stationaryRefreshActive = false;
+            return;
+        }
+
+        stationaryTicks = Math.min(STATIONARY_REFRESH_DELAY_TICKS, stationaryTicks + 1);
+        if (stationaryTicks < STATIONARY_REFRESH_DELAY_TICKS) {
+            return;
+        }
+
+        if (!stationaryRefreshActive && stationaryRefreshArmed) {
+            startStationaryRefresh(playerCx, playerCz, lodDistance);
+        }
+    }
+
+    private boolean shouldRefreshDirtyImmediately() {
+        return stationaryTicks >= STATIONARY_REFRESH_DELAY_TICKS;
+    }
+
+    private void armStationaryRefresh() {
+        stationaryRefreshArmed = true;
+        if (stationaryTicks < STATIONARY_REFRESH_DELAY_TICKS) {
+            stationaryRefreshActive = false;
+        }
+    }
+
+    private void startStationaryRefresh(int playerCx, int playerCz, int lodDistance) {
+        if (lodDistance <= 0) {
+            stationaryRefreshArmed = false;
+            stationaryRefreshActive = false;
+            return;
+        }
+
+        ensureOrderedOffsets(lodDistance);
+        stationaryRefreshCenterX = playerCx;
+        stationaryRefreshCenterZ = playerCz;
+        stationaryRefreshDistance = lodDistance;
+        stationaryRefreshOffsetIndex = 0;
+        stationaryRefreshActive = true;
+        stationaryRefreshArmed = false;
+    }
+
+    private int scanStationaryRefreshColumns(
+            int playerCx,
+            int playerCz,
+            int lodDistance,
+            int[] requestIds,
+            long[] positions,
+            long[] timestamps,
+            boolean[] allowGeneration,
+            int count,
+            int maxCount,
+            RequestWindow requestWindow,
+            long now) {
+        if (!stationaryRefreshActive || orderedOffsets.length == 0 || !requestWindow.hasCapacity()) {
+            return count;
+        }
+        if (playerCx != stationaryRefreshCenterX
+                || playerCz != stationaryRefreshCenterZ
+                || lodDistance != stationaryRefreshDistance) {
+            startStationaryRefresh(playerCx, playerCz, lodDistance);
+        }
+
+        int scanned = 0;
+        while (count < maxCount
+                && requestWindow.hasCapacity()
+                && stationaryRefreshOffsetIndex < orderedOffsets.length
+                && scanned < MAX_STATIONARY_REFRESH_CANDIDATES_PER_TICK) {
+            long offset = orderedOffsets[stationaryRefreshOffsetIndex++];
+            scanned++;
+
+            int cx = stationaryRefreshCenterX + decodeOffsetX(offset);
+            int cz = stationaryRefreshCenterZ + decodeOffsetZ(offset);
+            long packed = PositionUtil.packPosition(cx, cz);
+            if (!shouldRequestColumn(packed, now)) {
+                continue;
+            }
+
+            boolean dirtyRefresh = dirtyColumns.contains(packed);
+            boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
+            if (!requestWindow.canSend(dirtyRefresh, generationCandidate)) {
+                continue;
+            }
+
+            deferredColumns.remove(packed);
+            count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate);
+            requestWindow.record(dirtyRefresh, generationCandidate);
+        }
+
+        if (stationaryRefreshOffsetIndex >= orderedOffsets.length) {
+            stationaryRefreshActive = false;
+        }
+        return count;
+    }
+
     private void scanAndSend(ClientLevel level, LocalPlayer player) {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
@@ -447,9 +643,13 @@ public final class LodRequestManager {
         }
 
         ensureOrderedOffsets(lodDistance);
+        int protectedSyncDistance = getVanillaProtectedSyncDistance();
         long now = System.nanoTime();
-        count = drainDeferredColumns(playerCx, playerCz, lodDistance, requestIds, positions, timestamps, allowGeneration, count, maxCount, requestWindow, now);
-        count = scanNewSyncColumns(playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
+        count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
+                timestamps, allowGeneration, count, maxCount, requestWindow, now);
+        count = scanStationaryRefreshColumns(playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
+                allowGeneration, count, maxCount, requestWindow, now);
+        count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions, timestamps,
                 allowGeneration, count, maxCount, requestWindow, now);
 
         if (count > 0) {
@@ -491,6 +691,7 @@ public final class LodRequestManager {
             int playerCx,
             int playerCz,
             int lodDistance,
+            int protectedSyncDistance,
             int[] requestIds,
             long[] positions,
             long[] timestamps,
@@ -539,6 +740,11 @@ public final class LodRequestManager {
             }
 
             boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
+            if (!dirtyRefresh
+                    && !generationCandidate
+                    && isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)) {
+                continue;
+            }
             if (!dirtyRefresh && !isWithinSoftFrontier(packed, playerCx, playerCz, lodDistance)) {
                 requeueDeferredColumn(packed, false);
                 continue;
@@ -558,6 +764,7 @@ public final class LodRequestManager {
             int playerCx,
             int playerCz,
             int lodDistance,
+            int protectedSyncDistance,
             int[] requestIds,
             long[] positions,
             long[] timestamps,
@@ -592,7 +799,8 @@ public final class LodRequestManager {
             int cx = playerCx + decodeOffsetX(offset);
             int cz = playerCz + decodeOffsetZ(offset);
             long packed = PositionUtil.packPosition(cx, cz);
-            if (!shouldRequestColumn(packed, now)
+            if (isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)
+                    || !shouldRequestColumn(packed, now)
                     || dirtyColumns.contains(packed)
                     || isGenerationCandidate(packed)) {
                 continue;
@@ -603,6 +811,7 @@ public final class LodRequestManager {
                     playerCx,
                     playerCz,
                     lodDistance,
+                    protectedSyncDistance,
                     requestIds,
                     positions,
                     timestamps,
@@ -620,6 +829,7 @@ public final class LodRequestManager {
             int playerCx,
             int playerCz,
             int lodDistance,
+            int protectedSyncDistance,
             int[] requestIds,
             long[] positions,
             long[] timestamps,
@@ -631,16 +841,16 @@ public final class LodRequestManager {
         int centerX = PositionUtil.unpackX(centerPacked);
         int centerZ = PositionUtil.unpackZ(centerPacked);
         int maxClusterRing = chebyshevDistance(centerPacked, playerCx, playerCz);
-        count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
-                allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
+        count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
+                positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
         for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasSyncCapacity(); dz++) {
             for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasSyncCapacity(); dx++) {
                 if (dx == 0 && dz == 0) {
                     continue;
                 }
                 long packed = PositionUtil.packPosition(centerX + dx, centerZ + dz);
-                count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, requestIds, positions, timestamps,
-                        allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
+                count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
+                        positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, maxClusterRing);
             }
         }
         return count;
@@ -651,6 +861,7 @@ public final class LodRequestManager {
             int playerCx,
             int playerCz,
             int lodDistance,
+            int protectedSyncDistance,
             int[] requestIds,
             long[] positions,
             long[] timestamps,
@@ -667,6 +878,7 @@ public final class LodRequestManager {
         int cz = PositionUtil.unpackZ(packed);
         int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
         if (ring > lodDistance
+                || (protectedSyncDistance > 0 && ring <= protectedSyncDistance)
                 || ring > maxClusterRing
                 || !shouldRequestColumn(packed, now)) {
             return count;
@@ -818,7 +1030,9 @@ public final class LodRequestManager {
         }
         positionToRequestId.put(packed, requestId);
         requestIdToPosition.put(requestId, packed);
-        requestSendTimes.put(packed, System.nanoTime());
+        long now = System.nanoTime();
+        requestSendTimes.put(packed, now);
+        requestDeadlines.add(new RequestDeadline(packed, requestId, now + timeoutFor(packed)));
     }
 
     private long removeRequest(int requestId) {
@@ -846,13 +1060,14 @@ public final class LodRequestManager {
 
     private void timeoutSweep() {
         long now = System.nanoTime();
-        LongOpenHashSet expired = new LongOpenHashSet();
-        for (long packed : requestSendTimes.keySet()) {
-            if (now - requestSendTimes.get(packed) > timeoutFor(packed)) {
-                expired.add(packed);
+        while (!requestDeadlines.isEmpty() && requestDeadlines.peek().isDue(now)) {
+            RequestDeadline deadline = requestDeadlines.poll();
+            long packed = deadline.packed();
+            if (positionToRequestId.get(packed) != deadline.requestId()
+                    || requestIdToPosition.get(deadline.requestId()) != packed
+                    || !requestSendTimes.containsKey(packed)) {
+                continue;
             }
-        }
-        for (long packed : expired) {
             boolean generationCandidate = generationInFlight.contains(packed)
                     || (isGenerationCandidate(packed) && !dirtyColumns.contains(packed));
             int requestId = positionToRequestId.remove(packed);
@@ -1070,6 +1285,7 @@ public final class LodRequestManager {
         positionToRequestId.clear();
         requestIdToPosition.clear();
         requestSendTimes.clear();
+        requestDeadlines.clear();
         generationInFlight.clear();
         dirtyRefreshInFlight.clear();
         retryAfterNanos.clear();
@@ -1077,6 +1293,8 @@ public final class LodRequestManager {
         nextRequestId = 0;
         lastPlayerChunkX = Integer.MIN_VALUE;
         lastPlayerChunkZ = Integer.MIN_VALUE;
+        lastPlayerBlockX = Integer.MIN_VALUE;
+        lastPlayerBlockZ = Integer.MIN_VALUE;
         scanOffsetIndex = 0;
         softFrontierRadius = 0;
         lastEffectiveLodDistance = -1;
@@ -1085,6 +1303,13 @@ public final class LodRequestManager {
         syncRequestBudget = 0.0D;
         generationRequestBudget = 0.0D;
         dirtyRefreshBudget = 0.0D;
+        stationaryTicks = 0;
+        stationaryRefreshArmed = false;
+        stationaryRefreshActive = false;
+        stationaryRefreshCenterX = Integer.MIN_VALUE;
+        stationaryRefreshCenterZ = Integer.MIN_VALUE;
+        stationaryRefreshDistance = -1;
+        stationaryRefreshOffsetIndex = 0;
     }
 
     private void resetScanCursor() {
@@ -1119,7 +1344,6 @@ public final class LodRequestManager {
         int index = 0;
         offsets[index++] = encodeOffset(0, 0);
         for (int ring = 1; ring <= lodDistance; ring++) {
-            int ringStart = index;
             for (int dz = -ring; dz <= ring; dz++) {
                 offsets[index++] = encodeOffset(-ring, dz);
                 offsets[index++] = encodeOffset(ring, dz);
@@ -1128,11 +1352,27 @@ public final class LodRequestManager {
                 offsets[index++] = encodeOffset(dx, -ring);
                 offsets[index++] = encodeOffset(dx, ring);
             }
-            Arrays.sort(offsets, ringStart, index);
         }
         orderedOffsets = offsets;
         orderedOffsetDistance = lodDistance;
         resetScanCursor();
+    }
+
+    private static int getVanillaProtectedSyncDistance() {
+        try {
+            return Math.max(0, Minecraft.getInstance().options.renderDistance().get()
+                    + VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS);
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
+    }
+
+    private static boolean isInsideProtectedSyncWindow(
+            long packed,
+            int playerCx,
+            int playerCz,
+            int protectedSyncDistance) {
+        return protectedSyncDistance > 0 && chebyshevDistance(packed, playerCx, playerCz) <= protectedSyncDistance;
     }
 
     private boolean isWithinSoftFrontier(long packed, int playerCx, int playerCz, int lodDistance) {
@@ -1165,6 +1405,17 @@ public final class LodRequestManager {
 
     private static int offsetRing(long offset) {
         return Math.max(Math.abs(decodeOffsetX(offset)), Math.abs(decodeOffsetZ(offset)));
+    }
+
+    private record RequestDeadline(long packed, int requestId, long timeoutAtNanos) implements Comparable<RequestDeadline> {
+        private boolean isDue(long nowNanos) {
+            return timeoutAtNanos - nowNanos <= 0L;
+        }
+
+        @Override
+        public int compareTo(RequestDeadline other) {
+            return Long.compare(timeoutAtNanos, other.timeoutAtNanos);
+        }
     }
 
     private boolean isCoolingDown(long packed, long now) {

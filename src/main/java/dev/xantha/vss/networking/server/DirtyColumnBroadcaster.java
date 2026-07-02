@@ -5,7 +5,9 @@ import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.HashMap;
@@ -20,6 +22,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 
 public final class DirtyColumnBroadcaster {
+    private static final int DIRTY_BUCKET_SIZE = 32;
     private static final Map<Level, LongOpenHashSet> DIRTY = new HashMap<>();
     private static final Map<ResourceLocation, Long2LongLinkedOpenHashMap> DIRTY_VERSIONS = new HashMap<>();
     private static int tickCounter;
@@ -61,12 +64,13 @@ public final class DirtyColumnBroadcaster {
                 DIRTY.remove(level);
             }
             long[] timestamps = dirtyTimestamps(level, packed);
+            DirtyBatchIndex dirtyIndex = DirtyBatchIndex.of(packed, timestamps);
             for (ServerPlayer player : level.players()) {
                 if (!VSSServerNetworking.isRegistered(player)) {
                     continue;
                 }
 
-                DirtyColumnsS2CPayload playerPayload = filterColumnsForPlayer(player, packed, timestamps);
+                DirtyColumnsS2CPayload playerPayload = filterColumnsForPlayer(player, dirtyIndex);
                 if (playerPayload.dirtyPositions().length > 0) {
                     VSSNetworking.sendToPlayer(player, playerPayload);
                 }
@@ -265,21 +269,36 @@ public final class DirtyColumnBroadcaster {
         return timestamps;
     }
 
-    private static DirtyColumnsS2CPayload filterColumnsForPlayer(ServerPlayer player, long[] packedColumns, long[] timestamps) {
+    private static DirtyColumnsS2CPayload filterColumnsForPlayer(ServerPlayer player, DirtyBatchIndex dirtyIndex) {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks + VSSConstants.LOD_DISTANCE_BUFFER;
+        long[] packedColumns = dirtyIndex.packedColumns();
+        long[] timestamps = dirtyIndex.timestamps();
         long[] filtered = new long[packedColumns.length];
         long[] filteredTimestamps = new long[packedColumns.length];
         int count = 0;
-        for (int i = 0; i < packedColumns.length; i++) {
-            long packed = packedColumns[i];
-            int cx = PositionUtil.unpackX(packed);
-            int cz = PositionUtil.unpackZ(packed);
-            if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) <= maxDistance) {
-                filtered[count] = packed;
-                filteredTimestamps[count] = i < timestamps.length ? timestamps[i] : 0L;
-                count++;
+        int minBucketX = Math.floorDiv(playerCx - maxDistance, DIRTY_BUCKET_SIZE);
+        int maxBucketX = Math.floorDiv(playerCx + maxDistance, DIRTY_BUCKET_SIZE);
+        int minBucketZ = Math.floorDiv(playerCz - maxDistance, DIRTY_BUCKET_SIZE);
+        int maxBucketZ = Math.floorDiv(playerCz + maxDistance, DIRTY_BUCKET_SIZE);
+        for (int bucketX = minBucketX; bucketX <= maxBucketX; bucketX++) {
+            for (int bucketZ = minBucketZ; bucketZ <= maxBucketZ; bucketZ++) {
+                IntArrayList indices = dirtyIndex.indices(bucketX, bucketZ);
+                if (indices == null) {
+                    continue;
+                }
+                for (int cursor = 0; cursor < indices.size(); cursor++) {
+                    int i = indices.getInt(cursor);
+                    long packed = packedColumns[i];
+                    int cx = PositionUtil.unpackX(packed);
+                    int cz = PositionUtil.unpackZ(packed);
+                    if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) <= maxDistance) {
+                        filtered[count] = packed;
+                        filteredTimestamps[count] = i < timestamps.length ? timestamps[i] : 0L;
+                        count++;
+                    }
+                }
             }
         }
         if (count == packedColumns.length) {
@@ -290,5 +309,29 @@ public final class DirtyColumnBroadcaster {
         System.arraycopy(filtered, 0, trimmed, 0, count);
         System.arraycopy(filteredTimestamps, 0, trimmedTimestamps, 0, count);
         return new DirtyColumnsS2CPayload(trimmed, trimmedTimestamps);
+    }
+
+    private record DirtyBatchIndex(
+            long[] packedColumns,
+            long[] timestamps,
+            Long2ObjectOpenHashMap<IntArrayList> buckets) {
+        static DirtyBatchIndex of(long[] packedColumns, long[] timestamps) {
+            Long2ObjectOpenHashMap<IntArrayList> buckets = new Long2ObjectOpenHashMap<>();
+            for (int i = 0; i < packedColumns.length; i++) {
+                int cx = PositionUtil.unpackX(packedColumns[i]);
+                int cz = PositionUtil.unpackZ(packedColumns[i]);
+                long bucketKey = bucketKey(Math.floorDiv(cx, DIRTY_BUCKET_SIZE), Math.floorDiv(cz, DIRTY_BUCKET_SIZE));
+                buckets.computeIfAbsent(bucketKey, ignored -> new IntArrayList()).add(i);
+            }
+            return new DirtyBatchIndex(packedColumns, timestamps, buckets);
+        }
+
+        IntArrayList indices(int bucketX, int bucketZ) {
+            return buckets.get(bucketKey(bucketX, bucketZ));
+        }
+    }
+
+    private static long bucketKey(int bucketX, int bucketZ) {
+        return ((long) bucketX << 32) ^ (bucketZ & 0xFFFF_FFFFL);
     }
 }

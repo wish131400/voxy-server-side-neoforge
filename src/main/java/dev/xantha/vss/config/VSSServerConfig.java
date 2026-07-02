@@ -32,8 +32,8 @@ public class VSSServerConfig extends JsonConfig {
     private static final int PREVIOUS_DEFAULT_GENERATION_CONCURRENCY_LIMIT_GLOBAL = 24;
     private static final int LOW_BANDWIDTH_DEFAULT_KBPS_PER_PLAYER = 500;
     private static final int LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER = kbpsToBytesPerSecond(LOW_BANDWIDTH_DEFAULT_KBPS_PER_PLAYER);
-    private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 256;
-    private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER = 4 * BYTES_PER_MIB;
+    private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 512;
+    private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER = 8 * BYTES_PER_MIB;
     private static final int LOW_BANDWIDTH_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER = 16;
     private static final int LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER = 8;
     public static final VSSServerConfig CONFIG = load(VSSServerConfig.class, FILE_NAME);
@@ -274,10 +274,12 @@ public class VSSServerConfig extends JsonConfig {
                 || bandwidthEqualsBytes(PREVIOUS_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER)) {
             setPerPlayerBandwidthBytesUnchecked(LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER);
         }
-        if (sendQueueLimitPerPlayer == 500 || sendQueueLimitPerPlayer == 1000) {
+        if (sendQueueLimitPerPlayer == 256 || sendQueueLimitPerPlayer == 500 || sendQueueLimitPerPlayer == 1000) {
             sendQueueLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
         }
-        if (sendQueueBytesLimitPerPlayer == 16 * BYTES_PER_MIB || sendQueueBytesLimitPerPlayer == 32 * BYTES_PER_MIB) {
+        if (sendQueueBytesLimitPerPlayer == 4 * BYTES_PER_MIB
+                || sendQueueBytesLimitPerPlayer == 16 * BYTES_PER_MIB
+                || sendQueueBytesLimitPerPlayer == 32 * BYTES_PER_MIB) {
             sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
         }
         if (syncOnLoadRateLimitPerPlayer == 80 || syncOnLoadRateLimitPerPlayer == 120) {

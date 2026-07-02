@@ -7,6 +7,7 @@ import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
 import io.netty.buffer.Unpooled;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +39,7 @@ public final class FarPlayerBroadcaster {
     private static final int MAX_VEHICLE_SPAWN_DATA_BYTES = VSSConstants.MAX_FAR_VEHICLE_DATA_BYTES;
     private static final int MAX_VEHICLE_NBT_BYTES = VSSConstants.MAX_FAR_VEHICLE_DATA_BYTES;
     private static final int MAX_FAR_PLAYERS_PACKET_BYTES = VSSConstants.MAX_FAR_PLAYERS_PACKET_BYTES;
+    private static final int FAR_PLAYER_BUCKET_CHUNKS = 32;
     private static final Map<UUID, Map<UUID, VehicleSyncCache>> VEHICLE_SYNC_CACHES = new HashMap<>();
     private static int tickCounter;
     private static long nextDiagnosticNanos;
@@ -77,6 +79,7 @@ public final class FarPlayerBroadcaster {
         NorthstarRocketCompat.pruneViewers(players);
 
         double maxHorizontalDistanceSqr = square(config.lodDistanceChunks * 16.0D);
+        PlayerSpatialIndex spatialIndex = PlayerSpatialIndex.build(players);
         for (ServerPlayer viewer : players) {
             if (!VSSServerNetworking.isRegistered(viewer)) {
                 NorthstarRocketCompat.clear(viewer);
@@ -85,11 +88,12 @@ public final class FarPlayerBroadcaster {
 
             NorthstarRocketCompat.beginViewer(viewer);
             List<FarPlayersS2CPayload.Entry> entries = new ArrayList<>();
+            Set<Integer> sentVehicleIds = new HashSet<>();
             int skippedUnavailable = 0;
             int skippedDistance = 0;
             int vehicleSnapshotsSent = 0;
             try {
-                for (ServerPlayer target : players) {
+                for (ServerPlayer target : spatialIndex.candidates(viewer, config.lodDistanceChunks)) {
                     if (target == viewer) {
                         continue;
                     }
@@ -104,7 +108,7 @@ public final class FarPlayerBroadcaster {
                         continue;
                     }
 
-                    FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target);
+                    FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target, sentVehicleIds);
                     vehicleSnapshotsSent += vehicles.length;
                     entries.add(new FarPlayersS2CPayload.Entry(
                             target.getUUID(),
@@ -147,6 +151,55 @@ public final class FarPlayerBroadcaster {
             } finally {
                 NorthstarRocketCompat.finishViewer(viewer);
             }
+        }
+    }
+
+    private record PlayerSpatialIndex(Map<ResourceLocation, Map<Long, List<ServerPlayer>>> buckets) {
+        static PlayerSpatialIndex build(List<ServerPlayer> players) {
+            Map<ResourceLocation, Map<Long, List<ServerPlayer>>> buckets = new HashMap<>();
+            for (ServerPlayer player : players) {
+                if (player.isSpectator()) {
+                    continue;
+                }
+                ResourceLocation dimension = player.serverLevel().dimension().location();
+                int chunkX = player.getBlockX() >> 4;
+                int chunkZ = player.getBlockZ() >> 4;
+                long bucketKey = bucketKey(
+                        Math.floorDiv(chunkX, FAR_PLAYER_BUCKET_CHUNKS),
+                        Math.floorDiv(chunkZ, FAR_PLAYER_BUCKET_CHUNKS));
+                buckets.computeIfAbsent(dimension, ignored -> new HashMap<>())
+                        .computeIfAbsent(bucketKey, ignored -> new ArrayList<>())
+                        .add(player);
+            }
+            return new PlayerSpatialIndex(buckets);
+        }
+
+        List<ServerPlayer> candidates(ServerPlayer viewer, int lodDistanceChunks) {
+            Map<Long, List<ServerPlayer>> dimensionBuckets = buckets.get(viewer.serverLevel().dimension().location());
+            if (dimensionBuckets == null || dimensionBuckets.isEmpty()) {
+                return List.of();
+            }
+
+            int viewerCx = viewer.getBlockX() >> 4;
+            int viewerCz = viewer.getBlockZ() >> 4;
+            int minBucketX = Math.floorDiv(viewerCx - lodDistanceChunks, FAR_PLAYER_BUCKET_CHUNKS);
+            int maxBucketX = Math.floorDiv(viewerCx + lodDistanceChunks, FAR_PLAYER_BUCKET_CHUNKS);
+            int minBucketZ = Math.floorDiv(viewerCz - lodDistanceChunks, FAR_PLAYER_BUCKET_CHUNKS);
+            int maxBucketZ = Math.floorDiv(viewerCz + lodDistanceChunks, FAR_PLAYER_BUCKET_CHUNKS);
+            ArrayList<ServerPlayer> candidates = new ArrayList<>();
+            for (int bucketX = minBucketX; bucketX <= maxBucketX; bucketX++) {
+                for (int bucketZ = minBucketZ; bucketZ <= maxBucketZ; bucketZ++) {
+                    List<ServerPlayer> bucket = dimensionBuckets.get(bucketKey(bucketX, bucketZ));
+                    if (bucket != null) {
+                        candidates.addAll(bucket);
+                    }
+                }
+            }
+            return candidates;
+        }
+
+        private static long bucketKey(int bucketX, int bucketZ) {
+            return ((long) bucketX << 32) ^ (bucketZ & 0xFFFF_FFFFL);
         }
     }
 
@@ -338,7 +391,7 @@ public final class FarPlayerBroadcaster {
         return stack != null ? stack.copy() : ItemStack.EMPTY;
     }
 
-    private static FarPlayersS2CPayload.VehicleSnapshot[] vehicleSnapshots(ServerPlayer viewer, ServerPlayer target) {
+    private static FarPlayersS2CPayload.VehicleSnapshot[] vehicleSnapshots(ServerPlayer viewer, ServerPlayer target, Set<Integer> sentVehicleIds) {
         List<Entity> chain = vehicleChain(target);
         if (chain.isEmpty()) {
             clearVehicleCache(viewer, target);
@@ -353,13 +406,17 @@ public final class FarPlayerBroadcaster {
         boolean sentFullData = false;
         for (int i = 0; i < chain.size(); i++) {
             Entity vehicle = chain.get(i);
-            boolean fullData = cache.shouldSendFullData(vehicle, i, now);
+            boolean fullData = !sentVehicleIds.contains(vehicle.getId())
+                    && cache.shouldSendFullData(vehicle, i, now);
             sentFullData |= fullData;
             FarPlayersS2CPayload.VehicleSnapshot snapshot = vehicleSnapshot(vehicle, fullData);
             if (snapshot == null) {
                 break;
             }
             snapshots.add(snapshot);
+        }
+        for (FarPlayersS2CPayload.VehicleSnapshot snapshot : snapshots) {
+            sentVehicleIds.add(snapshot.sourceEntityId());
         }
         cache.remember(chain, now, sentFullData);
         return snapshots.toArray(FarPlayersS2CPayload.VehicleSnapshot[]::new);
