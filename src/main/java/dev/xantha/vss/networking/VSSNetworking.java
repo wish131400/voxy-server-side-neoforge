@@ -9,6 +9,7 @@ import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
@@ -36,6 +37,7 @@ public final class VSSNetworking {
         registrar.playToServer(BatchChunkRequestC2SPayload.TYPE, BatchChunkRequestC2SPayload.STREAM_CODEC, VSSServerNetworking::handleBatchRequest);
         registrar.playToServer(CancelRequestC2SPayload.TYPE, CancelRequestC2SPayload.STREAM_CODEC, VSSServerNetworking::handleCancel);
         registrar.playToServer(BandwidthUpdateC2SPayload.TYPE, BandwidthUpdateC2SPayload.STREAM_CODEC, VSSServerNetworking::handleBandwidthUpdate);
+        registrar.playToServer(RegionPresenceC2SPayload.TYPE, RegionPresenceC2SPayload.STREAM_CODEC, VSSServerNetworking::handleRegionPresence);
 
         registrar.playToClient(SessionConfigS2CPayload.TYPE, SessionConfigS2CPayload.STREAM_CODEC, VSSNetworking::handleSessionConfig);
         registrar.playToClient(BatchResponseS2CPayload.TYPE, BatchResponseS2CPayload.STREAM_CODEC, VSSNetworking::handleBatchResponse);
@@ -49,22 +51,7 @@ public final class VSSNetworking {
     }
 
     public static void sendToPlayer(ServerPlayer player, CustomPacketPayload payload) {
-        if (trySendToIntegratedHost(player, payload)) {
-            return;
-        }
         PacketDistributor.sendToPlayer(player, payload);
-    }
-
-    private static boolean trySendToIntegratedHost(ServerPlayer player, CustomPacketPayload payload) {
-        if (!FMLEnvironment.dist.isClient()) {
-            return false;
-        }
-        Object handled = invokeClientHandler(
-                "tryHandleIntegratedHostPayload",
-                new Class<?>[] {ServerPlayer.class, CustomPacketPayload.class},
-                player,
-                payload);
-        return Boolean.TRUE.equals(handled);
     }
 
     private static void handleSessionConfig(SessionConfigS2CPayload payload, IPayloadContext context) {

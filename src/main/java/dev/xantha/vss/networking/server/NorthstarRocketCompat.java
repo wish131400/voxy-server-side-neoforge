@@ -159,6 +159,7 @@ public final class NorthstarRocketCompat {
         RocketViewState state = viewerStates.computeIfAbsent(rocket.getId(), ignored -> new RocketViewState());
         long now = System.nanoTime();
         state.entity = rocket;
+        boolean syncStateChanged = state.updateSyncState(captureRocketSyncState(rocket));
 
         if (!state.spawned) {
             if (!sendPairingData(viewer, rocket)) {
@@ -174,7 +175,7 @@ public final class NorthstarRocketCompat {
             }
         }
 
-        if (now - state.lastFullSyncNanos >= FULL_SYNC_INTERVAL_NANOS) {
+        if (syncStateChanged || now - state.lastFullSyncNanos >= FULL_SYNC_INTERVAL_NANOS) {
             sendNorthstarSync(viewer, rocket);
             state.lastFullSyncNanos = now;
         }
@@ -323,6 +324,32 @@ public final class NorthstarRocketCompat {
         return UUID.nameUUIDFromBytes(("vss:far-player:" + uuid).getBytes(StandardCharsets.UTF_8));
     }
 
+    private static RocketSyncState captureRocketSyncState(Entity rocket) {
+        Reflection resolved = reflection();
+        if (resolved == null) {
+            return null;
+        }
+        try {
+            return new RocketSyncState(
+                    quantizeVelocity(resolved.liftVelocityField.getFloat(rocket)),
+                    quantizeVelocity(resolved.finalLiftVelocityField.getFloat(rocket)),
+                    ((Integer) resolved.getLaunchTimeMethod.invoke(rocket)).intValue(),
+                    resolved.launchingModeField.getBoolean(rocket),
+                    resolved.landingModeField.getBoolean(rocket),
+                    resolved.blastingField.getBoolean(rocket),
+                    resolved.slowingField.getBoolean(rocket),
+                    ((Boolean) resolved.isActiveLaunchMethod.invoke(rocket)).booleanValue(),
+                    ((Boolean) resolved.isInFlightMethod.invoke(rocket)).booleanValue());
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            VSSLogger.warn("Failed to read Northstar rocket sync state", e);
+            return null;
+        }
+    }
+
+    private static int quantizeVelocity(float velocity) {
+        return Math.round(velocity * 1000.0F);
+    }
+
     private static Reflection reflection() {
         if (reflectionUnavailable) {
             return null;
@@ -445,6 +472,30 @@ public final class NorthstarRocketCompat {
         private boolean spawned;
         private long lastFullSyncNanos;
         private Entity entity;
+        private RocketSyncState lastSyncState;
+
+        private boolean updateSyncState(RocketSyncState next) {
+            if (next == null) {
+                return false;
+            }
+            if (!next.equals(lastSyncState)) {
+                lastSyncState = next;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private record RocketSyncState(
+            int liftVelocity,
+            int finalLiftVelocity,
+            int launchTime,
+            boolean launchingMode,
+            boolean landingMode,
+            boolean blasting,
+            boolean slowing,
+            boolean activeLaunch,
+            boolean inFlight) {
     }
 
     private record Reflection(

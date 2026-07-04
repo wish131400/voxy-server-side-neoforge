@@ -15,8 +15,9 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.Locale;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 import java.util.stream.Stream;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -34,12 +35,14 @@ final class PersistentColumnLodStore {
     private static final int REGION_BITMAP_LONGS = REGION_SLOT_COUNT / Long.SIZE;
     private static final int MAX_COLUMN_BYTES = 2 * 1024 * 1024;
     private static final int MAX_ENCODED_COLUMN_BYTES = MAX_COLUMN_BYTES + 65536;
+    private static final int MIN_REGION_INDEX_CACHE_ENTRIES = 512;
+    private static final int MAX_REGION_INDEX_CACHE_ENTRIES = 8192;
     private static final String CACHE_DIR = "vss-column-cache";
     private static final String COLUMN_EXTENSION = ".vcl";
     private static final String INDEX_FILE_NAME = "index.vci";
 
     private final VSSServerConfig config;
-    private final ConcurrentHashMap<RegionKey, RegionIndex> regionIndexes = new ConcurrentHashMap<>();
+    private final Map<RegionKey, RegionIndex> regionIndexes = new LinkedHashMap<>(128, 0.75F, true);
     private long reads;
     private long hits;
     private long misses;
@@ -50,6 +53,7 @@ final class PersistentColumnLodStore {
     private long cleanupDeleted;
     private long indexScans;
     private long indexMissSkips;
+    private long indexEvictions;
     private long nextCleanupMillis;
     private long knownCacheBytes = -1L;
     private int knownCacheEntries = -1;
@@ -63,8 +67,12 @@ final class PersistentColumnLodStore {
         return config.enablePersistentColumnCache;
     }
 
+    static int regionSize() {
+        return REGION_SIZE;
+    }
+
     void clearMemory() {
-        regionIndexes.clear();
+        clearRegionIndexes();
         nextCleanupMillis = 0L;
         knownCacheBytes = -1L;
         knownCacheEntries = -1;
@@ -145,6 +153,36 @@ final class PersistentColumnLodStore {
         }
     }
 
+    ArrayList<ExistingColumn> findExistingColumnsInRegion(
+            MinecraftServer server,
+            ResourceKey<Level> dimension,
+            int regionX,
+            int regionZ,
+            int centerCx,
+            int centerCz,
+            int minDistance,
+            int maxDistance,
+            int limit) {
+        ArrayList<ExistingColumn> columns = new ArrayList<>(Math.min(Math.max(0, limit), REGION_SLOT_COUNT));
+        if (!config.enablePersistentColumnCache || limit <= 0 || maxDistance < minDistance) {
+            return columns;
+        }
+
+        refreshCompressionState();
+        RegionKey key = new RegionKey(safeDimension(dimension.location()), regionX, regionZ);
+        RegionIndex index = regionIndex(server, key);
+        index.collectReadable(columns, regionX, regionZ, centerCx, centerCz, minDistance, maxDistance);
+        columns.sort(Comparator
+                .comparingInt(ExistingColumn::distance)
+                .thenComparingLong(ExistingColumn::distanceSquared)
+                .thenComparingInt(ExistingColumn::chunkX)
+                .thenComparingInt(ExistingColumn::chunkZ));
+        if (columns.size() > limit) {
+            columns.subList(limit, columns.size()).clear();
+        }
+        return columns;
+    }
+
     void write(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData columnData) {
         if (!config.enablePersistentColumnCache
                 || columnData == null
@@ -208,7 +246,7 @@ final class PersistentColumnLodStore {
     String diagnostics() {
         return String.format(
                 Locale.ROOT,
-                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d, indexScans=%d, indexMissSkips=%d}",
+                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
                 config.enablePersistentColumnCache,
                 reads,
                 hits,
@@ -218,9 +256,11 @@ final class PersistentColumnLodStore {
                 invalidations,
                 cleanupRuns,
                 cleanupDeleted,
-                regionIndexes.size(),
+                regionIndexCount(),
+                maxRegionIndexCacheEntries(),
                 indexScans,
-                indexMissSkips);
+                indexMissSkips,
+                indexEvictions);
     }
 
     private static boolean isReadableCompression(int method) {
@@ -359,8 +399,12 @@ final class PersistentColumnLodStore {
     private void refreshCompressionState() {
         boolean zstdAvailable = LodByteCompression.isZstdAvailable();
         if (indexedZstdAvailable != zstdAvailable) {
-            regionIndexes.clear();
-            indexedZstdAvailable = zstdAvailable;
+            synchronized (this) {
+                if (indexedZstdAvailable != zstdAvailable) {
+                    regionIndexes.clear();
+                    indexedZstdAvailable = zstdAvailable;
+                }
+            }
         }
     }
 
@@ -379,7 +423,54 @@ final class PersistentColumnLodStore {
 
     private RegionIndex regionIndex(MinecraftServer server, RegionKey key) {
         refreshCompressionState();
-        return regionIndexes.computeIfAbsent(key, ignored -> loadOrScanRegion(server, key));
+        RegionIndex cached = cachedRegionIndex(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        RegionIndex loaded = loadOrScanRegion(server, key);
+        return cacheRegionIndex(key, loaded);
+    }
+
+    private synchronized RegionIndex cachedRegionIndex(RegionKey key) {
+        return regionIndexes.get(key);
+    }
+
+    private synchronized RegionIndex cacheRegionIndex(RegionKey key, RegionIndex index) {
+        RegionIndex cached = regionIndexes.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        regionIndexes.put(key, index);
+        int maxEntries = maxRegionIndexCacheEntries();
+        while (regionIndexes.size() > maxEntries) {
+            var iterator = regionIndexes.entrySet().iterator();
+            if (!iterator.hasNext()) {
+                return index;
+            }
+            iterator.next();
+            iterator.remove();
+            indexEvictions++;
+        }
+        return index;
+    }
+
+    private int maxRegionIndexCacheEntries() {
+        int regionRing = Math.max(0, (config.lodDistanceChunks + REGION_SIZE - 1) / REGION_SIZE);
+        long windowDiameter = (long) regionRing * 2L + 1L;
+        long activeWindow = windowDiameter * windowDiameter;
+        long target = activeWindow * 3L / 2L + 64L;
+        return (int) Math.max(
+                MIN_REGION_INDEX_CACHE_ENTRIES,
+                Math.min(MAX_REGION_INDEX_CACHE_ENTRIES, target));
+    }
+
+    private synchronized void clearRegionIndexes() {
+        regionIndexes.clear();
+    }
+
+    private synchronized int regionIndexCount() {
+        return regionIndexes.size();
     }
 
     private RegionIndex loadOrScanRegion(MinecraftServer server, RegionKey key) {
@@ -678,6 +769,9 @@ final class PersistentColumnLodStore {
         }
     }
 
+    record ExistingColumn(int chunkX, int chunkZ, long timestamp, int distance, long distanceSquared) {
+    }
+
     private static final class RegionIndex {
         private final long[] presentBitmap = new long[REGION_BITMAP_LONGS];
         private final IndexSlot[] slots = new IndexSlot[REGION_SLOT_COUNT];
@@ -725,6 +819,37 @@ final class PersistentColumnLodStore {
                 out.writeInt(slot.rawSize());
                 out.writeInt(slot.schemaVersion());
                 out.writeInt(slot.length());
+            }
+        }
+
+        synchronized void collectReadable(
+                ArrayList<ExistingColumn> output,
+                int regionX,
+                int regionZ,
+                int centerCx,
+                int centerCz,
+                int minDistance,
+                int maxDistance) {
+            int baseX = regionX * REGION_SIZE;
+            int baseZ = regionZ * REGION_SIZE;
+            for (int localIndex = 0; localIndex < REGION_SLOT_COUNT; localIndex++) {
+                if (!hasBit(presentBitmap, localIndex)) {
+                    continue;
+                }
+                IndexSlot slot = slots[localIndex];
+                if (!isReadableSlot(slot, 0L)) {
+                    continue;
+                }
+                int cx = baseX + (localIndex & (REGION_SIZE - 1));
+                int cz = baseZ + (localIndex >>> 5);
+                int dx = cx - centerCx;
+                int dz = cz - centerCz;
+                int distance = Math.max(Math.abs(dx), Math.abs(dz));
+                if (distance < minDistance || distance > maxDistance) {
+                    continue;
+                }
+                long distanceSquared = (long) dx * dx + (long) dz * dz;
+                output.add(new ExistingColumn(cx, cz, slot.timestamp(), distance, distanceSquared));
             }
         }
 

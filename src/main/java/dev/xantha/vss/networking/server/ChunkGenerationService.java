@@ -103,6 +103,11 @@ final class ChunkGenerationService {
         return true;
     }
 
+    boolean isGenerating(ResourceKey<Level> dimension, int cx, int cz) {
+        PendingGenerationKey key = new PendingGenerationKey(dimension, cx, cz);
+        return active.containsKey(key) || queued.containsKey(key);
+    }
+
     boolean submitLoadedColumn(
             UUID playerUuid,
             PlayerRequestState requestState,

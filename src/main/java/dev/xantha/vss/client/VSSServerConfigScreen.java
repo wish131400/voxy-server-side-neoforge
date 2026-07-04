@@ -96,12 +96,24 @@ final class VSSServerConfigScreen extends Screen {
                 left, inputX, inputWidth, y);
         y += rowHeight;
 
-        addField("vss.config.server.sync_rate", config.syncOnLoadRateLimitPerPlayer, 1, 1000,
-                value -> config.syncOnLoadRateLimitPerPlayer = value, left, inputX, inputWidth, y);
+        addField("vss.config.server.sync_near_rate", config.nearSyncRateLimitPerTick,
+                VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                value -> config.nearSyncRateLimitPerTick = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
-        addField("vss.config.server.sync_concurrency", config.syncOnLoadConcurrencyLimitPerPlayer, 1, 1000,
-                value -> config.syncOnLoadConcurrencyLimitPerPlayer = value, left, inputX, inputWidth, y);
+        addField("vss.config.server.sync_mid_rate", config.midSyncRateLimitPerTick,
+                VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                value -> config.midSyncRateLimitPerTick = value, left, inputX, inputWidth, y);
+        y += rowHeight;
+
+        addField("vss.config.server.sync_far_rate", config.farSyncRateLimitPerTick,
+                VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                value -> config.farSyncRateLimitPerTick = value, left, inputX, inputWidth, y);
+        y += rowHeight;
+
+        addField("vss.config.server.sync_distant_rate", config.distantSyncRateLimitPerTick,
+                VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                value -> config.distantSyncRateLimitPerTick = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
         addField("vss.config.server.dirty_broadcast_interval", config.dirtyBroadcastIntervalTicks,
@@ -158,6 +170,10 @@ final class VSSServerConfigScreen extends Screen {
         cancelButton = addRenderableWidget(Button.builder(Component.translatable("gui.cancel"), button -> minecraft.setScreen(parent))
                 .bounds(width / 2 + 5, buttonY, 150, 20)
                 .build());
+        if (!canEditLocalServerConfig()) {
+            disableServerControls();
+            status = Component.translatable("vss.config.server.remote_locked").withStyle(ChatFormatting.YELLOW);
+        }
     }
 
     private void addField(String labelKey, int initialValue, int min, int max, IntSetter setter, int left, int inputX, int inputWidth, int y) {
@@ -169,6 +185,10 @@ final class VSSServerConfigScreen extends Screen {
     }
 
     private boolean saveConfig() {
+        if (!canEditLocalServerConfig()) {
+            status = Component.translatable("vss.config.server.remote_locked").withStyle(ChatFormatting.YELLOW);
+            return false;
+        }
         for (ConfigNumberField field : fields) {
             if (!field.apply()) {
                 status = Component.translatable("vss.config.server.invalid", field.label, field.min, field.max)
@@ -182,6 +202,19 @@ final class VSSServerConfigScreen extends Screen {
         }
         status = Component.translatable("vss.config.server.saved").withStyle(ChatFormatting.GREEN);
         return true;
+    }
+
+    private boolean canEditLocalServerConfig() {
+        return minecraft == null || minecraft.level == null || minecraft.getSingleplayerServer() != null;
+    }
+
+    private void disableServerControls() {
+        enabledButton.active = false;
+        generationButton.active = false;
+        farPlayersButton.active = false;
+        for (ConfigNumberField field : fields) {
+            field.editBox.active = false;
+        }
     }
 
     private Component enabledLabel() {

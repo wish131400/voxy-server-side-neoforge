@@ -11,6 +11,7 @@ public class VSSClientConfig extends JsonConfig {
     @Deprecated
     private Integer desiredBandwidthMiB;
     public boolean offThreadSectionProcessing = true;
+    public boolean debugLogging = false;
 
     @Override
     protected String getFileName() {

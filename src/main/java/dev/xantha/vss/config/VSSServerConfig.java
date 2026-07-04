@@ -1,5 +1,7 @@
 package dev.xantha.vss.config;
 
+import dev.xantha.vss.common.VSSConstants;
+
 public class VSSServerConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-server-config.json";
     public static final int MIN_LOD_DISTANCE_CHUNKS = 1;
@@ -17,10 +19,14 @@ public class VSSServerConfig extends JsonConfig {
     public static final int MAX_DISK_READER_THREADS = 16;
     public static final int MIN_DIRTY_BROADCAST_INTERVAL_TICKS = 1;
     public static final int MAX_DIRTY_BROADCAST_INTERVAL_TICKS = 600;
+    public static final int MIN_SYNC_RATE_LIMIT_PER_TICK = 0;
+    public static final int MAX_SYNC_RATE_LIMIT_PER_TICK = VSSConstants.MAX_BATCH_CHUNK_REQUESTS;
+    public static final int DEFAULT_NEAR_SYNC_RATE_LIMIT_PER_TICK = 0;
+    public static final int DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK = 8;
+    public static final int DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK = 4;
+    public static final int DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK = 2;
     private static final int OLD_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 0x1400000;
     private static final int OLD_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 4000;
-    private static final int OLD_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER = 800;
-    private static final int OLD_DEFAULT_SYNC_ON_LOAD_CONCURRENCY_LIMIT_PER_PLAYER = 200;
     private static final int OLD_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER = 80;
     private static final int OLD_DEFAULT_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER = 16;
     private static final int OLD_DEFAULT_GENERATION_CONCURRENCY_LIMIT_GLOBAL = 32;
@@ -34,7 +40,6 @@ public class VSSServerConfig extends JsonConfig {
     private static final int LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER = kbpsToBytesPerSecond(LOW_BANDWIDTH_DEFAULT_KBPS_PER_PLAYER);
     private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 512;
     private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER = 8 * BYTES_PER_MIB;
-    private static final int LOW_BANDWIDTH_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER = 16;
     private static final int LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER = 8;
     public static final VSSServerConfig CONFIG = load(VSSServerConfig.class, FILE_NAME);
 
@@ -45,6 +50,7 @@ public class VSSServerConfig extends JsonConfig {
     public boolean lowBandwidthDefaultsApplied = false;
     public boolean storageThroughputDefaultsApplied = false;
     public boolean enabled = true;
+    public boolean debugLogging = false;
     public int lodDistanceChunks = 128;
     public int bytesPerSecondLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER;
     @Deprecated
@@ -52,11 +58,13 @@ public class VSSServerConfig extends JsonConfig {
     public int sendQueueLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
     public int sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
     public int diskReaderThreads = DEFAULT_DISK_READER_THREADS;
-    public int diskReadTimeoutMillis = 1500;
+    public int diskReadTimeoutMillis = 1000;
     public boolean enableChunkNbtColumnSync = true;
     public boolean enableChunkGeneration = true;
-    public int syncOnLoadRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER;
-    public int syncOnLoadConcurrencyLimitPerPlayer = 16;
+    public int nearSyncRateLimitPerTick = DEFAULT_NEAR_SYNC_RATE_LIMIT_PER_TICK;
+    public int midSyncRateLimitPerTick = DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK;
+    public int farSyncRateLimitPerTick = DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK;
+    public int distantSyncRateLimitPerTick = DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK;
     public int generationRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
     public int generationConcurrencyLimitPerPlayer = 4;
     public int generationConcurrencyLimitGlobal = 32;
@@ -64,7 +72,7 @@ public class VSSServerConfig extends JsonConfig {
     public int generationCompletionsPerTickLimit = 4;
     public int generationPackingThreads = 2;
     public int generationPackingQueueLimit = 32;
-    public int generationTimeoutSeconds = 45;
+    public int generationTimeoutSeconds = 30;
     @Deprecated
     public transient int dirtyBroadcastIntervalSeconds = 2;
     public int dirtyBroadcastIntervalTicks = 10;
@@ -72,7 +80,7 @@ public class VSSServerConfig extends JsonConfig {
     public int dirtyVersionCacheMaxEntries = 100000;
     public int dirtyVersionCacheRetentionSeconds = 43200;
     public boolean farPlayerSyncEnabled = true;
-    public int farPlayerSyncIntervalTicks = 10;
+    public int farPlayerSyncIntervalTicks = 2;
     public boolean enableColumnCache = true;
     public int columnCacheMaxEntries = 4096;
     public int columnCacheMaxBytes = 32 * BYTES_PER_MIB;
@@ -105,8 +113,10 @@ public class VSSServerConfig extends JsonConfig {
         sendQueueBytesLimitPerPlayer = clamp(sendQueueBytesLimitPerPlayer, MIN_SEND_QUEUE_BYTES_PER_PLAYER, MAX_SEND_QUEUE_BYTES_PER_PLAYER);
         diskReaderThreads = clamp(diskReaderThreads, MIN_DISK_READER_THREADS, MAX_DISK_READER_THREADS);
         diskReadTimeoutMillis = clamp(diskReadTimeoutMillis, 100, 60000);
-        syncOnLoadRateLimitPerPlayer = clamp(syncOnLoadRateLimitPerPlayer, 1, 1000);
-        syncOnLoadConcurrencyLimitPerPlayer = clamp(syncOnLoadConcurrencyLimitPerPlayer, 1, 1000);
+        nearSyncRateLimitPerTick = clamp(nearSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
+        midSyncRateLimitPerTick = clamp(midSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
+        farSyncRateLimitPerTick = clamp(farSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
+        distantSyncRateLimitPerTick = clamp(distantSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         generationRateLimitPerPlayer = clamp(generationRateLimitPerPlayer, 1, 1000);
         generationConcurrencyLimitPerPlayer = clamp(generationConcurrencyLimitPerPlayer, 1, 1000);
         generationConcurrencyLimitGlobal = clamp(generationConcurrencyLimitGlobal, 1, 1000);
@@ -136,12 +146,6 @@ public class VSSServerConfig extends JsonConfig {
         }
         if (sendQueueLimitPerPlayer == OLD_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER) {
             sendQueueLimitPerPlayer = 1000;
-        }
-        if (syncOnLoadRateLimitPerPlayer == OLD_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER) {
-            syncOnLoadRateLimitPerPlayer = 320;
-        }
-        if (syncOnLoadConcurrencyLimitPerPlayer == OLD_DEFAULT_SYNC_ON_LOAD_CONCURRENCY_LIMIT_PER_PLAYER) {
-            syncOnLoadConcurrencyLimitPerPlayer = 64;
         }
         if (generationRateLimitPerPlayer == OLD_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER) {
             generationRateLimitPerPlayer = 40;
@@ -207,12 +211,6 @@ public class VSSServerConfig extends JsonConfig {
             sendQueueBytesLimitPerPlayer = 16 * BYTES_PER_MIB;
         }
         // 降低同步并发
-        if (syncOnLoadRateLimitPerPlayer == 120) {
-            syncOnLoadRateLimitPerPlayer = 80;
-        }
-        if (syncOnLoadConcurrencyLimitPerPlayer == 24) {
-            syncOnLoadConcurrencyLimitPerPlayer = 16;
-        }
         // 大幅降低生成并发，这是最大的内存消耗源
         if (generationRateLimitPerPlayer == 40) {
             generationRateLimitPerPlayer = 20;
@@ -281,9 +279,6 @@ public class VSSServerConfig extends JsonConfig {
                 || sendQueueBytesLimitPerPlayer == 16 * BYTES_PER_MIB
                 || sendQueueBytesLimitPerPlayer == 32 * BYTES_PER_MIB) {
             sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
-        }
-        if (syncOnLoadRateLimitPerPlayer == 80 || syncOnLoadRateLimitPerPlayer == 120) {
-            syncOnLoadRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SYNC_ON_LOAD_RATE_LIMIT_PER_PLAYER;
         }
         if (generationRateLimitPerPlayer == 20 || generationRateLimitPerPlayer == 40) {
             generationRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;

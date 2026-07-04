@@ -1,6 +1,7 @@
 package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.api.VSSApi;
+import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.LodByteCompression;
@@ -13,16 +14,14 @@ import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
-import dev.xantha.vss.networking.server.VSSServerNetworking;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.resources.ResourceKey;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -39,15 +38,10 @@ public final class VSSClientNetworking {
     private static final ClientColumnProcessor COLUMN_PROCESSOR = new ClientColumnProcessor();
     private static final AtomicLong columnsReceived = new AtomicLong();
     private static final AtomicLong bytesReceived = new AtomicLong();
-    private static final int HANDSHAKE_RETRY_INTERVAL_TICKS = 40;
-    private static final int HANDSHAKE_FAILED_RETRY_INTERVAL_TICKS = 20;
-    private static final int INTEGRATED_HOST_SESSION_REFRESH_INTERVAL_TICKS = 20;
+    private static final int HANDSHAKE_RETRY_INTERVAL_TICKS = 5;
+    private static final int HANDSHAKE_FAILED_RETRY_INTERVAL_TICKS = 5;
     private static final long COLUMN_RECEIVE_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
-    private static final long INTEGRATED_HOST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static volatile long lastColumnReceiveDiagnosticNanos;
-    private static volatile long lastIntegratedHostDiagnosticNanos;
-    private static volatile long lastSessionConfigRevision = Long.MIN_VALUE;
-    private static int integratedHostSessionRefreshTicks;
 
     private VSSClientNetworking() {
     }
@@ -102,13 +96,12 @@ public final class VSSClientNetworking {
         handshakeRetryTicks = 0;
         serverEnabled = payload.enabled();
         serverLodDistance = payload.lodDistanceChunks();
-        lastSessionConfigRevision = payload.configRevision();
         if (payload.enabled()) {
             LodRequestManager manager = requestManager;
             boolean newSession = manager == null || !wasEnabled;
             if (newSession) {
                 COLUMN_PROCESSOR.beginSession();
-                manager = new LodRequestManager();
+                manager = new LodRequestManager(ClientLodPresenceCache.currentScope());
             }
             boolean requestStateReset = manager.onSessionConfig(payload);
             if (requestStateReset && !newSession) {
@@ -151,6 +144,7 @@ public final class VSSClientNetworking {
             int requestId = payload.requestIds()[i];
             switch (payload.responseTypes()[i]) {
                 case VSSConstants.RESPONSE_RATE_LIMITED -> manager.onRateLimited(requestId);
+                case VSSConstants.RESPONSE_BACKPRESSURE -> manager.onBackpressured(requestId);
                 case VSSConstants.RESPONSE_UP_TO_DATE -> manager.onColumnUpToDate(requestId);
                 case VSSConstants.RESPONSE_NOT_GENERATED -> manager.onColumnNotGenerated(requestId);
                 default -> VSSLogger.warn("Unknown batch response type: " + payload.responseTypes()[i]);
@@ -178,11 +172,15 @@ public final class VSSClientNetworking {
         LodRequestManager manager = requestManager;
         LodRequestManager.ColumnReceiveResult receiveResult;
         if (payload.requestId() < 0) {
-            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, Long.MIN_VALUE);
+            long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
+            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, packed);
         } else if (manager != null) {
             receiveResult = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
         } else {
             receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, Long.MIN_VALUE);
+        }
+        if (payload.requestId() >= 0 && !receiveResult.knownRequest()) {
+            return;
         }
         boolean replaceMissingSections = receiveResult.knownRequest() && payload.completeColumn();
         boolean queued = COLUMN_PROCESSOR.offer(
@@ -190,6 +188,9 @@ public final class VSSClientNetworking {
                 receiveResult.knownRequest(),
                 receiveResult.priority(),
                 replaceMissingSections);
+        if (queued && payload.requestId() < 0 && manager != null) {
+            manager.onPushedColumnReceived(payload.dimension(), payload.chunkX(), payload.chunkZ(), payload.columnTimestamp());
+        }
         if (!queued && manager != null && receiveResult.packedPosition() != Long.MIN_VALUE) {
             manager.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
         }
@@ -241,8 +242,6 @@ public final class VSSClientNetworking {
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
-        integratedHostSessionRefreshTicks = 0;
-        lastSessionConfigRevision = Long.MIN_VALUE;
         requestManager = null;
         if (!VSSClientConfig.CONFIG.receiveServerLods) {
             return;
@@ -260,7 +259,6 @@ public final class VSSClientNetworking {
     public static void onClientTick(ClientTickEvent.Post event) {
         ensureHandshakePending();
         tryPendingHandshake();
-        refreshIntegratedHostSessionIfNeeded();
         LodRequestManager manager = requestManager;
         if (manager != null && serverEnabled) {
             manager.tick();
@@ -284,54 +282,23 @@ public final class VSSClientNetworking {
     }
 
     static void sendBatchRequest(BatchChunkRequestC2SPayload payload) {
-        if (trySendToIntegratedServer(
-                "LOD batch request count=" + payload.count(),
-                serverPlayer -> VSSServerNetworking.handleIntegratedBatchRequest(serverPlayer, payload))) {
-            return;
-        }
         VSSNetworking.sendToServer(payload);
     }
 
     static void sendCancelRequest(CancelRequestC2SPayload payload) {
-        if (trySendToIntegratedServer(
-                "cancel request id=" + payload.requestId(),
-                serverPlayer -> VSSServerNetworking.handleIntegratedCancel(serverPlayer, payload))) {
-            return;
-        }
+        VSSNetworking.sendToServer(payload);
+    }
+
+    static void sendRegionPresence(RegionPresenceC2SPayload payload) {
         VSSNetworking.sendToServer(payload);
     }
 
     private static void sendBandwidthUpdate(BandwidthUpdateC2SPayload payload) {
         try {
-            if (trySendToIntegratedServer(
-                    "bandwidth update",
-                    serverPlayer -> VSSServerNetworking.handleIntegratedBandwidthUpdate(serverPlayer, payload))) {
-                return;
-            }
             VSSNetworking.sendToServer(payload);
         } catch (Exception e) {
             VSSLogger.debug("Bandwidth preference send failed: " + e.getMessage());
         }
-    }
-
-    private static boolean trySendToIntegratedServer(String action, java.util.function.Consumer<ServerPlayer> consumer) {
-        Minecraft minecraft = Minecraft.getInstance();
-        IntegratedServer server = minecraft.getSingleplayerServer();
-        LocalPlayer localPlayer = minecraft.player;
-        if (integratedServerPlayer(server, localPlayer) == null) {
-            return false;
-        }
-
-        logIntegratedHostDirect("Integrated host direct C2S: " + action);
-        server.execute(() -> {
-            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(localPlayer.getUUID());
-            if (serverPlayer != null) {
-                consumer.accept(serverPlayer);
-            } else {
-                VSSLogger.debug("Integrated host direct C2S skipped because the local server player is not ready");
-            }
-        });
-        return true;
     }
 
     private static void tryPendingHandshake() {
@@ -340,11 +307,6 @@ public final class VSSClientNetworking {
         }
         Minecraft mc = Minecraft.getInstance();
         if (mc.getConnection() == null || !isClientWorldReady()) {
-            return;
-        }
-        IntegratedServer integratedServer = mc.getSingleplayerServer();
-        if (integratedServerPlayer(integratedServer, mc.player) != null) {
-            tryIntegratedServerHandshake(mc, integratedServer);
             return;
         }
 
@@ -376,46 +338,6 @@ public final class VSSClientNetworking {
         }
     }
 
-    private static void tryIntegratedServerHandshake(Minecraft minecraft, IntegratedServer server) {
-        if (handshakeRetryTicks > 0) {
-            handshakeRetryTicks--;
-            return;
-        }
-
-        LocalPlayer localPlayer = minecraft.player;
-        if (localPlayer == null) {
-            return;
-        }
-
-        handshakeSent = true;
-        handshakeRetryTicks = HANDSHAKE_RETRY_INTERVAL_TICKS;
-        server.execute(() -> {
-            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(localPlayer.getUUID());
-            if (serverPlayer == null) {
-                return;
-            }
-            SessionConfigS2CPayload config = VSSServerNetworking.registerIntegratedHost(
-                    serverPlayer,
-                    VSSConstants.PROTOCOL_VERSION,
-                    clientCapabilities());
-            minecraft.execute(() -> {
-                VSSLogger.info("VSS integrated host session ready: distance=" + config.lodDistanceChunks()
-                        + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled")
-                        + ", revision=" + config.configRevision());
-                handleSessionConfig(config);
-            });
-        });
-    }
-
-    private static void logIntegratedHostDirect(String message) {
-        long now = System.nanoTime();
-        if (now - lastIntegratedHostDiagnosticNanos < INTEGRATED_HOST_DIAGNOSTIC_INTERVAL_NANOS) {
-            return;
-        }
-        lastIntegratedHostDiagnosticNanos = now;
-        VSSLogger.debug(message);
-    }
-
     private static boolean sendHandshake(String failurePrefix) {
         try {
             VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, clientCapabilities()));
@@ -426,59 +348,12 @@ public final class VSSClientNetworking {
         }
     }
 
-    private static void refreshIntegratedHostSessionIfNeeded() {
-        if (!serverEnabled || requestManager == null || !VSSClientConfig.CONFIG.receiveServerLods || !isClientWorldReady()) {
-            integratedHostSessionRefreshTicks = 0;
-            return;
-        }
-        if (++integratedHostSessionRefreshTicks < INTEGRATED_HOST_SESSION_REFRESH_INTERVAL_TICKS) {
-            return;
-        }
-        integratedHostSessionRefreshTicks = 0;
-
-        Minecraft minecraft = Minecraft.getInstance();
-        IntegratedServer server = minecraft.getSingleplayerServer();
-        LocalPlayer localPlayer = minecraft.player;
-        if (integratedServerPlayer(server, localPlayer) == null) {
-            return;
-        }
-
-        server.execute(() -> {
-            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(localPlayer.getUUID());
-            if (serverPlayer == null) {
-                return;
-            }
-            SessionConfigS2CPayload config = VSSServerNetworking.refreshIntegratedHostSession(
-                    serverPlayer,
-                    VSSConstants.PROTOCOL_VERSION,
-                    clientCapabilities());
-            minecraft.execute(() -> {
-                if (!isClientWorldReady()) {
-                    return;
-                }
-                if (config.configRevision() != lastSessionConfigRevision) {
-                    VSSLogger.info("VSS integrated host session refreshed: distance=" + config.lodDistanceChunks()
-                            + " chunks, generation=" + (config.generationEnabled() ? "enabled" : "disabled")
-                            + ", revision=" + config.configRevision());
-                    handleSessionConfig(config);
-                }
-            });
-        });
-    }
-
     private static int clientCapabilities() {
         int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
         if (LodByteCompression.isZstdAvailable()) {
             clientCaps |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
         }
         return clientCaps;
-    }
-
-    private static ServerPlayer integratedServerPlayer(IntegratedServer server, LocalPlayer localPlayer) {
-        if (server == null || localPlayer == null) {
-            return null;
-        }
-        return server.getPlayerList().getPlayer(localPlayer.getUUID());
     }
 
     private static boolean isClientWorldReady() {
@@ -500,11 +375,10 @@ public final class VSSClientNetworking {
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
-        integratedHostSessionRefreshTicks = 0;
-        lastSessionConfigRevision = Long.MIN_VALUE;
         if (manager != null) {
             manager.disconnect();
         }
+        ClientLodPresenceCache.flush();
         FarPlayerClientRenderer.clear();
         COLUMN_PROCESSOR.shutdown();
         if (resetStats) {
@@ -512,11 +386,13 @@ public final class VSSClientNetworking {
             columnsReceived.set(0);
             bytesReceived.set(0);
             lastColumnReceiveDiagnosticNanos = 0L;
-            lastIntegratedHostDiagnosticNanos = 0L;
         }
     }
 
     private static void logColumnReceive(VoxelColumnS2CPayload payload) {
+        if (!VSSLogger.isDebugEnabled()) {
+            return;
+        }
         long now = System.nanoTime();
         if (now - lastColumnReceiveDiagnosticNanos < COLUMN_RECEIVE_DIAGNOSTIC_INTERVAL_NANOS) {
             return;

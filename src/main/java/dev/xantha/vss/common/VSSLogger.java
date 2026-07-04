@@ -1,5 +1,7 @@
 package dev.xantha.vss.common;
 
+import dev.xantha.vss.config.VSSClientConfig;
+import dev.xantha.vss.config.VSSServerConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,7 +12,22 @@ public final class VSSLogger {
     }
 
     public static void debug(String msg) {
-        LOG.debug(msg);
+        if (!isDebugEnabled()) {
+            return;
+        }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug(msg);
+        } else {
+            LOG.info("[debug] " + msg);
+        }
+    }
+
+    public static boolean isDebugEnabled() {
+        try {
+            return VSSClientConfig.CONFIG.debugLogging || VSSServerConfig.CONFIG.debugLogging || LOG.isDebugEnabled();
+        } catch (Throwable ignored) {
+            return LOG.isDebugEnabled();
+        }
     }
 
     public static void info(String msg) {

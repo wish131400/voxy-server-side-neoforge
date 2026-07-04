@@ -13,6 +13,7 @@ import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.HashMap;
@@ -56,8 +57,13 @@ public final class VSSServerNetworking {
     private static final AtomicLong serverLifecycleEpoch = new AtomicLong();
     private static final AtomicLong configRevision = new AtomicLong(1L);
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
-    private static final int PRIORITY_SEND_COLUMNS_PER_TICK = 4;
-    private static final long PRIORITY_SEND_BYTES_PER_TICK = 256L * 1024L;
+    private static final int PRIORITY_SEND_COLUMNS_PER_TICK = 8;
+    private static final int PRELOAD_COLUMNS_PER_REGION = 1024;
+    private static final int PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD = 2048;
+    private static final int PRELOAD_NEAR_DISTANCE = 32;
+    private static final int PRELOAD_MID_DISTANCE = 64;
+    private static final int PRELOAD_FAR_DISTANCE = 128;
+    private static final int PRELOAD_PENDING_DISK_LIMIT = 256;
     private static volatile long lastRequestDiagnosticNanos;
     private static volatile long lastSendDiagnosticNanos;
     private static volatile boolean serverStopping;
@@ -235,6 +241,7 @@ public final class VSSServerNetworking {
     public static void bumpAndRefreshSessionConfigs(MinecraftServer server) {
         applyRuntimeConfig();
         configRevision.incrementAndGet();
+        primeAllSendCredits();
         refreshSessionConfigs(server);
     }
 
@@ -242,11 +249,19 @@ public final class VSSServerNetworking {
         resizeDiskReadExecutor();
     }
 
-    public static SessionConfigS2CPayload refreshIntegratedHostSession(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
-        return registerIntegratedHost(player, clientProtocolVersion, clientCapabilities);
+    private static void primeAllSendCredits() {
+        long configuredLimit = VSSServerConfig.CONFIG.bandwidthBytesPerSecond();
+        for (PlayerRequestState state : PLAYER_STATES.values()) {
+            state.primeSendCredit(configuredLimit);
+        }
     }
 
-    public static SessionConfigS2CPayload registerIntegratedHost(ServerPlayer player, int clientProtocolVersion, int clientCapabilities) {
+    private static SessionConfigS2CPayload configurePlayerSession(
+            ServerPlayer player,
+            int clientProtocolVersion,
+            int clientCapabilities,
+            String logPrefix,
+            boolean resetState) {
         if (serverStopping) {
             return createSessionConfig(false);
         }
@@ -255,15 +270,23 @@ public final class VSSServerNetworking {
         boolean enabled = config.enabled && compatible;
         if (compatible && enabled) {
             PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
-            if (state == null) {
+            boolean created = resetState || state == null;
+            if (created) {
+                if (state != null) {
+                    state.clearAll();
+                }
                 state = new PlayerRequestState();
                 PLAYER_STATES.put(player.getUUID(), state);
-                VSSLogger.info("Integrated host " + player.getGameProfile().getName() + " registered for VSS LOD sync");
             }
             state.setClientCapabilities(clientCapabilities);
+            state.primeSendCredit(config.bandwidthBytesPerSecond());
+            if (created) {
+                scheduleExistingColumnPreload(player, state);
+                VSSLogger.info(logPrefix + " " + player.getGameProfile().getName() + " registered for VSS LOD sync");
+            }
             idleMemoryReleased = false;
         } else if (!compatible) {
-            logIncompatibleClient("Integrated host " + player.getGameProfile().getName(), clientProtocolVersion, clientCapabilities);
+            logIncompatibleClient(logPrefix + " " + player.getGameProfile().getName(), clientProtocolVersion, clientCapabilities);
         }
         return createSessionConfig(enabled);
     }
@@ -356,22 +379,13 @@ public final class VSSServerNetworking {
             return;
         }
 
-        VSSServerConfig config = VSSServerConfig.CONFIG;
-        boolean compatible = isCompatibleClient(payload.protocolVersion(), payload.capabilities());
-        boolean enabled = config.enabled && compatible;
-        sendSessionConfig(player, enabled);
-
-        if (!compatible) {
-            logIncompatibleClient("Player " + player.getGameProfile().getName(), payload.protocolVersion(), payload.capabilities());
-            return;
-        }
-        if (enabled) {
-            PlayerRequestState state = new PlayerRequestState();
-            state.setClientCapabilities(payload.capabilities());
-            PLAYER_STATES.put(player.getUUID(), state);
-            idleMemoryReleased = false;
-            VSSLogger.info("Player " + player.getGameProfile().getName() + " registered for VSS LOD sync");
-        }
+        SessionConfigS2CPayload config = configurePlayerSession(
+                player,
+                payload.protocolVersion(),
+                payload.capabilities(),
+                "Player",
+                true);
+        VSSNetworking.sendToPlayer(player, config);
     }
 
     private static void sendSessionConfig(ServerPlayer player) {
@@ -389,8 +403,10 @@ public final class VSSServerNetworking {
                 enabled && !serverStopping,
                 config.lodDistanceChunks,
                 serverCapabilities(),
-                config.syncOnLoadRateLimitPerPlayer,
-                config.syncOnLoadConcurrencyLimitPerPlayer,
+                config.nearSyncRateLimitPerTick,
+                config.midSyncRateLimitPerTick,
+                config.farSyncRateLimitPerTick,
+                config.distantSyncRateLimitPerTick,
                 config.generationRateLimitPerPlayer,
                 config.generationConcurrencyLimitPerPlayer,
                 config.enableChunkGeneration,
@@ -406,19 +422,6 @@ public final class VSSServerNetworking {
         handleBatchRequest(player, payload);
     }
 
-    public static void handleIntegratedBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
-        if (player == null || serverStopping || !VSSServerConfig.CONFIG.enabled) {
-            return;
-        }
-        if (!PLAYER_STATES.containsKey(player.getUUID())) {
-            registerIntegratedHost(
-                    player,
-                    VSSConstants.PROTOCOL_VERSION,
-                    VSSConstants.CAPABILITY_VOXEL_COLUMNS | VSSConstants.CAPABILITY_ZSTD_COLUMNS);
-        }
-        handleBatchRequest(player, payload);
-    }
-
     private static void handleBatchRequest(ServerPlayer player, BatchChunkRequestC2SPayload payload) {
         if (serverStopping) {
             return;
@@ -428,6 +431,7 @@ public final class VSSServerNetworking {
             return;
         }
 
+        VSSServerConfig config = VSSServerConfig.CONFIG;
         ServerLevel level = player.serverLevel();
         byte[] responseTypes = new byte[payload.count()];
         int[] responseIds = new int[payload.count()];
@@ -465,9 +469,18 @@ public final class VSSServerNetworking {
             }
 
             long clientTimestamp = payload.clientTimestamps()[i];
+            if (clientTimestamp > 0L) {
+                state.markClientKnownColumn(level.dimension(), packed, clientTimestamp);
+            }
             boolean allowGeneration = i < payload.allowGeneration().length && payload.allowGeneration()[i];
             long dirtyTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), cx, cz);
             boolean priorityRefresh = clientTimestamp > 0L;
+            if (!priorityRefresh && state.shouldBackpressureNormalRequests(config.bandwidthBytesPerSecond())) {
+                responseTypes[responseCount] = VSSConstants.RESPONSE_BACKPRESSURE;
+                responseIds[responseCount++] = requestId;
+                state.clearRequest(requestId);
+                continue;
+            }
             ColumnLodCache.Entry cachedColumn = COLUMN_CACHE.get(level.dimension(), cx, cz);
             if (cachedColumn != null && !cachedColumn.completeColumn()) {
                 COLUMN_CACHE.invalidate(level.dimension(), cx, cz);
@@ -480,6 +493,7 @@ public final class VSSServerNetworking {
                     responseTypes[responseCount] = VSSConstants.RESPONSE_UP_TO_DATE;
                     responseIds[responseCount++] = requestId;
                     state.clearRequest(requestId);
+                    continue;
                 } else if (dirtyTimestamp > cachedColumn.timestamp()) {
                     COLUMN_CACHE.invalidate(level.dimension(), cx, cz);
                 } else {
@@ -488,9 +502,6 @@ public final class VSSServerNetworking {
                             requestId,
                             level.dimension(),
                             cachedColumn.columnData().withColumnStamp(requiredTimestamp)), priorityRefresh);
-                    continue;
-                }
-                if (clientTimestamp >= requiredTimestamp || dirtyTimestamp <= cachedColumn.timestamp()) {
                     continue;
                 }
             }
@@ -767,6 +778,11 @@ public final class VSSServerNetworking {
                 continue;
             }
 
+            if (!isColumnStillRelevant(player, result.dimension(), columnData.chunkX(), columnData.chunkZ())) {
+                state.clearRequest(result.requestId());
+                continue;
+            }
+
             if (!columnData.hasBody() || !columnData.completeColumn()) {
                 state.clearRequest(result.requestId());
                 VSSNetworking.sendToPlayer(player, new BatchResponseS2CPayload(
@@ -776,17 +792,245 @@ public final class VSSServerNetworking {
                 continue;
             }
 
-            if (!isColumnStillRelevant(player, result.dimension(), columnData.chunkX(), columnData.chunkZ())) {
-                state.clearRequest(result.requestId());
-                continue;
-            }
-
-            queueColumn(player, state, new VoxelColumnS2CPayload(
+            boolean queued = queueColumn(player, state, new VoxelColumnS2CPayload(
                     result.requestId(),
                     result.dimension(),
                     columnData), result.priority());
             COLUMN_CACHE.put(result.dimension(), columnData);
+            if (!queued && isColumnStillRelevant(player, result.dimension(), columnData.chunkX(), columnData.chunkZ())) {
+                state.addPreloadColumn(new PlayerRequestState.PreloadColumn(
+                        columnData.chunkX(),
+                        columnData.chunkZ(),
+                        columnData.columnStamp()));
+            }
             writePersistentColumn(server, result.dimension(), columnData);
+        }
+    }
+
+    private static void scheduleExistingColumnPreload(ServerPlayer player, PlayerRequestState state) {
+        if (serverStopping || !PERSISTENT_COLUMN_STORE.enabled()) {
+            return;
+        }
+        int regionSize = PersistentColumnLodStore.regionSize();
+        int centerRegionX = Math.floorDiv(player.getBlockX() >> 4, regionSize);
+        int centerRegionZ = Math.floorDiv(player.getBlockZ() >> 4, regionSize);
+        int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks;
+        int maxRegionRing = Math.max(0, (maxDistance + regionSize - 1) / regionSize);
+        state.resetPreloadRegions(player.serverLevel().dimension(), centerRegionX, centerRegionZ, maxRegionRing);
+        VSSLogger.debug("Queued " + state.preloadRegionCount() + " LOD cache regions for cold-start indexed preload around region "
+                + centerRegionX + "," + centerRegionZ);
+    }
+
+    private static void updateExistingColumnPreloadWindow(ServerPlayer player, PlayerRequestState state) {
+        int regionSize = PersistentColumnLodStore.regionSize();
+        int centerRegionX = Math.floorDiv(player.getBlockX() >> 4, regionSize);
+        int centerRegionZ = Math.floorDiv(player.getBlockZ() >> 4, regionSize);
+        int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks;
+        int maxRegionRing = Math.max(0, (maxDistance + regionSize - 1) / regionSize);
+        state.updatePreloadRegions(player.serverLevel().dimension(), centerRegionX, centerRegionZ, maxRegionRing);
+    }
+
+    private static void scanPreloadRegions(MinecraftServer server) {
+        if (serverStopping || !PERSISTENT_COLUMN_STORE.enabled()) {
+            return;
+        }
+        for (Map.Entry<UUID, PlayerRequestState> entry : PLAYER_STATES.entrySet()) {
+            if (pendingDiskReads.get() >= PRELOAD_PENDING_DISK_LIMIT) {
+                return;
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+            PlayerRequestState state = entry.getValue();
+            if (player != null) {
+                updateExistingColumnPreloadWindow(player, state);
+            }
+            if (player == null
+                    || state.preloadRegionCount() <= 0
+                    || state.preloadColumnCount() >= PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD) {
+                continue;
+            }
+            while (pendingDiskReads.get() < PRELOAD_PENDING_DISK_LIMIT
+                    && state.preloadColumnCount() < PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD) {
+                PlayerRequestState.PreloadRegion region = state.pollPreloadRegion();
+                if (region == null) {
+                    break;
+                }
+                submitPreloadRegionScan(player, state, region);
+            }
+        }
+    }
+
+    private static void submitPreloadRegionScan(ServerPlayer player, PlayerRequestState state, PlayerRequestState.PreloadRegion region) {
+        UUID playerId = player.getUUID();
+        MinecraftServer server = player.server;
+        ServerLevel level = player.serverLevel();
+        long lifecycleEpoch = serverLifecycleEpoch.get();
+        int centerCx = player.getBlockX() >> 4;
+        int centerCz = player.getBlockZ() >> 4;
+        int minDistance = 0;
+        int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks;
+        pendingDiskReads.incrementAndGet();
+        try {
+            diskReadExecutor().execute(() -> {
+                try {
+                    var columns = PERSISTENT_COLUMN_STORE.findExistingColumnsInRegion(
+                            server,
+                            level.dimension(),
+                            region.regionX(),
+                            region.regionZ(),
+                            centerCx,
+                            centerCz,
+                            minDistance,
+                            maxDistance,
+                            PRELOAD_COLUMNS_PER_REGION);
+                    if (columns.isEmpty() || serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+                        return;
+                    }
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(playerId);
+                        if (onlinePlayer == null || PLAYER_STATES.get(playerId) != state) {
+                            return;
+                        }
+                        columns.removeIf(column -> GENERATION_SERVICE.isGenerating(level.dimension(), column.chunkX(), column.chunkZ()));
+                        columns.removeIf(column -> state.isClientKnownCurrent(
+                                level.dimension(),
+                                column.chunkX(),
+                                column.chunkZ(),
+                                Math.max(
+                                        column.timestamp(),
+                                        DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), column.chunkX(), column.chunkZ()))));
+                        state.addPreloadColumns(columns);
+                    });
+                } finally {
+                    decrementPendingDiskReads();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            decrementPendingDiskReads();
+            VSSLogger.debug("Existing LOD preload region scan rejected: " + e.getMessage());
+        }
+    }
+
+    private static void flushPreloadColumns(MinecraftServer server) {
+        if (serverStopping || !PERSISTENT_COLUMN_STORE.enabled()) {
+            return;
+        }
+        boolean submittedAny;
+        do {
+            submittedAny = false;
+            for (Map.Entry<UUID, PlayerRequestState> entry : PLAYER_STATES.entrySet()) {
+                if (pendingDiskReads.get() >= PRELOAD_PENDING_DISK_LIMIT) {
+                    return;
+                }
+                ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+                PlayerRequestState state = entry.getValue();
+                if (player == null || state.preloadColumnCount() <= 0) {
+                    continue;
+                }
+                int playerCx = player.getBlockX() >> 4;
+                int playerCz = player.getBlockZ() >> 4;
+                submittedAny |= submitNextPreloadReadInDistanceRange(
+                        player, state, playerCx, playerCz, 0, PRELOAD_NEAR_DISTANCE);
+                submittedAny |= submitNextPreloadReadInDistanceRange(
+                        player, state, playerCx, playerCz, PRELOAD_NEAR_DISTANCE + 1, PRELOAD_MID_DISTANCE);
+                submittedAny |= submitNextPreloadReadInDistanceRange(
+                        player, state, playerCx, playerCz, PRELOAD_MID_DISTANCE + 1, PRELOAD_FAR_DISTANCE);
+                submittedAny |= submitNextPreloadReadInDistanceRange(
+                        player, state, playerCx, playerCz, PRELOAD_FAR_DISTANCE + 1, Integer.MAX_VALUE);
+            }
+        } while (submittedAny && pendingDiskReads.get() < PRELOAD_PENDING_DISK_LIMIT);
+    }
+
+    private static boolean submitNextPreloadReadInDistanceRange(
+            ServerPlayer player,
+            PlayerRequestState state,
+            int playerCx,
+            int playerCz,
+            int minDistance,
+            int maxDistance) {
+        while (pendingDiskReads.get() < PRELOAD_PENDING_DISK_LIMIT) {
+            PlayerRequestState.PreloadColumn preload = state.pollPreloadColumnInDistanceRange(
+                    playerCx,
+                    playerCz,
+                    minDistance,
+                    maxDistance);
+            if (preload == null) {
+                return false;
+            }
+            if (!isColumnStillRelevant(player, player.serverLevel().dimension(), preload.chunkX(), preload.chunkZ())) {
+                continue;
+            }
+            long requiredTimestamp = Math.max(
+                    preload.timestamp(),
+                    DirtyColumnBroadcaster.latestDirtyTimestamp(player.serverLevel().dimension(), preload.chunkX(), preload.chunkZ()));
+            if (state.isClientKnownCurrent(player.serverLevel().dimension(), preload.chunkX(), preload.chunkZ(), requiredTimestamp)) {
+                continue;
+            }
+            submitPreloadRead(player, state, preload);
+            return true;
+        }
+        return false;
+    }
+
+    private static void submitPreloadRead(ServerPlayer player, PlayerRequestState state, PlayerRequestState.PreloadColumn preload) {
+        if (serverStopping) {
+            return;
+        }
+        UUID playerId = player.getUUID();
+        ServerLevel level = player.serverLevel();
+        MinecraftServer server = player.server;
+        long lifecycleEpoch = serverLifecycleEpoch.get();
+        pendingDiskReads.incrementAndGet();
+        try {
+            diskReadExecutor().execute(() -> {
+                PersistentColumnLodStore.Entry storedData = null;
+                try {
+                    if (!serverStopping && lifecycleEpoch == serverLifecycleEpoch.get()) {
+                        storedData = PERSISTENT_COLUMN_STORE.read(
+                                server,
+                                level.dimension(),
+                                preload.chunkX(),
+                                preload.chunkZ(),
+                                DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), preload.chunkX(), preload.chunkZ()));
+                    }
+                } finally {
+                    decrementPendingDiskReads();
+                }
+                if (storedData == null || storedData.columnData() == null
+                        || serverStopping || lifecycleEpoch != serverLifecycleEpoch.get()) {
+                    return;
+                }
+                EncodedColumnData columnData = storedData.columnData();
+                server.execute(() -> {
+                    ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(playerId);
+                    if (onlinePlayer == null || PLAYER_STATES.get(playerId) != state) {
+                        return;
+                    }
+                    if (GENERATION_SERVICE.isGenerating(level.dimension(), columnData.chunkX(), columnData.chunkZ())) {
+                        return;
+                    }
+                    if (!isColumnStillRelevant(onlinePlayer, level.dimension(), columnData.chunkX(), columnData.chunkZ())) {
+                        return;
+                    }
+                    long requiredTimestamp = Math.max(
+                            columnData.columnStamp(),
+                            DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), columnData.chunkX(), columnData.chunkZ()));
+                    if (state.isClientKnownCurrent(level.dimension(), columnData.chunkX(), columnData.chunkZ(), requiredTimestamp)) {
+                        return;
+                    }
+                    boolean queued = queueColumn(onlinePlayer, state, new VoxelColumnS2CPayload(-1, level.dimension(), columnData), false);
+                    if (queued) {
+                        COLUMN_CACHE.put(level.dimension(), columnData);
+                    } else if (isColumnStillRelevant(onlinePlayer, level.dimension(), columnData.chunkX(), columnData.chunkZ())) {
+                        state.addPreloadColumn(new PlayerRequestState.PreloadColumn(
+                                columnData.chunkX(),
+                                columnData.chunkZ(),
+                                columnData.columnStamp()));
+                    }
+                });
+            });
+        } catch (RejectedExecutionException e) {
+            decrementPendingDiskReads();
+            VSSLogger.debug("Existing LOD preload read rejected: " + e.getMessage());
         }
     }
 
@@ -839,19 +1083,23 @@ public final class VSSServerNetworking {
         }
     }
 
-    private static void queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload, boolean priority) {
+    private static boolean queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload, boolean priority) {
         if (serverStopping) {
             state.clearRequest(payload.requestId());
-            return;
+            return false;
         }
         if (!isPayloadStillRelevant(player, payload)) {
             state.clearRequest(payload.requestId());
-            return;
+            return false;
         }
         payload.setAllowZstdEncoding(state.supportsZstdColumns());
         if (!state.enqueue(payload, priority)) {
-            sendRateLimited(player, payload.requestId());
+            if (payload.requestId() >= 0) {
+                sendRateLimited(player, payload.requestId());
+            }
+            return false;
         }
+        return true;
     }
 
     private static boolean isPayloadStillRelevant(ServerPlayer player, VoxelColumnS2CPayload payload) {
@@ -911,13 +1159,7 @@ public final class VSSServerNetworking {
 
     public static void handleCancel(CancelRequestC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player != null && !serverStopping) {
-            handleIntegratedCancel(player, payload);
-        }
-    }
-
-    public static void handleIntegratedCancel(ServerPlayer player, CancelRequestC2SPayload payload) {
-        if (serverStopping) {
+        if (player == null || serverStopping) {
             return;
         }
         PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
@@ -929,18 +1171,29 @@ public final class VSSServerNetworking {
 
     public static void handleBandwidthUpdate(BandwidthUpdateC2SPayload payload, IPayloadContext context) {
         ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
-        if (player != null && !serverStopping) {
-            handleIntegratedBandwidthUpdate(player, payload);
-        }
-    }
-
-    public static void handleIntegratedBandwidthUpdate(ServerPlayer player, BandwidthUpdateC2SPayload payload) {
-        if (serverStopping) {
+        if (player == null || serverStopping) {
             return;
         }
         PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
         if (state != null) {
             state.setDesiredBandwidth(payload.desiredRate());
+            state.primeSendCredit(VSSServerConfig.CONFIG.bandwidthBytesPerSecond());
+        }
+    }
+
+    public static void handleRegionPresence(RegionPresenceC2SPayload payload, IPayloadContext context) {
+        ServerPlayer player = context.player() instanceof ServerPlayer serverPlayer ? serverPlayer : null;
+        if (player == null || serverStopping || !VSSServerConfig.CONFIG.enabled) {
+            return;
+        }
+        PlayerRequestState state = PLAYER_STATES.get(player.getUUID());
+        if (state != null && player.serverLevel().dimension().equals(payload.dimension())) {
+            try {
+                state.updateClientKnownColumns(payload.dimension(), payload);
+            } catch (RuntimeException e) {
+                VSSLogger.debug("Ignored invalid LOD presence summary from "
+                        + player.getGameProfile().getName() + ": " + e.getMessage());
+            }
         }
     }
 
@@ -961,14 +1214,9 @@ public final class VSSServerNetworking {
             int playerCz = player.getBlockZ() >> 4;
             state.prepareSendOrder(playerCx, playerCz);
             int priorityColumnsSent = 0;
-            long priorityBytesSent = 0L;
             while (priorityColumnsSent < PRIORITY_SEND_COLUMNS_PER_TICK) {
                 PlayerRequestState.QueuedPayload queued = state.peekPriorityQueuedPayload(playerCx, playerCz);
-                if (queued == null) {
-                    break;
-                }
-                if (priorityColumnsSent > 0
-                        && priorityBytesSent + queued.estimatedBytes() > PRIORITY_SEND_BYTES_PER_TICK) {
+                if (queued == null || !state.canSend(effectiveLimit)) {
                     break;
                 }
                 if (state.pollPriorityQueuedPayload(queued) == null) {
@@ -982,10 +1230,10 @@ public final class VSSServerNetworking {
                     continue;
                 }
                 VSSNetworking.sendToPlayer(player, queued.payload());
+                markClientKnownAfterSend(state, queued.payload());
                 state.recordSend(queued.estimatedBytes());
                 state.clearRequest(queued.payload().requestId());
                 priorityColumnsSent++;
-                priorityBytesSent += queued.estimatedBytes();
                 logColumnSend(player, queued.payload(), state);
             }
 
@@ -1005,6 +1253,7 @@ public final class VSSServerNetworking {
                     continue;
                 }
                 VSSNetworking.sendToPlayer(player, queued.payload());
+                markClientKnownAfterSend(state, queued.payload());
                 state.recordSend(queued.estimatedBytes());
                 state.clearRequest(queued.payload().requestId());
                 logColumnSend(player, queued.payload(), state);
@@ -1012,7 +1261,19 @@ public final class VSSServerNetworking {
         }
     }
 
+    private static void markClientKnownAfterSend(PlayerRequestState state, VoxelColumnS2CPayload payload) {
+        if (payload.completeColumn() && payload.columnTimestamp() > 0L) {
+            state.markClientKnownColumn(
+                    payload.dimension(),
+                    PositionUtil.packPosition(payload.chunkX(), payload.chunkZ()),
+                    payload.columnTimestamp());
+        }
+    }
+
     private static void logRequestBatch(ServerPlayer player, int count) {
+        if (!VSSLogger.isDebugEnabled()) {
+            return;
+        }
         long now = System.nanoTime();
         if (now - lastRequestDiagnosticNanos < DIAGNOSTIC_INTERVAL_NANOS) {
             return;
@@ -1029,17 +1290,16 @@ public final class VSSServerNetworking {
     }
 
     private static void logColumnSend(ServerPlayer player, VoxelColumnS2CPayload payload, PlayerRequestState state) {
+        if (!VSSLogger.isDebugEnabled()) {
+            return;
+        }
         long now = System.nanoTime();
         if (now - lastSendDiagnosticNanos < DIAGNOSTIC_INTERVAL_NANOS) {
             return;
         }
         lastSendDiagnosticNanos = now;
-        VSSLogger.info("LOD column sent to " + player.getGameProfile().getName()
+        VSSLogger.debug("LOD column sent to " + player.getGameProfile().getName()
                 + ": chunk=" + payload.chunkX() + "," + payload.chunkZ()
-                + ", complete=" + payload.completeColumn()
-                + ", rawBytes=" + payload.rawSectionBytesLength()
-                + ", encodedBytes=" + payload.encodedSectionBytesLength()
-                + ", compression=" + payload.encodedCompression()
                 + ", bytes=" + payload.estimatedBytes()
                 + ", queued=" + state.queuedPayloadCount()
                 + ", queuedBytes=" + state.queuedBytes()
@@ -1066,10 +1326,8 @@ public final class VSSServerNetworking {
         }
         GENERATION_SERVICE.releaseIdleMemory();
         DirtyColumnBroadcaster.clear();
-        COLUMN_CACHE.clear();
-        PERSISTENT_COLUMN_STORE.clearMemory();
         idleMemoryReleased = true;
-        VSSLogger.info("Released idle VSS memory after the last VSS player disconnected");
+        VSSLogger.info("Released idle VSS request state after the last VSS player disconnected; kept hot LOD caches");
     }
 
     @SubscribeEvent
@@ -1083,6 +1341,8 @@ public final class VSSServerNetworking {
         }
         MinecraftServer server = event.getServer();
         flushGeneratedColumns(server);
+        flushPreloadColumns(server);
+        scanPreloadRegions(server);
         flushQueuedColumns(server);
         DirtyColumnBroadcaster.tick(server);
     }

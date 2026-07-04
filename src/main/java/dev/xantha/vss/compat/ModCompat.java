@@ -19,6 +19,14 @@ public final class ModCompat {
         return voxyLoaded ? VoxyCompat.getViewDistanceChunks() : OptionalInt.empty();
     }
 
+    public static boolean isVoxyLoaded() {
+        return voxyLoaded;
+    }
+
+    public static LocalColumnState getVoxyLocalColumnState(net.minecraft.world.level.Level level, int chunkX, int chunkZ) {
+        return voxyLoaded ? VoxyCompat.getLocalColumnState(level, chunkX, chunkZ) : LocalColumnState.UNKNOWN;
+    }
+
     public static void clientTick() {
         if (voxyLoaded) {
             VoxyCompat.clientTick();
@@ -32,5 +40,11 @@ public final class ModCompat {
         } catch (ClassNotFoundException e) {
             return false;
         }
+    }
+
+    public enum LocalColumnState {
+        PRESENT,
+        MISSING,
+        UNKNOWN
     }
 }

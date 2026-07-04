@@ -2,6 +2,7 @@ package dev.xantha.vss.networking.server;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.xantha.vss.config.VSSServerConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
@@ -126,6 +127,8 @@ public final class VSSServerCommands {
                                         .executes(context -> setQueueMiB(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "MiB"))))))
+                .then(requestLimitsCommand("request_limits", "get", "set_near", "set_mid", "set_far", "set_distant"))
+                .then(requestLimitsCommand("请求限速", "查看", "设置近处", "设置中距", "设置远处", "设置超远"))
                 .then(Commands.literal("distance")
                         .executes(context -> showDistance(context.getSource()))
                         .then(Commands.literal("get")
@@ -322,6 +325,34 @@ public final class VSSServerCommands {
                                                 IntegerArgumentType.getInteger(context, "秒")))))));
     }
 
+    private static LiteralArgumentBuilder<CommandSourceStack> requestLimitsCommand(
+            String root,
+            String get,
+            String setNear,
+            String setMid,
+            String setFar,
+            String setDistant) {
+        return Commands.literal(root)
+                .executes(context -> showRequestLimits(context.getSource()))
+                .then(Commands.literal(get)
+                        .executes(context -> showRequestLimits(context.getSource())))
+                .then(requestLimitSetter(setNear, "near"))
+                .then(requestLimitSetter(setMid, "mid"))
+                .then(requestLimitSetter(setFar, "far"))
+                .then(requestLimitSetter(setDistant, "distant"));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> requestLimitSetter(String command, String bucket) {
+        return Commands.literal(command)
+                .then(Commands.argument("columns_per_tick", IntegerArgumentType.integer(
+                                VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                                VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK))
+                        .executes(context -> setRequestLimit(
+                                context.getSource(),
+                                bucket,
+                                IntegerArgumentType.getInteger(context, "columns_per_tick"))));
+    }
+
     private static int showStats(CommandSourceStack source) {
         source.sendSuccess(() -> Component.translatable("vss.command.stats")
                 .withStyle(ChatFormatting.GREEN)
@@ -397,6 +428,48 @@ public final class VSSServerCommands {
                         config.sendQueueLimitPerPlayer,
                         formatBytes(config.sendQueueBytesLimitPerPlayer))), true);
         return config.sendQueueLimitPerPlayer;
+    }
+
+    private static int showRequestLimits(CommandSourceStack source) {
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        source.sendSuccess(() -> Component.translatable("vss.command.request_limits.show")
+                .withStyle(ChatFormatting.GREEN)
+                .append(requestLimitsDetails(config)), false);
+        return config.nearSyncRateLimitPerTick
+                + config.midSyncRateLimitPerTick
+                + config.farSyncRateLimitPerTick
+                + config.distantSyncRateLimitPerTick;
+    }
+
+    private static int setRequestLimit(CommandSourceStack source, String bucket, int columnsPerTick) {
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        switch (bucket) {
+            case "near" -> config.nearSyncRateLimitPerTick = columnsPerTick;
+            case "mid" -> config.midSyncRateLimitPerTick = columnsPerTick;
+            case "far" -> config.farSyncRateLimitPerTick = columnsPerTick;
+            case "distant" -> config.distantSyncRateLimitPerTick = columnsPerTick;
+            default -> throw new IllegalArgumentException("Unknown request limit bucket: " + bucket);
+        }
+        config.normalizeAndSave();
+        return reportRequestLimitsUpdated(source);
+    }
+
+    private static int reportRequestLimitsUpdated(CommandSourceStack source) {
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
+        source.sendSuccess(() -> Component.translatable("vss.command.request_limits.saved")
+                .withStyle(ChatFormatting.YELLOW)
+                .append(requestLimitsDetails(config)), true);
+        return 1;
+    }
+
+    private static Component requestLimitsDetails(VSSServerConfig config) {
+        return Component.translatable(
+                "vss.command.request_limits.details",
+                config.nearSyncRateLimitPerTick,
+                config.midSyncRateLimitPerTick,
+                config.farSyncRateLimitPerTick,
+                config.distantSyncRateLimitPerTick);
     }
 
     private static int showDistance(CommandSourceStack source) {

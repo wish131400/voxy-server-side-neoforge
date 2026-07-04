@@ -56,7 +56,7 @@ public final class FarPlayerClientRenderer {
     private static final long STALE_AFTER_NANOS = 3_000L * NANOS_PER_MILLI;
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000L * NANOS_PER_MILLI;
     private static final long MIN_INTERPOLATION_NANOS = 50L * NANOS_PER_MILLI;
-    private static final long MAX_INTERPOLATION_NANOS = 1_000L * NANOS_PER_MILLI;
+    private static final long MAX_INTERPOLATION_NANOS = 500L * NANOS_PER_MILLI;
     private static final double TELEPORT_DISTANCE_SQR = 32.0D * 32.0D;
     private static final double VANILLA_HANDOFF_DISTANCE_BLOCKS = VSSConstants.FAR_PLAYER_SYNC_START_BLOCKS;
     private static final double VANILLA_HANDOFF_DISTANCE_SQR = VANILLA_HANDOFF_DISTANCE_BLOCKS * VANILLA_HANDOFF_DISTANCE_BLOCKS;
@@ -445,11 +445,11 @@ public final class FarPlayerClientRenderer {
                 targetBodyYaw = entry.bodyYaw();
                 long packetInterval = lastSeenNanos > 0L ? now - lastSeenNanos : MIN_INTERPOLATION_NANOS;
                 interpolationStartNanos = now;
-                interpolationDurationNanos = clamp(packetInterval, MIN_INTERPOLATION_NANOS, MAX_INTERPOLATION_NANOS);
+                interpolationDurationNanos = clamp(packetInterval + (packetInterval / 4), MIN_INTERPOLATION_NANOS, MAX_INTERPOLATION_NANOS);
             }
 
             lastEntry = entry;
-            if (isInsideVanillaHandoffRange(newLevel)) {
+            if (isInsideVanillaHandoffRange(newLevel) && !hasNorthstarRocket(entry.vehicles())) {
                 removeAll();
                 lastSeenNanos = now;
                 return;
@@ -546,6 +546,18 @@ public final class FarPlayerClientRenderer {
         private boolean isInsideVanillaHandoffRange(LocalPlayer localPlayer) {
             return horizontalDistanceSqr(localPlayer.getX(), localPlayer.getZ(), targetX, targetZ) <= VANILLA_HANDOFF_RELEASE_DISTANCE_SQR
                     && Math.abs(localPlayer.getY() - targetY) <= VANILLA_HANDOFF_RELEASE_VERTICAL_BLOCKS;
+        }
+
+        private boolean hasNorthstarRocket(FarPlayersS2CPayload.VehicleSnapshot[] snapshots) {
+            if (snapshots == null) {
+                return false;
+            }
+            for (FarPlayersS2CPayload.VehicleSnapshot snapshot : snapshots) {
+                if (snapshot != null && isNorthstarRocket(snapshot.entityTypeId())) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void createEntity(ClientLevel currentLevel) {
@@ -976,15 +988,19 @@ public final class FarPlayerClientRenderer {
         }
 
         private void update(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot, long now, long lastSeenNanos) {
-            boolean needsCreate = this.level != level
+            boolean switchedToExternal = attachExternalVehicle(level, snapshot);
+            boolean needsCreate = !switchedToExternal
+                    && (this.level != level
                     || vehicle == null
                     || vehicle.isRemoved()
                     || !snapshot.entityTypeId().equals(vehicleTypeId)
-                    || (externalEntity && vehicle.getId() != snapshot.sourceEntityId());
+                    || (externalEntity && vehicle.getId() != snapshot.sourceEntityId()));
             if (needsCreate) {
                 remove();
                 this.level = level;
                 create(level, snapshot);
+                snapTo(snapshot);
+            } else if (switchedToExternal) {
                 snapTo(snapshot);
             } else {
                 VehiclePoseSample current = sample(now);
@@ -1021,17 +1037,7 @@ public final class FarPlayerClientRenderer {
 
         private void create(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot) {
             rocketParticleTicks = 0;
-            Entity existingVehicle = level.getEntity(snapshot.sourceEntityId());
-            ResourceLocation existingTypeId = existingVehicle == null
-                    ? null
-                    : BuiltInRegistries.ENTITY_TYPE.getKey(existingVehicle.getType());
-            if (existingVehicle != null
-                    && !existingVehicle.isRemoved()
-                    && snapshot.entityTypeId().equals(existingTypeId)) {
-                vehicle = existingVehicle;
-                vehicleTypeId = snapshot.entityTypeId();
-                externalEntity = true;
-                vehicle.noCulling = true;
+            if (attachExternalVehicle(level, snapshot)) {
                 return;
             }
             vehicle = null;
@@ -1066,6 +1072,37 @@ public final class FarPlayerClientRenderer {
             vehicleTypeId = snapshot.entityTypeId();
             externalEntity = false;
             applySyntheticIdentity(snapshot);
+        }
+
+        private boolean attachExternalVehicle(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot) {
+            if (externalEntity || level == null || snapshot == null) {
+                return false;
+            }
+            Entity existingVehicle = level.getEntity(snapshot.sourceEntityId());
+            ResourceLocation existingTypeId = existingVehicle == null
+                    ? null
+                    : BuiltInRegistries.ENTITY_TYPE.getKey(existingVehicle.getType());
+            if (existingVehicle == null
+                    || existingVehicle.isRemoved()
+                    || existingVehicle == vehicle
+                    || !snapshot.entityTypeId().equals(existingTypeId)) {
+                return false;
+            }
+            discardSyntheticVehicle();
+            this.level = level;
+            vehicle = existingVehicle;
+            vehicleTypeId = snapshot.entityTypeId();
+            externalEntity = true;
+            vehicle.noCulling = true;
+            return true;
+        }
+
+        private void discardSyntheticVehicle() {
+            if (vehicle != null && !vehicle.isRemoved() && !externalEntity) {
+                vehicle.ejectPassengers();
+                vehicle.setRemoved(Entity.RemovalReason.DISCARDED);
+                vehicle.onClientRemoval();
+            }
         }
 
         private void applyFullData(ClientLevel level, FarPlayersS2CPayload.VehicleSnapshot snapshot) {
@@ -1133,7 +1170,7 @@ public final class FarPlayerClientRenderer {
             if (vehicle == null || vehicle.isRemoved() || sample == null) {
                 return;
             }
-            if (externalEntity) {
+            if (externalEntity && !isNorthstarRocket(vehicleTypeId)) {
                 vehicle.noCulling = true;
                 return;
             }
@@ -1160,6 +1197,10 @@ public final class FarPlayerClientRenderer {
             if (vehicle instanceof LivingEntity livingEntity) {
                 livingEntity.setYBodyRot(sample.bodyYaw);
                 livingEntity.setYHeadRot(sample.headYaw);
+            }
+            if (externalEntity) {
+                vehicle.noCulling = true;
+                vehicle.setDeltaMovement(sample.x - oldX, sample.y - oldY, sample.z - oldZ);
             }
         }
 
@@ -1220,7 +1261,10 @@ public final class FarPlayerClientRenderer {
         }
 
         private void renderManually(PoseStack poseStack, MultiBufferSource.BufferSource buffers, float partialTick, Vec3 cameraPosition) {
-            if (vehicle == null || vehicle.isRemoved() || externalEntity) {
+            if (vehicle == null || vehicle.isRemoved()) {
+                return;
+            }
+            if (externalEntity && !isNorthstarRocket(vehicleTypeId)) {
                 return;
             }
             Minecraft.getInstance().getEntityRenderDispatcher().render(
@@ -1244,13 +1288,7 @@ public final class FarPlayerClientRenderer {
         }
 
         private void remove() {
-            if (vehicle != null && !vehicle.isRemoved()) {
-                if (!externalEntity) {
-                    vehicle.ejectPassengers();
-                    vehicle.setRemoved(Entity.RemovalReason.DISCARDED);
-                    vehicle.onClientRemoval();
-                }
-            }
+            discardSyntheticVehicle();
             vehicle = null;
             level = null;
             vehicleTypeId = null;

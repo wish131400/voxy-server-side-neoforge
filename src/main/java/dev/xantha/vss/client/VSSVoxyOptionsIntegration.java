@@ -165,7 +165,8 @@ public final class VSSVoxyOptionsIntegration {
             Object page = invokeByName(configBuilder, "createOptionPage");
             invokeByName(page, "setName", Component.translatable("vss.voxy_options.title"));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+            if (canEditLocalServerConfig()) {
+                invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.client",
                     sodium08BooleanOption(
@@ -248,7 +249,7 @@ public final class VSSVoxyOptionsIntegration {
                             () -> VSSServerConfig.CONFIG.enableChunkGeneration,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+                invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.far_players",
                     sodium08BooleanOption(
@@ -276,7 +277,7 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatTicks,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+                invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.server_limits",
                     sodium08IntOption(
@@ -337,31 +338,59 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
-                            "sync_rate",
-                            "vss.voxy_options.sync_rate",
-                            "vss.voxy_options.sync_rate.tooltip",
+                            "sync_near_rate",
+                            "vss.voxy_options.sync_near_rate",
+                            "vss.voxy_options.sync_near_rate.tooltip",
                             "MEDIUM",
-                            16,
+                            VSSServerConfig.DEFAULT_NEAR_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            1000,
-                            1,
-                            value -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer = value,
-                            () -> VSSServerConfig.CONFIG.syncOnLoadRateLimitPerPlayer,
-                            VSSVoxyOptionsIntegration::formatRequestsPerSecond,
+                            value -> VSSServerConfig.CONFIG.nearSyncRateLimitPerTick = value,
+                            () -> VSSServerConfig.CONFIG.nearSyncRateLimitPerTick,
+                            VSSVoxyOptionsIntegration::formatNearRequestsPerTick,
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
-                            "sync_concurrency",
-                            "vss.voxy_options.sync_concurrency",
-                            "vss.voxy_options.sync_concurrency.tooltip",
+                            "sync_mid_rate",
+                            "vss.voxy_options.sync_mid_rate",
+                            "vss.voxy_options.sync_mid_rate.tooltip",
                             "MEDIUM",
-                            16,
+                            VSSServerConfig.DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            1000,
+                            value -> VSSServerConfig.CONFIG.midSyncRateLimitPerTick = value,
+                            () -> VSSServerConfig.CONFIG.midSyncRateLimitPerTick,
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "sync_far_rate",
+                            "vss.voxy_options.sync_far_rate",
+                            "vss.voxy_options.sync_far_rate.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            value -> VSSServerConfig.CONFIG.syncOnLoadConcurrencyLimitPerPlayer = value,
-                            () -> VSSServerConfig.CONFIG.syncOnLoadConcurrencyLimitPerPlayer,
-                            VSSVoxyOptionsIntegration::formatColumns,
+                            value -> VSSServerConfig.CONFIG.farSyncRateLimitPerTick = value,
+                            () -> VSSServerConfig.CONFIG.farSyncRateLimitPerTick,
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
+                            "sync_distant_rate",
+                            "vss.voxy_options.sync_distant_rate",
+                            "vss.voxy_options.sync_distant_rate.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                            1,
+                            value -> VSSServerConfig.CONFIG.distantSyncRateLimitPerTick = value,
+                            () -> VSSServerConfig.CONFIG.distantSyncRateLimitPerTick,
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
                             VSSVoxyOptionsIntegration::saveServerConfig),
                     sodium08IntOption(
                             configBuilder,
@@ -392,7 +421,7 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatThreads,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+                invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.generation",
                     sodium08IntOption(
@@ -493,6 +522,7 @@ public final class VSSVoxyOptionsIntegration {
                             () -> VSSServerConfig.CONFIG.generationTimeoutSeconds,
                             VSSVoxyOptionsIntegration::formatSeconds,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
+            }
 
             invokeByName(modOptions, "addPage", page);
             VSSLogger.info("Registered VSS options page with Sodium 0.8 config API");
@@ -562,7 +592,8 @@ public final class VSSVoxyOptionsIntegration {
             Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
             Object serverStorage = oldStorage(VSSServerConfig.CONFIG, VSSVoxyOptionsIntegration::saveServerConfig);
 
-            groups.add(oldGroup(
+            if (canEditLocalServerConfig()) {
+                groups.add(oldGroup(
                     oldBooleanOption(
                             clientStorage,
                             "vss.voxy_options.receive_server_lods",
@@ -578,7 +609,7 @@ public final class VSSVoxyOptionsIntegration {
                             (VSSClientConfig config, Boolean value) -> config.offThreadSectionProcessing = value,
                             config -> config.offThreadSectionProcessing)));
 
-            groups.add(oldGroup(
+                groups.add(oldGroup(
                     oldIntOption(
                             clientStorage,
                             "vss.voxy_options.client_lod_distance",
@@ -605,7 +636,7 @@ public final class VSSVoxyOptionsIntegration {
                             },
                             config -> config.desiredBandwidthKbps)));
 
-            groups.add(oldGroup(
+                groups.add(oldGroup(
                     oldBooleanOption(
                             serverStorage,
                             "vss.voxy_options.server_sync",
@@ -621,7 +652,7 @@ public final class VSSVoxyOptionsIntegration {
                             (VSSServerConfig config, Boolean value) -> config.enableChunkGeneration = value,
                             config -> config.enableChunkGeneration)));
 
-            groups.add(oldGroup(
+                groups.add(oldGroup(
                     oldBooleanOption(
                             serverStorage,
                             "vss.voxy_options.far_player_sync",
@@ -688,26 +719,48 @@ public final class VSSVoxyOptionsIntegration {
                             VSSServerConfig::getSendQueueBytesMiBRounded),
                     oldIntOption(
                             serverStorage,
-                            "vss.voxy_options.sync_rate",
-                            "vss.voxy_options.sync_rate.tooltip",
+                            "vss.voxy_options.sync_near_rate",
+                            "vss.voxy_options.sync_near_rate.tooltip",
                             "MEDIUM",
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            1000,
-                            1,
-                            VSSVoxyOptionsIntegration::formatRequestsPerSecond,
-                            (VSSServerConfig config, Integer value) -> config.syncOnLoadRateLimitPerPlayer = value,
-                            config -> config.syncOnLoadRateLimitPerPlayer),
+                            VSSVoxyOptionsIntegration::formatNearRequestsPerTick,
+                            (VSSServerConfig config, Integer value) -> config.nearSyncRateLimitPerTick = value,
+                            config -> config.nearSyncRateLimitPerTick),
                     oldIntOption(
                             serverStorage,
-                            "vss.voxy_options.sync_concurrency",
-                            "vss.voxy_options.sync_concurrency.tooltip",
+                            "vss.voxy_options.sync_mid_rate",
+                            "vss.voxy_options.sync_mid_rate.tooltip",
                             "MEDIUM",
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            1000,
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
+                            (VSSServerConfig config, Integer value) -> config.midSyncRateLimitPerTick = value,
+                            config -> config.midSyncRateLimitPerTick),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.sync_far_rate",
+                            "vss.voxy_options.sync_far_rate.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
                             1,
-                            VSSVoxyOptionsIntegration::formatColumns,
-                            (VSSServerConfig config, Integer value) -> config.syncOnLoadConcurrencyLimitPerPlayer = value,
-                            config -> config.syncOnLoadConcurrencyLimitPerPlayer),
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
+                            (VSSServerConfig config, Integer value) -> config.farSyncRateLimitPerTick = value,
+                            config -> config.farSyncRateLimitPerTick),
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.sync_distant_rate",
+                            "vss.voxy_options.sync_distant_rate.tooltip",
+                            "MEDIUM",
+                            VSSServerConfig.MIN_SYNC_RATE_LIMIT_PER_TICK,
+                            VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                            1,
+                            VSSVoxyOptionsIntegration::formatRequestsPerTick,
+                            (VSSServerConfig config, Integer value) -> config.distantSyncRateLimitPerTick = value,
+                            config -> config.distantSyncRateLimitPerTick),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.dirty_broadcast_interval",
@@ -809,6 +862,7 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatSeconds,
                             (VSSServerConfig config, Integer value) -> config.generationTimeoutSeconds = value,
                             config -> config.generationTimeoutSeconds)));
+            }
 
             Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
             return pageConstructor.newInstance(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
@@ -1112,8 +1166,14 @@ public final class VSSVoxyOptionsIntegration {
         return Component.translatable("vss.voxy_options.mib", value);
     }
 
-    private static Component formatRequestsPerSecond(int value) {
-        return Component.translatable("vss.voxy_options.requests_per_second", value);
+    private static Component formatNearRequestsPerTick(int value) {
+        return value <= 0
+                ? Component.translatable("vss.voxy_options.unlimited")
+                : formatRequestsPerTick(value);
+    }
+
+    private static Component formatRequestsPerTick(int value) {
+        return Component.translatable("vss.voxy_options.requests_per_tick", value);
     }
 
     private static Component formatColumns(int value) {
@@ -1132,11 +1192,19 @@ public final class VSSVoxyOptionsIntegration {
         return Component.translatable("vss.voxy_options.ticks", value);
     }
 
+    private static boolean canEditLocalServerConfig() {
+        Minecraft minecraft = Minecraft.getInstance();
+        return minecraft.level == null || minecraft.getSingleplayerServer() != null;
+    }
+
     private static void saveClientConfig() {
         VSSClientConfig.CONFIG.normalizeAndSave();
     }
 
     private static void saveServerConfig() {
+        if (!canEditLocalServerConfig()) {
+            return;
+        }
         VSSServerConfig.CONFIG.normalizeAndSave();
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.getSingleplayerServer() != null) {

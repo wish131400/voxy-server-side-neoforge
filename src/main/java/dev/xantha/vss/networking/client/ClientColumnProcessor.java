@@ -24,10 +24,11 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 final class ClientColumnProcessor {
     static final int MAX_QUEUED_COLUMNS = 1024;
     private static final long MAX_QUEUED_BYTES = 32L * 1024L * 1024L;
-    private static final int MAX_COLUMNS_PER_DRAIN = 48;
-    private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 512;
+    private static final int MAX_COLUMNS_PER_DRAIN = 64;
+    private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 768;
     private static final int MAX_SECTIONS_PER_COLUMN = 64;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
+    private static final int SECTION_POOL_SIZE = 128;
     private static final long COLUMN_PROCESS_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
     private final ConcurrentLinkedQueue<QueuedColumn> priorityColumnQueue = new ConcurrentLinkedQueue<>();
@@ -42,6 +43,35 @@ final class ClientColumnProcessor {
     private volatile boolean shuttingDown = true;
     private volatile long lastDropWarnMs;
     private volatile long lastColumnProcessDiagnosticNanos;
+
+    private static class SectionPool {
+        private final ConcurrentLinkedQueue<LevelChunkSection> pool = new ConcurrentLinkedQueue<>();
+        private final int maxSize;
+
+        SectionPool(int maxSize) {
+            this.maxSize = maxSize;
+        }
+
+        LevelChunkSection acquire(Registry<Biome> biomeRegistry) {
+            LevelChunkSection section = pool.poll();
+            if (section == null) {
+                return new LevelChunkSection(biomeRegistry);
+            }
+            return section;
+        }
+
+        void release(LevelChunkSection section) {
+            if (pool.size() < maxSize) {
+                pool.offer(section);
+            }
+        }
+
+        void clear() {
+            pool.clear();
+        }
+    }
+
+    private final SectionPool sectionPool = new SectionPool(SECTION_POOL_SIZE);
 
     void beginSession() {
         sessionEpoch.incrementAndGet();
@@ -190,7 +220,7 @@ final class ClientColumnProcessor {
                         int sectionY = buf.readByte();
                         minSectionY = Math.min(minSectionY, sectionY);
                         maxSectionY = Math.max(maxSectionY, sectionY);
-                        LevelChunkSection section = new LevelChunkSection(biomeRegistry);
+                        LevelChunkSection section = sectionPool.acquire(biomeRegistry);
                         section.read(buf);
 
                         DataLayer blockLight = null;
@@ -253,6 +283,7 @@ final class ClientColumnProcessor {
         clearQueue();
         processing.set(false);
         executor = null;
+        sectionPool.clear();
         if (old != null) {
             old.shutdownNow();
         }
@@ -265,13 +296,16 @@ final class ClientColumnProcessor {
             int minSectionY,
             int maxSectionY,
             boolean replaceMissingSections) {
+        if (!VSSLogger.isDebugEnabled()) {
+            return;
+        }
         long now = System.nanoTime();
         if (now - lastColumnProcessDiagnosticNanos < COLUMN_PROCESS_DIAGNOSTIC_INTERVAL_NANOS) {
             return;
         }
         lastColumnProcessDiagnosticNanos = now;
         String sectionRange = sectionCount > 0 ? minSectionY + ".." + maxSectionY : "empty";
-        VSSLogger.info("LOD column processed: chunk=" + payload.chunkX() + "," + payload.chunkZ()
+        VSSLogger.debug("LOD column processed: chunk=" + payload.chunkX() + "," + payload.chunkZ()
                 + ", sections=" + sectionCount
                 + ", y=" + sectionRange
                 + ", complete=" + payload.completeColumn()

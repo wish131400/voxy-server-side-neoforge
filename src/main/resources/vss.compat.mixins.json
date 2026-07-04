@@ -8,6 +8,7 @@
     "ftbessentials.TeleportCommandsNoBlockingMixin",
     "minecraft.ChunkMapEntityTrackingAccessor",
     "minecraft.LevelBlockEntityTickerCompactionMixin",
+    "minecraft.LevelBlockUpdateDirtyColumnMixin",
     "minecraft.LevelChunkClearBlockEntitiesMixin",
     "minecraft.LevelDirtyColumnMixin",
     "minecraft.LevelChunkDirtyColumnMixin",
