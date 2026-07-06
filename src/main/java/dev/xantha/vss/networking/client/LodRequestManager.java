@@ -797,7 +797,7 @@ public final class LodRequestManager {
                     && isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)) {
                 continue;
             }
-            if (!dirtyRefresh && !isWithinSoftFrontier(packed, playerCx, playerCz)) {
+            if (!dirtyRefresh && !isWithinDeferredFrontier(packed, playerCx, playerCz)) {
                 requeueDeferredColumn(packed, false);
                 continue;
             }
@@ -1323,7 +1323,7 @@ public final class LodRequestManager {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int ring = chebyshevDistance(packed, playerCx, playerCz);
-        return ring <= Math.min(getEffectiveLodDistance(), softFrontierRadius);
+        return ring <= generationFallbackFrontier();
     }
 
     private boolean hasKnownColumn(long packed) {
@@ -1754,8 +1754,18 @@ public final class LodRequestManager {
         return protectedSyncDistance > 0 && chebyshevDistance(packed, playerCx, playerCz) <= protectedSyncDistance;
     }
 
-    private boolean isWithinSoftFrontier(long packed, int playerCx, int playerCz) {
-        return chebyshevDistance(packed, playerCx, playerCz) <= softFrontierRadius;
+    private boolean isWithinDeferredFrontier(long packed, int playerCx, int playerCz) {
+        int ring = chebyshevDistance(packed, playerCx, playerCz);
+        if (isGenerationCandidate(packed)) {
+            return ring <= generationFallbackFrontier();
+        }
+        return ring <= softFrontierRadius;
+    }
+
+    private int generationFallbackFrontier() {
+        return Math.min(
+                getEffectiveLodDistance(),
+                Math.max(softFrontierRadius, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS));
     }
 
     private void updateSoftFrontier(int ring, int lodDistance) {
