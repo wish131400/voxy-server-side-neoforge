@@ -1002,7 +1002,7 @@ public final class LodRequestManager {
     }
 
     private boolean shouldWaitForFirstPassGenerationSlot(long packed, RequestWindow requestWindow) {
-        return requiresFirstPassGenerationFallback(packed) && !requestWindow.hasGenerationCapacity();
+        return isGenerationCandidate(packed) && !requestWindow.hasGenerationCapacity();
     }
 
     private boolean requiresFirstPassGenerationFallback(long packed) {
