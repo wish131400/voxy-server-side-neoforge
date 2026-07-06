@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.client;
 
+import dev.xantha.vss.common.ChebyshevRingOffsets;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
@@ -15,11 +16,10 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -32,13 +32,20 @@ public final class LodRequestManager {
     private static final long GENERATION_REQUEST_TIMEOUT_NANOS = 300_000_000_000L;
     private static final long DIRTY_REFRESH_BACKOFF_NANOS = 500_000_000L;
     private static final long BACKPRESSURE_BACKOFF_NANOS = 250_000_000L;
-    private static final long RATE_LIMIT_BACKOFF_NANOS = 3_000_000_000L;
-    private static final long GENERATION_BACKOFF_NANOS = 15_000_000_000L;
-    private static final long MAX_RETRY_BACKOFF_NANOS = 60_000_000_000L;
+    private static final long RATE_LIMIT_BACKOFF_NANOS = 1_000_000_000L;
+    private static final long GENERATION_BACKOFF_NANOS = 5_000_000_000L;
+    private static final int DIRTY_REFRESH_BACKOFF_MAX_SHIFT = 3;
+    private static final int RATE_LIMIT_BACKOFF_MAX_SHIFT = 3;
+    private static final int GENERATION_BACKOFF_MAX_SHIFT = 1;
     private static final int DIRTY_REFRESH_RATE_LIMIT = 512;
     private static final int DIRTY_REFRESH_CONCURRENCY_LIMIT = 64;
     private static final int MAX_SCAN_CANDIDATES_PER_TICK = 4096;
     private static final int BOOSTED_SCAN_CANDIDATES_PER_TICK = 32768;
+    private static final int MAX_REQUESTS_PER_TICK = 256;
+    private static final int INTEGRATED_MAX_REQUESTS_PER_TICK = 96;
+    private static final long MAX_SCAN_NANOS_PER_TICK = 1_500_000L;
+    private static final long INTEGRATED_MAX_SCAN_NANOS_PER_TICK = 750_000L;
+    private static final int SCAN_DEADLINE_CHECK_INTERVAL = 64;
     private static final int SCAN_BOOST_TICKS = 100;
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
@@ -46,14 +53,17 @@ public final class LodRequestManager {
     private static final int FAST_MOVE_KEEP_RADIUS_CHUNKS = 48;
     private static final int MOVEMENT_RESCAN_TRAIL_CHUNKS = 16;
     private static final int ESTIMATED_SYNC_COLUMN_BYTES = 5 * 1024;
-    private static final int PRESENCE_REGIONS_PER_PACKET = 256;
-    private static final int PRESENCE_COLUMNS_PER_PACKET = 8192;
-    private static final int PRESENCE_PACKETS_PER_TICK = 4;
+    private static final int PRESENCE_REGIONS_PER_PACKET = 64;
+    private static final int INTEGRATED_PRESENCE_REGIONS_PER_PACKET = 16;
+    private static final int PRESENCE_COLUMNS_PER_PACKET = 4096;
+    private static final int INTEGRATED_PRESENCE_COLUMNS_PER_PACKET = 1024;
+    private static final int PRESENCE_PACKETS_PER_TICK = 2;
+    private static final int INTEGRATED_PRESENCE_PACKETS_PER_TICK = 1;
     private static final long PRESENCE_INCREMENTAL_RESEND_INTERVAL_NANOS = 5_000_000_000L;
     private static final int PRESENCE_INCREMENTAL_RESENDS_PER_TICK = 32;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
-    private static final Map<Integer, long[]> OFFSET_CACHE = new HashMap<>();
+    private static final Map<Integer, long[]> OFFSET_CACHE = new ConcurrentHashMap<>();
 
     static {
         for (int dist : new int[]{32, 64, 96, 128, 192, 256}) {
@@ -62,52 +72,30 @@ public final class LodRequestManager {
     }
 
     private static long[] generateOffsetsForDistance(int lodDistance) {
-        int side = lodDistance * 2 + 1;
-        long[] offsets = new long[side * side];
-        LongOpenHashSet seenOffsets = new LongOpenHashSet(offsets.length);
-        int index = 0;
-        index = appendOffsetStatic(offsets, seenOffsets, index, 0, 0);
-        for (int ring = 1; ring <= lodDistance; ring++) {
-            index = appendOffsetStatic(offsets, seenOffsets, index, -ring, 0);
-            index = appendOffsetStatic(offsets, seenOffsets, index, ring, 0);
-            index = appendOffsetStatic(offsets, seenOffsets, index, 0, -ring);
-            index = appendOffsetStatic(offsets, seenOffsets, index, 0, ring);
-            for (int step = 1; step <= ring; step++) {
-                index = appendOffsetStatic(offsets, seenOffsets, index, -ring, -step);
-                index = appendOffsetStatic(offsets, seenOffsets, index, -ring, step);
-                index = appendOffsetStatic(offsets, seenOffsets, index, ring, -step);
-                index = appendOffsetStatic(offsets, seenOffsets, index, ring, step);
-                index = appendOffsetStatic(offsets, seenOffsets, index, -step, -ring);
-                index = appendOffsetStatic(offsets, seenOffsets, index, step, -ring);
-                index = appendOffsetStatic(offsets, seenOffsets, index, -step, ring);
-                index = appendOffsetStatic(offsets, seenOffsets, index, step, ring);
-            }
-        }
-        return offsets;
-    }
-
-    private static int appendOffsetStatic(long[] offsets, LongOpenHashSet seenOffsets, int index, int dx, int dz) {
-        long offset = encodeOffset(dx, dz);
-        if (seenOffsets.add(offset)) {
-            offsets[index++] = offset;
-        }
-        return index;
+        return ChebyshevRingOffsets.generate(lodDistance);
     }
 
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
     private final LongOpenHashSet dirtyColumns = new LongOpenHashSet();
     private final Long2LongOpenHashMap dirtyColumnTimestamps = new Long2LongOpenHashMap();
     private final LongOpenHashSet inFlight = new LongOpenHashSet();
-    private final LongOpenHashSet deferredColumns = new LongOpenHashSet();
-    private final ArrayDeque<Long> deferredQueue = new ArrayDeque<>();
+    private final DeferredColumnQueue deferredColumns = new DeferredColumnQueue(MAX_DEFERRED_COLUMNS);
     private final Long2IntOpenHashMap positionToRequestId = new Long2IntOpenHashMap();
     private final Int2LongOpenHashMap requestIdToPosition = new Int2LongOpenHashMap();
     private final Long2LongOpenHashMap requestSendTimes = new Long2LongOpenHashMap();
     private final PriorityQueue<RequestDeadline> requestDeadlines = new PriorityQueue<>();
     private final LongOpenHashSet generationInFlight = new LongOpenHashSet();
     private final LongOpenHashSet dirtyRefreshInFlight = new LongOpenHashSet();
-    private final Long2LongOpenHashMap retryAfterNanos = new Long2LongOpenHashMap();
-    private final Long2IntOpenHashMap retryAttempts = new Long2IntOpenHashMap();
+    private final RetryBackoff retryBackoff = new RetryBackoff(
+            System::nanoTime,
+            new RetryBackoffPolicy(
+                    DIRTY_REFRESH_BACKOFF_NANOS,
+                    RATE_LIMIT_BACKOFF_NANOS,
+                    GENERATION_BACKOFF_NANOS,
+                    BACKPRESSURE_BACKOFF_NANOS,
+                    DIRTY_REFRESH_BACKOFF_MAX_SHIFT,
+                    RATE_LIMIT_BACKOFF_MAX_SHIFT,
+                    GENERATION_BACKOFF_MAX_SHIFT));
     private final LongOpenHashSet diskMissedColumns = new LongOpenHashSet();
     private final String presenceScope;
     private final LongOpenHashSet sentPresenceRegions = new LongOpenHashSet();
@@ -159,15 +147,13 @@ public final class LodRequestManager {
         positionToRequestId.defaultReturnValue(-1);
         requestIdToPosition.defaultReturnValue(Long.MIN_VALUE);
         requestSendTimes.defaultReturnValue(0L);
-        retryAfterNanos.defaultReturnValue(0L);
-        retryAttempts.defaultReturnValue(0);
         dirtyColumnTimestamps.defaultReturnValue(0L);
         delayedPresenceRegionDeadlines.defaultReturnValue(0L);
         generationRequestBudget = 8.0;
         dirtyRefreshBudget = 16.0;
     }
 
-    public boolean onSessionConfig(SessionConfigS2CPayload config) {
+    public synchronized boolean onSessionConfig(SessionConfigS2CPayload config) {
         SessionConfigS2CPayload previousConfig = sessionConfig;
         boolean shouldReset = shouldResetForSessionConfig(config);
         sessionConfig = config;
@@ -190,7 +176,7 @@ public final class LodRequestManager {
         return shouldReset;
     }
 
-    public void tick() {
+    public synchronized void tick() {
         if (sessionConfig == null || !sessionConfig.enabled()) {
             return;
         }
@@ -251,13 +237,14 @@ public final class LodRequestManager {
         scanAndSend(level, player);
     }
 
-    public ColumnReceiveResult onColumnReceived(int requestId, long columnTimestamp) {
+    public synchronized ColumnReceiveResult onColumnReceived(int requestId, long columnTimestamp) {
         boolean dirtyRefreshRequest = isDirtyRefreshRequest(requestId);
         long packed = removeRequest(requestId);
         if (packed == Long.MIN_VALUE) {
-            return new ColumnReceiveResult(false, false, Long.MIN_VALUE);
+            return new ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
         }
 
+        boolean replacingKnownColumn = columnTimestamps.get(packed) > 0L || dirtyRefreshRequest;
         long requiredTimestamp = dirtyColumnTimestamps.get(packed);
         columnTimestamps.put(packed, columnTimestamp);
         rememberKnownColumn(lastDimension, packed, columnTimestamp);
@@ -271,10 +258,10 @@ public final class LodRequestManager {
             dirtyColumnTimestamps.remove(packed);
             clearBackoff(packed);
         }
-        return new ColumnReceiveResult(true, dirtyRefreshRequest, packed);
+        return new ColumnReceiveResult(true, dirtyRefreshRequest, replacingKnownColumn, packed);
     }
 
-    public void onPushedColumnReceived(ResourceKey<Level> dimension, int cx, int cz, long columnTimestamp) {
+    public synchronized void onPushedColumnReceived(ResourceKey<Level> dimension, int cx, int cz, long columnTimestamp) {
         if (!isActiveDimension(dimension)) {
             return;
         }
@@ -294,15 +281,15 @@ public final class LodRequestManager {
         }
     }
 
-    public void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
+    public synchronized void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
         forgetColumn(dimension, cx, cz, true);
     }
 
-    public void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
+    public synchronized void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
         forgetColumn(dimension, cx, cz, false);
     }
 
-    public void onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
+    public synchronized void onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
         for (int i = 0; i < dirtyPositions.length; i++) {
             long packed = dirtyPositions[i];
             if (hasKnownColumn(packed)) {
@@ -321,7 +308,7 @@ public final class LodRequestManager {
         }
     }
 
-    public void onColumnNotGenerated(int requestId) {
+    public synchronized void onColumnNotGenerated(int requestId) {
         boolean dirtyRefreshRequest = isDirtyRefreshRequest(requestId);
         boolean generationRequest = isGenerationRequest(requestId);
         long packed = removeRequest(requestId);
@@ -345,16 +332,16 @@ public final class LodRequestManager {
                 markBackoff(packed, true);
                 deferredColumns.remove(packed);
                 deferColumn(packed);
-            } else if (shouldPromoteNotGeneratedToGeneration(packed)) {
-                columnTimestamps.remove(packed);
-                diskMissedColumns.add(packed);
-                clearBackoff(packed);
-                deferredColumns.remove(packed);
-                deferColumn(packed);
             } else if (sessionConfig != null && sessionConfig.generationEnabled()) {
                 columnTimestamps.remove(packed);
-                clearMissState(packed);
+                clearBackoff(packed);
                 deferredColumns.remove(packed);
+                if (shouldPromoteNotGeneratedToGeneration(packed)) {
+                    diskMissedColumns.add(packed);
+                    deferColumn(packed);
+                } else {
+                    clearMissState(packed);
+                }
             } else {
                 columnTimestamps.put(packed, 0L);
                 diskMissedColumns.add(packed);
@@ -364,7 +351,7 @@ public final class LodRequestManager {
         }
     }
 
-    public void onColumnUpToDate(int requestId) {
+    public synchronized void onColumnUpToDate(int requestId) {
         long packed = removeRequest(requestId);
         if (packed != Long.MIN_VALUE) {
             long requiredTimestamp = dirtyColumnTimestamps.get(packed);
@@ -405,7 +392,7 @@ public final class LodRequestManager {
         }
     }
 
-    public void onRateLimited(int requestId) {
+    public synchronized void onRateLimited(int requestId) {
         boolean generationRequest = isGenerationRequest(requestId);
         long packed = removeRequest(requestId);
         if (packed != Long.MIN_VALUE) {
@@ -415,7 +402,7 @@ public final class LodRequestManager {
         }
     }
 
-    public void onBackpressured(int requestId) {
+    public synchronized void onBackpressured(int requestId) {
         long packed = removeRequest(requestId);
         if (packed != Long.MIN_VALUE) {
             markBackpressure(packed);
@@ -424,16 +411,16 @@ public final class LodRequestManager {
         }
     }
 
-    public void disconnect() {
+    public synchronized void disconnect() {
         resetRequestState();
         ClientLodPresenceCache.flush();
     }
 
-    public void forceResync() {
+    public synchronized void forceResync() {
         resetRequestStateAfterConfigChange();
     }
 
-    public int getPendingCount() {
+    public synchronized int getPendingCount() {
         return inFlight.size();
     }
 
@@ -525,7 +512,7 @@ public final class LodRequestManager {
             clearBackoff(packed);
         }
         if (!deferredGeneration.isEmpty()) {
-            deferredQueue.removeIf(packed -> !deferredColumns.contains(packed.longValue()));
+            deferredColumns.compact();
         }
     }
 
@@ -542,7 +529,6 @@ public final class LodRequestManager {
         int lodDistance = getEffectiveLodDistance();
         LongOpenHashSet candidates = new LongOpenHashSet(diskMissedColumns);
         int resumed = 0;
-
         for (long packed : candidates) {
             if (resumed >= MAX_DEFERRED_COLUMNS) {
                 break;
@@ -570,7 +556,9 @@ public final class LodRequestManager {
             return;
         }
 
-        int maxCount = Math.min(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, requestWindow.remaining());
+        int maxCount = Math.min(
+                Math.min(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, requestWindow.remaining()),
+                maxRequestsPerTick());
         int[] requestIds = requestBuffers.requestIds;
         long[] positions = requestBuffers.positions;
         long[] timestamps = requestBuffers.timestamps;
@@ -585,19 +573,27 @@ public final class LodRequestManager {
         int protectedSyncDistance = getVanillaProtectedSyncDistance();
         long now = System.nanoTime();
         int maxAllowedRingThisTick = lodDistance;
+        ScanBudget scanBudget = ScanBudget.create(scanBoostTicks > 0);
 
         count = scanNearSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, count, maxCount, requestWindow, now);
+                timestamps, allowGeneration, count, maxCount, requestWindow, now, scanBudget);
         count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick);
+                timestamps, allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
+                DeferredDrainMode.DIRTY_ONLY);
         count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions, timestamps,
-                allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick);
+                allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget);
+        count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
+                timestamps, allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
+                DeferredDrainMode.ALL);
+        if (scanBoostTicks > 0) {
+            scanBoostTicks--;
+        }
 
         if (count > 0) {
-            generationRequestBudget = Math.max(0.0D, generationRequestBudget - requestWindow.generationSent);
-            dirtyRefreshBudget = Math.max(0.0D, dirtyRefreshBudget - requestWindow.dirtySent);
+            generationRequestBudget = Math.max(0.0D, generationRequestBudget - requestWindow.generationSent());
+            dirtyRefreshBudget = Math.max(0.0D, dirtyRefreshBudget - requestWindow.dirtySent());
             VSSClientNetworking.sendBatchRequest(new BatchChunkRequestC2SPayload(requestIds, positions, timestamps, allowGeneration, count));
-            logRequestBatch(now, count, requestWindow.syncSent, requestWindow.generationSent, requestWindow.dirtySent, lodDistance, playerCx, playerCz);
+            logRequestBatch(now, count, requestWindow.syncSent(), requestWindow.generationSent(), requestWindow.dirtySent(), lodDistance, playerCx, playerCz);
         }
     }
 
@@ -644,22 +640,21 @@ public final class LodRequestManager {
             int count,
             int maxCount,
             RequestWindow requestWindow,
-            long now) {
+            long now,
+            ScanBudget scanBudget) {
         if (nearScanCompletedForCurrentOffsets
                 || orderedOffsets.length == 0
-                || !requestWindow.hasNearSyncCapacity()
-                || lodDistance <= 0) {
+                || !requestWindow.hasNormalCandidateCapacity(0)
+                || lodDistance <= 0
+                || !scanBudget.canScanMore()) {
             return count;
         }
 
         int maxAllowedRing = Math.min(lodDistance, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS);
-        int scannedCandidates = 0;
         int totalCandidates = orderedOffsets.length;
-        int scanLimit = scanBoostTicks > 0 ? BOOSTED_SCAN_CANDIDATES_PER_TICK : MAX_SCAN_CANDIDATES_PER_TICK;
-        int maxScans = Math.min(scanLimit, totalCandidates);
         while (count < maxCount
-                && requestWindow.hasNearSyncCapacity()
-                && scannedCandidates < maxScans) {
+                && requestWindow.hasNormalCandidateCapacity(0)
+                && scanBudget.canScanMore()) {
             if (nearScanOffsetIndex >= totalCandidates) {
                 nearScanCompletedForCurrentOffsets = true;
                 return count;
@@ -672,10 +667,6 @@ public final class LodRequestManager {
                 return count;
             }
 
-            nearScanOffsetIndex++;
-            scannedCandidates++;
-            updateSoftFrontier(offsetRing, lodDistance);
-
             int cx = playerCx + decodeOffsetX(offset);
             int cz = playerCz + decodeOffsetZ(offset);
             long packed = PositionUtil.packPosition(cx, cz);
@@ -683,8 +674,18 @@ public final class LodRequestManager {
                     || dirtyColumns.contains(packed)
                     || requeueGenerationCandidate(packed)
                     || !shouldRequestColumn(packed, now)) {
+                nearScanOffsetIndex++;
+                scanBudget.recordCandidate();
+                updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
+            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+                break;
+            }
+
+            nearScanOffsetIndex++;
+            scanBudget.recordCandidate();
+            updateSoftFrontier(offsetRing, lodDistance);
 
             count = appendRequestCluster(
                     packed,
@@ -718,35 +719,35 @@ public final class LodRequestManager {
             int maxCount,
             RequestWindow requestWindow,
             long now,
-            int maxAllowedRing) {
-        int attempts = Math.min(deferredQueue.size(), MAX_DEFERRED_CANDIDATES_PER_TICK);
-        if (attempts <= 0) {
+            int maxAllowedRing,
+            ScanBudget scanBudget,
+            DeferredDrainMode mode) {
+        if (count >= maxCount || deferredColumns.queuedEntries() <= 0 || !scanBudget.canScanMore()) {
+            return count;
+        }
+        if (mode == DeferredDrainMode.DIRTY_ONLY && dirtyColumns.isEmpty()) {
             return count;
         }
 
-        List<Long> candidates = new ArrayList<>(attempts);
-        LongOpenHashSet seen = new LongOpenHashSet();
-        while (attempts-- > 0 && !deferredQueue.isEmpty()) {
-            Long queued = deferredQueue.pollFirst();
-            if (queued == null) {
-                break;
-            }
-            long packed = queued.longValue();
-            if (!deferredColumns.contains(packed) || !seen.add(packed)) {
-                continue;
-            }
-            candidates.add(packed);
-        }
-
-        candidates.sort(deferredColumnComparator(playerCx, playerCz));
+        List<Long> candidates = bucketDeferredCandidates(
+                deferredColumns.pollUniqueCandidates(Math.min(MAX_DEFERRED_CANDIDATES_PER_TICK, scanBudget.remainingCandidates())),
+                playerCx,
+                playerCz,
+                lodDistance);
 
         int firstNormalDeferredRing = -1;
 
-        // 追踪当前处理的最远距离，防止跳跃式处理
-        int maxProcessedRing = 0;
-
         for (long packed : candidates) {
             boolean dirtyRefresh = dirtyColumns.contains(packed);
+            if (!mode.accepts(dirtyRefresh)) {
+                requeueDeferredColumn(packed, dirtyRefresh);
+                continue;
+            }
+            if (!scanBudget.canScanMore()) {
+                requeueDeferredColumn(packed, dirtyRefresh);
+                continue;
+            }
+            scanBudget.recordCandidate();
             if (count >= maxCount || !requestWindow.hasCapacity()) {
                 requeueDeferredColumn(packed, dirtyRefresh);
                 continue;
@@ -766,21 +767,17 @@ public final class LodRequestManager {
                 continue;
             }
 
-            // 全局环限制：脏刷新也应该有适度限制，避免跳跃过大
             if (ring > maxAllowedRing) {
-                // 脏刷新允许+10环的容差，但不是完全绕过
                 if (!dirtyRefresh || ring > maxAllowedRing + 10) {
                     requeueDeferredColumn(packed, dirtyRefresh);
                     continue;
                 }
             }
 
-            // 对于非脏刷新的普通请求，严格按环顺序处理，防止跳跃
-            // 脏刷新（dirtyRefresh）可以跳过此限制，因为需要立即更新
             if (!dirtyRefresh) {
                 if (firstNormalDeferredRing < 0) {
                     firstNormalDeferredRing = ring;
-                } else if (ring > firstNormalDeferredRing + 2) {
+                } else if (ring > firstNormalDeferredRing + 1) {
                     requeueDeferredColumn(packed, false);
                     continue;
                 }
@@ -811,8 +808,6 @@ public final class LodRequestManager {
 
             count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate);
             requestWindow.record(dirtyRefresh, generationCandidate, ring);
-
-            // 更新已处理的最远环
         }
         return count;
     }
@@ -830,32 +825,22 @@ public final class LodRequestManager {
             int maxCount,
             RequestWindow requestWindow,
             long now,
-            int maxAllowedRing) {
-        if (!requestWindow.hasAnySyncCapacity() || orderedOffsets.length == 0) {
+            int maxAllowedRing,
+            ScanBudget scanBudget) {
+        if (!requestWindow.hasAnyNormalCandidateCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
             return count;
         }
         if (scanCompletedForCurrentOffsets) {
             return count;
         }
 
-        int scannedCandidates = 0;
         int totalCandidates = orderedOffsets.length;
-        int scanLimit = scanBoostTicks > 0 ? BOOSTED_SCAN_CANDIDATES_PER_TICK : MAX_SCAN_CANDIDATES_PER_TICK;
-        int maxScans = Math.min(scanLimit, totalCandidates);
-        if (scanBoostTicks > 0) {
-            scanBoostTicks--;
-        }
 
-        // 记录本次tick开始时的环，防止跳跃式请求远处区块
-        int startingRing = scanOffsetIndex < totalCandidates
-            ? offsetRing(orderedOffsets[scanOffsetIndex])
-            : Integer.MAX_VALUE;
-        int currentRing = startingRing;
-        int requestsInCurrentBatch = 0;
+        RingScanGate ringGate = RingScanGate.fromCursor(orderedOffsets, scanOffsetIndex, totalCandidates);
 
         while (count < maxCount
-                && requestWindow.hasAnySyncCapacity()
-                && scannedCandidates < maxScans) {
+                && requestWindow.hasAnyNormalCandidateCapacity()
+                && scanBudget.canScanMore()) {
             if (scanOffsetIndex >= totalCandidates) {
                 scanCompletedForCurrentOffsets = true;
                 softFrontierRadius = lodDistance;
@@ -865,24 +850,18 @@ public final class LodRequestManager {
             long offset = orderedOffsets[scanOffsetIndex];
             int offsetRing = offsetRing(offset);
 
-            // 全局环限制检查
             if (offsetRing > maxAllowedRing) {
                 break;
             }
-            if (!requestWindow.hasSyncCapacity(offsetRing)) {
+            if (!requestWindow.hasNormalCandidateCapacity(offsetRing)) {
                 break;
             }
 
-            // 防止在单个tick内跳过多个环，确保由内向外渐进加载
-            // 如果已经跳到了新的环，并且这个环比起始环远了2个以上，就停止本次扫描
-            if (offsetRing > startingRing + 1 && requestsInCurrentBatch > 0) {
+            // Scan at most the ring where this tick started. Cooldowns and known
+            // columns must not let the cursor leap over intermediate rings.
+            if (!ringGate.allows(offsetRing)) {
                 break;
             }
-
-            scanOffsetIndex++;
-            scannedCandidates++;
-            currentRing = offsetRing;
-            updateSoftFrontier(offsetRing, lodDistance);
 
             int cx = playerCx + decodeOffsetX(offset);
             int cz = playerCz + decodeOffsetZ(offset);
@@ -891,10 +870,19 @@ public final class LodRequestManager {
                     || dirtyColumns.contains(packed)
                     || requeueGenerationCandidate(packed)
                     || !shouldRequestColumn(packed, now)) {
+                scanOffsetIndex++;
+                scanBudget.recordCandidate();
+                updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
+            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+                break;
+            }
 
-            int beforeCount = count;
+            scanOffsetIndex++;
+            scanBudget.recordCandidate();
+            updateSoftFrontier(offsetRing, lodDistance);
+
             count = appendRequestCluster(
                     packed,
                     playerCx,
@@ -911,10 +899,6 @@ public final class LodRequestManager {
                     now,
                     maxAllowedRing);
 
-            // 记录本批次实际发送的请求数
-            if (count > beforeCount) {
-                requestsInCurrentBatch += (count - beforeCount);
-            }
         }
         return count;
     }
@@ -938,26 +922,21 @@ public final class LodRequestManager {
         int centerZ = PositionUtil.unpackZ(centerPacked);
         int centerRing = chebyshevDistance(centerPacked, playerCx, playerCz);
 
-        // 全局环限制检查
         if (centerRing > maxAllowedRing) {
             return count;
         }
 
-        // 首先添加中心区块
         count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
                 positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
 
-        // 对于周围的区块，只添加距离不超过中心区块的
-        // 防止集群请求导致远处区块越过近处区块被优先请求
-        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dz++) {
-            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dx++) {
+        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dz++) {
+            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dx++) {
                 if (dx == 0 && dz == 0) {
                     continue;
                 }
                 long packed = PositionUtil.packPosition(centerX + dx, centerZ + dz);
                 int neighborRing = chebyshevDistance(packed, playerCx, playerCz);
 
-                // 只请求距离不超过中心区块且不超过全局限制的邻居，避免跳跃式加载
                 if (neighborRing <= centerRing && neighborRing <= maxAllowedRing) {
                     count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
                             positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
@@ -985,7 +964,7 @@ public final class LodRequestManager {
         int cx = PositionUtil.unpackX(packed);
         int cz = PositionUtil.unpackZ(packed);
         int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
-        if (count >= maxCount || !requestWindow.hasSyncCapacity(ring)) {
+        if (count >= maxCount) {
             return count;
         }
         if (ring > lodDistance
@@ -995,13 +974,42 @@ public final class LodRequestManager {
             return count;
         }
 
-        if (dirtyColumns.contains(packed) || requeueGenerationCandidate(packed) || !requestWindow.canSend(false, false, ring)) {
+        if (dirtyColumns.contains(packed) || requeueGenerationCandidate(packed)) {
             return count;
         }
 
-        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, false);
-        requestWindow.record(false, false, ring);
+        if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+            return count;
+        }
+        boolean generationCandidate = shouldUseFirstPassGenerationFallback(packed, ring, requestWindow);
+        if (!requestWindow.canSend(false, generationCandidate, ring)) {
+            return count;
+        }
+
+        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate);
+        requestWindow.record(false, generationCandidate, ring);
         return count;
+    }
+
+    private boolean shouldUseFirstPassGenerationFallback(long packed, int ring, RequestWindow requestWindow) {
+        if (!requestWindow.hasGenerationCapacity() || !requiresFirstPassGenerationFallback(packed)) {
+            return false;
+        }
+        if (!requestWindow.canSend(false, true, ring)) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean shouldWaitForFirstPassGenerationSlot(long packed, RequestWindow requestWindow) {
+        return requiresFirstPassGenerationFallback(packed) && !requestWindow.hasGenerationCapacity();
+    }
+
+    private boolean requiresFirstPassGenerationFallback(long packed) {
+        return sessionConfig != null
+                && sessionConfig.generationEnabled()
+                && columnTimestamps.get(packed) <= 0L
+                && !hasKnownColumn(packed);
     }
 
     private boolean shouldRequestColumn(long packed, long now) {
@@ -1102,28 +1110,28 @@ public final class LodRequestManager {
         presenceMaxRegionRing = maxRegionRing;
 
         for (int ring = 0; ring <= maxRegionRing; ring++) {
-            queuePresenceRegionRing(level, dimension, centerRegionX, centerRegionZ, ring);
+            queuePresenceRegionRing(centerRegionX, centerRegionZ, ring);
         }
+        seedPresenceRegion(level, dimension, centerRegionX, centerRegionZ);
     }
 
-    private void queuePresenceRegionRing(ClientLevel level, ResourceKey<Level> dimension, int centerRegionX, int centerRegionZ, int ring) {
+    private void queuePresenceRegionRing(int centerRegionX, int centerRegionZ, int ring) {
         if (ring == 0) {
-            seedAndQueuePresenceRegion(level, dimension, centerRegionX, centerRegionZ);
+            queuePresenceRegion(centerRegionX, centerRegionZ, false);
             return;
         }
         for (int dx = -ring; dx <= ring; dx++) {
-            seedAndQueuePresenceRegion(level, dimension, centerRegionX + dx, centerRegionZ - ring);
-            seedAndQueuePresenceRegion(level, dimension, centerRegionX + dx, centerRegionZ + ring);
+            queuePresenceRegion(centerRegionX + dx, centerRegionZ - ring, false);
+            queuePresenceRegion(centerRegionX + dx, centerRegionZ + ring, false);
         }
         for (int dz = -ring + 1; dz <= ring - 1; dz++) {
-            seedAndQueuePresenceRegion(level, dimension, centerRegionX - ring, centerRegionZ + dz);
-            seedAndQueuePresenceRegion(level, dimension, centerRegionX + ring, centerRegionZ + dz);
+            queuePresenceRegion(centerRegionX - ring, centerRegionZ + dz, false);
+            queuePresenceRegion(centerRegionX + ring, centerRegionZ + dz, false);
         }
     }
 
-    private void seedAndQueuePresenceRegion(ClientLevel level, ResourceKey<Level> dimension, int regionX, int regionZ) {
+    private void seedPresenceRegion(ClientLevel level, ResourceKey<Level> dimension, int regionX, int regionZ) {
         ClientLodPresenceCache.seedRegion(presenceScope, dimension, regionX, regionZ, columnTimestamps, level);
-        queuePresenceRegion(regionX, regionZ, false);
     }
 
     private void queuePresenceRegionForColumn(ResourceKey<Level> dimension, long packed) {
@@ -1173,12 +1181,15 @@ public final class LodRequestManager {
             return;
         }
         int packetsSent = 0;
-        while (packetsSent < PRESENCE_PACKETS_PER_TICK && !pendingPresenceRegions.isEmpty()) {
+        int packetsPerTick = presencePacketsPerTick();
+        int regionsPerPacket = presenceRegionsPerPacket();
+        int columnsPerPacket = presenceColumnsPerPacket();
+        while (packetsSent < packetsPerTick && !pendingPresenceRegions.isEmpty()) {
             ArrayList<RegionPresenceC2SPayload.RegionEntry> entries = new ArrayList<>();
             int consumedRegions = 0;
             int columnCount = 0;
-            while (consumedRegions < PRESENCE_REGIONS_PER_PACKET
-                    && columnCount < PRESENCE_COLUMNS_PER_PACKET
+            while (consumedRegions < regionsPerPacket
+                    && columnCount < columnsPerPacket
                     && !pendingPresenceRegions.isEmpty()) {
                 long key = pendingPresenceRegions.pollFirst();
                 queuedPresenceRegions.remove(key);
@@ -1186,6 +1197,7 @@ public final class LodRequestManager {
                 consumedRegions++;
                 int regionX = ClientLodPresenceCache.regionKeyX(key);
                 int regionZ = ClientLodPresenceCache.regionKeyZ(key);
+                seedPresenceRegion(level, dimension, regionX, regionZ);
                 RegionPresenceC2SPayload.RegionEntry entry = ClientLodPresenceCache.regionEntry(
                         presenceScope,
                         dimension,
@@ -1480,8 +1492,7 @@ public final class LodRequestManager {
             inFlight.remove(packed);
             generationInFlight.remove(packed);
             diskMissedColumns.remove(packed);
-            retryAfterNanos.remove(packed);
-            retryAttempts.remove(packed);
+            clearBackoff(packed);
         }
 
         LongOpenHashSet staleDeferred = new LongOpenHashSet();
@@ -1494,11 +1505,10 @@ public final class LodRequestManager {
         for (long packed : staleDeferred) {
             deferredColumns.remove(packed);
             diskMissedColumns.remove(packed);
-            retryAfterNanos.remove(packed);
-            retryAttempts.remove(packed);
+            clearBackoff(packed);
         }
         if (!staleDeferred.isEmpty()) {
-            deferredQueue.removeIf(packed -> !deferredColumns.contains(packed.longValue()));
+            deferredColumns.compact();
         }
     }
 
@@ -1515,8 +1525,7 @@ public final class LodRequestManager {
             dirtyColumnTimestamps.remove(packed);
             deferredColumns.remove(packed);
             diskMissedColumns.remove(packed);
-            retryAfterNanos.remove(packed);
-            retryAttempts.remove(packed);
+            clearBackoff(packed);
         }
 
         LongOpenHashSet staleRequests = new LongOpenHashSet();
@@ -1541,82 +1550,94 @@ public final class LodRequestManager {
     }
 
     private void deferColumn(long packed) {
-        deferColumn(packed, false);
+        deferredColumns.defer(packed);
     }
 
     private void deferColumn(long packed, boolean urgent) {
-        boolean alreadyDeferred = deferredColumns.contains(packed);
-        if (!alreadyDeferred && deferredColumns.size() >= MAX_DEFERRED_COLUMNS) {
-            Long oldest = deferredQueue.pollFirst();
-            if (oldest != null) {
-                deferredColumns.remove(oldest.longValue());
-            }
-        }
-        if (deferredColumns.add(packed) || urgent) {
-            if (urgent) {
-                deferredQueue.addFirst(packed);
-                return;
-            }
-            deferredQueue.addLast(packed);
-        }
+        deferredColumns.defer(packed, urgent);
     }
 
     private void requeueDeferredColumn(long packed, boolean urgent) {
-        if (deferredColumns.size() >= MAX_DEFERRED_COLUMNS && !deferredColumns.contains(packed)) {
-            Long oldest = deferredQueue.pollFirst();
-            if (oldest != null) {
-                deferredColumns.remove(oldest.longValue());
+        deferredColumns.requeue(packed, urgent);
+    }
+
+    private List<Long> bucketDeferredCandidates(List<Long> candidates, int playerCx, int playerCz, int lodDistance) {
+        if (candidates.size() <= 1) {
+            return candidates;
+        }
+
+        int bucketCount = Math.max(1, lodDistance + 2);
+        ArrayDeque<Long>[] dirtyBuckets = newDeferredBuckets(bucketCount);
+        ArrayDeque<Long>[] normalBuckets = newDeferredBuckets(bucketCount);
+        ArrayDeque<Long>[] generationBuckets = newDeferredBuckets(bucketCount);
+
+        for (long packed : candidates) {
+            boolean dirtyRefresh = dirtyColumns.contains(packed);
+            int ring = chebyshevDistance(packed, playerCx, playerCz);
+            int bucket = Math.min(Math.max(0, ring), bucketCount - 1);
+            ArrayDeque<Long>[] buckets;
+            if (dirtyRefresh) {
+                buckets = dirtyBuckets;
+            } else if (isGenerationCandidate(packed)) {
+                buckets = generationBuckets;
+            } else {
+                buckets = normalBuckets;
             }
+            ArrayDeque<Long> ringBucket = buckets[bucket];
+            if (ringBucket == null) {
+                ringBucket = new ArrayDeque<>();
+                buckets[bucket] = ringBucket;
+            }
+            ringBucket.addLast(packed);
         }
-        deferredColumns.add(packed);
-        if (urgent) {
-            deferredQueue.addFirst(packed);
-        } else {
-            deferredQueue.addLast(packed);
+
+        ArrayList<Long> ordered = new ArrayList<>(candidates.size());
+        appendBuckets(ordered, dirtyBuckets);
+        for (int i = 0; i < bucketCount; i++) {
+            appendBucket(ordered, normalBuckets[i]);
+            appendBucket(ordered, generationBuckets[i]);
+        }
+        return ordered;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArrayDeque<Long>[] newDeferredBuckets(int bucketCount) {
+        return (ArrayDeque<Long>[]) new ArrayDeque<?>[bucketCount];
+    }
+
+    private static void appendBuckets(ArrayList<Long> ordered, ArrayDeque<Long>[] buckets) {
+        for (ArrayDeque<Long> bucket : buckets) {
+            appendBucket(ordered, bucket);
         }
     }
 
-    private Comparator<Long> deferredColumnComparator(int playerCx, int playerCz) {
-        return (left, right) -> compareDeferredColumns(left, right, playerCx, playerCz);
+    private static void appendBucket(ArrayList<Long> ordered, ArrayDeque<Long> bucket) {
+        if (bucket == null) {
+            return;
+        }
+        while (!bucket.isEmpty()) {
+            ordered.add(bucket.removeFirst());
+        }
     }
 
-    private int compareDeferredColumns(long left, long right, int playerCx, int playerCz) {
-        boolean leftDirty = dirtyColumns.contains(left);
-        boolean rightDirty = dirtyColumns.contains(right);
-        if (leftDirty != rightDirty) {
-            return leftDirty ? -1 : 1;
-        }
-
-        int leftRing = chebyshevDistance(left, playerCx, playerCz);
-        int rightRing = chebyshevDistance(right, playerCx, playerCz);
-        if (leftRing != rightRing) {
-            return Integer.compare(leftRing, rightRing);
-        }
-
-        long leftDistanceSquared = distanceSquared(left, playerCx, playerCz);
-        long rightDistanceSquared = distanceSquared(right, playerCx, playerCz);
-        if (leftDistanceSquared != rightDistanceSquared) {
-            return Long.compare(leftDistanceSquared, rightDistanceSquared);
-        }
-
-        boolean leftGeneration = !leftDirty && isGenerationCandidate(left);
-        boolean rightGeneration = !rightDirty && isGenerationCandidate(right);
-        if (leftGeneration != rightGeneration) {
-            return leftGeneration ? 1 : -1;
-        }
-
-        int leftX = PositionUtil.unpackX(left);
-        int rightX = PositionUtil.unpackX(right);
-        if (leftX != rightX) {
-            return Integer.compare(leftX, rightX);
-        }
-        return Integer.compare(PositionUtil.unpackZ(left), PositionUtil.unpackZ(right));
+    private static int maxRequestsPerTick() {
+        return isIntegratedServer() ? INTEGRATED_MAX_REQUESTS_PER_TICK : MAX_REQUESTS_PER_TICK;
     }
 
-    private static long distanceSquared(long packed, int playerCx, int playerCz) {
-        long dx = (long) PositionUtil.unpackX(packed) - playerCx;
-        long dz = (long) PositionUtil.unpackZ(packed) - playerCz;
-        return dx * dx + dz * dz;
+    private static int presencePacketsPerTick() {
+        return isIntegratedServer() ? INTEGRATED_PRESENCE_PACKETS_PER_TICK : PRESENCE_PACKETS_PER_TICK;
+    }
+
+    private static int presenceRegionsPerPacket() {
+        return isIntegratedServer() ? INTEGRATED_PRESENCE_REGIONS_PER_PACKET : PRESENCE_REGIONS_PER_PACKET;
+    }
+
+    private static int presenceColumnsPerPacket() {
+        return isIntegratedServer() ? INTEGRATED_PRESENCE_COLUMNS_PER_PACKET : PRESENCE_COLUMNS_PER_PACKET;
+    }
+
+    private static boolean isIntegratedServer() {
+        return Minecraft.getInstance().getSingleplayerServer() != null;
     }
 
     private static int chebyshevDistance(long packed, int playerCx, int playerCz) {
@@ -1637,7 +1658,6 @@ public final class LodRequestManager {
         dirtyColumnTimestamps.clear();
         inFlight.clear();
         deferredColumns.clear();
-        deferredQueue.clear();
         diskMissedColumns.clear();
         positionToRequestId.clear();
         requestIdToPosition.clear();
@@ -1645,8 +1665,7 @@ public final class LodRequestManager {
         requestDeadlines.clear();
         generationInFlight.clear();
         dirtyRefreshInFlight.clear();
-        retryAfterNanos.clear();
-        retryAttempts.clear();
+        retryBackoff.clearAll();
         nextRequestId = 0;
         lastPlayerChunkX = Integer.MIN_VALUE;
         lastPlayerChunkZ = Integer.MIN_VALUE;
@@ -1718,46 +1737,9 @@ public final class LodRequestManager {
             return;
         }
 
-        long[] cached = OFFSET_CACHE.get(lodDistance);
-        if (cached != null) {
-            orderedOffsets = cached;
-            orderedOffsetDistance = lodDistance;
-            resetScanCursor();
-            return;
-        }
-
-        int side = lodDistance * 2 + 1;
-        long[] offsets = new long[side * side];
-        LongOpenHashSet seenOffsets = new LongOpenHashSet(offsets.length);
-        int index = 0;
-        index = appendOffset(offsets, seenOffsets, index, 0, 0);
-        for (int ring = 1; ring <= lodDistance; ring++) {
-            index = appendOffset(offsets, seenOffsets, index, -ring, 0);
-            index = appendOffset(offsets, seenOffsets, index, ring, 0);
-            index = appendOffset(offsets, seenOffsets, index, 0, -ring);
-            index = appendOffset(offsets, seenOffsets, index, 0, ring);
-            for (int step = 1; step <= ring; step++) {
-                index = appendOffset(offsets, seenOffsets, index, -ring, -step);
-                index = appendOffset(offsets, seenOffsets, index, -ring, step);
-                index = appendOffset(offsets, seenOffsets, index, ring, -step);
-                index = appendOffset(offsets, seenOffsets, index, ring, step);
-                index = appendOffset(offsets, seenOffsets, index, -step, -ring);
-                index = appendOffset(offsets, seenOffsets, index, step, -ring);
-                index = appendOffset(offsets, seenOffsets, index, -step, ring);
-                index = appendOffset(offsets, seenOffsets, index, step, ring);
-            }
-        }
-        orderedOffsets = offsets;
+        orderedOffsets = OFFSET_CACHE.computeIfAbsent(lodDistance, LodRequestManager::generateOffsetsForDistance);
         orderedOffsetDistance = lodDistance;
         resetScanCursor();
-    }
-
-    private static int appendOffset(long[] offsets, LongOpenHashSet seenOffsets, int index, int dx, int dz) {
-        long offset = encodeOffset(dx, dz);
-        if (seenOffsets.add(offset)) {
-            offsets[index++] = offset;
-        }
-        return index;
     }
 
     private static int getVanillaProtectedSyncDistance() {
@@ -1785,22 +1767,19 @@ public final class LodRequestManager {
     }
 
     private static long encodeOffset(int dx, int dz) {
-        long distanceSquared = (long) dx * dx + (long) dz * dz;
-        return distanceSquared << 32
-                | (long) (dx & 0xFFFF) << 16
-                | (long) (dz & 0xFFFF);
+        return ChebyshevRingOffsets.encode(dx, dz);
     }
 
     private static int decodeOffsetX(long offset) {
-        return (short) ((offset >>> 16) & 0xFFFF);
+        return ChebyshevRingOffsets.decodeX(offset);
     }
 
     private static int decodeOffsetZ(long offset) {
-        return (short) (offset & 0xFFFF);
+        return ChebyshevRingOffsets.decodeZ(offset);
     }
 
     private static int offsetRing(long offset) {
-        return Math.max(Math.abs(decodeOffsetX(offset)), Math.abs(decodeOffsetZ(offset)));
+        return ChebyshevRingOffsets.ring(offset);
     }
 
     private record RequestDeadline(long packed, int requestId, long timeoutAtNanos) implements Comparable<RequestDeadline> {
@@ -1814,135 +1793,68 @@ public final class LodRequestManager {
         }
     }
 
+    private static final class ScanBudget {
+        private int remainingCandidates;
+        private int checksUntilDeadline;
+        private final long deadlineNanos;
+
+        private ScanBudget(int remainingCandidates, long deadlineNanos) {
+            this.remainingCandidates = Math.max(0, remainingCandidates);
+            this.deadlineNanos = deadlineNanos;
+            this.checksUntilDeadline = SCAN_DEADLINE_CHECK_INTERVAL;
+        }
+
+        static ScanBudget create(boolean boosted) {
+            int candidateLimit = boosted ? BOOSTED_SCAN_CANDIDATES_PER_TICK : MAX_SCAN_CANDIDATES_PER_TICK;
+            long scanNanos = isIntegratedServer() ? INTEGRATED_MAX_SCAN_NANOS_PER_TICK : MAX_SCAN_NANOS_PER_TICK;
+            return new ScanBudget(candidateLimit, System.nanoTime() + scanNanos);
+        }
+
+        boolean canScanMore() {
+            if (remainingCandidates <= 0) {
+                return false;
+            }
+            if (--checksUntilDeadline > 0) {
+                return true;
+            }
+            checksUntilDeadline = SCAN_DEADLINE_CHECK_INTERVAL;
+            return System.nanoTime() - deadlineNanos <= 0L;
+        }
+
+        void recordCandidate() {
+            remainingCandidates = Math.max(0, remainingCandidates - 1);
+        }
+
+        int remainingCandidates() {
+            return remainingCandidates;
+        }
+    }
+
+    private enum DeferredDrainMode {
+        DIRTY_ONLY,
+        ALL;
+
+        private boolean accepts(boolean dirtyRefresh) {
+            return this == ALL || dirtyRefresh;
+        }
+    }
+
     private boolean isCoolingDown(long packed, long now) {
-        long retryAfter = retryAfterNanos.get(packed);
-        if (retryAfter <= 0L) {
-            return false;
-        }
-        if (retryAfter > now) {
-            return true;
-        }
-        retryAfterNanos.remove(packed);
-        return false;
+        return retryBackoff.isCoolingDown(packed, now);
     }
 
     private void markBackoff(long packed, boolean generationCandidate) {
-        // 降低重试次数上限，避免长时间阻塞
-        int attempts = Math.min(3, retryAttempts.addTo(packed, 1) + 1);
-        long baseDelay = dirtyColumns.contains(packed)
-                ? DIRTY_REFRESH_BACKOFF_NANOS      // 0.5秒
-                : generationCandidate ? 5_000_000_000L : 1_000_000_000L; // 降低基础延迟：5秒/1秒
-        // 降低最大延迟上限到10秒，避免永久卡住
-        long delay = Math.min(10_000_000_000L, baseDelay << Math.max(0, attempts - 1));
-        retryAfterNanos.put(packed, System.nanoTime() + delay);
+        retryBackoff.markBackoff(packed, dirtyColumns.contains(packed), generationCandidate);
     }
 
     private void markBackpressure(long packed) {
-        retryAfterNanos.put(packed, System.nanoTime() + BACKPRESSURE_BACKOFF_NANOS);
+        retryBackoff.markBackpressure(packed);
     }
 
     private void clearBackoff(long packed) {
-        retryAfterNanos.remove(packed);
-        retryAttempts.remove(packed);
+        retryBackoff.clear(packed);
     }
 
-    private static final class RequestWindow {
-        private int nearSyncRemaining;
-        private int midSyncRemaining;
-        private int farSyncRemaining;
-        private int distantSyncRemaining;
-        private int generationRemaining;
-        private int dirtyRemaining;
-        private int syncSent;
-        private int generationSent;
-        private int dirtySent;
-
-        private RequestWindow(
-                int nearSyncRemaining,
-                int midSyncRemaining,
-                int farSyncRemaining,
-                int distantSyncRemaining,
-                int generationRemaining,
-                int dirtyRemaining) {
-            this.nearSyncRemaining = nearSyncRemaining;
-            this.midSyncRemaining = midSyncRemaining;
-            this.farSyncRemaining = farSyncRemaining;
-            this.distantSyncRemaining = distantSyncRemaining;
-            this.generationRemaining = generationRemaining;
-            this.dirtyRemaining = dirtyRemaining;
-        }
-
-        private boolean hasCapacity() {
-            return hasAnySyncCapacity() || generationRemaining > 0 || dirtyRemaining > 0;
-        }
-
-        private boolean hasAnySyncCapacity() {
-            return nearSyncRemaining > 0 || midSyncRemaining > 0 || farSyncRemaining > 0 || distantSyncRemaining > 0;
-        }
-
-        private boolean hasNearSyncCapacity() {
-            return nearSyncRemaining > 0;
-        }
-
-        private boolean hasSyncCapacity(int ring) {
-            return syncRemainingForRing(ring) > 0;
-        }
-
-        private int remaining() {
-            return Math.max(0, nearSyncRemaining)
-                    + Math.max(0, midSyncRemaining)
-                    + Math.max(0, farSyncRemaining)
-                    + Math.max(0, distantSyncRemaining)
-                    + Math.max(0, generationRemaining)
-                    + Math.max(0, dirtyRemaining);
-        }
-
-        private boolean canSend(boolean dirtyRefresh, boolean generationCandidate, int ring) {
-            if (dirtyRefresh) {
-                return dirtyRemaining > 0;
-            }
-            return generationCandidate ? generationRemaining > 0 : hasSyncCapacity(ring);
-        }
-
-        private void record(boolean dirtyRefresh, boolean generationCandidate, int ring) {
-            if (dirtyRefresh) {
-                dirtyRemaining--;
-                dirtySent++;
-            } else if (generationCandidate) {
-                generationRemaining--;
-                generationSent++;
-            } else {
-                decrementSyncRemaining(ring);
-                syncSent++;
-            }
-        }
-
-        private int syncRemainingForRing(int ring) {
-            if (ring <= VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS) {
-                return nearSyncRemaining;
-            }
-            if (ring <= VSSConstants.SYNC_MID_DISTANCE_CHUNKS) {
-                return midSyncRemaining;
-            }
-            if (ring <= VSSConstants.SYNC_FAR_DISTANCE_CHUNKS) {
-                return farSyncRemaining;
-            }
-            return distantSyncRemaining;
-        }
-
-        private void decrementSyncRemaining(int ring) {
-            if (ring <= VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS) {
-                nearSyncRemaining--;
-            } else if (ring <= VSSConstants.SYNC_MID_DISTANCE_CHUNKS) {
-                midSyncRemaining--;
-            } else if (ring <= VSSConstants.SYNC_FAR_DISTANCE_CHUNKS) {
-                farSyncRemaining--;
-            } else {
-                distantSyncRemaining--;
-            }
-        }
-    }
-
-    public record ColumnReceiveResult(boolean knownRequest, boolean priority, long packedPosition) {
+    public record ColumnReceiveResult(boolean knownRequest, boolean priority, boolean replaceExistingColumn, long packedPosition) {
     }
 }

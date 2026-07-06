@@ -1,6 +1,9 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.command;
 
 import com.mojang.brigadier.CommandDispatcher;
+import dev.xantha.vss.networking.server.VSSServerNetworking;
+import dev.xantha.vss.networking.server.broadcast.FarPlayerBroadcaster;
+import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.xantha.vss.config.VSSServerConfig;

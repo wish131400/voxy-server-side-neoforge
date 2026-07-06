@@ -1,6 +1,6 @@
 package dev.xantha.vss.mixin.minecraft;
 
-import dev.xantha.vss.networking.server.DirtyColumnBroadcaster;
+import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;

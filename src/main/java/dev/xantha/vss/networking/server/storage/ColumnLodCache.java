@@ -1,4 +1,4 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.storage;
 
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.common.processing.EncodedColumnData;
@@ -9,7 +9,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
 
-final class ColumnLodCache {
+public final class ColumnLodCache {
     private final VSSServerConfig config;
     private final LinkedHashMap<Key, Entry> entries = new LinkedHashMap<>(1024, 0.75F, true);
     private long cachedBytes;
@@ -19,11 +19,11 @@ final class ColumnLodCache {
     private long evictions;
     private long invalidations;
 
-    ColumnLodCache(VSSServerConfig config) {
+    public ColumnLodCache(VSSServerConfig config) {
         this.config = config;
     }
 
-    synchronized Entry get(ResourceKey<Level> dimension, int cx, int cz) {
+    public synchronized Entry get(ResourceKey<Level> dimension, int cx, int cz) {
         if (!config.enableColumnCache) {
             return null;
         }
@@ -37,7 +37,7 @@ final class ColumnLodCache {
         return entry;
     }
 
-    synchronized void put(ResourceKey<Level> dimension, EncodedColumnData columnData) {
+    public synchronized void put(ResourceKey<Level> dimension, EncodedColumnData columnData) {
         if (!config.enableColumnCache || columnData == null || columnData.encodedBytes() == null || !columnData.completeColumn()) {
             return;
         }
@@ -50,6 +50,10 @@ final class ColumnLodCache {
         Key key = new Key(dimension.location(), columnData.chunkX(), columnData.chunkZ());
         Entry previous = entries.remove(key);
         if (previous != null) {
+            if (previous.timestamp() > columnData.columnStamp()) {
+                entries.put(key, previous);
+                return;
+            }
             cachedBytes -= previous.sizeBytes();
         }
 
@@ -64,12 +68,12 @@ final class ColumnLodCache {
                 sizeBytes,
                 columnData.schemaVersion(),
                 columnData.completeColumn()));
-        cachedBytes += sizeBytes;
+        this.cachedBytes += sizeBytes;
         puts++;
         evictOverflow();
     }
 
-    synchronized void invalidate(ResourceKey<Level> dimension, int cx, int cz) {
+    public synchronized void invalidate(ResourceKey<Level> dimension, int cx, int cz) {
         Entry removed = entries.remove(new Key(dimension.location(), cx, cz));
         if (removed != null) {
             cachedBytes -= removed.sizeBytes();
@@ -77,12 +81,23 @@ final class ColumnLodCache {
         }
     }
 
-    synchronized void clear() {
+    public synchronized void invalidateOlderThan(ResourceKey<Level> dimension, int cx, int cz, long minimumInvalidTimestamp) {
+        Key key = new Key(dimension.location(), cx, cz);
+        Entry entry = entries.get(key);
+        if (entry == null || entry.timestamp() >= minimumInvalidTimestamp) {
+            return;
+        }
+        entries.remove(key);
+        cachedBytes -= entry.sizeBytes();
+        invalidations++;
+    }
+
+    public synchronized void clear() {
         entries.clear();
         cachedBytes = 0L;
     }
 
-    synchronized String diagnostics() {
+    public synchronized String diagnostics() {
         return String.format(
                 "entries=%d, bytes=%.2f MiB, hits=%d, misses=%d, puts=%d, evictions=%d, invalidations=%d",
                 entries.size(),
@@ -107,7 +122,7 @@ final class ColumnLodCache {
     private record Key(ResourceLocation dimension, int chunkX, int chunkZ) {
     }
 
-    record Entry(
+    public record Entry(
             int chunkX,
             int chunkZ,
             long timestamp,
@@ -117,7 +132,7 @@ final class ColumnLodCache {
             int sizeBytes,
             int schemaVersion,
             boolean completeColumn) {
-        EncodedColumnData columnData() {
+        public EncodedColumnData columnData() {
             return new EncodedColumnData(
                     chunkX,
                     chunkZ,

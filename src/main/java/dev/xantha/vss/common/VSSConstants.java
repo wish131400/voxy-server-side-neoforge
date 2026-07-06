@@ -1,5 +1,7 @@
 package dev.xantha.vss.common;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
     public static final int PROTOCOL_VERSION = 34;
@@ -21,6 +23,7 @@ public final class VSSConstants {
     public static final int FAR_PLAYER_VERTICAL_HANDOFF_BLOCKS = 16;
     public static final int ESTIMATED_COLUMN_OVERHEAD_BYTES = 25;
     public static final int LOD_DISTANCE_BUFFER = 32;
+    public static final int MAX_CLIENT_LOD_DISTANCE_CHUNKS = 512;
     public static final int SYNC_NEAR_DISTANCE_CHUNKS = 32;
     public static final int SYNC_MID_DISTANCE_CHUNKS = 64;
     public static final int SYNC_FAR_DISTANCE_CHUNKS = 128;
@@ -33,8 +36,21 @@ public final class VSSConstants {
     private VSSConstants() {
     }
 
+    private static final AtomicLong LAST_COLUMN_VERSION = new AtomicLong();
+
     public static long epochMillis() {
         return System.currentTimeMillis();
+    }
+
+    public static long columnVersion() {
+        long now = epochMillis();
+        while (true) {
+            long previous = LAST_COLUMN_VERSION.get();
+            long next = Math.max(now, previous + 1L);
+            if (LAST_COLUMN_VERSION.compareAndSet(previous, next)) {
+                return next;
+            }
+        }
     }
 
     public static long epochSeconds() {

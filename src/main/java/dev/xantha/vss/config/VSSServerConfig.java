@@ -36,6 +36,10 @@ public class VSSServerConfig extends JsonConfig {
     private static final int CONSERVATIVE_GENERATION_TIMEOUT_SECONDS = 30;
     private static final int PREVIOUS_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 4 * BYTES_PER_MIB;
     private static final int PREVIOUS_DEFAULT_GENERATION_CONCURRENCY_LIMIT_GLOBAL = 24;
+    private static final int DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = PREVIOUS_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER;
+    private static final int DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 1024;
+    private static final int DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER = 32 * BYTES_PER_MIB;
+    private static final int DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER = 40;
     private static final int LOW_BANDWIDTH_DEFAULT_KBPS_PER_PLAYER = 500;
     private static final int LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER = kbpsToBytesPerSecond(LOW_BANDWIDTH_DEFAULT_KBPS_PER_PLAYER);
     private static final int LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 512;
@@ -49,15 +53,17 @@ public class VSSServerConfig extends JsonConfig {
     public boolean memoryOptimizedDefaultsApplied = false;
     public boolean lowBandwidthDefaultsApplied = false;
     public boolean storageThroughputDefaultsApplied = false;
+    public boolean bandwidthDecoupledDefaultsApplied = false;
     public boolean enabled = true;
     public boolean debugLogging = false;
     public int lodDistanceChunks = 128;
-    public int bytesPerSecondLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER;
+    public int bytesPerSecondLimitPerPlayer = DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER;
     @Deprecated
     private Integer bandwidthLimitKbpsPerPlayer;
-    public int sendQueueLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
-    public int sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
+    public int sendQueueLimitPerPlayer = DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
+    public int sendQueueBytesLimitPerPlayer = DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
     public int diskReaderThreads = DEFAULT_DISK_READER_THREADS;
+    public int diskReadQueueLimit = 4096;
     public int diskReadTimeoutMillis = 1000;
     public boolean enableChunkNbtColumnSync = true;
     public boolean enableChunkGeneration = true;
@@ -65,7 +71,7 @@ public class VSSServerConfig extends JsonConfig {
     public int midSyncRateLimitPerTick = DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK;
     public int farSyncRateLimitPerTick = DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK;
     public int distantSyncRateLimitPerTick = DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK;
-    public int generationRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
+    public int generationRateLimitPerPlayer = DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
     public int generationConcurrencyLimitPerPlayer = 4;
     public int generationConcurrencyLimitGlobal = 32;
     public int generationStartsPerTickLimit = 2;
@@ -90,12 +96,17 @@ public class VSSServerConfig extends JsonConfig {
     public int persistentColumnCacheMaxMiB = 512;
     public int persistentColumnCacheMaxEntries = 250000;
     public int persistentColumnCacheWriteQueueLimit = 128;
+    public int persistentColumnInvalidationBatchSize = 2048;
     public boolean ftbChunksSafeForceLoad = true;
     public int ftbChunksForceLoadTicketsPerTick = 4;
 
     @Override
     protected String getFileName() {
         return FILE_NAME;
+    }
+
+    public int effectiveColumnSyncDistanceChunks() {
+        return Math.min(lodDistanceChunks, VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS);
     }
 
     @Override
@@ -107,11 +118,13 @@ public class VSSServerConfig extends JsonConfig {
         applyMemoryOptimizedDefaults();
         applyLowBandwidthDefaults();
         applyStorageThroughputDefaults();
+        applyBandwidthDecoupledDefaults();
         lodDistanceChunks = clamp(lodDistanceChunks, MIN_LOD_DISTANCE_CHUNKS, MAX_LOD_DISTANCE_CHUNKS);
         bytesPerSecondLimitPerPlayer = clamp(bytesPerSecondLimitPerPlayer, MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER, MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER);
         sendQueueLimitPerPlayer = clamp(sendQueueLimitPerPlayer, 1, 100000);
         sendQueueBytesLimitPerPlayer = clamp(sendQueueBytesLimitPerPlayer, MIN_SEND_QUEUE_BYTES_PER_PLAYER, MAX_SEND_QUEUE_BYTES_PER_PLAYER);
         diskReaderThreads = clamp(diskReaderThreads, MIN_DISK_READER_THREADS, MAX_DISK_READER_THREADS);
+        diskReadQueueLimit = clamp(diskReadQueueLimit, 1, 100000);
         diskReadTimeoutMillis = clamp(diskReadTimeoutMillis, 100, 60000);
         nearSyncRateLimitPerTick = clamp(nearSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         midSyncRateLimitPerTick = clamp(midSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
@@ -134,6 +147,7 @@ public class VSSServerConfig extends JsonConfig {
         persistentColumnCacheMaxMiB = clamp(persistentColumnCacheMaxMiB, 64, 65536);
         persistentColumnCacheMaxEntries = clamp(persistentColumnCacheMaxEntries, 1024, 10000000);
         persistentColumnCacheWriteQueueLimit = clamp(persistentColumnCacheWriteQueueLimit, 1, 10000);
+        persistentColumnInvalidationBatchSize = clamp(persistentColumnInvalidationBatchSize, 1, VSSConstants.MAX_DIRTY_COLUMN_POSITIONS);
         ftbChunksForceLoadTicketsPerTick = clamp(ftbChunksForceLoadTicketsPerTick, 1, 64);
     }
 
@@ -195,23 +209,23 @@ public class VSSServerConfig extends JsonConfig {
         if (memoryOptimizedDefaultsApplied) {
             return;
         }
-        // 降低默认LOD距离从256到128区块，减少75%的内存占用
+        // Lower the default LOD distance for memory-optimized installs.
         if (lodDistanceChunks == 256) {
             lodDistanceChunks = 128;
         }
-        // 降低带宽限制，减少网络缓冲
+        // Lower bandwidth pressure for memory-optimized installs.
         if (bandwidthEqualsBytes(3 * BYTES_PER_MIB)) {
             setPerPlayerBandwidthBytesUnchecked(2 * BYTES_PER_MIB);
         }
-        // 减少发送队列大小
+        // Reduce the send queue size.
         if (sendQueueLimitPerPlayer == 1000) {
             sendQueueLimitPerPlayer = 500;
         }
         if (sendQueueBytesLimitPerPlayer == 32 * BYTES_PER_MIB) {
             sendQueueBytesLimitPerPlayer = 16 * BYTES_PER_MIB;
         }
-        // 降低同步并发
-        // 大幅降低生成并发，这是最大的内存消耗源
+        // 闄嶄綆鍚屾骞跺彂
+        // 澶у箙闄嶄綆鐢熸垚骞跺彂锛岃繖鏄渶澶х殑鍐呭瓨娑堣€楁簮
         if (generationRateLimitPerPlayer == 40) {
             generationRateLimitPerPlayer = 20;
         }
@@ -230,7 +244,7 @@ public class VSSServerConfig extends JsonConfig {
         if (generationPackingQueueLimit == 64) {
             generationPackingQueueLimit = 32;
         }
-        // 降低缓存大小
+        // 闄嶄綆缂撳瓨澶у皬
         if (columnCacheMaxEntries == 8192) {
             columnCacheMaxEntries = 4096;
         }
@@ -249,11 +263,11 @@ public class VSSServerConfig extends JsonConfig {
         if (dirtyVersionCacheMaxEntries == 200000) {
             dirtyVersionCacheMaxEntries = 100000;
         }
-        // 启用网络压缩减少带宽占用
+        // 鍚敤缃戠粶鍘嬬缉鍑忓皯甯﹀鍗犵敤
         if (!enableNetworkColumnCompression) {
             enableNetworkColumnCompression = true;
         }
-        // 增加广播间隔，减少频繁更新
+        // Increase broadcast intervals to reduce frequent updates.
         if (dirtyBroadcastIntervalTicks == 5) {
             dirtyBroadcastIntervalTicks = 10;
         }
@@ -267,22 +281,6 @@ public class VSSServerConfig extends JsonConfig {
         if (lowBandwidthDefaultsApplied) {
             return;
         }
-        if (bandwidthEqualsBytes(2 * BYTES_PER_MIB)
-                || bandwidthEqualsBytes(3 * BYTES_PER_MIB)
-                || bandwidthEqualsBytes(PREVIOUS_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER)) {
-            setPerPlayerBandwidthBytesUnchecked(LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER);
-        }
-        if (sendQueueLimitPerPlayer == 256 || sendQueueLimitPerPlayer == 500 || sendQueueLimitPerPlayer == 1000) {
-            sendQueueLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
-        }
-        if (sendQueueBytesLimitPerPlayer == 4 * BYTES_PER_MIB
-                || sendQueueBytesLimitPerPlayer == 16 * BYTES_PER_MIB
-                || sendQueueBytesLimitPerPlayer == 32 * BYTES_PER_MIB) {
-            sendQueueBytesLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
-        }
-        if (generationRateLimitPerPlayer == 20 || generationRateLimitPerPlayer == 40) {
-            generationRateLimitPerPlayer = LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
-        }
         lowBandwidthDefaultsApplied = true;
     }
 
@@ -294,6 +292,25 @@ public class VSSServerConfig extends JsonConfig {
             diskReaderThreads = DEFAULT_DISK_READER_THREADS;
         }
         storageThroughputDefaultsApplied = true;
+    }
+
+    private void applyBandwidthDecoupledDefaults() {
+        if (bandwidthDecoupledDefaultsApplied) {
+            return;
+        }
+        if (lowBandwidthDefaultsApplied && bandwidthEqualsBytes(LOW_BANDWIDTH_DEFAULT_BYTES_PER_SECOND_PER_PLAYER)) {
+            setPerPlayerBandwidthBytesUnchecked(DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER);
+        }
+        if (lowBandwidthDefaultsApplied && sendQueueLimitPerPlayer == LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER) {
+            sendQueueLimitPerPlayer = DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER;
+        }
+        if (lowBandwidthDefaultsApplied && sendQueueBytesLimitPerPlayer == LOW_BANDWIDTH_DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER) {
+            sendQueueBytesLimitPerPlayer = DEFAULT_SEND_QUEUE_BYTES_PER_PLAYER;
+        }
+        if (lowBandwidthDefaultsApplied && generationRateLimitPerPlayer == LOW_BANDWIDTH_DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER) {
+            generationRateLimitPerPlayer = DEFAULT_GENERATION_RATE_LIMIT_PER_PLAYER;
+        }
+        bandwidthDecoupledDefaultsApplied = true;
     }
 
     public void normalizeAndSave() {

@@ -1,5 +1,7 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.dirty;
 
+
+import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.config.VSSServerConfig;
@@ -31,7 +33,7 @@ public final class DirtyColumnBroadcaster {
     private DirtyColumnBroadcaster() {
     }
 
-    static void tick(MinecraftServer server) {
+    public static synchronized void tick(MinecraftServer server) {
         if (!VSSServerNetworking.hasRegisteredPlayers()) {
             DIRTY.clear();
             tickCounter = 0;
@@ -78,14 +80,14 @@ public final class DirtyColumnBroadcaster {
         }
     }
 
-    static void clear() {
+    public static synchronized void clear() {
         DIRTY.clear();
         DIRTY_VERSIONS.clear();
         tickCounter = 0;
         cleanupTickCounter = 0;
     }
 
-    static String diagnostics() {
+    public static synchronized String diagnostics() {
         int columns = 0;
         for (LongOpenHashSet positions : DIRTY.values()) {
             columns += positions.size();
@@ -96,7 +98,7 @@ public final class DirtyColumnBroadcaster {
                 + ", versionColumns=" + dirtyVersionCount();
     }
 
-    static Component diagnosticsComponent() {
+    public static synchronized Component diagnosticsComponent() {
         int columns = 0;
         for (LongOpenHashSet positions : DIRTY.values()) {
             columns += positions.size();
@@ -104,7 +106,7 @@ public final class DirtyColumnBroadcaster {
         return Component.translatable("vss.command.stats.dirty", DIRTY.size(), columns, DIRTY_VERSIONS.size(), dirtyVersionCount());
     }
 
-    static long latestDirtyTimestamp(ResourceKey<Level> dimension, int cx, int cz) {
+    public static synchronized long latestDirtyTimestamp(ResourceKey<Level> dimension, int cx, int cz) {
         if (!VSSServerConfig.CONFIG.dirtyVersionCacheEnabled) {
             return 0L;
         }
@@ -128,21 +130,21 @@ public final class DirtyColumnBroadcaster {
         return timestamp;
     }
 
-    public static void markDirtyColumn(Object levelAccess, int cx, int cz) {
+    public static synchronized void markDirtyColumn(Object levelAccess, int cx, int cz) {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
             markDirtyColumn(level, cx, cz);
         }
     }
 
-    public static void markDirtyColumnAndNeighbors(Object levelAccess, int cx, int cz) {
+    public static synchronized void markDirtyColumnAndNeighbors(Object levelAccess, int cx, int cz) {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled) {
             markDirtyColumnAndNeighbors(level, cx, cz);
         }
     }
 
-    public static void markDirtyBlock(Object levelAccess, BlockPos pos) {
+    public static synchronized void markDirtyBlock(Object levelAccess, BlockPos pos) {
         if (levelAccess instanceof ServerLevel level
                 && VSSServerConfig.CONFIG.enabled
                 && pos != null) {
@@ -157,17 +159,22 @@ public final class DirtyColumnBroadcaster {
     }
 
     private static void markDirtyColumnAndNeighbors(ServerLevel level, int cx, int cz) {
+        long timestamp = VSSConstants.columnVersion();
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
-                markDirtyColumn(level, cx + dx, cz + dz);
+                markDirtyColumn(level, cx + dx, cz + dz, timestamp);
             }
         }
     }
 
     private static void markDirtyColumn(ServerLevel level, int cx, int cz) {
+        markDirtyColumn(level, cx, cz, VSSConstants.columnVersion());
+    }
+
+    private static void markDirtyColumn(ServerLevel level, int cx, int cz, long timestamp) {
         long packed = PositionUtil.packPosition(cx, cz);
-        recordDirtyVersion(level.dimension(), packed, VSSConstants.epochMillis());
-        VSSServerNetworking.invalidateCachedColumn(level, cx, cz);
+        recordDirtyVersion(level.dimension(), packed, timestamp);
+        VSSServerNetworking.invalidateCachedColumn(level, cx, cz, timestamp);
         if (!VSSServerNetworking.hasRegisteredPlayers(level)) {
             return;
         }
@@ -272,7 +279,7 @@ public final class DirtyColumnBroadcaster {
     private static DirtyColumnsS2CPayload filterColumnsForPlayer(ServerPlayer player, DirtyBatchIndex dirtyIndex) {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
-        int maxDistance = VSSServerConfig.CONFIG.lodDistanceChunks + VSSConstants.LOD_DISTANCE_BUFFER;
+        int maxDistance = VSSServerConfig.CONFIG.effectiveColumnSyncDistanceChunks() + VSSConstants.LOD_DISTANCE_BUFFER;
         long[] packedColumns = dirtyIndex.packedColumns();
         long[] timestamps = dirtyIndex.timestamps();
         long[] filtered = new long[packedColumns.length];

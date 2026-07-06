@@ -1,5 +1,8 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.generation;
 
+
+import dev.xantha.vss.networking.server.state.PlayerRequestState;
+import dev.xantha.vss.networking.server.storage.SectionSerializer;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
@@ -31,7 +34,7 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LevelChunk;
 
-final class ChunkGenerationService {
+public final class ChunkGenerationService {
     private static final TicketType<ChunkPos> VSS_GEN_TICKET =
             TicketType.create("vss_generation", Comparator.comparingLong(ChunkPos::toLong));
     private static final int VSS_GEN_TICKET_DISTANCE = 0;
@@ -43,6 +46,7 @@ final class ChunkGenerationService {
     private final Map<UUID, Integer> perPlayerQueuedCount = new HashMap<>();
     private final Map<RequestKey, GenerationLocation> requestIndex = new HashMap<>();
     private final Map<UUID, Set<RequestKey>> playerRequestIndex = new HashMap<>();
+    private final Map<UUID, PlayerGenerationView> playerGenerationViews = new HashMap<>();
     private final ConcurrentLinkedQueue<PackingResult> completedPackingResults = new ConcurrentLinkedQueue<>();
     private final VSSServerConfig config;
     private ThreadPoolExecutor packingExecutor;
@@ -59,15 +63,23 @@ final class ChunkGenerationService {
     private volatile long packingEpoch;
     private long nextPackingTaskSequence;
 
-    ChunkGenerationService(VSSServerConfig config) {
+    public ChunkGenerationService(VSSServerConfig config) {
         this.config = config;
     }
 
-    boolean submitGeneration(UUID playerUuid, PlayerRequestState requestState, int requestId, ServerLevel level, int cx, int cz) {
+    public synchronized boolean submitGeneration(
+            UUID playerUuid,
+            PlayerRequestState requestState,
+            int requestId,
+            ServerLevel level,
+            int cx,
+            int cz,
+            long minimumTimestamp) {
         PendingGenerationKey key = new PendingGenerationKey(level.dimension(), cx, cz);
         PendingGeneration existing = active.get(key);
         if (existing != null) {
             GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, false);
+            existing.minimumTimestamp = Math.max(existing.minimumTimestamp, minimumTimestamp);
             existing.callbacks.add(callback);
             indexCallback(key, callback, true);
             incrementCount(playerUuid);
@@ -80,6 +92,7 @@ final class ChunkGenerationService {
                 return false;
             }
             GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, false);
+            queuedGeneration.minimumTimestamp = Math.max(queuedGeneration.minimumTimestamp, minimumTimestamp);
             queuedGeneration.callbacks.add(callback);
             indexCallback(key, callback, false);
             incrementQueuedCount(playerUuid);
@@ -87,7 +100,7 @@ final class ChunkGenerationService {
         }
 
         ChunkPos pos = new ChunkPos(cx, cz);
-        PendingGeneration generation = new PendingGeneration(pos, level);
+        PendingGeneration generation = new PendingGeneration(pos, level, minimumTimestamp);
         generation.callbacks.add(new GenerationCallback(playerUuid, requestState, requestId, false));
         if (canStart(generation) && tryConsumeStartBudget()) {
             startGeneration(key, generation);
@@ -103,12 +116,12 @@ final class ChunkGenerationService {
         return true;
     }
 
-    boolean isGenerating(ResourceKey<Level> dimension, int cx, int cz) {
+    public synchronized boolean isGenerating(ResourceKey<Level> dimension, int cx, int cz) {
         PendingGenerationKey key = new PendingGenerationKey(dimension, cx, cz);
         return active.containsKey(key) || queued.containsKey(key);
     }
 
-    boolean submitLoadedColumn(
+    public synchronized boolean submitLoadedColumn(
             UUID playerUuid,
             PlayerRequestState requestState,
             int requestId,
@@ -132,6 +145,7 @@ final class ChunkGenerationService {
 
         try {
             long taskEpoch = packingEpoch;
+            long columnTimestamp = Math.max(VSSConstants.columnVersion(), minimumTimestamp);
             submitPackingRunnable(
                     priority,
                     () -> packSnapshot(
@@ -140,7 +154,7 @@ final class ChunkGenerationService {
                             snapshot,
                             List.of(new GenerationCallback(playerUuid, requestState, requestId, priority)),
                             false,
-                            minimumTimestamp));
+                            columnTimestamp));
             totalPackingSubmitted++;
             totalLivePackingSubmitted++;
             return true;
@@ -149,13 +163,12 @@ final class ChunkGenerationService {
         }
     }
 
-    List<GenerationResult> tick(MinecraftServer server) {
+    public synchronized List<GenerationResult> tick(MinecraftServer server) {
         startsThisTick = 0;
         refillStartBudget();
         List<GenerationResult> results = new ArrayList<>();
         drainPackingResults(results);
-        pruneStaleCallbacks(server, queued, false, results);
-        pruneStaleCallbacks(server, active, true, results);
+        pruneStalePlayerRequests(server, results);
         promoteQueued();
         if (active.isEmpty()) {
             return results.isEmpty() ? List.of() : results;
@@ -214,7 +227,7 @@ final class ChunkGenerationService {
         return results;
     }
 
-    void cancelRequest(UUID playerUuid, int requestId) {
+    public synchronized void cancelRequest(UUID playerUuid, int requestId) {
         RequestKey requestKey = new RequestKey(playerUuid, requestId);
         if (cancelIndexedRequest(requestKey, true)) {
             return;
@@ -222,7 +235,8 @@ final class ChunkGenerationService {
 
         Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> queuedIterator = queued.entrySet().iterator();
         while (queuedIterator.hasNext()) {
-            PendingGeneration generation = queuedIterator.next().getValue();
+            Map.Entry<PendingGenerationKey, PendingGeneration> entry = queuedIterator.next();
+            PendingGeneration generation = entry.getValue();
             if (removeCallback(generation.callbacks, playerUuid, requestId)) {
                 unindexCallback(playerUuid, requestId);
                 decrementQueuedCount(playerUuid);
@@ -235,7 +249,8 @@ final class ChunkGenerationService {
 
         Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> activeIterator = active.entrySet().iterator();
         while (activeIterator.hasNext()) {
-            PendingGeneration generation = activeIterator.next().getValue();
+            Map.Entry<PendingGenerationKey, PendingGeneration> entry = activeIterator.next();
+            PendingGeneration generation = entry.getValue();
             if (removeCallback(generation.callbacks, playerUuid, requestId)) {
                 unindexCallback(playerUuid, requestId);
                 decrementCount(playerUuid);
@@ -249,7 +264,7 @@ final class ChunkGenerationService {
         }
     }
 
-    void removePlayer(UUID playerUuid) {
+    public synchronized void removePlayer(UUID playerUuid) {
         Set<RequestKey> indexedRequests = playerRequestIndex.remove(playerUuid);
         if (indexedRequests != null) {
             for (RequestKey requestKey : List.copyOf(indexedRequests)) {
@@ -295,7 +310,7 @@ final class ChunkGenerationService {
         promoteQueued();
     }
 
-    void releaseIdleMemory() {
+    public synchronized void releaseIdleMemory() {
         packingEpoch++;
         for (PendingGeneration generation : active.values()) {
             removeTicket(generation);
@@ -308,13 +323,14 @@ final class ChunkGenerationService {
         perPlayerQueuedCount.clear();
         requestIndex.clear();
         playerRequestIndex.clear();
+        playerGenerationViews.clear();
     }
 
-    void shutdown() {
+    public synchronized void shutdown() {
         releaseIdleMemory();
     }
 
-    String diagnostics() {
+    public synchronized String diagnostics() {
         ThreadPoolExecutor executor = this.packingExecutor;
         int packingActive = executor != null ? executor.getActiveCount() : 0;
         int packingQueued = executor != null ? executor.getQueue().size() : 0;
@@ -333,7 +349,7 @@ final class ChunkGenerationService {
                 + String.format(", livePackingSubmitted=%d, livePackingCompleted=%d", totalLivePackingSubmitted, totalLivePackingCompleted);
     }
 
-    Component diagnosticsComponent(Component storageDiagnostics) {
+    public synchronized Component diagnosticsComponent(Component storageDiagnostics) {
         ThreadPoolExecutor executor = this.packingExecutor;
         int packingActive = executor != null ? executor.getActiveCount() : 0;
         int packingQueued = executor != null ? executor.getQueue().size() : 0;
@@ -463,7 +479,8 @@ final class ChunkGenerationService {
         boolean priority = callbacks.stream().anyMatch(GenerationCallback::priority);
         try {
             long taskEpoch = packingEpoch;
-            submitPackingRunnable(priority, () -> packSnapshot(taskEpoch, dimension, snapshot, callbacks, true, 0L));
+            long columnTimestamp = Math.max(VSSConstants.columnVersion(), generation.minimumTimestamp);
+            submitPackingRunnable(priority, () -> packSnapshot(taskEpoch, dimension, snapshot, callbacks, true, columnTimestamp));
             totalPackingSubmitted++;
         } catch (RejectedExecutionException e) {
             throw e;
@@ -480,7 +497,7 @@ final class ChunkGenerationService {
             SectionSerializer.ColumnSnapshot snapshot,
             List<GenerationCallback> callbacks,
             boolean generationWork,
-            long minimumTimestamp) {
+            long columnTimestamp) {
         if (taskEpoch != packingEpoch || Thread.currentThread().isInterrupted()) {
             return;
         }
@@ -492,9 +509,7 @@ final class ChunkGenerationService {
             if (taskEpoch != packingEpoch || Thread.currentThread().isInterrupted()) {
                 return;
             }
-            long columnTimestamp = Math.max(VSSConstants.epochMillis(), minimumTimestamp);
             EncodedColumnData columnData = EncodedColumnData.encode(rawColumnData, columnTimestamp);
-            String source = generationWork ? "generated" : "loaded-chunk";
             for (GenerationCallback callback : callbacks) {
                 results.add(new GenerationResult(
                         callback.playerUuid(),
@@ -503,8 +518,7 @@ final class ChunkGenerationService {
                         dimension,
                         columnData,
                         false,
-                        callback.priority(),
-                        source));
+                        callback.priority()));
             }
             completed = true;
         } catch (Exception e) {
@@ -621,67 +635,124 @@ final class ChunkGenerationService {
     }
 
     private static boolean removeCallback(List<GenerationCallback> callbacks, UUID playerUuid, int requestId) {
+        return removeCallbackEntry(callbacks, playerUuid, requestId) != null;
+    }
+
+    private static GenerationCallback removeCallbackEntry(List<GenerationCallback> callbacks, UUID playerUuid, int requestId) {
         Iterator<GenerationCallback> iterator = callbacks.iterator();
         while (iterator.hasNext()) {
             GenerationCallback callback = iterator.next();
             if (callback.playerUuid().equals(playerUuid) && callback.requestId() == requestId) {
                 iterator.remove();
-                return true;
+                return callback;
             }
         }
-        return false;
+        return null;
     }
 
-    private void pruneStaleCallbacks(
-            MinecraftServer server,
-            LinkedHashMap<PendingGenerationKey, PendingGeneration> generations,
-            boolean activeGenerations,
+    private void pruneStalePlayerRequests(MinecraftServer server, List<GenerationResult> results) {
+        if (playerRequestIndex.isEmpty()) {
+            playerGenerationViews.clear();
+            return;
+        }
+
+        for (UUID playerUuid : List.copyOf(playerRequestIndex.keySet())) {
+            ServerPlayer player = server.getPlayerList().getPlayer(playerUuid);
+            if (player == null) {
+                pruneAllRequestsForPlayer(playerUuid, results);
+                playerGenerationViews.remove(playerUuid);
+                continue;
+            }
+
+            PlayerGenerationView view = PlayerGenerationView.from(player);
+            PlayerGenerationView previous = playerGenerationViews.put(playerUuid, view);
+            if (view.equals(previous)) {
+                continue;
+            }
+            pruneMovedPlayerRequests(playerUuid, player, results);
+        }
+
+        playerGenerationViews.keySet().removeIf(playerUuid -> !playerRequestIndex.containsKey(playerUuid));
+    }
+
+    private void pruneAllRequestsForPlayer(UUID playerUuid, List<GenerationResult> results) {
+        Set<RequestKey> requests = playerRequestIndex.get(playerUuid);
+        if (requests == null || requests.isEmpty()) {
+            return;
+        }
+        for (RequestKey requestKey : List.copyOf(requests)) {
+            cancelIndexedRequestAsStale(requestKey, null, results);
+        }
+    }
+
+    private void pruneMovedPlayerRequests(UUID playerUuid, ServerPlayer player, List<GenerationResult> results) {
+        Set<RequestKey> requests = playerRequestIndex.get(playerUuid);
+        if (requests == null || requests.isEmpty()) {
+            return;
+        }
+        for (RequestKey requestKey : List.copyOf(requests)) {
+            cancelIndexedRequestAsStale(requestKey, player, results);
+        }
+    }
+
+    private boolean cancelIndexedRequestAsStale(
+            RequestKey requestKey,
+            ServerPlayer player,
             List<GenerationResult> results) {
-        Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> generationIterator = generations.entrySet().iterator();
-        while (generationIterator.hasNext()) {
-            PendingGeneration generation = generationIterator.next().getValue();
-            Iterator<GenerationCallback> callbackIterator = generation.callbacks.iterator();
-            while (callbackIterator.hasNext()) {
-                GenerationCallback callback = callbackIterator.next();
-                if (!isStale(server, generation, callback)) {
-                    continue;
-                }
-
-                results.add(GenerationResult.notGenerated(
-                        callback.playerUuid(),
-                        callback.requestState(),
-                        callback.requestId(),
-                        generation.level.dimension()));
-                callbackIterator.remove();
-                unindexCallback(callback.playerUuid(), callback.requestId());
-                if (activeGenerations) {
-                    decrementCount(callback.playerUuid());
-                } else {
-                    decrementQueuedCount(callback.playerUuid());
-                }
-            }
-
-            if (generation.callbacks.isEmpty()) {
-                if (activeGenerations) {
-                    removeTicket(generation);
-                }
-                generationIterator.remove();
-            }
+        GenerationLocation location = requestIndex.get(requestKey);
+        if (location == null) {
+            unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+            return false;
         }
+
+        LinkedHashMap<PendingGenerationKey, PendingGeneration> generations = location.active() ? active : queued;
+        PendingGeneration generation = generations.get(location.key());
+        if (generation == null) {
+            unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+            return false;
+        }
+        if (player != null && !isStale(player, generation)) {
+            return false;
+        }
+
+        GenerationCallback callback = removeCallbackEntry(
+                generation.callbacks,
+                requestKey.playerUuid(),
+                requestKey.requestId());
+        if (callback == null) {
+            unindexCallback(requestKey.playerUuid(), requestKey.requestId());
+            return false;
+        }
+
+        results.add(GenerationResult.notGenerated(
+                callback.playerUuid(),
+                callback.requestState(),
+                callback.requestId(),
+                generation.level.dimension(),
+                callback.priority()));
+        unindexCallback(callback.playerUuid(), callback.requestId());
+        if (location.active()) {
+            decrementCount(callback.playerUuid());
+        } else {
+            decrementQueuedCount(callback.playerUuid());
+        }
+        if (generation.callbacks.isEmpty()) {
+            if (location.active()) {
+                removeTicket(generation);
+            }
+            generations.remove(location.key());
+        }
+        return true;
     }
 
-    private boolean isStale(MinecraftServer server, PendingGeneration generation, GenerationCallback callback) {
-        ServerPlayer player = server.getPlayerList().getPlayer(callback.playerUuid());
-        if (player == null) {
-            return true;
-        }
+    private boolean isStale(ServerPlayer player, PendingGeneration generation) {
         if (!player.serverLevel().dimension().equals(generation.level.dimension())) {
             return true;
         }
 
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
-        int maxDistance = config.lodDistanceChunks + VSSConstants.LOD_DISTANCE_BUFFER;
+        int maxDistance = config.effectiveColumnSyncDistanceChunks() + VSSConstants.LOD_DISTANCE_BUFFER;
         return PositionUtil.chebyshevDistance(generation.pos.x, generation.pos.z, playerCx, playerCz) > maxDistance;
     }
 
@@ -749,6 +820,7 @@ final class ChunkGenerationService {
         playerRequests.remove(requestKey);
         if (playerRequests.isEmpty()) {
             playerRequestIndex.remove(playerUuid);
+            playerGenerationViews.remove(playerUuid);
         }
     }
 
@@ -761,19 +833,30 @@ final class ChunkGenerationService {
     private record GenerationLocation(PendingGenerationKey key, boolean active) {
     }
 
+    private record PlayerGenerationView(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+        private static PlayerGenerationView from(ServerPlayer player) {
+            return new PlayerGenerationView(
+                    player.serverLevel().dimension(),
+                    player.getBlockX() >> 4,
+                    player.getBlockZ() >> 4);
+        }
+    }
+
     private static final class PendingGeneration {
         private final ChunkPos pos;
         private final ServerLevel level;
         private final List<GenerationCallback> callbacks = new ArrayList<>();
+        private long minimumTimestamp;
         private int ticksWaiting;
 
-        private PendingGeneration(ChunkPos pos, ServerLevel level) {
+        private PendingGeneration(ChunkPos pos, ServerLevel level, long minimumTimestamp) {
             this.pos = pos;
             this.level = level;
+            this.minimumTimestamp = minimumTimestamp;
         }
     }
 
-    record GenerationCallback(UUID playerUuid, PlayerRequestState requestState, int requestId, boolean priority) {
+    public record GenerationCallback(UUID playerUuid, PlayerRequestState requestState, int requestId, boolean priority) {
     }
 
     private record PackingResult(List<GenerationResult> results, boolean completed, boolean failed, boolean generationWork) {
@@ -795,21 +878,20 @@ final class ChunkGenerationService {
         }
     }
 
-    record GenerationResult(
+    public record GenerationResult(
             UUID playerUuid,
             PlayerRequestState requestState,
             int requestId,
             ResourceKey<Level> dimension,
             EncodedColumnData columnData,
             boolean notGenerated,
-            boolean priority,
-            String source) {
+            boolean priority) {
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension) {
             return notGenerated(playerUuid, requestState, requestId, dimension, false);
         }
 
         private static GenerationResult notGenerated(UUID playerUuid, PlayerRequestState requestState, int requestId, ResourceKey<Level> dimension, boolean priority) {
-            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, true, priority, "not-generated");
+            return new GenerationResult(playerUuid, requestState, requestId, dimension, null, true, priority);
         }
     }
 }

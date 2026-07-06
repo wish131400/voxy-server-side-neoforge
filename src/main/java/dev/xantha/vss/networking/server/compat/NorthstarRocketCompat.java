@@ -1,4 +1,4 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.compat;
 
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.mixin.minecraft.ChunkMapEntityTrackingAccessor;
@@ -76,13 +76,13 @@ public final class NorthstarRocketCompat {
         }
     }
 
-    public static void beginViewer(ServerPlayer viewer) {
+    public static synchronized void beginViewer(ServerPlayer viewer) {
         if (viewer != null) {
             ACTIVE_THIS_BROADCAST.put(viewer.getUUID(), new HashSet<>());
         }
     }
 
-    public static void finishViewer(ServerPlayer viewer) {
+    public static synchronized void finishViewer(ServerPlayer viewer) {
         if (viewer == null) {
             return;
         }
@@ -90,7 +90,7 @@ public final class NorthstarRocketCompat {
         prune(viewer, activeIds != null ? activeIds : Set.of());
     }
 
-    public static void pruneViewers(List<ServerPlayer> players) {
+    public static synchronized void pruneViewers(List<ServerPlayer> players) {
         Set<UUID> online = new HashSet<>();
         for (ServerPlayer player : players) {
             if (player != null) {
@@ -101,7 +101,7 @@ public final class NorthstarRocketCompat {
         ACTIVE_THIS_BROADCAST.keySet().removeIf(uuid -> !online.contains(uuid));
     }
 
-    public static void sync(ServerPlayer viewer, ServerPlayer target, List<Entity> chain) {
+    public static synchronized void sync(ServerPlayer viewer, ServerPlayer target, List<Entity> chain) {
         if (viewer == null || chain == null || chain.isEmpty()) {
             return;
         }
@@ -116,7 +116,7 @@ public final class NorthstarRocketCompat {
         }
     }
 
-    public static void clear(ServerPlayer viewer) {
+    public static synchronized void clear(ServerPlayer viewer) {
         if (viewer == null) {
             return;
         }
@@ -129,7 +129,12 @@ public final class NorthstarRocketCompat {
         }
     }
 
-    public static void removeAll() {
+    public static synchronized void clearAll() {
+        ACTIVE_THIS_BROADCAST.clear();
+        TRACKED.clear();
+    }
+
+    public static synchronized void removeAll() {
         if (TRACKED.isEmpty() && ACTIVE_THIS_BROADCAST.isEmpty()) {
             return;
         }

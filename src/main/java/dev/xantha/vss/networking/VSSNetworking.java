@@ -21,6 +21,7 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
+import net.neoforged.neoforge.network.registration.HandlerThread;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 public final class VSSNetworking {
@@ -31,7 +32,7 @@ public final class VSSNetworking {
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar(PROTOCOL);
+        PayloadRegistrar registrar = event.registrar(PROTOCOL).executesOn(HandlerThread.MAIN);
 
         registrar.playToServer(HandshakeC2SPayload.TYPE, HandshakeC2SPayload.STREAM_CODEC, VSSServerNetworking::handleHandshake);
         registrar.playToServer(BatchChunkRequestC2SPayload.TYPE, BatchChunkRequestC2SPayload.STREAM_CODEC, VSSServerNetworking::handleBatchRequest);
@@ -51,7 +52,22 @@ public final class VSSNetworking {
     }
 
     public static void sendToPlayer(ServerPlayer player, CustomPacketPayload payload) {
+        if (trySendToIntegratedHost(player, payload)) {
+            return;
+        }
         PacketDistributor.sendToPlayer(player, payload);
+    }
+
+    private static boolean trySendToIntegratedHost(ServerPlayer player, CustomPacketPayload payload) {
+        if (!FMLEnvironment.dist.isClient()) {
+            return false;
+        }
+        Object handled = invokeClientHandler(
+                "tryHandleIntegratedHostPayload",
+                new Class<?>[] {ServerPlayer.class, CustomPacketPayload.class},
+                player,
+                payload);
+        return Boolean.TRUE.equals(handled);
     }
 
     private static void handleSessionConfig(SessionConfigS2CPayload payload, IPayloadContext context) {

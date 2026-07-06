@@ -121,6 +121,13 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         return wireBodyLength() + VSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
     }
 
+    public int estimatedWireBytes(boolean networkCompressionEnabled) {
+        LodByteCompression.Result encoded = encodedForClient(this, networkCompressionEnabled);
+        byte[] bytes = encoded.bytes();
+        int bodyLength = bytes != null ? bytes.length : 0;
+        return bodyLength + VSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
+    }
+
     public void setAllowZstdEncoding(boolean allowZstdEncoding) {
         this.allowZstdEncoding = allowZstdEncoding;
     }
@@ -141,7 +148,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
         buf.writeLong(payload.columnTimestamp);
         buf.writeBoolean(payload.completeColumn);
-        LodByteCompression.Result encoded = encodedForClient(payload);
+        LodByteCompression.Result encoded = encodedForClient(payload, VSSServerConfig.CONFIG.enableNetworkColumnCompression);
         if (encoded.method() == LodByteCompression.METHOD_ZSTD && !payload.allowZstdEncoding) {
             throw new IllegalStateException("Cannot send Zstd LOD column to a client without Zstd capability");
         }
@@ -175,9 +182,9 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         return new VoxelColumnS2CPayload(requestId, cx, cz, dim, timestamp, sections, completeColumn);
     }
 
-    private static LodByteCompression.Result encodedForClient(VoxelColumnS2CPayload payload) {
+    private static LodByteCompression.Result encodedForClient(VoxelColumnS2CPayload payload, boolean networkCompressionEnabled) {
         if (payload.encodedSectionBytes == null) {
-            return VSSServerConfig.CONFIG.enableNetworkColumnCompression
+            return networkCompressionEnabled
                     ? LodByteCompression.compressForNetwork(payload.sectionBytes, payload.allowZstdEncoding)
                     : LodByteCompression.Result.raw(payload.sectionBytes);
         }
@@ -191,7 +198,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
 
         byte[] sections = payload.decompressedSections();
-        return VSSServerConfig.CONFIG.enableNetworkColumnCompression
+        return networkCompressionEnabled
                 ? LodByteCompression.compressForNetwork(sections, false)
                 : LodByteCompression.Result.raw(sections);
     }

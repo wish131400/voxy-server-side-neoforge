@@ -173,16 +173,18 @@ public final class VSSClientNetworking {
         LodRequestManager.ColumnReceiveResult receiveResult;
         if (payload.requestId() < 0) {
             long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
-            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, packed);
+            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, false, packed);
         } else if (manager != null) {
             receiveResult = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
         } else {
-            receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, Long.MIN_VALUE);
+            receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
         }
         if (payload.requestId() >= 0 && !receiveResult.knownRequest()) {
             return;
         }
-        boolean replaceMissingSections = receiveResult.knownRequest() && payload.completeColumn();
+        boolean replaceMissingSections = receiveResult.knownRequest()
+                && receiveResult.replaceExistingColumn()
+                && payload.completeColumn();
         boolean queued = COLUMN_PROCESSOR.offer(
                 payload,
                 receiveResult.knownRequest(),

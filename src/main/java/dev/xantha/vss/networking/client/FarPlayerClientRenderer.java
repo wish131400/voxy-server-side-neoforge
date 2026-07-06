@@ -7,6 +7,7 @@ import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
 import io.netty.buffer.Unpooled;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -71,7 +72,13 @@ public final class FarPlayerClientRenderer {
     private static final Map<UUID, FarPlayerState> FAR_PLAYERS = new HashMap<>();
     private static final Map<VehicleKey, FarVehicleState> FAR_VEHICLES = new HashMap<>();
     private static final Set<ResourceLocation> FAILED_VEHICLE_TYPES = new HashSet<>();
+    private static final Set<FarVehicleState> TICKED_VEHICLES = new HashSet<>();
+    private static final Set<FarVehicleState> APPLIED_VEHICLES = new HashSet<>();
+    private static final Set<FarVehicleState> RENDERED_VEHICLES = new HashSet<>();
+    private static final LongOpenHashSet ACTIVE_RENDER_BLOCKS = new LongOpenHashSet();
     private static long nextClientDiagnosticNanos;
+    private static ClientLevel activeRenderBlockLevel;
+    private static boolean activeRenderBlocksDirty = true;
     private static boolean manualFarPlayerRender;
 
     private FarPlayerClientRenderer() {
@@ -113,6 +120,7 @@ public final class FarPlayerClientRenderer {
                 }
             }
         }
+        markRenderBlockIndexDirty();
         maybeLogClientDiagnostics(payload.entries(), now);
     }
 
@@ -122,6 +130,7 @@ public final class FarPlayerClientRenderer {
         }
         FAR_PLAYERS.clear();
         clearSharedVehicles();
+        clearRenderBlockIndex();
     }
 
     public static boolean isSyntheticFarPlayer(Entity entity) {
@@ -135,12 +144,8 @@ public final class FarPlayerClientRenderer {
             return false;
         }
 
-        for (FarPlayerState state : FAR_PLAYERS.values()) {
-            if (state.level == level && state.shouldAllowRenderingAt(pos)) {
-                return true;
-            }
-        }
-        return false;
+        ensureRenderBlockIndex(level);
+        return ACTIVE_RENDER_BLOCKS.contains(pos.asLong());
     }
 
     @SubscribeEvent
@@ -173,21 +178,27 @@ public final class FarPlayerClientRenderer {
         }
 
         long now = System.nanoTime();
-        Set<FarVehicleState> tickedVehicles = new HashSet<>();
-        Iterator<Map.Entry<UUID, FarPlayerState>> iterator = FAR_PLAYERS.entrySet().iterator();
-        while (iterator.hasNext()) {
-            FarPlayerState state = iterator.next().getValue();
-            if (now - state.lastSeenNanos > STALE_AFTER_NANOS) {
-                state.removeAll();
-                iterator.remove();
-                continue;
-            }
+        TICKED_VEHICLES.clear();
+        try {
+            Iterator<Map.Entry<UUID, FarPlayerState>> iterator = FAR_PLAYERS.entrySet().iterator();
+            while (iterator.hasNext()) {
+                FarPlayerState state = iterator.next().getValue();
+                if (now - state.lastSeenNanos > STALE_AFTER_NANOS) {
+                    state.removeAll();
+                    iterator.remove();
+                    markRenderBlockIndexDirty();
+                    continue;
+                }
 
-            if (state.level == level) {
-                state.ensureEntityState(level);
-                state.tickAnimation(now, tickedVehicles);
+                if (state.level == level) {
+                    state.ensureEntityState(level);
+                    state.tickAnimation(now, TICKED_VEHICLES);
+                }
             }
+        } finally {
+            TICKED_VEHICLES.clear();
         }
+        markRenderBlockIndexDirty();
     }
 
     @SubscribeEvent
@@ -207,11 +218,15 @@ public final class FarPlayerClientRenderer {
         }
 
         long now = System.nanoTime();
-        Set<FarVehicleState> appliedVehicles = new HashSet<>();
-        for (FarPlayerState state : FAR_PLAYERS.values()) {
-            if (state.level == level && state.hasRenderableObjects(level)) {
-                state.apply(now, appliedVehicles);
+        APPLIED_VEHICLES.clear();
+        try {
+            for (FarPlayerState state : FAR_PLAYERS.values()) {
+                if (state.level == level && state.hasRenderableObjects(level)) {
+                    state.apply(now, APPLIED_VEHICLES);
+                }
             }
+        } finally {
+            APPLIED_VEHICLES.clear();
         }
     }
 
@@ -233,12 +248,12 @@ public final class FarPlayerClientRenderer {
         RenderSystem.depthMask(true);
         RenderSystem.depthFunc(GL11.GL_LEQUAL);
         try {
-            Set<FarVehicleState> appliedVehicles = new HashSet<>();
-            Set<FarVehicleState> renderedVehicles = new HashSet<>();
+            APPLIED_VEHICLES.clear();
+            RENDERED_VEHICLES.clear();
             for (FarPlayerState state : FAR_PLAYERS.values()) {
                 if (state.level == level && state.hasRenderableObjects(level)) {
-                    state.apply(now, appliedVehicles);
-                    state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition, renderedVehicles);
+                    state.apply(now, APPLIED_VEHICLES);
+                    state.renderManually(event.getPoseStack(), buffers, event.getPartialTick().getGameTimeDeltaPartialTick(false), cameraPosition, RENDERED_VEHICLES);
                     renderedAny = true;
                 }
             }
@@ -246,6 +261,8 @@ public final class FarPlayerClientRenderer {
                 buffers.endBatch();
             }
         } finally {
+            APPLIED_VEHICLES.clear();
+            RENDERED_VEHICLES.clear();
             RenderSystem.depthFunc(depthFunc);
             RenderSystem.depthMask(depthMask);
             if (!depthTest) {
@@ -311,6 +328,35 @@ public final class FarPlayerClientRenderer {
             vehicle.remove();
         }
         FAR_VEHICLES.clear();
+    }
+
+    private static void markRenderBlockIndexDirty() {
+        activeRenderBlocksDirty = true;
+    }
+
+    private static void clearRenderBlockIndex() {
+        ACTIVE_RENDER_BLOCKS.clear();
+        activeRenderBlockLevel = null;
+        activeRenderBlocksDirty = true;
+    }
+
+    private static void ensureRenderBlockIndex(ClientLevel level) {
+        if (!activeRenderBlocksDirty && activeRenderBlockLevel == level) {
+            return;
+        }
+        rebuildRenderBlockIndex(level);
+    }
+
+    private static void rebuildRenderBlockIndex(ClientLevel level) {
+        ACTIVE_RENDER_BLOCKS.clear();
+        activeRenderBlockLevel = level;
+        activeRenderBlocksDirty = false;
+        if (level == null) {
+            return;
+        }
+        for (FarPlayerState state : FAR_PLAYERS.values()) {
+            state.addRenderBlocks(level, ACTIVE_RENDER_BLOCKS);
+        }
     }
 
     private static boolean isNorthstarRocket(ResourceLocation entityTypeId) {
@@ -533,6 +579,31 @@ public final class FarPlayerClientRenderer {
                     && Math.abs(Mth.floor(targetX) - pos.getX()) <= 2
                     && Math.abs(Mth.floor(targetY) - pos.getY()) <= 3
                     && Math.abs(Mth.floor(targetZ) - pos.getZ()) <= 2;
+        }
+
+        private void addRenderBlocks(ClientLevel currentLevel, LongOpenHashSet output) {
+            if (level != currentLevel) {
+                return;
+            }
+            if (player != null && !player.isRemoved()) {
+                output.add(BlockPos.asLong(player.getBlockX(), player.getBlockY(), player.getBlockZ()));
+            }
+            for (FarVehicleState vehicle : vehicles) {
+                vehicle.addRenderBlock(output);
+            }
+            if (lastEntry != null) {
+                addRenderBox(output, Mth.floor(targetX), Mth.floor(targetY), Mth.floor(targetZ));
+            }
+        }
+
+        private static void addRenderBox(LongOpenHashSet output, int centerX, int centerY, int centerZ) {
+            for (int y = centerY - 3; y <= centerY + 3; y++) {
+                for (int z = centerZ - 2; z <= centerZ + 2; z++) {
+                    for (int x = centerX - 2; x <= centerX + 2; x++) {
+                        output.add(BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
         }
 
         private boolean isInsideVanillaHandoffRange(ClientLevel currentLevel) {
@@ -1285,6 +1356,12 @@ public final class FarPlayerClientRenderer {
                     && vehicle.getBlockX() == pos.getX()
                     && vehicle.getBlockY() == pos.getY()
                     && vehicle.getBlockZ() == pos.getZ();
+        }
+
+        private void addRenderBlock(LongOpenHashSet output) {
+            if (vehicle != null && !vehicle.isRemoved()) {
+                output.add(BlockPos.asLong(vehicle.getBlockX(), vehicle.getBlockY(), vehicle.getBlockZ()));
+            }
         }
 
         private void remove() {

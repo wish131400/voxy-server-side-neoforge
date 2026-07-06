@@ -1,4 +1,4 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.storage;
 
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import io.netty.buffer.Unpooled;
@@ -28,7 +28,7 @@ public final class SectionSerializer {
     private SectionSerializer() {
     }
 
-    static LoadedColumnData emptyColumn(int cx, int cz, boolean completeColumn) {
+    public static LoadedColumnData emptyColumn(int cx, int cz, boolean completeColumn) {
         return new LoadedColumnData(cx, cz, EMPTY_COLUMN_BYTES.clone(), EMPTY_COLUMN_BYTES.length, completeColumn);
     }
 

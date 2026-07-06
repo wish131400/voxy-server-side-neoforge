@@ -1,4 +1,4 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.storage;
 
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.EncodedColumnData;
@@ -25,7 +25,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 
-final class PersistentColumnLodStore {
+public final class PersistentColumnLodStore {
     private static final int FILE_MAGIC = 0x5653534C;
     private static final int FILE_VERSION_CURRENT = 6;
     private static final int INDEX_MAGIC = 0x56535349;
@@ -37,12 +37,16 @@ final class PersistentColumnLodStore {
     private static final int MAX_ENCODED_COLUMN_BYTES = MAX_COLUMN_BYTES + 65536;
     private static final int MIN_REGION_INDEX_CACHE_ENTRIES = 512;
     private static final int MAX_REGION_INDEX_CACHE_ENTRIES = 8192;
+    private static final int COLUMN_LOCK_STRIPES = 1024;
+    private static final int REGION_LOCK_STRIPES = 256;
     private static final String CACHE_DIR = "vss-column-cache";
     private static final String COLUMN_EXTENSION = ".vcl";
     private static final String INDEX_FILE_NAME = "index.vci";
 
     private final VSSServerConfig config;
     private final Map<RegionKey, RegionIndex> regionIndexes = new LinkedHashMap<>(128, 0.75F, true);
+    private final Object[] columnLocks = createLocks(COLUMN_LOCK_STRIPES);
+    private final Object[] regionLocks = createLocks(REGION_LOCK_STRIPES);
     private long reads;
     private long hits;
     private long misses;
@@ -59,19 +63,19 @@ final class PersistentColumnLodStore {
     private int knownCacheEntries = -1;
     private volatile boolean indexedZstdAvailable = LodByteCompression.isZstdAvailable();
 
-    PersistentColumnLodStore(VSSServerConfig config) {
+    public PersistentColumnLodStore(VSSServerConfig config) {
         this.config = config;
     }
 
-    boolean enabled() {
+    public boolean enabled() {
         return config.enablePersistentColumnCache;
     }
 
-    static int regionSize() {
+    public static int regionSize() {
         return REGION_SIZE;
     }
 
-    void clearMemory() {
+    public void clearMemory() {
         clearRegionIndexes();
         nextCleanupMillis = 0L;
         knownCacheBytes = -1L;
@@ -79,11 +83,17 @@ final class PersistentColumnLodStore {
         indexedZstdAvailable = LodByteCompression.isZstdAvailable();
     }
 
-    Entry read(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz, long minimumTimestamp) {
+    public Entry read(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz, long minimumTimestamp) {
         if (!config.enablePersistentColumnCache) {
             return null;
         }
 
+        synchronized (columnLock(dimension, cx, cz)) {
+            return readLocked(server, dimension, cx, cz, minimumTimestamp);
+        }
+    }
+
+    private Entry readLocked(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz, long minimumTimestamp) {
         reads++;
         refreshCompressionState();
         RegionIndex index = regionIndex(server, dimension, cx, cz);
@@ -153,7 +163,7 @@ final class PersistentColumnLodStore {
         }
     }
 
-    ArrayList<ExistingColumn> findExistingColumnsInRegion(
+    public ArrayList<ExistingColumn> findExistingColumnsInRegion(
             MinecraftServer server,
             ResourceKey<Level> dimension,
             int regionX,
@@ -183,7 +193,7 @@ final class PersistentColumnLodStore {
         return columns;
     }
 
-    void write(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData columnData) {
+    public void write(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData columnData) {
         if (!config.enablePersistentColumnCache
                 || columnData == null
                 || columnData.encodedBytes() == null
@@ -197,53 +207,94 @@ final class PersistentColumnLodStore {
             return;
         }
 
-        Path path = columnPath(server, dimension, columnData.chunkX(), columnData.chunkZ());
-        Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
-        long previousSize = sizeIfRegular(path);
-        try {
-            Files.createDirectories(path.getParent());
-            try (OutputStream fileOut = Files.newOutputStream(tmp);
-                DataOutputStream out = new DataOutputStream(fileOut)) {
-                out.writeInt(FILE_MAGIC);
-                out.writeInt(FILE_VERSION_CURRENT);
-                out.writeInt(columnData.chunkX());
-                out.writeInt(columnData.chunkZ());
-                out.writeLong(columnData.columnStamp());
-                out.writeBoolean(columnData.completeColumn());
-                out.writeInt(columnData.compression());
-                out.writeInt(columnData.rawSize());
-                out.writeInt(columnData.schemaVersion());
-                out.writeInt(columnData.encodedBytes().length);
-                out.write(columnData.encodedBytes());
+        synchronized (columnLock(dimension, columnData.chunkX(), columnData.chunkZ())) {
+            Path path = columnPath(server, dimension, columnData.chunkX(), columnData.chunkZ());
+            IndexSlot existingSlot = readColumnHeader(path, columnData.chunkX(), columnData.chunkZ());
+            if (existingSlot != null && existingSlot.timestamp() > columnData.columnStamp()) {
+                return;
             }
-            moveIntoPlace(tmp, path);
-            recordColumnWrite(previousSize, sizeIfRegular(path));
-            markIndexed(server, dimension, columnData.chunkX(), columnData.chunkZ(), IndexSlot.from(columnData));
-            writes++;
-            cleanupIfNeeded(server);
-        } catch (Exception e) {
-            writeFailures++;
-            deleteQuietly(tmp);
-            VSSLogger.debug("Failed to write persistent LOD column " + columnData.chunkX() + ","
-                    + columnData.chunkZ() + ": " + e.getMessage());
+            Path tmp = path.resolveSibling(path.getFileName() + ".tmp");
+            long previousSize = sizeIfRegular(path);
+            try {
+                Files.createDirectories(path.getParent());
+                try (OutputStream fileOut = Files.newOutputStream(tmp);
+                    DataOutputStream out = new DataOutputStream(fileOut)) {
+                    out.writeInt(FILE_MAGIC);
+                    out.writeInt(FILE_VERSION_CURRENT);
+                    out.writeInt(columnData.chunkX());
+                    out.writeInt(columnData.chunkZ());
+                    out.writeLong(columnData.columnStamp());
+                    out.writeBoolean(columnData.completeColumn());
+                    out.writeInt(columnData.compression());
+                    out.writeInt(columnData.rawSize());
+                    out.writeInt(columnData.schemaVersion());
+                    out.writeInt(columnData.encodedBytes().length);
+                    out.write(columnData.encodedBytes());
+                }
+                moveIntoPlace(tmp, path);
+                recordColumnWrite(previousSize, sizeIfRegular(path));
+                markIndexed(server, dimension, columnData.chunkX(), columnData.chunkZ(), IndexSlot.from(columnData));
+                writes++;
+                cleanupIfNeeded(server);
+            } catch (Exception e) {
+                writeFailures++;
+                deleteQuietly(tmp);
+                VSSLogger.debug("Failed to write persistent LOD column " + columnData.chunkX() + ","
+                        + columnData.chunkZ() + ": " + e.getMessage());
+            }
         }
     }
 
-    void invalidate(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz) {
+    public void invalidate(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz) {
         if (!config.enablePersistentColumnCache) {
             return;
         }
 
+        synchronized (columnLock(dimension, cx, cz)) {
+            deleteColumn(server, dimension, cx, cz);
+        }
+    }
+
+    public void invalidateOlderThan(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz, long minimumInvalidTimestamp) {
+        if (!config.enablePersistentColumnCache) {
+            return;
+        }
+        synchronized (columnLock(dimension, cx, cz)) {
+            if (minimumInvalidTimestamp <= 0L) {
+                deleteColumn(server, dimension, cx, cz);
+                return;
+            }
+
+            RegionIndex index = regionIndex(server, dimension, cx, cz);
+            IndexSlot indexedSlot = index.slot(cx, cz);
+            if (indexedSlot != null && indexedSlot.timestamp() >= minimumInvalidTimestamp) {
+                return;
+            }
+
+            Path path = columnPath(server, dimension, cx, cz);
+            IndexSlot fileSlot = readColumnHeader(path, cx, cz);
+            if (fileSlot != null && fileSlot.timestamp() >= minimumInvalidTimestamp) {
+                markIndexed(server, dimension, cx, cz, fileSlot);
+                return;
+            }
+            deleteColumn(server, dimension, cx, cz);
+            return;
+        }
+    }
+
+    private void deleteColumn(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz) {
         Path path = columnPath(server, dimension, cx, cz);
         long previousSize = sizeIfRegular(path);
         if (deleteQuietly(path)) {
             recordColumnDelete(previousSize);
             markIndexed(server, dimension, cx, cz, null);
             invalidations++;
+        } else if (previousSize == 0L) {
+            markIndexed(server, dimension, cx, cz, null);
         }
     }
 
-    String diagnostics() {
+    public String diagnostics() {
         return String.format(
                 Locale.ROOT,
                 "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
@@ -410,10 +461,12 @@ final class PersistentColumnLodStore {
 
     private void markIndexed(MinecraftServer server, ResourceKey<Level> dimension, int cx, int cz, IndexSlot slot) {
         RegionKey key = RegionKey.of(dimension.location(), cx, cz);
-        RegionIndex index = regionIndex(server, key);
-        boolean changed = slot == null ? index.remove(cx, cz) : index.put(cx, cz, slot);
-        if (changed) {
-            saveIndex(server, key, index);
+        synchronized (regionLock(key)) {
+            RegionIndex index = regionIndex(server, key);
+            boolean changed = slot == null ? index.remove(cx, cz) : index.put(cx, cz, slot);
+            if (changed) {
+                saveIndex(server, key, index);
+            }
         }
     }
 
@@ -422,14 +475,16 @@ final class PersistentColumnLodStore {
     }
 
     private RegionIndex regionIndex(MinecraftServer server, RegionKey key) {
-        refreshCompressionState();
-        RegionIndex cached = cachedRegionIndex(key);
-        if (cached != null) {
-            return cached;
-        }
+        synchronized (regionLock(key)) {
+            refreshCompressionState();
+            RegionIndex cached = cachedRegionIndex(key);
+            if (cached != null) {
+                return cached;
+            }
 
-        RegionIndex loaded = loadOrScanRegion(server, key);
-        return cacheRegionIndex(key, loaded);
+            RegionIndex loaded = loadOrScanRegion(server, key);
+            return cacheRegionIndex(key, loaded);
+        }
     }
 
     private synchronized RegionIndex cachedRegionIndex(RegionKey key) {
@@ -456,13 +511,35 @@ final class PersistentColumnLodStore {
     }
 
     private int maxRegionIndexCacheEntries() {
-        int regionRing = Math.max(0, (config.lodDistanceChunks + REGION_SIZE - 1) / REGION_SIZE);
+        int regionRing = Math.max(0, (config.effectiveColumnSyncDistanceChunks() + REGION_SIZE - 1) / REGION_SIZE);
         long windowDiameter = (long) regionRing * 2L + 1L;
         long activeWindow = windowDiameter * windowDiameter;
         long target = activeWindow * 3L / 2L + 64L;
         return (int) Math.max(
                 MIN_REGION_INDEX_CACHE_ENTRIES,
                 Math.min(MAX_REGION_INDEX_CACHE_ENTRIES, target));
+    }
+
+    private Object columnLock(ResourceKey<Level> dimension, int cx, int cz) {
+        int hash = dimension.location().hashCode();
+        hash = 31 * hash + cx;
+        hash = 31 * hash + cz;
+        return columnLocks[Math.floorMod(hash, columnLocks.length)];
+    }
+
+    private Object regionLock(RegionKey key) {
+        int hash = key.dimension().hashCode();
+        hash = 31 * hash + key.regionX();
+        hash = 31 * hash + key.regionZ();
+        return regionLocks[Math.floorMod(hash, regionLocks.length)];
+    }
+
+    private static Object[] createLocks(int count) {
+        Object[] locks = new Object[count];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new Object();
+        }
+        return locks;
     }
 
     private synchronized void clearRegionIndexes() {
@@ -624,9 +701,11 @@ final class PersistentColumnLodStore {
                 return;
             }
             RegionKey key = new RegionKey(dimensionName, regionX, regionZ);
-            RegionIndex index = regionIndex(server, key);
-            if (index.remove(position.chunkX(), position.chunkZ())) {
-                saveIndex(server, key, index);
+            synchronized (regionLock(key)) {
+                RegionIndex index = regionIndex(server, key);
+                if (index.remove(position.chunkX(), position.chunkZ())) {
+                    saveIndex(server, key, index);
+                }
             }
         } catch (NumberFormatException ignored) {
         }
@@ -769,7 +848,7 @@ final class PersistentColumnLodStore {
         }
     }
 
-    record ExistingColumn(int chunkX, int chunkZ, long timestamp, int distance, long distanceSquared) {
+    public record ExistingColumn(int chunkX, int chunkZ, long timestamp, int distance, long distanceSquared) {
     }
 
     private static final class RegionIndex {
@@ -870,8 +949,8 @@ final class PersistentColumnLodStore {
         }
     }
 
-    record Entry(EncodedColumnData columnData) {
-        long timestamp() {
+    public record Entry(EncodedColumnData columnData) {
+        public long timestamp() {
             return columnData.columnStamp();
         }
     }

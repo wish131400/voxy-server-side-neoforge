@@ -1,4 +1,4 @@
-package dev.xantha.vss.networking.server;
+package dev.xantha.vss.networking.server.storage;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.DynamicOps;
@@ -33,13 +33,13 @@ import net.minecraft.world.level.chunk.status.ChunkType;
 import net.minecraft.world.level.chunk.storage.ChunkSerializer;
 import net.minecraft.world.level.chunk.storage.ChunkStorage;
 
-final class NbtSectionSerializer {
+public final class NbtSectionSerializer {
     private static final byte[] EMPTY = new byte[0];
 
     private NbtSectionSerializer() {
     }
 
-    static LoadedColumnData readAndSerializeSections(ServerLevel level, ChunkStorage storage, int cx, int cz, long timeoutMillis) throws Exception {
+    public static LoadedColumnData readAndSerializeSections(ServerLevel level, ChunkStorage storage, int cx, int cz, long timeoutMillis) throws Exception {
         Optional<CompoundTag> optionalTag;
         try {
             optionalTag = storage.read(new ChunkPos(cx, cz)).get(timeoutMillis, TimeUnit.MILLISECONDS);
@@ -49,7 +49,7 @@ final class NbtSectionSerializer {
         return serializeTag(level, cx, cz, optionalTag);
     }
 
-    static LoadedColumnData readAndSerializeSections(ServerLevel level, ChunkStorage storage, int cx, int cz) throws Exception {
+    public static LoadedColumnData readAndSerializeSections(ServerLevel level, ChunkStorage storage, int cx, int cz) throws Exception {
         Optional<CompoundTag> optionalTag = storage.read(new ChunkPos(cx, cz)).get(10L, TimeUnit.SECONDS);
         return serializeTag(level, cx, cz, optionalTag);
     }
@@ -89,14 +89,27 @@ final class NbtSectionSerializer {
         buf.writeVarInt(0);
         int includedCount = 0;
         int highestIncludedSectionY = Integer.MIN_VALUE;
+        int minSectionY = level.getMinSection();
+        int maxSectionY = minSectionY + level.getSectionsCount();
+        boolean skippedUnserializableSection = false;
         try {
             for (Tag tag : sections) {
                 if (!(tag instanceof CompoundTag sectionTag) || !sectionTag.contains("Y")) {
+                    skippedUnserializableSection = true;
+                    continue;
+                }
+
+                int sectionY = sectionTag.getByte("Y");
+                if (sectionY < minSectionY || sectionY >= maxSectionY) {
+                    skippedUnserializableSection = true;
                     continue;
                 }
 
                 LevelChunkSection section = parseSection(sectionTag, blockStateCodec, biomeCodec, ops, biomeRegistry, defaultBiome);
                 if (section == null) {
+                    if (sectionTag.contains("block_states", Tag.TAG_COMPOUND)) {
+                        skippedUnserializableSection = true;
+                    }
                     continue;
                 }
 
@@ -108,7 +121,7 @@ final class NbtSectionSerializer {
 
                 byte[] skyLight = getByteArray(sectionTag, ChunkSerializer.SKY_LIGHT_TAG);
                 boolean hasSkyLight = skyLight.length == 2048 && hasNonZeroData(skyLight);
-                buf.writeByte(sectionTag.getByte("Y"));
+                buf.writeByte(sectionY);
                 section.write(buf);
                 buf.writeBoolean(hasBlockLight);
                 if (hasBlockLight) {
@@ -119,11 +132,12 @@ final class NbtSectionSerializer {
                     buf.writeBytes(skyLight);
                 }
                 includedCount++;
-                highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionTag.getByte("Y"));
+                highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionY);
             }
 
             if (includedCount == 0) {
-                return SectionSerializer.emptyColumn(cx, cz, highestSurfaceSection(chunkNbt).isEmpty());
+                return SectionSerializer.emptyColumn(cx, cz,
+                        !skippedUnserializableSection && highestSurfaceSection(chunkNbt).isEmpty());
             }
 
             int endWriterIndex = buf.writerIndex();
@@ -132,7 +146,8 @@ final class NbtSectionSerializer {
             buf.writerIndex(endWriterIndex);
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            boolean completeColumn = isCompleteColumn(chunkNbt, highestIncludedSectionY);
+            boolean completeColumn = !skippedUnserializableSection
+                    && isCompleteColumn(chunkNbt, highestIncludedSectionY);
             return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
         } finally {
             buf.release();

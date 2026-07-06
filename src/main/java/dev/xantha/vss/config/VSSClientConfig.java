@@ -1,8 +1,10 @@
 package dev.xantha.vss.config;
 
+import dev.xantha.vss.common.VSSConstants;
+
 public class VSSClientConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-client-config.json";
-    public static final int MAX_LOD_DISTANCE_CHUNKS = 512;
+    public static final int MAX_LOD_DISTANCE_CHUNKS = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
     public static VSSClientConfig CONFIG = load(VSSClientConfig.class, FILE_NAME);
 
     public boolean receiveServerLods = true;
