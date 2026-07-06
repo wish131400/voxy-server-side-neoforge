@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.xantha.vss.common.PositionUtil;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -19,32 +20,38 @@ class DeferredColumnQueueTest {
 
         assertEquals(1, queue.size());
         assertEquals(1, queue.queuedEntries());
-        assertIterableEquals(List.of(1L), queue.pollUniqueCandidates(10));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
     }
 
     @Test
     void urgentDefersMoveColumnToFront() {
         DeferredColumnQueue queue = new DeferredColumnQueue(10);
 
-        queue.defer(1L);
-        queue.defer(2L);
-        queue.defer(1L, true);
+        long normal = position(1, 0);
+        long urgent = position(8, 0);
+        queue.recenter(0, 0);
+        queue.defer(normal);
+        queue.defer(urgent, true);
 
-        assertIterableEquals(List.of(1L, 2L), queue.pollUniqueCandidates(10));
+        assertIterableEquals(List.of(urgent, normal), queue.pollClosestCandidates(10, false));
     }
 
     @Test
-    void capacityEvictsOldestQueuedColumn() {
+    void capacityEvictsFurthestNormalColumn() {
         DeferredColumnQueue queue = new DeferredColumnQueue(2);
 
-        queue.defer(1L);
-        queue.defer(2L);
-        queue.defer(3L);
+        long near = position(1, 0);
+        long far = position(8, 0);
+        long middle = position(4, 0);
+        queue.recenter(0, 0);
+        queue.defer(near);
+        queue.defer(far);
+        queue.defer(middle);
 
-        assertFalse(queue.contains(1L));
-        assertTrue(queue.contains(2L));
-        assertTrue(queue.contains(3L));
-        assertIterableEquals(List.of(2L, 3L), queue.pollUniqueCandidates(10));
+        assertTrue(queue.contains(near));
+        assertTrue(queue.contains(middle));
+        assertFalse(queue.contains(far));
+        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10, false));
     }
 
     @Test
@@ -54,7 +61,7 @@ class DeferredColumnQueueTest {
         queue.defer(1L);
         queue.remove(1L);
 
-        assertIterableEquals(List.of(), queue.pollUniqueCandidates(10));
+        assertIterableEquals(List.of(), queue.pollClosestCandidates(10, false));
         assertEquals(0, queue.queuedEntries());
     }
 
@@ -63,10 +70,61 @@ class DeferredColumnQueueTest {
         DeferredColumnQueue queue = new DeferredColumnQueue(10);
 
         queue.defer(1L);
-        assertIterableEquals(List.of(1L), queue.pollUniqueCandidates(10));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
         queue.requeue(1L, false);
 
         assertTrue(queue.contains(1L));
-        assertIterableEquals(List.of(1L), queue.pollUniqueCandidates(10));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
+    }
+
+    @Test
+    void recenterChangesPollOrder() {
+        DeferredColumnQueue queue = new DeferredColumnQueue(10);
+        long west = position(-8, 0);
+        long east = position(8, 0);
+
+        queue.recenter(0, 0);
+        queue.defer(west);
+        queue.defer(east);
+
+        queue.recenter(10, 0);
+
+        assertIterableEquals(List.of(east, west), queue.pollClosestCandidates(10, false));
+    }
+
+    @Test
+    void urgentColumnsAreProtectedFromNormalEviction() {
+        DeferredColumnQueue queue = new DeferredColumnQueue(2);
+        long urgentFar = position(32, 0);
+        long normalNear = position(1, 0);
+        long incomingNear = position(2, 0);
+
+        queue.recenter(0, 0);
+        queue.defer(urgentFar, true);
+        queue.defer(normalNear);
+        queue.defer(incomingNear);
+
+        assertTrue(queue.contains(urgentFar));
+        assertFalse(queue.contains(normalNear));
+        assertTrue(queue.contains(incomingNear));
+    }
+
+    @Test
+    void urgentOnlyPollingSkipsNormalCandidates() {
+        DeferredColumnQueue queue = new DeferredColumnQueue(10);
+        long normal = position(1, 0);
+        long urgent = position(4, 0);
+
+        queue.recenter(0, 0);
+        queue.defer(normal);
+        queue.defer(urgent, true);
+
+        assertIterableEquals(List.of(urgent), queue.pollClosestCandidates(10, true));
+        assertTrue(queue.contains(normal));
+        assertIterableEquals(List.of(normal), queue.pollClosestCandidates(10, false));
+    }
+
+    private static long position(int cx, int cz) {
+        return PositionUtil.packPosition(cx, cz);
     }
 }

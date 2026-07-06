@@ -197,6 +197,7 @@ public final class LodRequestManager {
         int playerCx = playerBlockX >> 4;
         int playerCz = playerBlockZ >> 4;
         int lodDistance = getEffectiveLodDistance();
+        deferredColumns.recenter(playerCx, playerCz);
         handleEffectiveLodDistance(playerCx, playerCz, lodDistance);
         if (playerCx != lastPlayerChunkX || playerCz != lastPlayerChunkZ) {
             boolean firstKnownPosition = lastPlayerChunkX == Integer.MIN_VALUE;
@@ -221,6 +222,7 @@ public final class LodRequestManager {
                 resetScanCursorPastProtectedSyncWindow(lodDistance);
             } else if (moveDistance > 0) {
                 rebaseScanCursorAfterMove(lodDistance, moveDistance);
+                pruneStaleGenerationWorkAround(playerCx, playerCz, lodDistance);
                 armScanBoost();
             }
             lastPlayerChunkX = playerCx;
@@ -527,6 +529,7 @@ public final class LodRequestManager {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int lodDistance = getEffectiveLodDistance();
+        deferredColumns.recenter(playerCx, playerCz);
         LongOpenHashSet candidates = new LongOpenHashSet(diskMissedColumns);
         int resumed = 0;
         for (long packed : candidates) {
@@ -551,6 +554,7 @@ public final class LodRequestManager {
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int lodDistance = getEffectiveLodDistance();
+        deferredColumns.recenter(playerCx, playerCz);
         RequestWindow requestWindow = createRequestWindow();
         if (!requestWindow.hasCapacity()) {
             return;
@@ -730,7 +734,9 @@ public final class LodRequestManager {
         }
 
         List<Long> candidates = bucketDeferredCandidates(
-                deferredColumns.pollUniqueCandidates(Math.min(MAX_DEFERRED_CANDIDATES_PER_TICK, scanBudget.remainingCandidates())),
+                deferredColumns.pollClosestCandidates(
+                        Math.min(MAX_DEFERRED_CANDIDATES_PER_TICK, scanBudget.remainingCandidates()),
+                        mode == DeferredDrainMode.DIRTY_ONLY),
                 playerCx,
                 playerCz,
                 lodDistance);
@@ -1506,6 +1512,41 @@ public final class LodRequestManager {
             deferredColumns.remove(packed);
             diskMissedColumns.remove(packed);
             clearBackoff(packed);
+        }
+        if (!staleDeferred.isEmpty()) {
+            deferredColumns.compact();
+        }
+    }
+
+    private void pruneStaleGenerationWorkAround(int playerCx, int playerCz, int lodDistance) {
+        if (sessionConfig == null || !sessionConfig.generationEnabled()) {
+            return;
+        }
+
+        int activeGenerationRadius = Math.min(lodDistance, Math.max(0, softFrontierRadius));
+        LongOpenHashSet staleRequests = new LongOpenHashSet();
+        for (long packed : generationInFlight) {
+            if (!dirtyRefreshInFlight.contains(packed)
+                    && chebyshevDistance(packed, playerCx, playerCz) > activeGenerationRadius) {
+                staleRequests.add(packed);
+            }
+        }
+        for (long packed : staleRequests) {
+            cancelInFlightColumn(packed);
+            clearMissState(packed);
+        }
+
+        LongOpenHashSet staleDeferred = new LongOpenHashSet();
+        for (long packed : deferredColumns) {
+            if (!dirtyColumns.contains(packed)
+                    && diskMissedColumns.contains(packed)
+                    && chebyshevDistance(packed, playerCx, playerCz) > activeGenerationRadius) {
+                staleDeferred.add(packed);
+            }
+        }
+        for (long packed : staleDeferred) {
+            deferredColumns.remove(packed);
+            clearMissState(packed);
         }
         if (!staleDeferred.isEmpty()) {
             deferredColumns.compact();

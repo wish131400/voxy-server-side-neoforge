@@ -9,6 +9,7 @@ import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import dev.xantha.vss.config.VSSServerConfig;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -48,6 +49,7 @@ public final class ChunkGenerationService {
     private final Map<UUID, Set<RequestKey>> playerRequestIndex = new HashMap<>();
     private final Map<UUID, PlayerGenerationView> playerGenerationViews = new HashMap<>();
     private final ConcurrentLinkedQueue<PackingResult> completedPackingResults = new ConcurrentLinkedQueue<>();
+    private final ArrayDeque<GenerationResult> deferredGenerationResults = new ArrayDeque<>();
     private final VSSServerConfig config;
     private ThreadPoolExecutor packingExecutor;
     private long totalSubmitted;
@@ -88,7 +90,7 @@ public final class ChunkGenerationService {
 
         PendingGeneration queuedGeneration = queued.get(key);
         if (queuedGeneration != null) {
-            if (!canQueue(playerUuid)) {
+            if (!ensureQueueCapacityFor(playerUuid, queuedGeneration)) {
                 return false;
             }
             GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, false);
@@ -105,7 +107,7 @@ public final class ChunkGenerationService {
         if (canStart(generation) && tryConsumeStartBudget()) {
             startGeneration(key, generation);
         } else {
-            if (!canQueue(playerUuid)) {
+            if (!ensureQueueCapacityFor(playerUuid, generation)) {
                 return false;
             }
             queued.put(key, generation);
@@ -168,6 +170,7 @@ public final class ChunkGenerationService {
         refillStartBudget();
         List<GenerationResult> results = new ArrayList<>();
         drainPackingResults(results);
+        drainDeferredGenerationResults(results);
         pruneStalePlayerRequests(server, results);
         promoteQueued();
         if (active.isEmpty()) {
@@ -317,6 +320,7 @@ public final class ChunkGenerationService {
         }
         shutdownPackingExecutor();
         completedPackingResults.clear();
+        deferredGenerationResults.clear();
         active.clear();
         queued.clear();
         perPlayerActiveCount.clear();
@@ -379,16 +383,14 @@ public final class ChunkGenerationService {
             return;
         }
 
-        Iterator<Map.Entry<PendingGenerationKey, PendingGeneration>> iterator = queued.entrySet().iterator();
-        while (iterator.hasNext()
-                && active.size() < config.generationConcurrencyLimitGlobal
+        while (active.size() < config.generationConcurrencyLimitGlobal
                 && startBudget >= 1.0D
                 && startsThisTick < config.generationStartsPerTickLimit) {
-            Map.Entry<PendingGenerationKey, PendingGeneration> entry = iterator.next();
-            PendingGeneration generation = entry.getValue();
-            if (!canStart(generation)) {
-                continue;
+            Map.Entry<PendingGenerationKey, PendingGeneration> entry = selectNearestStartableQueuedGeneration();
+            if (entry == null) {
+                break;
             }
+            PendingGeneration generation = entry.getValue();
 
             if (!tryConsumeStartBudget()) {
                 break;
@@ -396,9 +398,26 @@ public final class ChunkGenerationService {
             for (GenerationCallback callback : generation.callbacks) {
                 decrementQueuedCount(callback.playerUuid());
             }
-            iterator.remove();
+            queued.remove(entry.getKey());
             startGeneration(entry.getKey(), generation);
         }
+    }
+
+    private Map.Entry<PendingGenerationKey, PendingGeneration> selectNearestStartableQueuedGeneration() {
+        Map.Entry<PendingGenerationKey, PendingGeneration> best = null;
+        int bestRing = Integer.MAX_VALUE;
+        for (Map.Entry<PendingGenerationKey, PendingGeneration> entry : queued.entrySet()) {
+            PendingGeneration generation = entry.getValue();
+            if (!canStart(generation)) {
+                continue;
+            }
+            int ring = priorityRing(generation);
+            if (best == null || ring < bestRing) {
+                best = entry;
+                bestRing = ring;
+            }
+        }
+        return best;
     }
 
     private boolean canStart(PendingGeneration generation) {
@@ -418,6 +437,106 @@ public final class ChunkGenerationService {
         int queuedForPlayer = perPlayerQueuedCount.getOrDefault(playerUuid, 0);
         int maxQueuedForPlayer = Math.max(1, config.generationRateLimitPerPlayer * config.generationTimeoutSeconds);
         return queuedForPlayer < maxQueuedForPlayer;
+    }
+
+    private boolean ensureQueueCapacityFor(UUID playerUuid, PendingGeneration incomingGeneration) {
+        if (canQueue(playerUuid)) {
+            return true;
+        }
+        return evictFarthestQueuedRequestFor(playerUuid, incomingGeneration);
+    }
+
+    private boolean evictFarthestQueuedRequestFor(UUID playerUuid, PendingGeneration incomingGeneration) {
+        PlayerGenerationView view = currentGenerationView(playerUuid, incomingGeneration.level);
+        if (view == null) {
+            return false;
+        }
+
+        int incomingRing = priorityRingForView(incomingGeneration, view);
+        QueuedCallbackCandidate farthest = null;
+        Set<RequestKey> playerRequests = playerRequestIndex.get(playerUuid);
+        if (playerRequests == null || playerRequests.isEmpty()) {
+            return false;
+        }
+
+        for (RequestKey requestKey : playerRequests) {
+            GenerationLocation location = requestIndex.get(requestKey);
+            if (location == null || location.active()) {
+                continue;
+            }
+            PendingGeneration generation = queued.get(location.key());
+            if (generation == null) {
+                continue;
+            }
+            int ring = priorityRingForView(generation, view);
+            if (farthest == null || ring > farthest.ring()) {
+                farthest = new QueuedCallbackCandidate(requestKey, location, ring);
+            }
+        }
+
+        if (farthest == null || incomingRing >= farthest.ring()) {
+            return false;
+        }
+        return evictQueuedCallback(farthest);
+    }
+
+    private boolean evictQueuedCallback(QueuedCallbackCandidate candidate) {
+        PendingGeneration generation = queued.get(candidate.location().key());
+        if (generation == null) {
+            unindexCallback(candidate.requestKey().playerUuid(), candidate.requestKey().requestId());
+            return false;
+        }
+
+        GenerationCallback callback = removeCallbackEntry(
+                generation.callbacks,
+                candidate.requestKey().playerUuid(),
+                candidate.requestKey().requestId());
+        if (callback == null) {
+            unindexCallback(candidate.requestKey().playerUuid(), candidate.requestKey().requestId());
+            return false;
+        }
+
+        deferredGenerationResults.add(GenerationResult.notGenerated(
+                callback.playerUuid(),
+                callback.requestState(),
+                callback.requestId(),
+                generation.level.dimension(),
+                callback.priority()));
+        unindexCallback(callback.playerUuid(), callback.requestId());
+        decrementQueuedCount(callback.playerUuid());
+        if (generation.callbacks.isEmpty()) {
+            queued.remove(candidate.location().key());
+        }
+        return true;
+    }
+
+    private PlayerGenerationView currentGenerationView(UUID playerUuid, ServerLevel level) {
+        ServerPlayer player = level.getServer().getPlayerList().getPlayer(playerUuid);
+        if (player != null) {
+            PlayerGenerationView view = PlayerGenerationView.from(player);
+            playerGenerationViews.put(playerUuid, view);
+            return view;
+        }
+        return playerGenerationViews.get(playerUuid);
+    }
+
+    private int priorityRing(PendingGeneration generation) {
+        int bestRing = Integer.MAX_VALUE;
+        for (GenerationCallback callback : generation.callbacks) {
+            PlayerGenerationView view = playerGenerationViews.get(callback.playerUuid());
+            if (view == null) {
+                continue;
+            }
+            bestRing = Math.min(bestRing, priorityRingForView(generation, view));
+        }
+        return bestRing;
+    }
+
+    private int priorityRingForView(PendingGeneration generation, PlayerGenerationView view) {
+        if (!view.dimension().equals(generation.level.dimension())) {
+            return Integer.MAX_VALUE;
+        }
+        return PositionUtil.chebyshevDistance(generation.pos.x, generation.pos.z, view.chunkX(), view.chunkZ());
     }
 
     private void refillStartBudget() {
@@ -553,6 +672,12 @@ public final class ChunkGenerationService {
             if (packingResult.failed()) {
                 totalPackingFailures++;
             }
+        }
+    }
+
+    private void drainDeferredGenerationResults(List<GenerationResult> results) {
+        while (!deferredGenerationResults.isEmpty()) {
+            results.add(deferredGenerationResults.removeFirst());
         }
     }
 
@@ -831,6 +956,9 @@ public final class ChunkGenerationService {
     }
 
     private record GenerationLocation(PendingGenerationKey key, boolean active) {
+    }
+
+    private record QueuedCallbackCandidate(RequestKey requestKey, GenerationLocation location, int ring) {
     }
 
     private record PlayerGenerationView(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
