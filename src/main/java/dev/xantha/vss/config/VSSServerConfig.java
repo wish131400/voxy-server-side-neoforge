@@ -6,7 +6,7 @@ public class VSSServerConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-server-config.json";
     public static final int MIN_LOD_DISTANCE_CHUNKS = 1;
     public static final int MAX_LOD_DISTANCE_CHUNKS = 8196;
-    public static final int MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 1024;
+    public static final int MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 62_500;
     public static final int MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 0x6400000;
     public static final int BYTES_PER_MIB = 1024 * 1024;
     public static final int MIN_BANDWIDTH_KBPS_PER_PLAYER = bytesToKbpsCeil(MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER);
