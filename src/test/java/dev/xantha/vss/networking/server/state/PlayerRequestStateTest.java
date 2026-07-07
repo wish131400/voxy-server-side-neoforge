@@ -1,6 +1,7 @@
 package dev.xantha.vss.networking.server.state;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -41,7 +42,7 @@ class PlayerRequestStateTest {
     }
 
     @Test
-    void priorityAndNormalSendCreditsAreIndependent() {
+    void priorityBypassesNormalSendCredit() {
         PlayerRequestState state = new PlayerRequestState();
         long limit = 64L * 1024L;
 
@@ -56,6 +57,8 @@ class PlayerRequestStateTest {
 
         state.recordSend(true, 256 * 1024);
 
-        assertFalse(state.canSend(true, limit));
+        assertTrue(state.canSend(true, limit));
+        assertEquals(512L * 1024L, state.totalBytesSent());
+        assertEquals(256L * 1024L, state.priorityBytesSent());
     }
 }

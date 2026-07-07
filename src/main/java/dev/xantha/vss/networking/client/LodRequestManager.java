@@ -66,7 +66,7 @@ public final class LodRequestManager {
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
     private final LongOpenHashSet dirtyColumns = new LongOpenHashSet();
     private final Long2LongOpenHashMap dirtyColumnTimestamps = new Long2LongOpenHashMap();
-    private final ClientRequestTracker requestTracker = new ClientRequestTracker();
+    private final ClientRequestTracker requestTracker;
     private final DeferredColumnQueue deferredColumns = new DeferredColumnQueue(MAX_DEFERRED_COLUMNS);
     private final RetryBackoff retryBackoff = new RetryBackoff(
             System::nanoTime,
@@ -113,6 +113,11 @@ public final class LodRequestManager {
     }
 
     public LodRequestManager(String presenceScope) {
+        this(presenceScope, new ClientRequestTracker());
+    }
+
+    LodRequestManager(String presenceScope, ClientRequestTracker requestTracker) {
+        this.requestTracker = requestTracker;
         this.presenceReporter = new ClientPresenceReporter(presenceScope);
         columnTimestamps.defaultReturnValue(-1L);
         dirtyColumnTimestamps.defaultReturnValue(0L);
@@ -287,19 +292,20 @@ public final class LodRequestManager {
     public synchronized void onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
         for (int i = 0; i < dirtyPositions.length; i++) {
             long packed = dirtyPositions[i];
-            if (hasKnownColumn(packed)) {
-                long dirtyTimestamp = i < dirtyTimestamps.length ? dirtyTimestamps[i] : VSSConstants.epochMillis();
-                long existingTimestamp = dirtyColumnTimestamps.get(packed);
-                if (dirtyTimestamp > existingTimestamp) {
-                    dirtyColumnTimestamps.put(packed, dirtyTimestamp);
-                }
-                clearBackoff(packed);
-                dirtyColumns.add(packed);
-                deferColumn(packed, true);
-            } else {
-                dirtyColumnTimestamps.remove(packed);
-                dirtyColumns.remove(packed);
+            long dirtyTimestamp = i < dirtyTimestamps.length ? dirtyTimestamps[i] : VSSConstants.epochMillis();
+            if (dirtyTimestamp <= 0L) {
+                dirtyTimestamp = VSSConstants.epochMillis();
             }
+            long existingTimestamp = dirtyColumnTimestamps.get(packed);
+            if (dirtyTimestamp > existingTimestamp) {
+                dirtyColumnTimestamps.put(packed, dirtyTimestamp);
+            }
+            clearBackoff(packed);
+            dirtyColumns.add(packed);
+            if (requestTracker.contains(packed) && !requestTracker.isDirtyRefreshPosition(packed)) {
+                requestTracker.cancel(packed);
+            }
+            deferColumn(packed, true);
         }
     }
 
@@ -1173,9 +1179,18 @@ public final class LodRequestManager {
                 now);
         requestIds[count] = requestId;
         positions[count] = packed;
-        timestamps[count] = columnTimestamps.get(packed);
+        timestamps[count] = requestTimestampFor(packed);
         allowGeneration[count] = generationCandidate;
         return count + 1;
+    }
+
+    long requestTimestampFor(long packed) {
+        long timestamp = columnTimestamps.get(packed);
+        if (!dirtyColumns.contains(packed) || timestamp > 0L) {
+            return timestamp;
+        }
+        long dirtyTimestamp = dirtyColumnTimestamps.get(packed);
+        return dirtyTimestamp > 1L ? dirtyTimestamp - 1L : 1L;
     }
 
     private int getEffectiveLodDistance() {

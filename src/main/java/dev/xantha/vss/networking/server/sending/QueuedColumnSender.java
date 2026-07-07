@@ -286,7 +286,7 @@ public final class QueuedColumnSender {
                 + ", queued=" + state.queuedPayloadCount()
                 + ", queuedWireBytes=" + state.queuedBytes()
                 + ", normalSendCreditBytes=" + state.normalSendCreditBytes()
-                + ", prioritySendCreditBytes=" + state.prioritySendCreditBytes()
+                + ", priorityBypassWireBytes=" + state.priorityBytesSent()
                 + ", totalSentWireBytes=" + state.totalBytesSent());
     }
 }
