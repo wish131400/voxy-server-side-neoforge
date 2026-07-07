@@ -175,27 +175,47 @@ public final class VSSClientNetworking {
             long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
             receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, false, packed);
         } else if (manager != null) {
-            receiveResult = manager.onColumnReceived(payload.requestId(), payload.columnTimestamp());
+            receiveResult = payload.completesRequest()
+                    ? manager.onColumnReceived(payload.requestId(), payload.columnTimestamp())
+                    : manager.onColumnPartReceived(payload.requestId());
         } else {
             receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
         }
-        if (payload.requestId() >= 0 && !receiveResult.knownRequest()) {
+        if (payload.requestId() >= 0
+                && payload.completesRequest()
+                && payload.completeColumn()
+                && !receiveResult.knownRequest()
+                && manager != null) {
+            receiveResult = manager.onLateColumnReceived(
+                    payload.dimension(),
+                    payload.chunkX(),
+                    payload.chunkZ(),
+                    payload.columnTimestamp());
+        }
+        if (!receiveResult.knownRequest()) {
             return;
         }
-        boolean replaceMissingSections = receiveResult.knownRequest()
-                && receiveResult.replaceExistingColumn()
-                && payload.completeColumn();
+        boolean replaceMissingSections = shouldReplaceMissingSections(receiveResult, payload);
         boolean queued = COLUMN_PROCESSOR.offer(
                 payload,
                 receiveResult.knownRequest(),
                 receiveResult.priority(),
                 replaceMissingSections);
-        if (queued && payload.requestId() < 0 && manager != null) {
+        if (queued && payload.requestId() < 0 && payload.completesRequest() && manager != null) {
             manager.onPushedColumnReceived(payload.dimension(), payload.chunkX(), payload.chunkZ(), payload.columnTimestamp());
         }
         if (!queued && manager != null && receiveResult.packedPosition() != Long.MIN_VALUE) {
             manager.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
         }
+    }
+
+    static boolean shouldReplaceMissingSections(
+            LodRequestManager.ColumnReceiveResult receiveResult,
+            VoxelColumnS2CPayload payload) {
+        return receiveResult.knownRequest()
+                && receiveResult.replaceExistingColumn()
+                && payload.completeColumn()
+                && payload.completesRequest();
     }
 
     public static void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
@@ -404,6 +424,6 @@ public final class VSSClientNetworking {
                 + ", bytes=" + bytesReceived.get()
                 + ", queued=" + COLUMN_PROCESSOR.getQueuedCount()
                 + ", last=" + payload.chunkX() + "," + payload.chunkZ()
-                + ", sectionsBytes=" + payload.decompressedSections().length);
+                + ", sectionsBytes=" + payload.rawSectionBytesLength());
     }
 }

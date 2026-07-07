@@ -10,7 +10,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Pseudo;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
@@ -23,7 +22,7 @@ public abstract class VoxyRenderSystemDefaultFramebufferMixin {
     private static boolean vss$loggedMainFramebufferRebind;
 
     @Inject(method = "renderOpaque(Lme/cortex/voxy/client/core/rendering/Viewport;)V", at = @At("HEAD"), cancellable = true, remap = false, require = 0)
-    private void vss$bindMainFramebufferWhenDefaultBound(@Coerce Object viewport, CallbackInfo ci) {
+    private void vss$bindMainFramebufferWhenDefaultBound(CallbackInfo ci) {
         if (GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING) != 0) {
             return;
         }

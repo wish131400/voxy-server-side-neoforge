@@ -41,19 +41,32 @@ class BandwidthLimiterTest {
         clock.advanceNanos(ONE_SEC / 2);
 
         assertTrue(limiter.canSend(limit));
-        assertEquals(1000L, limiter.availableBytes());
+        assertEquals(2000L, limiter.availableBytes());
     }
 
     @Test
-    void burstCapIsQuarterOfLimit() {
+    void burstCapIsQuarterOfLimitAboveLowBandwidthFloor() {
         FakeClock clock = new FakeClock();
         BandwidthLimiter limiter = new BandwidthLimiter(clock);
-        long limit = 8000L;
+        long limit = 512L * 1024L;
 
         clock.advanceNanos(ONE_SEC * 10);
         limiter.canSend(limit);
 
-        assertEquals(2000L, limiter.availableBytes());
+        assertEquals(128L * 1024L, limiter.availableBytes());
+    }
+
+    @Test
+    void lowBandwidthBurstCapCanAccumulateFullColumnCredit() {
+        FakeClock clock = new FakeClock();
+        BandwidthLimiter limiter = new BandwidthLimiter(clock);
+
+        for (int i = 0; i < 20; i++) {
+            clock.advanceNanos(ONE_SEC);
+            limiter.canSend(4000L);
+        }
+
+        assertEquals(64L * 1024L, limiter.availableBytes());
     }
 
     @Test
@@ -66,13 +79,38 @@ class BandwidthLimiterTest {
 
         limiter.recordSend(600);
 
-        assertEquals(400L, limiter.availableBytes());
+        assertEquals(3400L, limiter.availableBytes());
         assertEquals(600L, limiter.totalBytesSent());
 
         limiter.recordSend(1000);
 
-        assertEquals(0L, limiter.availableBytes());
+        assertEquals(2400L, limiter.availableBytes());
         assertEquals(1600L, limiter.totalBytesSent());
+    }
+
+    @Test
+    void oversizedSendCreatesDebtUntilBudgetCatchesUp() {
+        FakeClock clock = new FakeClock();
+        BandwidthLimiter limiter = new BandwidthLimiter(clock);
+        long limit = 4000L;
+        clock.advanceNanos(ONE_SEC);
+        assertTrue(limiter.canSend(limit));
+
+        limiter.recordSend(8000);
+
+        assertEquals(-4000L, limiter.availableBytes());
+
+        clock.advanceNanos(999_000_000L);
+        assertFalse(limiter.canSend(limit));
+        assertEquals(-4L, limiter.availableBytes());
+
+        clock.advanceNanos(1_000_000L);
+        assertFalse(limiter.canSend(limit));
+        assertEquals(0L, limiter.availableBytes());
+
+        clock.advanceNanos(1_000_000L);
+        assertTrue(limiter.canSend(limit));
+        assertEquals(4L, limiter.availableBytes());
     }
 
     @Test
@@ -95,7 +133,7 @@ class BandwidthLimiterTest {
         clock.advanceNanos(ONE_SEC);
         limiter.canSend(1_000_000L);
 
-        assertEquals(500L, limiter.availableBytes());
+        assertEquals(2000L, limiter.availableBytes());
     }
 
     @Test
@@ -125,6 +163,6 @@ class BandwidthLimiterTest {
 
         limiter.primeSendCredit(4000L);
 
-        assertEquals(1000L, limiter.availableBytes());
+        assertEquals(64L * 1024L, limiter.availableBytes());
     }
 }

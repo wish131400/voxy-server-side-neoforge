@@ -12,6 +12,7 @@ import dev.xantha.vss.networking.server.runtime.DiskTaskRuntime;
 import dev.xantha.vss.networking.server.runtime.ServerLifecycleGuard;
 import dev.xantha.vss.networking.server.runtime.ServerNetworkingLifecycle;
 import dev.xantha.vss.networking.server.sending.GeneratedColumnFlusher;
+import dev.xantha.vss.networking.server.sending.ColumnPayloadSplitter;
 import dev.xantha.vss.networking.server.sending.QueuedColumnSender;
 import dev.xantha.vss.networking.server.session.PlayerSessionManager;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
@@ -30,6 +31,7 @@ import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
+import java.util.List;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -220,8 +222,19 @@ public final class VSSServerNetworking {
             state.clearRequest(payload.requestId());
             return false;
         }
-        payload.setAllowZstdEncoding(state.supportsZstdColumns());
-        if (!state.enqueue(payload, priority)) {
+        boolean allowZstdColumns = state.supportsZstdColumns();
+        payload.setAllowZstdEncoding(allowZstdColumns);
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        long effectiveBandwidth = Math.min(config.bandwidthBytesPerSecond(), state.desiredBandwidth());
+        List<VoxelColumnS2CPayload> payloads = ColumnPayloadSplitter.splitForBandwidth(
+                player.serverLevel(),
+                payload,
+                effectiveBandwidth,
+                config.enableNetworkColumnCompression);
+        for (VoxelColumnS2CPayload queuedPayload : payloads) {
+            queuedPayload.setAllowZstdEncoding(allowZstdColumns);
+        }
+        if (!state.enqueue(payloads, priority)) {
             if (payload.requestId() >= 0) {
                 sendRateLimited(player, payload.requestId());
             }

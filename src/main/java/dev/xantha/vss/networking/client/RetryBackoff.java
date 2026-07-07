@@ -39,8 +39,16 @@ final class RetryBackoff {
         retryAfterNanos.put(packed, nanoClock.getAsLong() + delay);
     }
 
+    void markRateLimited(long packed) {
+        markTransientDelay(packed, policy.retryDelay(false, false, 1));
+    }
+
     void markBackpressure(long packed) {
-        retryAfterNanos.put(packed, nanoClock.getAsLong() + policy.backpressureDelayNanos());
+        markTransientDelay(packed, policy.backpressureDelayNanos());
+    }
+
+    void markTimeout(long packed) {
+        markTransientDelay(packed, policy.retryDelay(false, false, 1));
     }
 
     void clear(long packed) {
@@ -51,5 +59,10 @@ final class RetryBackoff {
     void clearAll() {
         retryAfterNanos.clear();
         retryAttempts.clear();
+    }
+
+    private void markTransientDelay(long packed, long delayNanos) {
+        retryAttempts.remove(packed);
+        retryAfterNanos.put(packed, nanoClock.getAsLong() + Math.max(0L, delayNanos));
     }
 }

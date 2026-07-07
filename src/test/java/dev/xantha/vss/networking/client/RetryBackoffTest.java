@@ -70,6 +70,61 @@ class RetryBackoffTest {
     }
 
     @Test
+    void rateLimitUsesFixedDelayAndDoesNotAccumulateAttempts() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+
+        backoff.markRateLimited(42L);
+        backoff.markRateLimited(42L);
+        backoff.markRateLimited(42L);
+
+        assertTrue(backoff.isCoolingDown(42L, 999L));
+        assertFalse(backoff.isCoolingDown(42L, 1_000L));
+    }
+
+    @Test
+    void rateLimitClearsPreviousExponentialAttemptState() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+
+        backoff.markBackoff(42L, false, false);
+        backoff.markBackoff(42L, false, false);
+        backoff.markRateLimited(42L);
+        backoff.markBackoff(42L, false, false);
+
+        assertTrue(backoff.isCoolingDown(42L, 999L));
+        assertFalse(backoff.isCoolingDown(42L, 1_000L));
+    }
+
+    @Test
+    void backpressureClearsPreviousExponentialAttemptState() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+
+        backoff.markBackoff(42L, false, false);
+        backoff.markBackoff(42L, false, false);
+        backoff.markBackpressure(42L);
+        backoff.markBackoff(42L, false, false);
+
+        assertTrue(backoff.isCoolingDown(42L, 999L));
+        assertFalse(backoff.isCoolingDown(42L, 1_000L));
+    }
+
+    @Test
+    void timeoutUsesFixedDelayAndClearsPreviousExponentialAttemptState() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+
+        backoff.markBackoff(42L, false, false);
+        backoff.markBackoff(42L, false, false);
+        backoff.markTimeout(42L);
+        backoff.markBackoff(42L, false, false);
+
+        assertTrue(backoff.isCoolingDown(42L, 999L));
+        assertFalse(backoff.isCoolingDown(42L, 1_000L));
+    }
+
+    @Test
     void clearingColumnResetsAttempts() {
         ManualClock clock = new ManualClock(0L);
         RetryBackoff backoff = backoff(clock);

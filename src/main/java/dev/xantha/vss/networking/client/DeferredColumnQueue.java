@@ -1,19 +1,18 @@
 package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.common.PositionUtil;
+import it.unimi.dsi.fastutil.ints.Int2ObjectAVLTreeMap;
+import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
+import it.unimi.dsi.fastutil.longs.LongList;
 import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
 
 final class DeferredColumnQueue implements Iterable<Long> {
     private final LongOpenHashSet columns = new LongOpenHashSet();
     private final LongOpenHashSet urgentColumns = new LongOpenHashSet();
-    private final TreeMap<Integer, ArrayDeque<Long>> urgentColumnsByRing = new TreeMap<>();
-    private final TreeMap<Integer, ArrayDeque<Long>> normalColumnsByRing = new TreeMap<>();
+    private final Int2ObjectAVLTreeMap<LongArrayFIFOQueue> urgentColumnsByRing = new Int2ObjectAVLTreeMap<>();
+    private final Int2ObjectAVLTreeMap<LongArrayFIFOQueue> normalColumnsByRing = new Int2ObjectAVLTreeMap<>();
     private final int maxColumns;
     private int queuedEntries;
     private int centerCx = Integer.MIN_VALUE;
@@ -94,20 +93,20 @@ final class DeferredColumnQueue implements Iterable<Long> {
         enqueue(packed, urgent || urgentColumns.contains(packed));
     }
 
-    List<Long> pollClosestCandidates(int maxAttempts, boolean urgentOnly) {
+    LongList pollClosestCandidates(int maxAttempts, boolean urgentOnly) {
         int attempts = Math.min(queuedEntries, Math.max(0, maxAttempts));
-        ArrayList<Long> candidates = new ArrayList<>(attempts);
+        LongArrayList candidates = new LongArrayList(attempts);
         LongOpenHashSet seen = new LongOpenHashSet();
         while (attempts > 0 && candidates.size() < maxAttempts) {
-            Long queued = pollClosest(urgentColumnsByRing);
-            if (queued == null && !urgentOnly) {
+            long queued = pollClosest(urgentColumnsByRing);
+            if (queued == Long.MIN_VALUE && !urgentOnly) {
                 queued = pollClosest(normalColumnsByRing);
             }
-            if (queued == null) {
+            if (queued == Long.MIN_VALUE) {
                 break;
             }
             attempts--;
-            long packed = queued.longValue();
+            long packed = queued;
             if (!columns.contains(packed)
                     || (urgentOnly && !urgentColumns.contains(packed))
                     || !seen.add(packed)) {
@@ -129,30 +128,27 @@ final class DeferredColumnQueue implements Iterable<Long> {
 
     private boolean ensureCapacityFor(boolean incomingUrgent) {
         while (columns.size() >= maxColumns) {
-            Long evicted = evictFurthest(normalColumnsByRing, false);
-            if (evicted == null && incomingUrgent) {
+            long evicted = evictFurthest(normalColumnsByRing, false);
+            if (evicted == Long.MIN_VALUE && incomingUrgent) {
                 evicted = evictFurthest(urgentColumnsByRing, true);
             }
-            if (evicted == null) {
+            if (evicted == Long.MIN_VALUE) {
                 return false;
             }
         }
         return true;
     }
 
-    private Long evictFurthest(TreeMap<Integer, ArrayDeque<Long>> buckets, boolean urgentBucket) {
+    private long evictFurthest(Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets, boolean urgentBucket) {
         while (!buckets.isEmpty()) {
-            Map.Entry<Integer, ArrayDeque<Long>> entry = buckets.lastEntry();
-            ArrayDeque<Long> bucket = entry.getValue();
-            Long queued = bucket.pollLast();
+            int ring = buckets.lastIntKey();
+            LongArrayFIFOQueue bucket = buckets.get(ring);
+            long queued = bucket.dequeueLastLong();
             queuedEntries = Math.max(0, queuedEntries - 1);
             if (bucket.isEmpty()) {
-                buckets.pollLastEntry();
+                buckets.remove(ring);
             }
-            if (queued == null) {
-                continue;
-            }
-            long packed = queued.longValue();
+            long packed = queued;
             if (!columns.contains(packed)) {
                 continue;
             }
@@ -164,31 +160,36 @@ final class DeferredColumnQueue implements Iterable<Long> {
             urgentColumns.remove(packed);
             return packed;
         }
-        return null;
+        return Long.MIN_VALUE;
     }
 
     private void enqueue(long packed, boolean urgent) {
-        bucketsFor(urgent).computeIfAbsent(ringFor(packed), ignored -> new ArrayDeque<>()).addLast(packed);
+        Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets = bucketsFor(urgent);
+        int ring = ringFor(packed);
+        LongArrayFIFOQueue bucket = buckets.get(ring);
+        if (bucket == null) {
+            bucket = new LongArrayFIFOQueue();
+            buckets.put(ring, bucket);
+        }
+        bucket.enqueue(packed);
         queuedEntries++;
     }
 
-    private Long pollClosest(TreeMap<Integer, ArrayDeque<Long>> buckets) {
+    private long pollClosest(Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets) {
         while (!buckets.isEmpty()) {
-            Map.Entry<Integer, ArrayDeque<Long>> entry = buckets.firstEntry();
-            ArrayDeque<Long> bucket = entry.getValue();
-            Long queued = bucket.pollFirst();
+            int ring = buckets.firstIntKey();
+            LongArrayFIFOQueue bucket = buckets.get(ring);
+            long queued = bucket.dequeueLong();
             queuedEntries = Math.max(0, queuedEntries - 1);
             if (bucket.isEmpty()) {
-                buckets.pollFirstEntry();
+                buckets.remove(ring);
             }
-            if (queued != null) {
-                return queued;
-            }
+            return queued;
         }
-        return null;
+        return Long.MIN_VALUE;
     }
 
-    private TreeMap<Integer, ArrayDeque<Long>> bucketsFor(boolean urgent) {
+    private Int2ObjectAVLTreeMap<LongArrayFIFOQueue> bucketsFor(boolean urgent) {
         return urgent ? urgentColumnsByRing : normalColumnsByRing;
     }
 

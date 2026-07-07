@@ -5,7 +5,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Pseudo;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
@@ -16,13 +15,13 @@ public abstract class NormalRenderPipelineDepthMaskMixin {
     private boolean vss$previousDepthMask;
 
     @Inject(method = "finish(Lme/cortex/voxy/client/core/rendering/Viewport;III)V", at = @At("HEAD"), remap = false, require = 0)
-    private void vss$enableDepthWritesForFinalBlit(@Coerce Object viewport, int depthTex, int targetFramebuffer, int width, CallbackInfo ci) {
+    private void vss$enableDepthWritesForFinalBlit(CallbackInfo ci) {
         vss$previousDepthMask = GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
         GL11.glDepthMask(true);
     }
 
     @Inject(method = "finish(Lme/cortex/voxy/client/core/rendering/Viewport;III)V", at = @At("RETURN"), remap = false, require = 0)
-    private void vss$restoreDepthWritesAfterFinalBlit(@Coerce Object viewport, int depthTex, int targetFramebuffer, int width, CallbackInfo ci) {
+    private void vss$restoreDepthWritesAfterFinalBlit(CallbackInfo ci) {
         GL11.glDepthMask(vss$previousDepthMask);
     }
 }

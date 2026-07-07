@@ -1,6 +1,6 @@
 package dev.xantha.vss.networking.server.diagnostics;
 
-
+import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import dev.xantha.vss.networking.server.generation.ChunkGenerationService;
 import dev.xantha.vss.networking.server.runtime.DiskTaskRuntime;
@@ -8,7 +8,6 @@ import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
 import dev.xantha.vss.networking.server.storage.ColumnLodCache;
 import dev.xantha.vss.networking.server.storage.PersistentColumnLodStore;
-import dev.xantha.vss.config.VSSServerConfig;
 import java.util.Locale;
 import net.minecraft.network.chat.Component;
 

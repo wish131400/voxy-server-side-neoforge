@@ -82,18 +82,24 @@ final class VoxyCompat {
 
                     if (columnData.sections().length == 0) {
                         if (columnData.replaceMissingSections()) {
-                            clearMissingSections(worldId, level, chunkX, chunkZ, Set.of());
-                            markLocalColumnMissing(level, chunkX, chunkZ);
+                            Set<Integer> presentSections = replacementSectionSet(columnData);
+                            clearMissingSections(worldId, level, chunkX, chunkZ, presentSections);
+                            if (presentSections.isEmpty()) {
+                                markLocalColumnMissing(level, chunkX, chunkZ);
+                            } else {
+                                markLocalColumnPresent(level, chunkX, chunkZ);
+                            }
                         }
                         return;
                     }
 
                     boolean accepted = true;
+                    boolean hasReplacementManifest = columnData.replacementSectionYs().length > 0;
                     Set<Integer> presentSections = columnData.replaceMissingSections()
-                            ? new HashSet<>()
+                            ? replacementSectionSet(columnData)
                             : null;
                     for (VoxelColumnData.SectionData sectionData : columnData.sections()) {
-                        if (presentSections != null) {
+                        if (presentSections != null && !hasReplacementManifest) {
                             presentSections.add(sectionData.sectionY());
                         }
                         accepted &= ingestSection(worldId, sectionData, chunkX, chunkZ);
@@ -101,7 +107,7 @@ final class VoxyCompat {
                     if (presentSections != null) {
                         clearMissingSections(worldId, level, chunkX, chunkZ, presentSections);
                     }
-                    if (!accepted) {
+                    if (!accepted && columnData.completesRequest()) {
                         VSSClientNetworking.onColumnProcessingFailed(dimension, chunkX, chunkZ);
                     } else {
                         markLocalColumnPresent(level, chunkX, chunkZ);
@@ -396,6 +402,18 @@ final class VoxyCompat {
         } catch (Throwable e) {
             return fallback;
         }
+    }
+
+    private static Set<Integer> replacementSectionSet(VoxelColumnData columnData) {
+        int[] replacementSectionYs = columnData.replacementSectionYs();
+        Set<Integer> sections = new HashSet<>(
+                Math.max(replacementSectionYs.length, columnData.sections().length));
+        if (replacementSectionYs.length > 0) {
+            for (int sectionY : replacementSectionYs) {
+                sections.add(sectionY);
+            }
+        }
+        return sections;
     }
 
     private static void initConfigHandles() throws Throwable {
