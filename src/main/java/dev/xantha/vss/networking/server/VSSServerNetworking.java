@@ -151,6 +151,18 @@ public final class VSSServerNetworking {
         return false;
     }
 
+    public static long clientKnownColumnTimestamp(
+            ServerPlayer player,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+            int cx,
+            int cz) {
+        if (isServerStopping() || player == null) {
+            return 0L;
+        }
+        PlayerRequestState state = PLAYER_REGISTRY.get(player.getUUID());
+        return state != null ? state.clientKnownTimestamp(dimension, cx, cz) : 0L;
+    }
+
     public static void refreshSessionConfigs(MinecraftServer server) {
         SESSION_MANAGER.refresh(server);
     }

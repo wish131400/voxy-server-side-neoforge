@@ -5,6 +5,7 @@ import dev.xantha.vss.networking.server.generation.ChunkGenerationService;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
+import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
@@ -53,6 +54,7 @@ public final class ClientControlMessageHandler {
         if (state != null && player.serverLevel().dimension().equals(payload.dimension())) {
             try {
                 state.updateClientKnownColumns(payload.dimension(), payload);
+                DirtyColumnBroadcaster.sendStaleColumnsForPresence(player, payload);
             } catch (RuntimeException e) {
                 VSSLogger.debug("Ignored invalid LOD presence summary from "
                         + player.getGameProfile().getName() + ": " + e.getMessage());

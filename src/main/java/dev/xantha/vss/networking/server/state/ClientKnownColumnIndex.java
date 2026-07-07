@@ -63,8 +63,17 @@ public final class ClientKnownColumnIndex {
         if (serverTimestamp <= 0L) {
             return false;
         }
+        long timestamp = knownTimestamp(dimension, cx, cz);
+        return timestamp >= serverTimestamp;
+    }
+
+    public synchronized long knownTimestamp(ResourceKey<Level> dimension, int cx, int cz) {
+        return knownTimestamp((Object) dimension, cx, cz);
+    }
+
+    public synchronized long knownTimestamp(Object dimension, int cx, int cz) {
         Long2LongOpenHashMap known = columnsByDimension.get(dimension);
-        return known != null && known.get(PositionUtil.packPosition(cx, cz)) >= serverTimestamp;
+        return known != null ? known.get(PositionUtil.packPosition(cx, cz)) : 0L;
     }
 
     public synchronized void clear() {

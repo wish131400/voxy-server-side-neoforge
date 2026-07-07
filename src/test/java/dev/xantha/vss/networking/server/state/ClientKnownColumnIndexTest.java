@@ -1,6 +1,7 @@
 package dev.xantha.vss.networking.server.state;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.xantha.vss.common.PositionUtil;
@@ -24,6 +25,8 @@ class ClientKnownColumnIndexTest {
         assertTrue(index.isCurrent(TEST_DIMENSION, 32, -64, 100L));
         assertTrue(index.isCurrent(TEST_DIMENSION, 33, -63, 200L));
         assertFalse(index.isCurrent(TEST_DIMENSION, 33, -63, 201L));
+        assertEquals(200L, index.knownTimestamp(TEST_DIMENSION, 33, -63));
+        assertEquals(0L, index.knownTimestamp(TEST_DIMENSION, 40, -63));
     }
 
     @Test

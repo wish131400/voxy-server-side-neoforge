@@ -201,6 +201,10 @@ public final class PlayerRequestState {
         return clientKnownColumns.isCurrent(dimension, cx, cz, serverTimestamp);
     }
 
+    public synchronized long clientKnownTimestamp(ResourceKey<Level> dimension, int cx, int cz) {
+        return clientKnownColumns.knownTimestamp(dimension, cx, cz);
+    }
+
     public synchronized void resetPreloadRegions(ResourceKey<Level> dimension, int centerRegionX, int centerRegionZ, int maxRegionRing) {
         preloadRegionWindow.reset(dimension, centerRegionX, centerRegionZ, maxRegionRing);
     }

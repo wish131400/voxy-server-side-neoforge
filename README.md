@@ -194,42 +194,6 @@ config/vss-client-config.json
 
 中文别名也可用，常用入口包括 `/vss 状态`、`/vss 带宽`、`/vss 距离`、`/vss 队列`、`/vss 请求限速`、`/vss 存储`、`/vss 刷新`、`/vss 生成`、`/vss 远处玩家`。
 
-## 调试建议
-
-已有缓存 LOD 加载慢：
-
-- 提高 `/vss bandwidth set_kbps` 或客户端 `desiredBandwidthKbps`。
-- 提高对应距离段的请求限速。
-- 如果瓶颈是磁盘读取，逐步提高 `diskReaderThreads`。
-- 查看 `/vss stats` 和 `/vss generation stats` 的缓存、磁盘和队列状态。
-
-缺失 LOD 生成慢：
-
-- 确认 `enableChunkGeneration=true`。
-- 提高 `generationRateLimitPerPlayer`。
-- 逐步提高 `generationConcurrencyLimitPerPlayer` 或 `generationStartsPerTickLimit`。
-- 提高 `generationPackingThreads` 时注意 CPU 和内存压力。
-
-低带宽下刷新慢：
-
-- 先确认实际线路下载是否已经接近配置上限。
-- 查看 debug 日志中的 `wireBytes`、`rawBytes`、`queuedWireBytes` 和 `sendCreditBytes`。
-- `sendCreditBytes` 为负表示大列包正在消耗发送债务，这是低带宽下的正常限速表现。
-- 如果需要 1 Mbps 下也快速成片刷新，后续需要更细粒度的分段 LOD 发送，而不是只调带宽。
-
-## NeoForge 说明
-
-- 1.21.1 端口与 Forge 1.20.1 的 0.2.7 行为对齐。
-- 客户端 UI 集成面向当前 Voxy/Sodium 风格选项页。
-- 包含 client-only 类加载保护，避免独立服务端加载 `net.minecraft.client.Minecraft`。
-
-## Notes
-
-- VSS `.vcl` 缓存按世界和维度隔离。
-- Region 索引是加速查询用的派生数据，缺失或过期时可重建。
-- 一个玩家生成或缓存过的完整 LOD 可以被其他玩家复用。
-- VSS 负责把 LOD 数据交给 Voxy，实际渲染仍由 Voxy 完成。
-
 ## License
 
 MIT. See `LICENSE`.
