@@ -25,6 +25,7 @@ public final class ExistingColumnPreloader {
     private static final int PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD = 2048;
     private static final int PRELOAD_FRONTIER_RING_SLACK = 1;
     private static final int PRELOAD_PENDING_DISK_LIMIT = 256;
+    private static final int MANUAL_DISK_READ_RESERVE = 32;
 
     private final PlayerRequestRegistry playerRegistry;
     private final PersistentColumnLodStore persistentStore;
@@ -64,7 +65,7 @@ public final class ExistingColumnPreloader {
             return;
         }
         for (Map.Entry<UUID, PlayerRequestState> entry : playerRegistry.entries()) {
-            if (!diskRuntime.hasReadCapacity(PRELOAD_PENDING_DISK_LIMIT)) {
+            if (!hasPreloadReadCapacity()) {
                 return;
             }
             ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
@@ -77,7 +78,7 @@ public final class ExistingColumnPreloader {
                     || state.preloadColumnCount() >= PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD) {
                 continue;
             }
-            while (diskRuntime.hasReadCapacity(PRELOAD_PENDING_DISK_LIMIT)
+            while (hasPreloadReadCapacity()
                     && state.preloadColumnCount() < PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD) {
                 PlayerRequestState.PreloadRegion region = state.pollPreloadRegion();
                 if (region == null) {
@@ -96,7 +97,7 @@ public final class ExistingColumnPreloader {
         do {
             submittedAny = false;
             for (Map.Entry<UUID, PlayerRequestState> entry : playerRegistry.entries()) {
-                if (!diskRuntime.hasReadCapacity(PRELOAD_PENDING_DISK_LIMIT)) {
+                if (!hasPreloadReadCapacity()) {
                     return;
                 }
                 ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
@@ -108,7 +109,7 @@ public final class ExistingColumnPreloader {
                 int playerCz = player.getBlockZ() >> 4;
                 submittedAny |= submitNextColumnRead(player, state, playerCx, playerCz);
             }
-        } while (submittedAny && diskRuntime.hasReadCapacity(PRELOAD_PENDING_DISK_LIMIT));
+        } while (submittedAny && hasPreloadReadCapacity());
     }
 
     private void updateWindow(ServerPlayer player, PlayerRequestState state) {
@@ -131,7 +132,7 @@ public final class ExistingColumnPreloader {
         int maxDistance = VSSServerConfig.CONFIG.effectiveColumnSyncDistanceChunks();
         int regionMinimumDistance = minimumChunkDistanceToRegion(centerCx, centerCz, region.regionX(), region.regionZ());
         state.beginPreloadRegionScan(regionMinimumDistance);
-        diskRuntime.submitRead(PRELOAD_PENDING_DISK_LIMIT, () -> {
+        diskRuntime.submitPreloadRead(preloadReadLimit(), manualReadReserve(), () -> {
             ArrayList<PersistentColumnLodStore.ExistingColumn> columns = new ArrayList<>();
             try {
                 if (!VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
@@ -192,7 +193,7 @@ public final class ExistingColumnPreloader {
             PlayerRequestState state,
             int playerCx,
             int playerCz) {
-        while (diskRuntime.hasReadCapacity(PRELOAD_PENDING_DISK_LIMIT)) {
+        while (hasPreloadReadCapacity()) {
             PlayerRequestState.PreloadColumn preload = state.pollFrontierPreloadColumn(
                     playerCx,
                     playerCz,
@@ -224,7 +225,7 @@ public final class ExistingColumnPreloader {
         MinecraftServer server = player.server;
         long lifecycleEpoch = VSSServerNetworking.lifecycleEpoch();
         state.beginPreloadColumnRead();
-        diskRuntime.submitRead(PRELOAD_PENDING_DISK_LIMIT, () -> {
+        diskRuntime.submitPreloadRead(preloadReadLimit(), manualReadReserve(), () -> {
             PersistentColumnLodStore.Entry storedData = null;
             if (!VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
                 storedData = persistentStore.read(
@@ -288,5 +289,20 @@ public final class ExistingColumnPreloader {
         int dx = centerCx < minX ? minX - centerCx : Math.max(0, centerCx - maxX);
         int dz = centerCz < minZ ? minZ - centerCz : Math.max(0, centerCz - maxZ);
         return Math.max(dx, dz);
+    }
+
+    private boolean hasPreloadReadCapacity() {
+        return diskRuntime.hasPreloadReadCapacity(preloadReadLimit(), manualReadReserve());
+    }
+
+    private static int preloadReadLimit() {
+        return Math.min(
+                PRELOAD_PENDING_DISK_LIMIT,
+                Math.max(1, VSSServerConfig.CONFIG.diskReadQueueLimit));
+    }
+
+    private static int manualReadReserve() {
+        int limit = preloadReadLimit();
+        return Math.min(MANUAL_DISK_READ_RESERVE, Math.max(1, limit / 8));
     }
 }

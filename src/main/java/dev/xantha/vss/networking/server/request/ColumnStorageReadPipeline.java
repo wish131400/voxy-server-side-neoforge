@@ -296,7 +296,8 @@ public final class ColumnStorageReadPipeline {
                     readContext.requestId(),
                     readContext.cx(),
                     readContext.cz(),
-                    minimumTimestamp);
+                    minimumTimestamp,
+                    readContext.priority());
             return;
         }
         readContext.requestState().clearRequest(readContext.requestId());
@@ -326,16 +327,27 @@ public final class ColumnStorageReadPipeline {
             int requestId,
             int cx,
             int cz,
-            long minimumTimestamp) {
+            long minimumTimestamp,
+            boolean priority) {
         if (VSSServerNetworking.isServerStopping()) {
             state.clearRequest(requestId);
             return;
         }
-        boolean accepted = generationService.submitGeneration(player.getUUID(), state, requestId, level, cx, cz, minimumTimestamp);
+        boolean accepted = generationService.submitGeneration(
+                player.getUUID(),
+                state,
+                requestId,
+                level,
+                cx,
+                cz,
+                minimumTimestamp,
+                priority);
         if (!accepted) {
             state.clearRequest(requestId);
             sendRateLimited(player, requestId);
+            return;
         }
+        sendGenerationQueued(player, requestId);
     }
 
     private static void sendRateLimited(ServerPlayer player, int requestId) {
@@ -352,6 +364,15 @@ public final class ColumnStorageReadPipeline {
                 player,
                 new BatchResponseS2CPayload(
                         new byte[] {VSSConstants.RESPONSE_BACKPRESSURE},
+                        new int[] {requestId},
+                        1));
+    }
+
+    private static void sendGenerationQueued(ServerPlayer player, int requestId) {
+        VSSNetworking.sendToPlayer(
+                player,
+                new BatchResponseS2CPayload(
+                        new byte[] {VSSConstants.RESPONSE_GENERATION_QUEUED},
                         new int[] {requestId},
                         1));
     }

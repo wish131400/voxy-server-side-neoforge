@@ -138,6 +138,17 @@ class ClientRequestTrackerTest {
         assertEquals(0, tracker.track(2L, false, false, 1_000L, 0L));
     }
 
+    @Test
+    void generationSlotStartsOnlyAfterServerAcknowledgement() {
+        ClientRequestTracker tracker = newTracker();
+        int requestId = tracker.track(42L, false, false, 1_000L, 0L);
+
+        assertEquals(0, tracker.generationSize());
+        assertTrue(tracker.markGenerationQueued(requestId, 10_000L, 1L));
+        assertTrue(tracker.isGenerationRequest(requestId));
+        assertEquals(1, tracker.generationSize());
+    }
+
     private static ClientRequestTracker newTracker() {
         return new ClientRequestTracker(ignored -> {
         });

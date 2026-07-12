@@ -1,10 +1,16 @@
 package dev.xantha.vss.common;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
 class VSSConstantsTest {
+
+    @Test
+    void protocolVersionMatchesGenerationQueueProtocol() {
+        assertEquals(37, VSSConstants.PROTOCOL_VERSION);
+    }
 
     @Test
     void columnVersionIsStrictlyMonotonic() {

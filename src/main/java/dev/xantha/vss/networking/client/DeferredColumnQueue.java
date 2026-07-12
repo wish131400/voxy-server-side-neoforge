@@ -2,19 +2,19 @@ package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.common.PositionUtil;
 import it.unimi.dsi.fastutil.ints.Int2ObjectAVLTreeMap;
-import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
-import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongList;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.Iterator;
 
 final class DeferredColumnQueue implements Iterable<Long> {
     private final LongOpenHashSet columns = new LongOpenHashSet();
+    private final LongOpenHashSet queuedColumns = new LongOpenHashSet();
     private final LongOpenHashSet urgentColumns = new LongOpenHashSet();
-    private final Int2ObjectAVLTreeMap<LongArrayFIFOQueue> urgentColumnsByRing = new Int2ObjectAVLTreeMap<>();
-    private final Int2ObjectAVLTreeMap<LongArrayFIFOQueue> normalColumnsByRing = new Int2ObjectAVLTreeMap<>();
+    private final Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> urgentColumnsByRing = new Int2ObjectAVLTreeMap<>();
+    private final Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> normalColumnsByRing = new Int2ObjectAVLTreeMap<>();
     private final int maxColumns;
-    private int queuedEntries;
     private int centerCx = Integer.MIN_VALUE;
     private int centerCz = Integer.MIN_VALUE;
 
@@ -27,8 +27,14 @@ final class DeferredColumnQueue implements Iterable<Long> {
     }
 
     boolean remove(long packed) {
-        urgentColumns.remove(packed);
-        return columns.remove(packed);
+        if (!columns.remove(packed)) {
+            return false;
+        }
+        boolean urgent = urgentColumns.remove(packed);
+        if (queuedColumns.remove(packed)) {
+            removeFromBucket(packed, urgent);
+        }
+        return true;
     }
 
     int size() {
@@ -36,15 +42,15 @@ final class DeferredColumnQueue implements Iterable<Long> {
     }
 
     int queuedEntries() {
-        return queuedEntries;
+        return queuedColumns.size();
     }
 
     void clear() {
         columns.clear();
+        queuedColumns.clear();
         urgentColumns.clear();
         urgentColumnsByRing.clear();
         normalColumnsByRing.clear();
-        queuedEntries = 0;
         centerCx = Integer.MIN_VALUE;
         centerCz = Integer.MIN_VALUE;
     }
@@ -63,53 +69,59 @@ final class DeferredColumnQueue implements Iterable<Long> {
     }
 
     void defer(long packed, boolean urgent) {
-        boolean alreadyDeferred = columns.contains(packed);
-        if (!alreadyDeferred && !ensureCapacityFor(urgent)) {
+        boolean existing = columns.contains(packed);
+        if (!existing && !ensureCapacityFor(packed, urgent)) {
             return;
         }
-        if (!alreadyDeferred) {
+        if (!existing) {
             columns.add(packed);
-            if (urgent) {
-                urgentColumns.add(packed);
-            }
-            enqueue(packed, urgent);
-            return;
         }
-        if (urgent) {
+
+        boolean wasUrgent = urgentColumns.contains(packed);
+        boolean targetUrgent = urgent || wasUrgent;
+        if (urgent && !wasUrgent) {
             urgentColumns.add(packed);
-            enqueue(packed, true);
+            if (queuedColumns.remove(packed)) {
+                removeFromBucket(packed, false);
+            }
+        }
+        if (!queuedColumns.contains(packed)) {
+            enqueue(packed, targetUrgent);
         }
     }
 
     void requeue(long packed, boolean urgent) {
-        boolean alreadyDeferred = columns.contains(packed);
-        if (!alreadyDeferred && !ensureCapacityFor(urgent)) {
+        boolean existing = columns.contains(packed);
+        if (!existing && !ensureCapacityFor(packed, urgent)) {
             return;
         }
         columns.add(packed);
-        if (urgent) {
+
+        boolean wasUrgent = urgentColumns.contains(packed);
+        boolean targetUrgent = urgent || wasUrgent;
+        if (targetUrgent) {
             urgentColumns.add(packed);
         }
-        enqueue(packed, urgent || urgentColumns.contains(packed));
+        if (queuedColumns.remove(packed)) {
+            removeFromBucket(packed, wasUrgent);
+        }
+        enqueue(packed, targetUrgent);
     }
 
     LongList pollClosestCandidates(int maxAttempts, boolean urgentOnly) {
-        int attempts = Math.min(queuedEntries, Math.max(0, maxAttempts));
+        int attempts = Math.min(queuedColumns.size(), Math.max(0, maxAttempts));
         LongArrayList candidates = new LongArrayList(attempts);
-        LongOpenHashSet seen = new LongOpenHashSet();
-        while (attempts > 0 && candidates.size() < maxAttempts) {
-            long queued = pollClosest(urgentColumnsByRing);
-            if (queued == Long.MIN_VALUE && !urgentOnly) {
-                queued = pollClosest(normalColumnsByRing);
+        while (attempts-- > 0 && candidates.size() < maxAttempts) {
+            long packed = pollClosest(urgentColumnsByRing);
+            if (packed == Long.MIN_VALUE && !urgentOnly) {
+                packed = pollClosest(normalColumnsByRing);
             }
-            if (queued == Long.MIN_VALUE) {
+            if (packed == Long.MIN_VALUE) {
                 break;
             }
-            attempts--;
-            long packed = queued;
+            queuedColumns.remove(packed);
             if (!columns.contains(packed)
-                    || (urgentOnly && !urgentColumns.contains(packed))
-                    || !seen.add(packed)) {
+                    || (urgentOnly && !urgentColumns.contains(packed))) {
                 continue;
             }
             candidates.add(packed);
@@ -126,11 +138,19 @@ final class DeferredColumnQueue implements Iterable<Long> {
         return columns.iterator();
     }
 
-    private boolean ensureCapacityFor(boolean incomingUrgent) {
+    private boolean ensureCapacityFor(long incoming, boolean incomingUrgent) {
         while (columns.size() >= maxColumns) {
-            long evicted = evictFurthest(normalColumnsByRing, false);
-            if (evicted == Long.MIN_VALUE && incomingUrgent) {
-                evicted = evictFurthest(urgentColumnsByRing, true);
+            long evicted;
+            if (!normalColumnsByRing.isEmpty() && incomingUrgent) {
+                evicted = evictFurthest(normalColumnsByRing, false);
+            } else {
+                Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> candidates = incomingUrgent
+                        ? urgentColumnsByRing
+                        : normalColumnsByRing;
+                if (candidates.isEmpty() || ringFor(incoming) >= candidates.lastIntKey()) {
+                    return false;
+                }
+                evicted = evictFurthest(candidates, incomingUrgent);
             }
             if (evicted == Long.MIN_VALUE) {
                 return false;
@@ -139,21 +159,19 @@ final class DeferredColumnQueue implements Iterable<Long> {
         return true;
     }
 
-    private long evictFurthest(Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets, boolean urgentBucket) {
+    private long evictFurthest(
+            Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> buckets,
+            boolean urgentBucket) {
         while (!buckets.isEmpty()) {
             int ring = buckets.lastIntKey();
-            LongArrayFIFOQueue bucket = buckets.get(ring);
-            long queued = bucket.dequeueLastLong();
-            queuedEntries = Math.max(0, queuedEntries - 1);
+            LongLinkedOpenHashSet bucket = buckets.get(ring);
+            long packed = bucket.removeLastLong();
             if (bucket.isEmpty()) {
                 buckets.remove(ring);
             }
-            long packed = queued;
-            if (!columns.contains(packed)) {
-                continue;
-            }
-            boolean isUrgent = urgentColumns.contains(packed);
-            if (isUrgent != urgentBucket) {
+            queuedColumns.remove(packed);
+            if (!columns.contains(packed)
+                    || urgentColumns.contains(packed) != urgentBucket) {
                 continue;
             }
             columns.remove(packed);
@@ -164,33 +182,39 @@ final class DeferredColumnQueue implements Iterable<Long> {
     }
 
     private void enqueue(long packed, boolean urgent) {
-        Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets = bucketsFor(urgent);
+        Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> buckets =
+                urgent ? urgentColumnsByRing : normalColumnsByRing;
         int ring = ringFor(packed);
-        LongArrayFIFOQueue bucket = buckets.get(ring);
-        if (bucket == null) {
-            bucket = new LongArrayFIFOQueue();
-            buckets.put(ring, bucket);
-        }
-        bucket.enqueue(packed);
-        queuedEntries++;
+        buckets.computeIfAbsent(ring, ignored -> new LongLinkedOpenHashSet())
+                .add(packed);
+        queuedColumns.add(packed);
     }
 
-    private long pollClosest(Int2ObjectAVLTreeMap<LongArrayFIFOQueue> buckets) {
+    private long pollClosest(Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> buckets) {
         while (!buckets.isEmpty()) {
             int ring = buckets.firstIntKey();
-            LongArrayFIFOQueue bucket = buckets.get(ring);
-            long queued = bucket.dequeueLong();
-            queuedEntries = Math.max(0, queuedEntries - 1);
+            LongLinkedOpenHashSet bucket = buckets.get(ring);
+            long packed = bucket.removeFirstLong();
             if (bucket.isEmpty()) {
                 buckets.remove(ring);
             }
-            return queued;
+            return packed;
         }
         return Long.MIN_VALUE;
     }
 
-    private Int2ObjectAVLTreeMap<LongArrayFIFOQueue> bucketsFor(boolean urgent) {
-        return urgent ? urgentColumnsByRing : normalColumnsByRing;
+    private void removeFromBucket(long packed, boolean urgent) {
+        Int2ObjectAVLTreeMap<LongLinkedOpenHashSet> buckets =
+                urgent ? urgentColumnsByRing : normalColumnsByRing;
+        int ring = ringFor(packed);
+        LongLinkedOpenHashSet bucket = buckets.get(ring);
+        if (bucket == null) {
+            return;
+        }
+        bucket.remove(packed);
+        if (bucket.isEmpty()) {
+            buckets.remove(ring);
+        }
     }
 
     private int ringFor(long packed) {
@@ -207,17 +231,9 @@ final class DeferredColumnQueue implements Iterable<Long> {
     private void rebuildBuckets() {
         urgentColumnsByRing.clear();
         normalColumnsByRing.clear();
-        queuedEntries = 0;
+        queuedColumns.clear();
 
-        LongOpenHashSet validUrgentColumns = new LongOpenHashSet();
-        for (long packed : urgentColumns) {
-            if (columns.contains(packed)) {
-                validUrgentColumns.add(packed);
-            }
-        }
-        urgentColumns.clear();
-        urgentColumns.addAll(validUrgentColumns);
-
+        urgentColumns.removeIf(packed -> !columns.contains(packed));
         for (long packed : columns) {
             enqueue(packed, urgentColumns.contains(packed));
         }

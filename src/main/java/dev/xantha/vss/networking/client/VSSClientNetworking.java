@@ -151,6 +151,7 @@ public final class VSSClientNetworking {
                 case VSSConstants.RESPONSE_BACKPRESSURE -> manager.onBackpressured(requestId);
                 case VSSConstants.RESPONSE_UP_TO_DATE -> manager.onColumnUpToDate(requestId);
                 case VSSConstants.RESPONSE_NOT_GENERATED -> manager.onColumnNotGenerated(requestId);
+                case VSSConstants.RESPONSE_GENERATION_QUEUED -> manager.onGenerationQueued(requestId);
                 default -> VSSLogger.warn("Unknown batch response type: " + payload.responseTypes()[i]);
             }
         }

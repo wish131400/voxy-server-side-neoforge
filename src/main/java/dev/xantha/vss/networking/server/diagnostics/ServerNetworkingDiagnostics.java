@@ -46,7 +46,9 @@ public final class ServerNetworkingDiagnostics {
                 disk.readQueueSize(),
                 disk.writeQueueSize(),
                 disk.pendingReads(),
-                disk.pendingWrites());
+                disk.pendingWrites())
+                .append(Component.literal("; "))
+                .append(diskRuntimeExtra(disk));
     }
 
     public Component generationDiagnosticsComponent() {
@@ -102,7 +104,26 @@ public final class ServerNetworkingDiagnostics {
                 diskRuntime.pendingReads(),
                 stats.diskReadHits(),
                 stats.diskReadMisses(),
-                stats.diskReadFailures());
+                stats.diskReadFailures())
+                .append(Component.literal("; "))
+                .append(diskRuntimeExtra(diskRuntime.snapshot()));
+    }
+
+    private static Component diskRuntimeExtra(DiskTaskRuntime.Snapshot disk) {
+        double averageWaitMs = disk.readWaitSamples() == 0L
+                ? 0.0D
+                : disk.readWaitNanos() / 1_000_000.0D / disk.readWaitSamples();
+        return Component.translatable(
+                "vss.command.storage.runtime.extra",
+                disk.pendingPreloadReads(),
+                disk.manualReadsSubmitted(),
+                disk.manualReadsCompleted(),
+                disk.manualReadsRejected(),
+                disk.preloadReadsSubmitted(),
+                disk.preloadReadsCompleted(),
+                disk.preloadReadsRejected(),
+                String.format(Locale.ROOT, "%.1f", averageWaitMs),
+                String.format(Locale.ROOT, "%.1f", disk.maxReadWaitNanos() / 1_000_000.0D));
     }
 
     private QueueTotals queueTotals() {

@@ -4,7 +4,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 36;
+    public static final int PROTOCOL_VERSION = 37;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     public static final int CAPABILITY_ZSTD_COLUMNS = 1 << 1;
@@ -32,6 +32,7 @@ public final class VSSConstants {
     public static final byte RESPONSE_UP_TO_DATE = 1;
     public static final byte RESPONSE_NOT_GENERATED = 2;
     public static final byte RESPONSE_BACKPRESSURE = 3;
+    public static final byte RESPONSE_GENERATION_QUEUED = 4;
 
     private VSSConstants() {
     }

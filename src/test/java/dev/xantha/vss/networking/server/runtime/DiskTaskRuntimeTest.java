@@ -133,6 +133,64 @@ class DiskTaskRuntimeTest {
         }
     }
 
+    @Test
+    void preloadReadsLeaveReservedCapacityForLiveReads() throws Exception {
+        DiskTaskRuntime runtime = runtime(() -> 1, () -> true);
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch preloadFinished = new CountDownLatch(3);
+        AtomicBoolean rejected = new AtomicBoolean();
+        try {
+            for (int i = 0; i < 3; i++) {
+                int index = i;
+                assertTrue(runtime.submitPreloadRead(4, 1, () -> {
+                    if (index == 0) {
+                        firstStarted.countDown();
+                        try {
+                            releaseFirst.await(2, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    preloadFinished.countDown();
+                }, e -> rejected.set(true)));
+            }
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+
+            assertFalse(runtime.submitPreloadRead(4, 1, () -> {
+            }, e -> rejected.set(true)));
+            assertTrue(runtime.submitManualRead(4, pending -> pending.complete(), e -> rejected.set(true)));
+            assertEquals(3, runtime.pendingPreloadReads());
+            assertTrue(rejected.get());
+
+            releaseFirst.countDown();
+            assertTrue(preloadFinished.await(2, TimeUnit.SECONDS));
+            waitForPendingReads(runtime, 0);
+            assertEquals(3, runtime.snapshot().preloadReadsSubmitted());
+            assertEquals(3, runtime.snapshot().preloadReadsCompleted());
+            assertEquals(1, runtime.snapshot().manualReadsSubmitted());
+            assertEquals(1, runtime.snapshot().manualReadsCompleted());
+            assertEquals(4, runtime.snapshot().readWaitSamples());
+        } finally {
+            releaseFirst.countDown();
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void zeroPreloadCapacityRejectsPreloadButAcceptsLiveRead() {
+        DiskTaskRuntime runtime = runtime(() -> 1, () -> true);
+        try {
+            assertFalse(runtime.submitPreloadRead(1, 1, () -> {
+            }, e -> {
+            }));
+            assertTrue(runtime.submitManualRead(1, pending -> pending.complete(), e -> {
+            }));
+        } finally {
+            runtime.shutdown();
+        }
+    }
+
     private static DiskTaskRuntime runtime(java.util.function.IntSupplier readThreads, java.util.function.BooleanSupplier accepting) {
         return new DiskTaskRuntime(1, 2, readThreads, accepting);
     }

@@ -486,6 +486,26 @@ public final class LodRequestManager {
         resetRequestState();
     }
 
+    public synchronized void onGenerationQueued(int requestId) {
+        long packed = requestTracker.positionFor(requestId);
+        if (packed == Long.MIN_VALUE) {
+            return;
+        }
+        transitionToGenerationWaiting(
+                requestTracker,
+                requestId,
+                generationTimeoutFor(requestTracker.size()),
+                System.nanoTime());
+    }
+
+    static boolean transitionToGenerationWaiting(
+            ClientRequestTracker tracker,
+            int requestId,
+            long timeoutNanos,
+            long nowNanos) {
+        return tracker.markGenerationQueued(requestId, timeoutNanos, nowNanos);
+    }
+
     private void primeRequestBudgets() {
         if (sessionConfig == null) {
             return;
@@ -692,7 +712,7 @@ public final class LodRequestManager {
             ScanBudget scanBudget) {
         if (nearScanCompletedForCurrentOffsets
                 || orderedOffsets.length == 0
-                || !requestWindow.hasNormalCandidateCapacity(0)
+                || !requestWindow.hasNearSyncCapacity()
                 || lodDistance <= 0
                 || !scanBudget.canScanMore()) {
             return count;
@@ -701,7 +721,7 @@ public final class LodRequestManager {
         int maxAllowedRing = Math.min(lodDistance, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS);
         int totalCandidates = orderedOffsets.length;
         while (count < maxCount
-                && requestWindow.hasNormalCandidateCapacity(0)
+                && requestWindow.hasNearSyncCapacity()
                 && scanBudget.canScanMore()) {
             if (nearScanOffsetIndex >= totalCandidates) {
                 nearScanCompletedForCurrentOffsets = true;
@@ -727,10 +747,6 @@ public final class LodRequestManager {
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
-            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
-                break;
-            }
-
             nearScanOffsetIndex++;
             scanBudget.recordCandidate();
             updateSoftFrontier(offsetRing, lodDistance);
@@ -881,7 +897,7 @@ public final class LodRequestManager {
             long now,
             int maxAllowedRing,
             ScanBudget scanBudget) {
-        if (!requestWindow.hasAnyNormalCandidateCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
+        if (!requestWindow.hasAnySyncCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
             return count;
         }
         if (scanCompletedForCurrentOffsets) {
@@ -893,7 +909,7 @@ public final class LodRequestManager {
         RingScanGate ringGate = RingScanGate.fromCursor(orderedOffsets, scanOffsetIndex, totalCandidates);
 
         while (count < maxCount
-                && requestWindow.hasAnyNormalCandidateCapacity()
+                && requestWindow.hasAnySyncCapacity()
                 && scanBudget.canScanMore()) {
             if (scanOffsetIndex >= totalCandidates) {
                 scanCompletedForCurrentOffsets = true;
@@ -907,7 +923,7 @@ public final class LodRequestManager {
             if (offsetRing > maxAllowedRing) {
                 break;
             }
-            if (!requestWindow.hasNormalCandidateCapacity(offsetRing)) {
+            if (!requestWindow.hasSyncCapacity(offsetRing)) {
                 break;
             }
 
@@ -929,10 +945,6 @@ public final class LodRequestManager {
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
-            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
-                break;
-            }
-
             scanOffsetIndex++;
             scanBudget.recordCandidate();
             updateSoftFrontier(offsetRing, lodDistance);
@@ -983,8 +995,8 @@ public final class LodRequestManager {
         count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
                 positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
 
-        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dz++) {
-            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dx++) {
+        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dz++) {
+            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dx++) {
                 if (dx == 0 && dz == 0) {
                     continue;
                 }
@@ -1032,31 +1044,14 @@ public final class LodRequestManager {
             return count;
         }
 
-        if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
-            return count;
-        }
-        boolean generationCandidate = shouldUseFirstPassGenerationFallback(packed, ring, requestWindow);
-        if (!requestWindow.canSend(false, generationCandidate, ring)) {
+        boolean generationAllowed = requiresFirstPassGenerationFallback(packed);
+        if (!requestWindow.canSend(false, false, ring)) {
             return count;
         }
 
-        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate, now);
-        requestWindow.record(false, generationCandidate, ring);
+        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationAllowed, now);
+        requestWindow.record(false, false, ring);
         return count;
-    }
-
-    private boolean shouldUseFirstPassGenerationFallback(long packed, int ring, RequestWindow requestWindow) {
-        if (!requestWindow.hasGenerationCapacity() || !requiresFirstPassGenerationFallback(packed)) {
-            return false;
-        }
-        if (!requestWindow.canSend(false, true, ring)) {
-            return false;
-        }
-        return true;
-    }
-
-    private boolean shouldWaitForFirstPassGenerationSlot(long packed, RequestWindow requestWindow) {
-        return requiresFirstPassGenerationFallback(packed) && !requestWindow.hasGenerationCapacity();
     }
 
     private boolean requiresFirstPassGenerationFallback(long packed) {
@@ -1204,18 +1199,18 @@ public final class LodRequestManager {
             long[] timestamps,
             boolean[] allowGeneration,
             int count,
-            boolean generationCandidate,
+            boolean generationAllowed,
             long now) {
         int requestId = requestTracker.track(
                 packed,
-                generationCandidate,
+                false,
                 dirtyColumns.contains(packed),
                 timeoutFor(packed, requestTracker.size()),
                 now);
         requestIds[count] = requestId;
         positions[count] = packed;
         timestamps[count] = requestTimestampFor(packed);
-        allowGeneration[count] = generationCandidate;
+        allowGeneration[count] = generationAllowed;
         return count + 1;
     }
 
@@ -1276,14 +1271,20 @@ public final class LodRequestManager {
 
     private long timeoutFor(long packed, int queuedAheadRequests) {
         long baseTimeout = SYNC_REQUEST_TIMEOUT_NANOS;
-        if (sessionConfig != null
-                && sessionConfig.generationEnabled()
-                && isGenerationCandidate(packed)
-                && !dirtyColumns.contains(packed)) {
+        if (requestTracker.isGenerationPosition(packed)) {
             baseTimeout = GENERATION_REQUEST_TIMEOUT_NANOS;
         }
         long queueTimeout = queueTimeoutNanos(queuedAheadRequests + 1, effectiveReceiveBandwidthBytesPerSecond());
         return Math.min(MAX_REQUEST_TIMEOUT_NANOS, Math.max(baseTimeout, queueTimeout));
+    }
+
+    private long generationTimeoutFor(int queuedAheadRequests) {
+        long queueTimeout = queueTimeoutNanos(
+                queuedAheadRequests + 1,
+                effectiveReceiveBandwidthBytesPerSecond());
+        return Math.min(
+                MAX_REQUEST_TIMEOUT_NANOS,
+                Math.max(GENERATION_REQUEST_TIMEOUT_NANOS, queueTimeout));
     }
 
     static long queueTimeoutNanos(int requestCount, long bandwidthBytesPerSecond) {

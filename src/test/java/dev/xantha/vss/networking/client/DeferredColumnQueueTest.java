@@ -78,6 +78,22 @@ class DeferredColumnQueueTest {
     }
 
     @Test
+    void repeatedRequeueKeepsOnePhysicalQueueEntry() {
+        DeferredColumnQueue queue = new DeferredColumnQueue(10);
+        long packed = position(3, 4);
+        queue.recenter(0, 0);
+
+        for (int i = 0; i < 1_000; i++) {
+            queue.requeue(packed, false);
+        }
+
+        assertEquals(1, queue.size());
+        assertEquals(1, queue.queuedEntries());
+        assertIterableEquals(List.of(packed), queue.pollClosestCandidates(10, false));
+        assertEquals(0, queue.queuedEntries());
+    }
+
+    @Test
     void recenterChangesPollOrder() {
         DeferredColumnQueue queue = new DeferredColumnQueue(10);
         long west = position(-8, 0);
@@ -97,7 +113,7 @@ class DeferredColumnQueueTest {
         DeferredColumnQueue queue = new DeferredColumnQueue(2);
         long urgentFar = position(32, 0);
         long normalNear = position(1, 0);
-        long incomingNear = position(2, 0);
+        long incomingNear = position(0, 0);
 
         queue.recenter(0, 0);
         queue.defer(urgentFar, true);
@@ -107,6 +123,24 @@ class DeferredColumnQueueTest {
         assertTrue(queue.contains(urgentFar));
         assertFalse(queue.contains(normalNear));
         assertTrue(queue.contains(incomingNear));
+    }
+
+    @Test
+    void fullQueueRejectsNewNormalColumnWhenItIsFurthest() {
+        DeferredColumnQueue queue = new DeferredColumnQueue(2);
+        long near = position(1, 0);
+        long middle = position(4, 0);
+        long far = position(8, 0);
+
+        queue.recenter(0, 0);
+        queue.defer(near);
+        queue.defer(middle);
+        queue.defer(far);
+
+        assertTrue(queue.contains(near));
+        assertTrue(queue.contains(middle));
+        assertFalse(queue.contains(far));
+        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10, false));
     }
 
     @Test

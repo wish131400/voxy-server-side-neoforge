@@ -151,6 +151,20 @@ final class ClientRequestTracker {
         return packed != Long.MIN_VALUE && generationInFlight.contains(packed);
     }
 
+    boolean markGenerationQueued(int requestId, long timeoutNanos, long nowNanos) {
+        long packed = requestIdToPosition.get(requestId);
+        if (packed == Long.MIN_VALUE || !matches(requestId, packed)) {
+            return false;
+        }
+        generationInFlight.add(packed);
+        refreshDeadline(requestId, timeoutNanos, nowNanos);
+        return true;
+    }
+
+    boolean isGenerationPosition(long packed) {
+        return generationInFlight.contains(packed);
+    }
+
     boolean isDirtyRefreshPosition(long packed) {
         return dirtyRefreshInFlight.contains(packed);
     }
