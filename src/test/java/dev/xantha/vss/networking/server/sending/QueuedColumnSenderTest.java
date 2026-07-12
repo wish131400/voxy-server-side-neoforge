@@ -50,16 +50,15 @@ class QueuedColumnSenderTest {
         ArrayList<Integer> cleared = new ArrayList<>();
         queue.enqueue(
                 List.of(
-                        splitPayload(7, 20, 0, false),
-                        splitPayload(7, 20, 0, true)),
+                        splitPayload(7, 20, 0, 0, 2),
+                        splitPayload(7, 20, 0, 1, 2)),
                 true,
                 10,
                 1_000_000,
-                false,
-                cleared::add);
+                false);
         PlayerRequestState.QueuedPayloadBatch priority = queue.peekPriorityBatch(0, 0);
         queue.consumeBatchPayload(priority);
-        queue.enqueue(payload(8, 1, 0, false), false, 10, 1_000_000, false, cleared::add);
+        queue.enqueue(payload(8, 1, 0, false), false, 10, 1_000_000, false);
 
         PlayerRequestState.QueuedPayloadBatch normal = queue.peekNormalBatch(0, 0);
 
@@ -72,16 +71,15 @@ class QueuedColumnSenderTest {
         ArrayList<Integer> cleared = new ArrayList<>();
         queue.enqueue(
                 List.of(
-                        splitPayload(7, 20, 0, false),
-                        splitPayload(7, 20, 0, true)),
+                        splitPayload(7, 20, 0, 0, 2),
+                        splitPayload(7, 20, 0, 1, 2)),
                 false,
                 10,
                 1_000_000,
-                false,
-                cleared::add);
+                false);
         PlayerRequestState.QueuedPayloadBatch normal = queue.peekNormalBatch(0, 0);
         queue.consumeBatchPayload(normal);
-        queue.enqueue(payload(8, 1, 0, true), true, 10, 1_000_000, false, cleared::add);
+        queue.enqueue(payload(8, 1, 0, true), true, 10, 1_000_000, false);
 
         PlayerRequestState.QueuedPayloadBatch priority = queue.peekPriorityBatch(0, 0);
 
@@ -116,11 +114,13 @@ class QueuedColumnSenderTest {
                 1L,
                 new byte[128],
                 true,
-                true,
+                81L,
+                0,
+                1,
                 new int[0]);
     }
 
-    private static VoxelColumnS2CPayload splitPayload(int requestId, int cx, int cz, boolean completesRequest) {
+    private static VoxelColumnS2CPayload splitPayload(int requestId, int cx, int cz, int partIndex, int partCount) {
         return new VoxelColumnS2CPayload(
                 requestId,
                 cx,
@@ -128,8 +128,10 @@ class QueuedColumnSenderTest {
                 null,
                 1L,
                 new byte[128],
-                completesRequest,
-                completesRequest,
+                true,
+                80L,
+                partIndex,
+                partCount,
                 new int[0]);
     }
 }

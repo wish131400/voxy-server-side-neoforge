@@ -38,7 +38,7 @@ final class ClientRequestTracker {
     }
 
     int track(long packed, boolean generationRequest, boolean dirtyRefreshRequest, long timeoutNanos, long nowNanos) {
-        int requestId = nextRequestId++;
+        int requestId = allocateRequestId();
         inFlight.add(packed);
         if (generationRequest) {
             generationInFlight.add(packed);
@@ -49,7 +49,7 @@ final class ClientRequestTracker {
         positionToRequestId.put(packed, requestId);
         requestIdToPosition.put(requestId, packed);
         requestSendTimes.put(packed, nowNanos);
-        long timeoutAtNanos = nowNanos + timeoutNanos;
+        long timeoutAtNanos = saturatedAdd(nowNanos, Math.max(0L, timeoutNanos));
         requestDeadlineTimes.put(requestId, timeoutAtNanos);
         requestDeadlines.add(new RequestDeadline(packed, requestId, timeoutAtNanos));
         return requestId;
@@ -60,7 +60,7 @@ final class ClientRequestTracker {
         if (packed == Long.MIN_VALUE || positionToRequestId.get(packed) != requestId) {
             return;
         }
-        long timeoutAtNanos = nowNanos + Math.max(0L, timeoutNanos);
+        long timeoutAtNanos = saturatedAdd(nowNanos, Math.max(0L, timeoutNanos));
         requestDeadlineTimes.put(requestId, timeoutAtNanos);
         requestDeadlines.add(new RequestDeadline(packed, requestId, timeoutAtNanos));
         deadlineTombstones++;
@@ -128,6 +128,24 @@ final class ClientRequestTracker {
         return requestIdToPosition.get(requestId);
     }
 
+    boolean matches(int requestId, long packed) {
+        return requestIdToPosition.get(requestId) == packed
+                && positionToRequestId.get(packed) == requestId;
+    }
+
+    int requestIdFor(long packed) {
+        return positionToRequestId.get(packed);
+    }
+
+    void cancelRequest(int requestId) {
+        long packed = requestIdToPosition.get(requestId);
+        if (packed == Long.MIN_VALUE || !matches(requestId, packed)) {
+            return;
+        }
+        removeTrackedPosition(packed);
+        cancelSender.accept(requestId);
+    }
+
     boolean isGenerationRequest(int requestId) {
         long packed = requestIdToPosition.get(requestId);
         return packed != Long.MIN_VALUE && generationInFlight.contains(packed);
@@ -180,11 +198,30 @@ final class ClientRequestTracker {
         positionToRequestId.clear();
         requestIdToPosition.clear();
         requestSendTimes.clear();
+        requestDeadlineTimes.clear();
         requestDeadlines.clear();
         generationInFlight.clear();
         dirtyRefreshInFlight.clear();
-        nextRequestId = 0;
         deadlineTombstones = 0;
+    }
+
+    private int allocateRequestId() {
+        int candidate = nextRequestId < 0 ? 0 : nextRequestId;
+        int start = candidate;
+        do {
+            if (!requestIdToPosition.containsKey(candidate)) {
+                nextRequestId = candidate == Integer.MAX_VALUE ? 0 : candidate + 1;
+                return candidate;
+            }
+            candidate = candidate == Integer.MAX_VALUE ? 0 : candidate + 1;
+        } while (candidate != start);
+        throw new IllegalStateException("No free VSS request ids");
+    }
+
+    private static long saturatedAdd(long value, long increment) {
+        return increment > 0L && value > Long.MAX_VALUE - increment
+                ? Long.MAX_VALUE
+                : value + increment;
     }
 
     private int removeTrackedPosition(long packed) {

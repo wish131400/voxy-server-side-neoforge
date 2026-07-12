@@ -10,6 +10,7 @@ import net.minecraft.world.level.Level;
 
 public final class VSSApi {
     private static final List<VoxelColumnConsumer> COLUMN_CONSUMERS = new CopyOnWriteArrayList<>();
+    private static final List<VoxelColumnProcessingConsumer> PROCESSING_COLUMN_CONSUMERS = new CopyOnWriteArrayList<>();
 
     private VSSApi() {
     }
@@ -19,8 +20,13 @@ public final class VSSApi {
         VSSLogger.info("Registered voxel column consumer: " + consumer.getClass().getName());
     }
 
+    public static void registerColumnProcessingConsumer(VoxelColumnProcessingConsumer consumer) {
+        PROCESSING_COLUMN_CONSUMERS.add(consumer);
+        VSSLogger.info("Registered voxel column processing consumer: " + consumer.getClass().getName());
+    }
+
     public static boolean hasVoxelConsumers() {
-        return !COLUMN_CONSUMERS.isEmpty();
+        return !COLUMN_CONSUMERS.isEmpty() || !PROCESSING_COLUMN_CONSUMERS.isEmpty();
     }
 
     public static boolean isServerEnabled() {
@@ -39,5 +45,34 @@ public final class VSSApi {
                 VSSLogger.error("Voxel column consumer threw exception", e);
             }
         }
+    }
+
+    public static boolean dispatchColumnAndReport(
+            ClientLevel level,
+            ResourceKey<Level> dimension,
+            int chunkX,
+            int chunkZ,
+            VoxelColumnData columnData) {
+        boolean handled = false;
+        boolean accepted = true;
+        for (VoxelColumnConsumer consumer : COLUMN_CONSUMERS) {
+            handled = true;
+            try {
+                consumer.onVoxelColumnReceived(level, dimension, chunkX, chunkZ, columnData);
+            } catch (Exception e) {
+                accepted = false;
+                VSSLogger.error("Voxel column consumer threw exception", e);
+            }
+        }
+        for (VoxelColumnProcessingConsumer consumer : PROCESSING_COLUMN_CONSUMERS) {
+            handled = true;
+            try {
+                accepted &= consumer.processVoxelColumn(level, dimension, chunkX, chunkZ, columnData);
+            } catch (Exception e) {
+                accepted = false;
+                VSSLogger.error("Voxel column processing consumer threw exception", e);
+            }
+        }
+        return handled && accepted;
     }
 }

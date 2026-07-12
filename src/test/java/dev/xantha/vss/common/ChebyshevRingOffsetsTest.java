@@ -69,6 +69,18 @@ class ChebyshevRingOffsetsTest {
         assertThrows(IllegalArgumentException.class, () -> ChebyshevRingOffsets.generate(-1));
     }
 
+    @Test
+    void firstRingIndicesMatchGeneratedLayout() {
+        long[] offsets = ChebyshevRingOffsets.generate(8);
+        for (int ring = 0; ring <= 8; ring++) {
+            int index = ChebyshevRingOffsets.firstIndexForRing(ring);
+            assertEquals(ring, ChebyshevRingOffsets.ring(offsets[index]));
+            if (index > 0) {
+                assertTrue(ChebyshevRingOffsets.ring(offsets[index - 1]) < ring);
+            }
+        }
+    }
+
     private static int[][] decode(long[] offsets) {
         int[][] decoded = new int[offsets.length][2];
         for (int i = 0; i < offsets.length; i++) {

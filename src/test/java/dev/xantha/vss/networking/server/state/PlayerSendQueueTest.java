@@ -89,9 +89,8 @@ class PlayerSendQueueTest {
         enqueue(queue, payload(1, 0, 0), false, 1, 1_000_000, cleared);
         enqueue(queue, payload(2, 1, 0), false, 1, 1_000_000, cleared);
 
-        assertEquals(0, queue.queuedPayloadCount());
-        assertEquals(2, cleared.get(0));
-        assertEquals(1, cleared.get(1));
+        assertEquals(1, queue.queuedPayloadCount());
+        assertEquals(List.of(2), cleared);
     }
 
     @Test
@@ -117,7 +116,7 @@ class PlayerSendQueueTest {
         byte[] rawColumn = new byte[4096];
         VoxelColumnS2CPayload payload = new VoxelColumnS2CPayload(1, 0, 0, null, 1L, rawColumn);
 
-        queue.enqueue(payload, false, 10, 1_000_000, true, cleared::add);
+        cleared.addAll(queue.enqueue(payload, false, 10, 1_000_000, true).rejectedRequestIds());
 
         assertEquals(payload.estimatedWireBytes(true), queue.queuedBytes());
         assertEquals(queue.peek(0, 0).wireBytes(), queue.queuedBytes());
@@ -144,11 +143,11 @@ class PlayerSendQueueTest {
         PlayerSendQueue queue = new PlayerSendQueue();
         ArrayList<Integer> cleared = new ArrayList<>();
         List<VoxelColumnS2CPayload> splitPayloads = List.of(
-                splitPayload(7, 0, 0, false),
-                splitPayload(7, 0, 0, false),
-                splitPayload(7, 0, 0, true));
+                splitPayload(7, 0, 0, 0, 3),
+                splitPayload(7, 0, 0, 1, 3),
+                splitPayload(7, 0, 0, 2, 3));
 
-        queue.enqueue(splitPayloads, false, 10, 1_000_000, false, cleared::add);
+        cleared.addAll(queue.enqueue(splitPayloads, false, 10, 1_000_000, false).rejectedRequestIds());
 
         PlayerRequestState.QueuedPayloadBatch batch = queue.peekNormalBatch(0, 0);
         int expectedWireBytes = splitPayloads.stream()
@@ -171,11 +170,11 @@ class PlayerSendQueueTest {
         PlayerSendQueue queue = new PlayerSendQueue();
         ArrayList<Integer> cleared = new ArrayList<>();
         List<VoxelColumnS2CPayload> splitPayloads = List.of(
-                splitPayload(7, 0, 0, false),
-                splitPayload(7, 0, 0, false),
-                splitPayload(7, 0, 0, true));
+                splitPayload(7, 0, 0, 0, 3),
+                splitPayload(7, 0, 0, 1, 3),
+                splitPayload(7, 0, 0, 2, 3));
 
-        queue.enqueue(splitPayloads, false, 10, 1_000_000, false, cleared::add);
+        cleared.addAll(queue.enqueue(splitPayloads, false, 10, 1_000_000, false).rejectedRequestIds());
         PlayerRequestState.QueuedPayloadBatch batch = queue.peekNormalBatch(0, 0);
         long initialBytes = queue.queuedBytes();
 
@@ -196,11 +195,44 @@ class PlayerSendQueueTest {
         assertNull(queue.peekNormalBatch(0, 0));
     }
 
+    @Test
+    void nearerNormalBatchReplacesUnstartedFarBatch() {
+        PlayerSendQueue queue = new PlayerSendQueue();
+        queue.prepareOrder(0, 0);
+
+        queue.enqueue(payload(1, 20, 0), false, 1, 1_000_000, false);
+        PlayerSendQueue.EnqueueResult result =
+                queue.enqueue(payload(2, 2, 0), false, 1, 1_000_000, false);
+
+        assertEquals(true, result.accepted());
+        assertEquals(List.of(1), result.rejectedRequestIds());
+        assertEquals(2, queue.peekNormal(0, 0).payload().requestId());
+    }
+
+    @Test
+    void priorityBatchCannotTruncateStartedNormalTransfer() {
+        PlayerSendQueue queue = new PlayerSendQueue();
+        queue.prepareOrder(0, 0);
+        List<VoxelColumnS2CPayload> splitPayloads = List.of(
+                splitPayload(7, 20, 0, 0, 2),
+                splitPayload(7, 20, 0, 1, 2));
+        queue.enqueue(splitPayloads, false, 2, 1_000_000, false);
+        PlayerRequestState.QueuedPayloadBatch started = queue.peekNormalBatch(0, 0);
+        queue.consumeBatchPayload(started);
+
+        PlayerSendQueue.EnqueueResult result =
+                queue.enqueue(payload(8, 1, 0), true, 1, 1_000_000, false);
+
+        assertEquals(false, result.accepted());
+        assertEquals(List.of(8), result.rejectedRequestIds());
+        assertEquals(started, queue.peekNormalBatch(0, 0));
+    }
+
     private static VoxelColumnS2CPayload payload(int requestId, int cx, int cz) {
         return new VoxelColumnS2CPayload(requestId, cx, cz, null, 1L, new byte[128]);
     }
 
-    private static VoxelColumnS2CPayload splitPayload(int requestId, int cx, int cz, boolean completesRequest) {
+    private static VoxelColumnS2CPayload splitPayload(int requestId, int cx, int cz, int partIndex, int partCount) {
         return new VoxelColumnS2CPayload(
                 requestId,
                 cx,
@@ -208,8 +240,10 @@ class PlayerSendQueueTest {
                 null,
                 1L,
                 new byte[128],
-                completesRequest,
-                completesRequest,
+                true,
+                77L,
+                partIndex,
+                partCount,
                 new int[0]);
     }
 
@@ -229,6 +263,11 @@ class PlayerSendQueueTest {
             int queueLimit,
             int queueBytesLimit,
             ArrayList<Integer> cleared) {
-        queue.enqueue(payload, priority, queueLimit, queueBytesLimit, false, cleared::add);
+        cleared.addAll(queue.enqueue(
+                payload,
+                priority,
+                queueLimit,
+                queueBytesLimit,
+                false).rejectedRequestIds());
     }
 }

@@ -46,9 +46,11 @@ public final class SectionSerializer {
         LevelLightEngine lightEngine = level.getLightEngine();
         LayerLightEventListener blockLightListener = lightEngine.getLayerListener(LightLayer.BLOCK);
         LayerLightEventListener skyLightListener = lightEngine.getLayerListener(LightLayer.SKY);
+        boolean requiresSkyLight = level.dimensionType().hasSkyLight();
 
         ArrayList<SectionSnapshot> includedSections = new ArrayList<>(sections.length);
         int highestIncludedSectionY = Integer.MIN_VALUE;
+        boolean missingSkyLight = false;
         for (int i = 0; i < sections.length; i++) {
             LevelChunkSection section = sections[i];
             if (section == null) {
@@ -57,24 +59,28 @@ public final class SectionSerializer {
 
             int sectionY = minSectionY + i;
             SectionPos sectionPos = SectionPos.of(cx, sectionY, cz);
-            byte[] blockLight = copyNonZeroLightData(blockLightListener, sectionPos);
+            LightData blockLight = copyLightData(blockLightListener, sectionPos);
             section.acquire();
             try {
-                if (section.hasOnlyAir() && blockLight == null) {
+                if (section.hasOnlyAir() && blockLight.data() == null) {
                     continue;
                 }
 
                 PalettedContainer<BlockState> states = section.getStates().copy();
                 PalettedContainerRO<Holder<Biome>> biomes = section.getBiomes().recreate();
-                byte[] skyLight = copyNonZeroLightData(skyLightListener, sectionPos);
-                includedSections.add(new SectionSnapshot(sectionY, states, biomes, blockLight, skyLight));
+                LightData skyLight = copyLightData(skyLightListener, sectionPos);
+                if (requiresSkyLight && !skyLight.present()) {
+                    missingSkyLight = true;
+                }
+                includedSections.add(new SectionSnapshot(sectionY, states, biomes, blockLight.data(), skyLight.data()));
                 highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionY);
             } finally {
                 section.release();
             }
         }
 
-        boolean completeColumn = isCompleteColumn(level, chunk, highestIncludedSectionY, includedSections.isEmpty());
+        boolean completeColumn = !missingSkyLight
+                && isCompleteColumn(level, chunk, highestIncludedSectionY, includedSections.isEmpty());
         return new ColumnSnapshot(cx, cz, includedSections.toArray(SectionSnapshot[]::new), completeColumn);
     }
 
@@ -114,6 +120,7 @@ public final class SectionSerializer {
         LevelChunkSection[] sections = chunk.getSections();
         LevelLightEngine lightEngine = includeLiveLight ? level.getLightEngine() : null;
         LayerLightEventListener blockLightListener = lightEngine != null ? lightEngine.getLayerListener(LightLayer.BLOCK) : null;
+        boolean requiresSkyLight = includeLiveLight && level.dimensionType().hasSkyLight();
 
         ArrayList<SectionInfo> includedSections = new ArrayList<>(sections.length);
         int highestIncludedSectionY = Integer.MIN_VALUE;
@@ -142,6 +149,7 @@ public final class SectionSerializer {
         try {
             buf.writeVarInt(includedSections.size());
             LayerLightEventListener skyLightListener = lightEngine != null ? lightEngine.getLayerListener(LightLayer.SKY) : null;
+            boolean missingSkyLight = false;
             for (SectionInfo info : includedSections) {
                 LevelChunkSection section = sections[info.index];
                 buf.writeByte(info.sectionY);
@@ -151,6 +159,9 @@ public final class SectionSerializer {
                     buf.writeBytes(info.blockLight.getData());
                 }
                 DataLayer skyLight = skyLightListener != null ? skyLightListener.getDataLayerData(info.sectionPos) : null;
+                if (requiresSkyLight && skyLight == null) {
+                    missingSkyLight = true;
+                }
                 boolean hasSkyLight = skyLight != null && hasNonZeroData(skyLight);
                 buf.writeBoolean(hasSkyLight);
                 if (hasSkyLight) {
@@ -160,7 +171,8 @@ public final class SectionSerializer {
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            boolean completeColumn = isCompleteColumn(level, chunk, highestIncludedSectionY, false);
+            boolean completeColumn = !missingSkyLight
+                    && isCompleteColumn(level, chunk, highestIncludedSectionY, false);
             return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
         } finally {
             buf.release();
@@ -201,15 +213,28 @@ public final class SectionSerializer {
         return false;
     }
 
-    private static byte[] copyNonZeroLightData(LayerLightEventListener listener, SectionPos sectionPos) {
+    private static LightData copyLightData(LayerLightEventListener listener, SectionPos sectionPos) {
         DataLayer layer = listener != null ? listener.getDataLayerData(sectionPos) : null;
-        if (layer == null || !hasNonZeroData(layer)) {
-            return null;
+        if (layer == null) {
+            return LightData.missing();
         }
-        return Arrays.copyOf(layer.getData(), layer.getData().length);
+        if (!hasNonZeroData(layer)) {
+            return LightData.empty();
+        }
+        return new LightData(Arrays.copyOf(layer.getData(), layer.getData().length), true);
     }
 
     private record SectionInfo(int index, int sectionY, SectionPos sectionPos, DataLayer blockLight, boolean hasBlockLight) {
+    }
+
+    private record LightData(byte[] data, boolean present) {
+        private static LightData empty() {
+            return new LightData(null, true);
+        }
+
+        private static LightData missing() {
+            return new LightData(null, false);
+        }
     }
 
     public record ColumnSnapshot(int chunkX, int chunkZ, SectionSnapshot[] sections, boolean completeColumn) {

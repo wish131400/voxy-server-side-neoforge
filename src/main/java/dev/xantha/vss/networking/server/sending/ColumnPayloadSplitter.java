@@ -26,24 +26,32 @@ public final class ColumnPayloadSplitter {
             VoxelColumnS2CPayload payload,
             long effectiveBandwidthBytesPerSecond,
             boolean networkCompressionEnabled) {
-        int targetWireBytes = targetWireBytes(effectiveBandwidthBytesPerSecond);
-        if (payload.estimatedWireBytes(networkCompressionEnabled) <= targetWireBytes) {
-            return List.of(payload);
+        if (!payload.hasTransferMetadata()) {
+            throw new IllegalArgumentException("LOD transfer id must be assigned before splitting");
         }
 
         byte[] rawSections = payload.decompressedSections();
-        if (rawSections == null || rawSections.length <= 1) {
-            return List.of(payload);
+        ParsedSections parsed = readSections(level, payload, rawSections);
+        int[] replacementSectionYs = payload.completeColumn() && parsed.valid()
+                ? replacementSectionYs(parsed.sections())
+                : payload.replacementSectionYs();
+        VoxelColumnS2CPayload normalized = payload.withTransferMetadata(
+                payload.transferId(),
+                0,
+                1,
+                replacementSectionYs);
+        int targetWireBytes = targetWireBytes(effectiveBandwidthBytesPerSecond);
+        if (normalized.estimatedWireBytes(networkCompressionEnabled) <= targetWireBytes) {
+            return List.of(normalized);
         }
 
-        List<SerializedSection> sections = readSections(level, payload, rawSections);
-        if (sections.size() <= 1) {
-            return List.of(payload);
+        if (!parsed.valid() || parsed.sections().size() <= 1) {
+            return List.of(normalized);
         }
 
+        List<SerializedSection> sections = parsed.sections();
         sections.sort(Comparator.comparingInt(SerializedSection::sectionY).reversed());
-        int[] replacementSectionYs = replacementSectionYs(sections);
-        ArrayList<VoxelColumnS2CPayload> splitPayloads = new ArrayList<>();
+        ArrayList<List<SerializedSection>> groups = new ArrayList<>();
         ArrayList<SerializedSection> currentGroup = new ArrayList<>(MAX_SECTIONS_PER_GROUP);
         int currentBytes = 0;
 
@@ -51,8 +59,8 @@ public final class ColumnPayloadSplitter {
             boolean groupFull = currentGroup.size() >= MAX_SECTIONS_PER_GROUP;
             boolean groupTooLarge = !currentGroup.isEmpty() && currentBytes + section.bytes().length > targetWireBytes;
             if (groupFull || groupTooLarge) {
-                addGroup(splitPayloads, payload, currentGroup, false, false, new int[0]);
-                currentGroup.clear();
+                groups.add(List.copyOf(currentGroup));
+                currentGroup = new ArrayList<>(MAX_SECTIONS_PER_GROUP);
                 currentBytes = 0;
             }
             currentGroup.add(section);
@@ -60,17 +68,26 @@ public final class ColumnPayloadSplitter {
         }
 
         if (!currentGroup.isEmpty()) {
-            addGroup(
-                    splitPayloads,
-                    payload,
-                    currentGroup,
-                    payload.completeColumn(),
-                    true,
-                    payload.completeColumn() ? replacementSectionYs : new int[0]);
+            groups.add(List.copyOf(currentGroup));
         }
 
-        if (splitPayloads.size() <= 1) {
-            return List.of(payload);
+        if (groups.size() <= 1) {
+            return List.of(normalized);
+        }
+        if (groups.size() > VoxelColumnS2CPayload.MAX_TRANSFER_PARTS) {
+            throw new IllegalArgumentException("LOD column exceeds transfer part limit: " + groups.size());
+        }
+
+        ArrayList<VoxelColumnS2CPayload> splitPayloads = new ArrayList<>(groups.size());
+        for (int partIndex = 0; partIndex < groups.size(); partIndex++) {
+            boolean finalPart = partIndex == groups.size() - 1;
+            addGroup(
+                    splitPayloads,
+                    normalized,
+                    groups.get(partIndex),
+                    partIndex,
+                    groups.size(),
+                    finalPart && payload.completeColumn() ? replacementSectionYs : new int[0]);
         }
         return splitPayloads;
     }
@@ -79,20 +96,26 @@ public final class ColumnPayloadSplitter {
         return BandwidthProfile.targetWireBytes(effectiveBandwidthBytesPerSecond);
     }
 
-    private static List<SerializedSection> readSections(
+    private static ParsedSections readSections(
             ServerLevel level,
             VoxelColumnS2CPayload payload,
             byte[] rawSections) {
+        if (rawSections == null || rawSections.length == 0) {
+            return ParsedSections.invalid();
+        }
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(rawSections));
         try {
             int sectionCount = buf.readVarInt();
-            if (sectionCount <= 0 || sectionCount > 64) {
-                return List.of();
+            if (sectionCount < 0 || sectionCount > 64) {
+                return ParsedSections.invalid();
             }
 
             Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
             ArrayList<SerializedSection> sections = new ArrayList<>(sectionCount);
-            for (int i = 0; i < sectionCount && buf.isReadable(); i++) {
+            for (int i = 0; i < sectionCount; i++) {
+                if (!buf.isReadable()) {
+                    return ParsedSections.invalid();
+                }
                 int start = buf.readerIndex();
                 int sectionY = buf.readByte();
                 LevelChunkSection section = new LevelChunkSection(biomeRegistry);
@@ -108,12 +131,15 @@ public final class ColumnPayloadSplitter {
                 System.arraycopy(rawSections, start, bytes, 0, bytes.length);
                 sections.add(new SerializedSection(sectionY, bytes));
             }
-            return sections;
+            if (buf.isReadable()) {
+                return ParsedSections.invalid();
+            }
+            return new ParsedSections(sections, true);
         } catch (Exception e) {
             VSSLogger.debug("Failed to split oversized LOD column at "
                     + payload.chunkX() + "," + payload.chunkZ()
                     + ": " + e.getMessage());
-            return List.of();
+            return ParsedSections.invalid();
         } finally {
             buf.release();
         }
@@ -123,8 +149,8 @@ public final class ColumnPayloadSplitter {
             ArrayList<VoxelColumnS2CPayload> payloads,
             VoxelColumnS2CPayload source,
             List<SerializedSection> sections,
-            boolean completeColumn,
-            boolean completesRequest,
+            int partIndex,
+            int partCount,
             int[] replacementSectionYs) {
         byte[] groupedSections = writeGroup(sections);
         payloads.add(new VoxelColumnS2CPayload(
@@ -134,8 +160,10 @@ public final class ColumnPayloadSplitter {
                 source.dimension(),
                 source.columnTimestamp(),
                 groupedSections,
-                completeColumn,
-                completesRequest,
+                source.completeColumn(),
+                source.transferId(),
+                partIndex,
+                partCount,
                 replacementSectionYs));
     }
 
@@ -163,5 +191,11 @@ public final class ColumnPayloadSplitter {
     }
 
     private record SerializedSection(int sectionY, byte[] bytes) {
+    }
+
+    private record ParsedSections(List<SerializedSection> sections, boolean valid) {
+        private static ParsedSections invalid() {
+            return new ParsedSections(new ArrayList<>(), false);
+        }
     }
 }

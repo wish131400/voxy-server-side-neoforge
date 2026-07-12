@@ -33,4 +33,20 @@ class LodRequestManagerDirtyRefreshTest {
         assertFalse(tracker.contains(packed));
         assertEquals(9_999L, manager.requestTimestampFor(packed));
     }
+
+    @Test
+    void newerDirtyVersionCancelsOlderDirtyRefreshButDuplicateNoticeDoesNot() {
+        ClientRequestTracker tracker = new ClientRequestTracker(ignored -> {
+        });
+        LodRequestManager manager = new LodRequestManager("test", tracker);
+        long packed = PositionUtil.packPosition(2, 3);
+        manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L});
+        tracker.track(packed, false, true, 1_000_000_000L, 0L);
+
+        manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L});
+        assertEquals(true, tracker.contains(packed));
+
+        manager.onDirtyColumns(new long[] {packed}, new long[] {10_001L});
+        assertFalse(tracker.contains(packed));
+    }
 }

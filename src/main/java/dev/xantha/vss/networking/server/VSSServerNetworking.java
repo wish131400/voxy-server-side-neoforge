@@ -17,6 +17,7 @@ import dev.xantha.vss.networking.server.sending.QueuedColumnSender;
 import dev.xantha.vss.networking.server.session.PlayerSessionManager;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
+import dev.xantha.vss.networking.server.state.PlayerSendQueue;
 import dev.xantha.vss.networking.server.storage.ColumnLodCache;
 import dev.xantha.vss.networking.server.storage.PersistentColumnLodStore;
 import dev.xantha.vss.networking.server.storage.PersistentColumnWriter;
@@ -32,6 +33,7 @@ import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -44,6 +46,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 public final class VSSServerNetworking {
+    private static final AtomicLong NEXT_TRANSFER_ID = new AtomicLong(1L);
     private static final PlayerRequestRegistry PLAYER_REGISTRY = new PlayerRequestRegistry();
     private static final ChunkGenerationService GENERATION_SERVICE = new ChunkGenerationService(VSSServerConfig.CONFIG);
     private static final ColumnLodCache COLUMN_CACHE = new ColumnLodCache(VSSServerConfig.CONFIG);
@@ -230,29 +233,39 @@ public final class VSSServerNetworking {
             state.clearRequest(payload.requestId());
             return false;
         }
+        if (!payload.completeColumn()) {
+            state.clearRequest(payload.requestId());
+            sendNotGenerated(player, payload.requestId());
+            return false;
+        }
         if (!isPayloadStillRelevant(player, payload)) {
             state.clearRequest(payload.requestId());
+            sendBackpressured(player, payload.requestId());
             return false;
         }
         boolean allowZstdColumns = state.supportsZstdColumns();
-        payload.setAllowZstdEncoding(allowZstdColumns);
+        VoxelColumnS2CPayload transferPayload = payload.withTransferMetadata(
+                nextTransferId(),
+                0,
+                1,
+                payload.replacementSectionYs());
+        transferPayload.setAllowZstdEncoding(allowZstdColumns);
         VSSServerConfig config = VSSServerConfig.CONFIG;
         long effectiveBandwidth = Math.min(config.bandwidthBytesPerSecond(), state.desiredBandwidth());
         List<VoxelColumnS2CPayload> payloads = ColumnPayloadSplitter.splitForBandwidth(
                 player.serverLevel(),
-                payload,
+                transferPayload,
                 effectiveBandwidth,
                 config.enableNetworkColumnCompression);
         for (VoxelColumnS2CPayload queuedPayload : payloads) {
             queuedPayload.setAllowZstdEncoding(allowZstdColumns);
         }
-        if (!state.enqueue(payloads, priority)) {
-            if (payload.requestId() >= 0) {
-                sendRateLimited(player, payload.requestId());
-            }
-            return false;
+        state.prepareSendOrder(player.getBlockX() >> 4, player.getBlockZ() >> 4);
+        PlayerSendQueue.EnqueueResult admission = state.enqueue(payloads, priority);
+        for (int rejectedRequestId : admission.rejectedRequestIds()) {
+            sendBackpressured(player, rejectedRequestId);
         }
-        return true;
+        return admission.accepted();
     }
 
     private static boolean isPayloadStillRelevant(ServerPlayer player, VoxelColumnS2CPayload payload) {
@@ -277,13 +290,28 @@ public final class VSSServerNetworking {
         return PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) <= maxDistance;
     }
 
-    private static void sendRateLimited(ServerPlayer player, int requestId) {
+    private static void sendBackpressured(ServerPlayer player, int requestId) {
+        sendResponse(player, requestId, VSSConstants.RESPONSE_BACKPRESSURE);
+    }
+
+    private static void sendNotGenerated(ServerPlayer player, int requestId) {
+        sendResponse(player, requestId, VSSConstants.RESPONSE_NOT_GENERATED);
+    }
+
+    private static void sendResponse(ServerPlayer player, int requestId, byte responseType) {
+        if (requestId < 0) {
+            return;
+        }
         VSSNetworking.sendToPlayer(
                 player,
                 new BatchResponseS2CPayload(
-                        new byte[] {VSSConstants.RESPONSE_RATE_LIMITED},
+                        new byte[] {responseType},
                         new int[] {requestId},
                         1));
+    }
+
+    private static long nextTransferId() {
+        return NEXT_TRANSFER_ID.getAndUpdate(current -> current == Long.MAX_VALUE ? 1L : current + 1L);
     }
 
     public static void handleCancel(CancelRequestC2SPayload payload, IPayloadContext context) {

@@ -118,6 +118,26 @@ class ClientRequestTrackerTest {
         assertEquals(1L, timedOut.get(0).packed());
     }
 
+    @Test
+    void clearingRequestsPreservesMonotonicRequestIds() {
+        ClientRequestTracker tracker = newTracker();
+        int first = tracker.track(1L, false, false, 1_000L, 0L);
+
+        tracker.clear();
+        int second = tracker.track(2L, false, false, 1_000L, 0L);
+
+        assertEquals(first + 1, second);
+    }
+
+    @Test
+    void requestIdsWrapOnlyToAnUnusedId() {
+        ClientRequestTracker tracker = newTracker();
+        tracker.restoreNextRequestId(Integer.MAX_VALUE);
+
+        assertEquals(Integer.MAX_VALUE, tracker.track(1L, false, false, 1_000L, 0L));
+        assertEquals(0, tracker.track(2L, false, false, 1_000L, 0L));
+    }
+
     private static ClientRequestTracker newTracker() {
         return new ClientRequestTracker(ignored -> {
         });

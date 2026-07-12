@@ -70,19 +70,22 @@ public final class PlayerRequestState {
         return requestId < 0 || requestPositions.containsKey(requestId);
     }
 
-    public synchronized boolean enqueue(VoxelColumnS2CPayload payload, boolean priority) {
+    public synchronized PlayerSendQueue.EnqueueResult enqueue(VoxelColumnS2CPayload payload, boolean priority) {
         return enqueue(List.of(payload), priority);
     }
 
-    public synchronized boolean enqueue(List<VoxelColumnS2CPayload> payloads, boolean priority) {
+    public synchronized PlayerSendQueue.EnqueueResult enqueue(List<VoxelColumnS2CPayload> payloads, boolean priority) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
-        return sendQueue.enqueue(
+        PlayerSendQueue.EnqueueResult result = sendQueue.enqueue(
                 payloads,
                 priority,
                 config.sendQueueLimitPerPlayer,
                 config.sendQueueBytesLimitPerPlayer,
-                config.enableNetworkColumnCompression,
-                this::clearRequest);
+                config.enableNetworkColumnCompression);
+        for (int requestId : result.rejectedRequestIds()) {
+            clearRequest(requestId);
+        }
+        return result;
     }
 
     public synchronized void prepareSendOrder(int playerCx, int playerCz) {

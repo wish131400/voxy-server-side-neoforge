@@ -24,8 +24,12 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     private static final int MAX_ENCODED_SECTIONS_SIZE = MAX_SECTIONS_SIZE + 65536;
     private static final int MAX_DIMENSION_STRING_LENGTH = 256;
     private static final int MAX_REPLACEMENT_SECTION_COUNT = 64;
+    public static final int MAX_TRANSFER_PARTS = 64;
 
     private final int requestId;
+    private final long transferId;
+    private final int partIndex;
+    private final int partCount;
     private final int chunkX;
     private final int chunkZ;
     private final ResourceKey<Level> dimension;
@@ -35,7 +39,6 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     private final int encodedCompression;
     private final int encodedRawSize;
     private final boolean completeColumn;
-    private final boolean completesRequest;
     private final int[] replacementSectionYs;
     private boolean allowZstdEncoding;
     private volatile boolean hasCachedEncodedForClient;
@@ -48,9 +51,10 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     public VoxelColumnS2CPayload(int requestId, int chunkX, int chunkZ, ResourceKey<Level> dimension, long columnTimestamp, byte[] sectionBytes, boolean completeColumn) {
-        this(requestId, chunkX, chunkZ, dimension, columnTimestamp, sectionBytes, completeColumn, true, new int[0]);
+        this(requestId, chunkX, chunkZ, dimension, columnTimestamp, sectionBytes, completeColumn, 0L, 0, 1, new int[0]);
     }
 
+    @Deprecated
     public VoxelColumnS2CPayload(
             int requestId,
             int chunkX,
@@ -61,7 +65,37 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             boolean completeColumn,
             boolean completesRequest,
             int[] replacementSectionYs) {
+        this(
+                requestId,
+                chunkX,
+                chunkZ,
+                dimension,
+                columnTimestamp,
+                sectionBytes,
+                completeColumn,
+                0L,
+                0,
+                legacyPartCount(completesRequest),
+                replacementSectionYs);
+    }
+
+    public VoxelColumnS2CPayload(
+            int requestId,
+            int chunkX,
+            int chunkZ,
+            ResourceKey<Level> dimension,
+            long columnTimestamp,
+            byte[] sectionBytes,
+            boolean completeColumn,
+            long transferId,
+            int partIndex,
+            int partCount,
+            int[] replacementSectionYs) {
+        validateTransferMetadata(transferId, partIndex, partCount);
         this.requestId = requestId;
+        this.transferId = transferId;
+        this.partIndex = partIndex;
+        this.partCount = partCount;
         this.chunkX = chunkX;
         this.chunkZ = chunkZ;
         this.dimension = dimension;
@@ -71,21 +105,36 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedCompression = LodByteCompression.METHOD_NONE;
         this.encodedRawSize = sectionBytes != null ? sectionBytes.length : 0;
         this.completeColumn = completeColumn;
-        this.completesRequest = completesRequest;
         this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
     }
 
     public VoxelColumnS2CPayload(int requestId, ResourceKey<Level> dimension, EncodedColumnData columnData) {
-        this(requestId, dimension, columnData, true, new int[0]);
+        this(requestId, dimension, columnData, 0L, 0, 1, new int[0]);
     }
 
+    @Deprecated
     public VoxelColumnS2CPayload(
             int requestId,
             ResourceKey<Level> dimension,
             EncodedColumnData columnData,
             boolean completesRequest,
             int[] replacementSectionYs) {
+        this(requestId, dimension, columnData, 0L, 0, legacyPartCount(completesRequest), replacementSectionYs);
+    }
+
+    public VoxelColumnS2CPayload(
+            int requestId,
+            ResourceKey<Level> dimension,
+            EncodedColumnData columnData,
+            long transferId,
+            int partIndex,
+            int partCount,
+            int[] replacementSectionYs) {
+        validateTransferMetadata(transferId, partIndex, partCount);
         this.requestId = requestId;
+        this.transferId = transferId;
+        this.partIndex = partIndex;
+        this.partCount = partCount;
         this.chunkX = columnData.chunkX();
         this.chunkZ = columnData.chunkZ();
         this.dimension = dimension;
@@ -95,7 +144,6 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedCompression = columnData.compression();
         this.encodedRawSize = columnData.rawSize();
         this.completeColumn = columnData.completeColumn();
-        this.completesRequest = completesRequest;
         this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
     }
 
@@ -109,7 +157,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             int encodedCompression,
             int encodedRawSize,
             boolean completeColumn) {
-        this(requestId, chunkX, chunkZ, dimension, columnTimestamp, encodedSectionBytes, encodedCompression, encodedRawSize, completeColumn, true, new int[0]);
+        this(requestId, chunkX, chunkZ, dimension, columnTimestamp, encodedSectionBytes, encodedCompression, encodedRawSize, completeColumn, 0L, 0, 1, new int[0]);
     }
 
     VoxelColumnS2CPayload(
@@ -122,9 +170,15 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             int encodedCompression,
             int encodedRawSize,
             boolean completeColumn,
-            boolean completesRequest,
+            long transferId,
+            int partIndex,
+            int partCount,
             int[] replacementSectionYs) {
+        validateTransferMetadata(transferId, partIndex, partCount);
         this.requestId = requestId;
+        this.transferId = transferId;
+        this.partIndex = partIndex;
+        this.partCount = partCount;
         this.chunkX = chunkX;
         this.chunkZ = chunkZ;
         this.dimension = dimension;
@@ -134,12 +188,23 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedCompression = encodedCompression;
         this.encodedRawSize = encodedRawSize;
         this.completeColumn = completeColumn;
-        this.completesRequest = completesRequest;
         this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
     }
 
     public int requestId() {
         return requestId;
+    }
+
+    public long transferId() {
+        return transferId;
+    }
+
+    public int partIndex() {
+        return partIndex;
+    }
+
+    public int partCount() {
+        return partCount;
     }
 
     public int chunkX() {
@@ -176,7 +241,46 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     public boolean completesRequest() {
-        return completesRequest;
+        return partIndex == partCount - 1;
+    }
+
+    public boolean hasTransferMetadata() {
+        return transferId > 0L;
+    }
+
+    public VoxelColumnS2CPayload withTransferMetadata(
+            long transferId,
+            int partIndex,
+            int partCount,
+            int[] replacementSectionYs) {
+        if (sectionBytes != null) {
+            return new VoxelColumnS2CPayload(
+                    requestId,
+                    chunkX,
+                    chunkZ,
+                    dimension,
+                    columnTimestamp,
+                    sectionBytes,
+                    completeColumn,
+                    transferId,
+                    partIndex,
+                    partCount,
+                    replacementSectionYs);
+        }
+        return new VoxelColumnS2CPayload(
+                requestId,
+                chunkX,
+                chunkZ,
+                dimension,
+                columnTimestamp,
+                encodedSectionBytes,
+                encodedCompression,
+                encodedRawSize,
+                completeColumn,
+                transferId,
+                partIndex,
+                partCount,
+                replacementSectionYs);
     }
 
     public int[] replacementSectionYs() {
@@ -227,7 +331,14 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     public static void encode(VoxelColumnS2CPayload payload, FriendlyByteBuf buf) {
-        buf.writeVarInt(payload.requestId);
+        encode(payload, buf, VSSServerConfig.CONFIG.enableNetworkColumnCompression);
+    }
+
+    static void encode(
+            VoxelColumnS2CPayload payload,
+            FriendlyByteBuf buf,
+            boolean networkCompressionEnabled) {
+        writeTransferMetadata(payload, buf);
         buf.writeInt(payload.chunkX);
         buf.writeInt(payload.chunkZ);
         int ordinal = dimensionToOrdinal(payload.dimension);
@@ -237,12 +348,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
         buf.writeLong(payload.columnTimestamp);
         buf.writeBoolean(payload.completeColumn);
-        buf.writeBoolean(payload.completesRequest);
         buf.writeVarInt(payload.replacementSectionYs.length);
         for (int sectionY : payload.replacementSectionYs) {
             buf.writeByte(sectionY);
         }
-        LodByteCompression.Result encoded = encodedForClient(payload, VSSServerConfig.CONFIG.enableNetworkColumnCompression);
+        LodByteCompression.Result encoded = encodedForClient(payload, networkCompressionEnabled);
         if (encoded.method() == LodByteCompression.METHOD_ZSTD && !payload.allowZstdEncoding) {
             throw new IllegalStateException("Cannot send Zstd LOD column to a client without Zstd capability");
         }
@@ -252,7 +362,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     public static VoxelColumnS2CPayload decode(FriendlyByteBuf buf) {
-        int requestId = buf.readVarInt();
+        TransferMetadata transfer = readTransferMetadata(buf);
+        int requestId = transfer.requestId();
+        long transferId = transfer.transferId();
+        int partIndex = transfer.partIndex();
+        int partCount = transfer.partCount();
         int cx = buf.readInt();
         int cz = buf.readInt();
         int ordinal = buf.readVarInt();
@@ -264,7 +378,6 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         };
         long timestamp = buf.readLong();
         boolean completeColumn = buf.readBoolean();
-        boolean completesRequest = buf.readBoolean();
         int replacementCount = buf.readVarInt();
         if (replacementCount < 0 || replacementCount > MAX_REPLACEMENT_SECTION_COUNT) {
             throw new IllegalArgumentException("Invalid LOD replacement section count: " + replacementCount);
@@ -287,7 +400,9 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
                 method,
                 originalLength,
                 completeColumn,
-                completesRequest,
+                transferId,
+                partIndex,
+                partCount,
                 replacementSectionYs);
     }
 
@@ -364,14 +479,72 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     }
 
     private int metadataBytes() {
-        return 2 + 1 + replacementSectionYs.length;
+        return 18 + replacementSectionYs.length;
+    }
+
+    private static void validateTransferMetadata(long transferId, int partIndex, int partCount) {
+        if (transferId < 0L) {
+            throw new IllegalArgumentException("Invalid LOD transfer id: " + transferId);
+        }
+        if (partCount < 1 || partCount > MAX_TRANSFER_PARTS) {
+            throw new IllegalArgumentException("Invalid LOD transfer part count: " + partCount);
+        }
+        if (partIndex < 0 || partIndex >= partCount) {
+            throw new IllegalArgumentException("Invalid LOD transfer part index: " + partIndex + "/" + partCount);
+        }
+        if (transferId == 0L && (partIndex != 0 || partCount != 1)) {
+            throw new IllegalArgumentException("Unassigned LOD transfer metadata must describe one complete packet");
+        }
+    }
+
+    private static void validateWireTransferMetadata(long transferId, int partIndex, int partCount) {
+        validateTransferMetadata(transferId, partIndex, partCount);
+        if (transferId == 0L) {
+            throw new IllegalArgumentException("LOD transfer id must be assigned before encoding");
+        }
+    }
+
+    static void writeTransferMetadata(VoxelColumnS2CPayload payload, FriendlyByteBuf buf) {
+        validateWireTransferMetadata(payload.transferId, payload.partIndex, payload.partCount);
+        buf.writeVarInt(payload.requestId);
+        buf.writeVarLong(payload.transferId);
+        buf.writeVarInt(payload.partIndex);
+        buf.writeVarInt(payload.partCount);
+    }
+
+    static TransferMetadata readTransferMetadata(FriendlyByteBuf buf) {
+        int requestId = buf.readVarInt();
+        long transferId = buf.readVarLong();
+        int partIndex = buf.readVarInt();
+        int partCount = buf.readVarInt();
+        validateWireTransferMetadata(transferId, partIndex, partCount);
+        return new TransferMetadata(requestId, transferId, partIndex, partCount);
+    }
+
+    record TransferMetadata(int requestId, long transferId, int partIndex, int partCount) {
+    }
+
+    private static int legacyPartCount(boolean completesRequest) {
+        if (!completesRequest) {
+            throw new IllegalArgumentException("Fragment payloads require explicit transfer metadata");
+        }
+        return 1;
     }
 
     private static int[] sanitizeReplacementSections(int[] sectionYs) {
         if (sectionYs == null || sectionYs.length == 0) {
             return new int[0];
         }
-        int count = Math.min(sectionYs.length, MAX_REPLACEMENT_SECTION_COUNT);
-        return Arrays.copyOf(sectionYs, count);
+        if (sectionYs.length > MAX_REPLACEMENT_SECTION_COUNT) {
+            throw new IllegalArgumentException("Too many replacement sections: " + sectionYs.length);
+        }
+        int[] sanitized = Arrays.copyOf(sectionYs, sectionYs.length);
+        Arrays.sort(sanitized);
+        for (int i = 1; i < sanitized.length; i++) {
+            if (sanitized[i] == sanitized[i - 1]) {
+                throw new IllegalArgumentException("Duplicate replacement section: " + sanitized[i]);
+            }
+        }
+        return sanitized;
     }
 }

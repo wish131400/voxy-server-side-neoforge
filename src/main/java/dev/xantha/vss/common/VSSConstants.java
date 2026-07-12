@@ -4,7 +4,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 35;
+    public static final int PROTOCOL_VERSION = 36;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     public static final int CAPABILITY_ZSTD_COLUMNS = 1 << 1;

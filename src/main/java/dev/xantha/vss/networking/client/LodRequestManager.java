@@ -14,6 +14,7 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -45,9 +46,9 @@ public final class LodRequestManager {
     private static final int SCAN_BOOST_TICKS = 100;
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
+    private static final int VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS = 2;
     private static final int FAST_MOVE_CHUNK_THRESHOLD = 8;
     private static final int FAST_MOVE_KEEP_RADIUS_CHUNKS = 48;
-    private static final int MOVEMENT_RESCAN_TRAIL_CHUNKS = 16;
     private static final int ESTIMATED_SYNC_COLUMN_BYTES = 48 * 1024;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
@@ -80,6 +81,7 @@ public final class LodRequestManager {
                     GENERATION_BACKOFF_MAX_SHIFT));
     private final LongOpenHashSet diskMissedColumns = new LongOpenHashSet();
     private final ClientPresenceReporter presenceReporter;
+    private final Runnable transferReset;
 
     private SessionConfigS2CPayload sessionConfig;
     private ResourceKey<Level> lastDimension;
@@ -109,16 +111,25 @@ public final class LodRequestManager {
     private final RequestBuffers requestBuffers = new RequestBuffers();
 
     public LodRequestManager() {
-        this(ClientLodPresenceCache.currentScope());
+        this(ClientLodPresenceCache.currentScope(), new ClientRequestTracker(), () -> {
+        });
     }
 
     public LodRequestManager(String presenceScope) {
-        this(presenceScope, new ClientRequestTracker());
+        this(presenceScope, new ClientRequestTracker(), () -> {
+        });
     }
 
     LodRequestManager(String presenceScope, ClientRequestTracker requestTracker) {
+        this(presenceScope, requestTracker, () -> {
+        });
+    }
+
+    LodRequestManager(String presenceScope, ClientRequestTracker requestTracker, Runnable transferReset) {
         this.requestTracker = requestTracker;
         this.presenceReporter = new ClientPresenceReporter(presenceScope);
+        this.transferReset = transferReset != null ? transferReset : () -> {
+        };
         columnTimestamps.defaultReturnValue(-1L);
         dirtyColumnTimestamps.defaultReturnValue(0L);
         generationRequestBudget = 8.0;
@@ -193,7 +204,7 @@ public final class LodRequestManager {
             if (firstKnownPosition || isTeleport) {
                 resetScanCursorPastProtectedSyncWindow(lodDistance);
             } else if (moveDistance > 0) {
-                rebaseScanCursorAfterMove(lodDistance, moveDistance);
+                rebaseScanCursorAfterMove(lodDistance);
                 pruneStaleGenerationWorkAround(playerCx, playerCz, lodDistance);
                 armScanBoost();
             }
@@ -212,30 +223,8 @@ public final class LodRequestManager {
         scanAndSend(level, player);
     }
 
-    public synchronized ColumnReceiveResult onColumnReceived(int requestId, long columnTimestamp) {
-        boolean dirtyRefreshRequest = requestTracker.isDirtyRefreshRequest(requestId);
-        long packed = requestTracker.remove(requestId);
-        if (packed == Long.MIN_VALUE) {
-            return new ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
-        }
-
-        boolean replacingKnownColumn = columnTimestamps.get(packed) > 0L || dirtyRefreshRequest;
-        acceptColumn(lastDimension, packed, columnTimestamp);
-        return new ColumnReceiveResult(true, dirtyRefreshRequest, replacingKnownColumn, packed);
-    }
-
-    public synchronized ColumnReceiveResult onColumnPartReceived(int requestId) {
-        long packed = requestTracker.positionFor(requestId);
-        if (packed == Long.MIN_VALUE) {
-            return new ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
-        }
-
-        requestTracker.refreshDeadline(requestId, timeoutFor(packed, requestTracker.size()), System.nanoTime());
-        boolean dirtyRefreshRequest = requestTracker.isDirtyRefreshRequest(requestId);
-        return new ColumnReceiveResult(true, dirtyRefreshRequest, false, packed);
-    }
-
-    public synchronized ColumnReceiveResult onLateColumnReceived(
+    public synchronized ColumnReceiveResult onColumnTransferPart(
+            int requestId,
             ResourceKey<Level> dimension,
             int cx,
             int cz,
@@ -249,19 +238,68 @@ public final class LodRequestManager {
             return new ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
         }
 
-        requestTracker.cancel(packed);
+        if (requestId >= 0 && requestTracker.matches(requestId, packed)) {
+            if (!isColumnVersionAllowed(packed, columnTimestamp, false)) {
+                return new ColumnReceiveResult(false, false, false, packed);
+            }
+            requestTracker.refreshDeadline(requestId, timeoutFor(packed, requestTracker.size()), System.nanoTime());
+            boolean dirtyRefreshRequest = requestTracker.isDirtyRefreshRequest(requestId);
+            boolean replacingKnownColumn = columnTimestamps.get(packed) > 0L || dirtyRefreshRequest;
+            return new ColumnReceiveResult(true, dirtyRefreshRequest, replacingKnownColumn, packed);
+        }
+
+        if (requestTracker.contains(packed) || !isColumnVersionAllowed(packed, columnTimestamp, true)) {
+            return new ColumnReceiveResult(false, false, false, packed);
+        }
         boolean dirtyRefreshRequest = dirtyColumns.contains(packed);
         boolean replacingKnownColumn = columnTimestamps.get(packed) > 0L || dirtyRefreshRequest;
-        acceptColumn(dimension, packed, columnTimestamp);
         return new ColumnReceiveResult(true, dirtyRefreshRequest, replacingKnownColumn, packed);
     }
 
-    public synchronized void onPushedColumnReceived(ResourceKey<Level> dimension, int cx, int cz, long columnTimestamp) {
-        if (!isActiveDimension(dimension)) {
-            return;
+    public synchronized ColumnProcessingResult processColumnIfCurrent(
+            int requestId,
+            ResourceKey<Level> dimension,
+            int cx,
+            int cz,
+            long columnTimestamp,
+            BooleanSupplier processor) {
+        if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) {
+            return ColumnProcessingResult.STALE;
         }
         long packed = PositionUtil.packPosition(cx, cz);
+        boolean activeRequest = requestId >= 0 && requestTracker.matches(requestId, packed);
+        if (!activeRequest && (requestTracker.contains(packed)
+                || !isWithinCurrentLodWindow(packed)
+                || !isColumnVersionAllowed(packed, columnTimestamp, true))) {
+            return ColumnProcessingResult.STALE;
+        }
+        if (activeRequest && !isColumnVersionAllowed(packed, columnTimestamp, false)) {
+            failTrackedRequest(requestId, packed);
+            return ColumnProcessingResult.STALE;
+        }
+
+        boolean processed;
+        try {
+            processed = processor.getAsBoolean();
+        } catch (RuntimeException e) {
+            failTrackedRequest(requestId, packed);
+            throw e;
+        }
+        if (!processed) {
+            failTrackedRequest(requestId, packed);
+            return ColumnProcessingResult.FAILED;
+        }
+
+        if (activeRequest) {
+            if (requestTracker.remove(requestId) != packed) {
+                return ColumnProcessingResult.STALE;
+            }
+        } else if (requestTracker.contains(packed)
+                || !isColumnVersionAllowed(packed, columnTimestamp, true)) {
+            return ColumnProcessingResult.STALE;
+        }
         acceptColumn(dimension, packed, columnTimestamp);
+        return ColumnProcessingResult.APPLIED;
     }
 
     private void acceptColumn(ResourceKey<Level> dimension, long packed, long columnTimestamp) {
@@ -280,13 +318,24 @@ public final class LodRequestManager {
         }
     }
 
-    public synchronized void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
-        cancelInFlightColumn(dimension, cx, cz);
-        forgetColumn(dimension, cx, cz, true);
+    public synchronized void onColumnTransferFailed(
+            int requestId,
+            long transferId,
+            ResourceKey<Level> dimension,
+            int cx,
+            int cz) {
+        if (!isActiveDimension(dimension)) {
+            return;
+        }
+        long packed = PositionUtil.packPosition(cx, cz);
+        if (requestId < 0 || !requestTracker.matches(requestId, packed)) {
+            return;
+        }
+        failTrackedRequest(requestId, packed);
     }
 
     public synchronized void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
-        forgetColumn(dimension, cx, cz, false);
+        // Vanilla chunk lifetime is independent from Voxy's persisted LOD lifetime.
     }
 
     public synchronized void onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
@@ -297,12 +346,13 @@ public final class LodRequestManager {
                 dirtyTimestamp = VSSConstants.epochMillis();
             }
             long existingTimestamp = dirtyColumnTimestamps.get(packed);
-            if (dirtyTimestamp > existingTimestamp) {
+            boolean newerDirtyVersion = dirtyTimestamp > existingTimestamp;
+            if (newerDirtyVersion) {
                 dirtyColumnTimestamps.put(packed, dirtyTimestamp);
             }
             clearBackoff(packed);
             dirtyColumns.add(packed);
-            if (requestTracker.contains(packed) && !requestTracker.isDirtyRefreshPosition(packed)) {
+            if (newerDirtyVersion && requestTracker.contains(packed)) {
                 requestTracker.cancel(packed);
             }
             deferColumn(packed, true);
@@ -433,10 +483,7 @@ public final class LodRequestManager {
     }
 
     private void resetRequestStateAfterConfigChange() {
-        int preservedNextRequestId = requestTracker.nextRequestId();
-        requestTracker.cancelAll();
         resetRequestState();
-        requestTracker.restoreNextRequestId(preservedNextRequestId);
     }
 
     private void primeRequestBudgets() {
@@ -1058,47 +1105,35 @@ public final class LodRequestManager {
                 <= getEffectiveLodDistance() + VSSConstants.LOD_DISTANCE_BUFFER;
     }
 
-    private void forgetColumn(ResourceKey<Level> dimension, int cx, int cz, boolean applyBackoff) {
-        if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) {
-            return;
-        }
-
-        long packed = PositionUtil.packPosition(cx, cz);
-        if (applyBackoff) {
-            presenceReporter.removeKnownColumn(dimension, packed);
-        }
-        columnTimestamps.remove(packed);
-        dirtyColumns.remove(packed);
-        dirtyColumnTimestamps.remove(packed);
-        diskMissedColumns.remove(packed);
-        if (applyBackoff) {
-            markBackoff(packed, false);
-        } else {
-            clearBackoff(packed);
-        }
-
-        Minecraft minecraft = Minecraft.getInstance();
-        LocalPlayer player = minecraft.player;
-        ClientLevel level = minecraft.level;
-        if (player == null || level == null || player.isRemoved() || !level.dimension().equals(dimension)) {
-            return;
-        }
-
-        int playerCx = player.getBlockX() >> 4;
-        int playerCz = player.getBlockZ() >> 4;
-        if (PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz) <= getEffectiveLodDistance()) {
-            deferColumn(packed, true);
-        }
+    private boolean isColumnVersionAllowed(long packed, long columnTimestamp, boolean strictUpdate) {
+        long requiredTimestamp = dirtyColumnTimestamps.get(packed);
+        long currentTimestamp = columnTimestamps.get(packed);
+        return isColumnVersionAllowed(currentTimestamp, requiredTimestamp, columnTimestamp, strictUpdate);
     }
 
-    private void cancelInFlightColumn(ResourceKey<Level> dimension, int cx, int cz) {
-        if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) {
+    static boolean isColumnVersionAllowed(
+            long currentTimestamp,
+            long requiredTimestamp,
+            long columnTimestamp,
+            boolean strictUpdate) {
+        if (columnTimestamp <= 0L
+                || (requiredTimestamp > 0L && columnTimestamp < requiredTimestamp)) {
+            return false;
+        }
+        if (currentTimestamp <= 0L) {
+            return true;
+        }
+        return strictUpdate ? columnTimestamp > currentTimestamp : columnTimestamp >= currentTimestamp;
+    }
+
+    private void failTrackedRequest(int requestId, long packed) {
+        if (requestId < 0 || !requestTracker.matches(requestId, packed)) {
             return;
         }
-        long packed = PositionUtil.packPosition(cx, cz);
-        if (requestTracker.contains(packed)) {
-            requestTracker.cancel(packed);
-        }
+        requestTracker.cancelRequest(requestId);
+        markBackoff(packed, isGenerationCandidate(packed));
+        deferredColumns.remove(packed);
+        deferColumn(packed, dirtyColumns.contains(packed));
     }
 
     private boolean isActiveDimension(ResourceKey<Level> dimension) {
@@ -1403,10 +1438,12 @@ public final class LodRequestManager {
     }
 
     private void resetRequestState() {
+        requestTracker.cancelAll();
         columnTimestamps.clear();
         dirtyColumns.clear();
         dirtyColumnTimestamps.clear();
         requestTracker.clear();
+        transferReset.run();
         deferredColumns.clear();
         diskMissedColumns.clear();
         retryBackoff.clearAll();
@@ -1451,12 +1488,8 @@ public final class LodRequestManager {
         setScanCursorAtRing(Math.min(lodDistance + 1, protectedSyncDistance + 1));
     }
 
-    private void rebaseScanCursorAfterMove(int lodDistance, int moveDistance) {
-        ensureOrderedOffsets(lodDistance);
-        int frontier = scanCompletedForCurrentOffsets ? lodDistance : softFrontierRadius;
-        int trail = Math.max(MOVEMENT_RESCAN_TRAIL_CHUNKS, moveDistance + 2);
-        resetNearScanCursor();
-        setScanCursorAtRing(Math.max(0, Math.min(lodDistance, frontier) - trail));
+    private void rebaseScanCursorAfterMove(int lodDistance) {
+        resetScanCursorPastProtectedSyncWindow(lodDistance);
     }
 
     private void setScanCursorAtRing(int ring) {
@@ -1464,10 +1497,8 @@ public final class LodRequestManager {
             resetScanCursor();
             return;
         }
-        int index = 0;
-        while (index < orderedOffsets.length && offsetRing(orderedOffsets[index]) < ring) {
-            index++;
-        }
+        int clampedRing = Math.min(ring, orderedOffsetDistance + 1);
+        int index = Math.min(orderedOffsets.length, ChebyshevRingOffsets.firstIndexForRing(clampedRing));
         resetNearScanCursor();
         scanOffsetIndex = index;
         softFrontierRadius = Math.max(0, Math.min(ring - 1, orderedOffsetDistance));
@@ -1486,7 +1517,14 @@ public final class LodRequestManager {
     }
 
     private static int getVanillaProtectedSyncDistance() {
-        return 0;
+        try {
+            return Math.max(
+                    0,
+                    Minecraft.getInstance().options.renderDistance().get()
+                            + VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS);
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
     }
 
     private static boolean isInsideProtectedSyncWindow(
@@ -1596,5 +1634,11 @@ public final class LodRequestManager {
     }
 
     public record ColumnReceiveResult(boolean knownRequest, boolean priority, boolean replaceExistingColumn, long packedPosition) {
+    }
+
+    public enum ColumnProcessingResult {
+        APPLIED,
+        STALE,
+        FAILED
     }
 }

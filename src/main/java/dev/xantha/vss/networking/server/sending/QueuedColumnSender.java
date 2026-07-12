@@ -4,7 +4,6 @@ package dev.xantha.vss.networking.server.sending;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
-import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSServerConfig;
@@ -200,6 +199,7 @@ public final class QueuedColumnSender {
             return false;
         }
         if (!isPayloadStillRelevant(player, firstPayload)) {
+            sendBackpressured(player, requestId);
             state.clearRequest(requestId);
             discardQueuedBatch(state, batch);
             return false;
@@ -222,7 +222,6 @@ public final class QueuedColumnSender {
         VoxelColumnS2CPayload payload = queuedPayload.payload();
         VSSNetworking.sendToPlayer(player, payload);
         if (payload.completesRequest()) {
-            markClientKnownAfterSend(state, payload);
             state.clearRequest(requestId);
         }
         state.recordSend(batch.priority(), queuedPayload.wireBytes());
@@ -252,15 +251,6 @@ public final class QueuedColumnSender {
 
     private static boolean isPayloadStillRelevant(ServerPlayer player, VoxelColumnS2CPayload payload) {
         return VSSServerNetworking.isColumnStillRelevant(player, payload.dimension(), payload.chunkX(), payload.chunkZ());
-    }
-
-    private static void markClientKnownAfterSend(PlayerRequestState state, VoxelColumnS2CPayload payload) {
-        if (payload.completesRequest() && payload.completeColumn() && payload.columnTimestamp() > 0L) {
-            state.markClientKnownColumn(
-                    payload.dimension(),
-                    PositionUtil.packPosition(payload.chunkX(), payload.chunkZ()),
-                    payload.columnTimestamp());
-        }
     }
 
     private void logColumnSend(

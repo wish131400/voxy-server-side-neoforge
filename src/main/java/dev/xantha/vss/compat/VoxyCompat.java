@@ -66,57 +66,50 @@ final class VoxyCompat {
                             DataLayer.class,
                             DataLayer.class));
 
-            VSSApi.registerColumnConsumer((level, dimension, chunkX, chunkZ, columnData) -> {
+            VSSApi.registerColumnProcessingConsumer((level, dimension, chunkX, chunkZ, columnData) -> {
                 if (!VSSClientNetworking.isClientLodSessionActive()) {
-                    return;
+                    return false;
                 }
                 try {
                     if (!isIngestAvailable()) {
-                        VSSClientNetworking.onColumnProcessingFailed(dimension, chunkX, chunkZ);
-                        return;
+                        return false;
                     }
                     Object worldId = worldIdentifierOf.invoke(level);
                     if (worldId == null) {
-                        return;
+                        return false;
                     }
 
                     if (columnData.sections().length == 0) {
                         if (columnData.replaceMissingSections()) {
-                            Set<Integer> presentSections = replacementSectionSet(columnData);
-                            clearMissingSections(worldId, level, chunkX, chunkZ, presentSections);
-                            if (presentSections.isEmpty()) {
-                                markLocalColumnMissing(level, chunkX, chunkZ);
-                            } else {
-                                markLocalColumnPresent(level, chunkX, chunkZ);
+                            if (!clearMissingSections(worldId, level, chunkX, chunkZ, Set.of())) {
+                                return false;
                             }
+                            markLocalColumnMissing(level, chunkX, chunkZ);
                         }
-                        return;
+                        return true;
                     }
 
                     boolean accepted = true;
-                    boolean hasReplacementManifest = columnData.replacementSectionYs().length > 0;
-                    Set<Integer> presentSections = columnData.replaceMissingSections()
-                            ? replacementSectionSet(columnData)
-                            : null;
                     for (VoxelColumnData.SectionData sectionData : columnData.sections()) {
-                        if (presentSections != null && !hasReplacementManifest) {
-                            presentSections.add(sectionData.sectionY());
-                        }
                         accepted &= ingestSection(worldId, sectionData, chunkX, chunkZ);
                     }
-                    if (presentSections != null) {
-                        clearMissingSections(worldId, level, chunkX, chunkZ, presentSections);
+                    if (!accepted) {
+                        return false;
                     }
-                    if (!accepted && columnData.completesRequest()) {
-                        VSSClientNetworking.onColumnProcessingFailed(dimension, chunkX, chunkZ);
-                    } else {
-                        markLocalColumnPresent(level, chunkX, chunkZ);
+                    if (columnData.replaceMissingSections()) {
+                        Set<Integer> presentSections = replacementSectionSet(columnData);
+                        if (!clearMissingSections(worldId, level, chunkX, chunkZ, presentSections)) {
+                            return false;
+                        }
                     }
+                    markLocalColumnPresent(level, chunkX, chunkZ);
+                    return true;
                 } catch (Throwable e) {
                     if (e instanceof Error && !(e instanceof LinkageError) && !(e instanceof AssertionError)) {
                         throw (Error) e;
                     }
                     VSSLogger.error("Voxy raw ingest failed", e);
+                    return false;
                 }
             });
             VSSLogger.info("Voxy detected, registered raw ingest bridge");
@@ -188,23 +181,37 @@ final class VoxyCompat {
                 sectionData.skyLight());
     }
 
-    private static void clearMissingSections(Object worldId, Level level, int chunkX, int chunkZ, Set<Integer> presentSections)
+    private static Set<Integer> replacementSectionSet(VoxelColumnData columnData) {
+        HashSet<Integer> presentSections = new HashSet<>();
+        for (int sectionY : columnData.replacementSectionYs()) {
+            presentSections.add(sectionY);
+        }
+        return presentSections;
+    }
+
+    private static boolean clearMissingSections(
+            Object worldId,
+            Level level,
+            int chunkX,
+            int chunkZ,
+            Set<Integer> presentSections)
             throws Throwable {
+        boolean accepted = true;
         int minSection = level.getMinSection();
         int maxSection = minSection + level.getSectionsCount();
         for (int sectionY = minSection; sectionY < maxSection; sectionY++) {
-            if (presentSections.contains(sectionY)) {
-                continue;
+            if (!presentSections.contains(sectionY)) {
+                accepted &= (boolean) rawIngest.invoke(
+                        worldId,
+                        new LevelChunkSection(level.registryAccess().registryOrThrow(Registries.BIOME)),
+                        chunkX,
+                        sectionY,
+                        chunkZ,
+                        null,
+                        null);
             }
-            rawIngest.invoke(
-                    worldId,
-                    new LevelChunkSection(level.registryAccess().registryOrThrow(Registries.BIOME)),
-                    chunkX,
-                    sectionY,
-                    chunkZ,
-                    null,
-                    null);
         }
+        return accepted;
     }
 
     static ModCompat.LocalColumnState getLocalColumnState(Level level, int chunkX, int chunkZ) {
@@ -402,18 +409,6 @@ final class VoxyCompat {
         } catch (Throwable e) {
             return fallback;
         }
-    }
-
-    private static Set<Integer> replacementSectionSet(VoxelColumnData columnData) {
-        int[] replacementSectionYs = columnData.replacementSectionYs();
-        Set<Integer> sections = new HashSet<>(
-                Math.max(replacementSectionYs.length, columnData.sections().length));
-        if (replacementSectionYs.length > 0) {
-            for (int sectionY : replacementSectionYs) {
-                sections.add(sectionY);
-            }
-        }
-        return sections;
     }
 
     private static void initConfigHandles() throws Throwable {

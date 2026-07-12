@@ -234,7 +234,9 @@ public final class ExistingColumnPreloader {
                         preload.chunkZ(),
                         DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), preload.chunkX(), preload.chunkZ()));
             }
-            if (storedData == null || storedData.columnData() == null
+            if (storedData == null
+                    || storedData.columnData() == null
+                    || !storedData.columnData().completeColumn()
                     || VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
                 state.finishPreloadColumnRead();
                 return;

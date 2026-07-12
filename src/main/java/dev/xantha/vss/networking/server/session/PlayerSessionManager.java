@@ -40,8 +40,7 @@ public final class PlayerSessionManager {
                 player,
                 payload.protocolVersion(),
                 payload.capabilities(),
-                "Player",
-                true);
+                "Player");
         VSSNetworking.sendToPlayer(player, config);
     }
 
@@ -74,8 +73,7 @@ public final class PlayerSessionManager {
             ServerPlayer player,
             int clientProtocolVersion,
             int clientCapabilities,
-            String logPrefix,
-            boolean resetState) {
+            String logPrefix) {
         if (VSSServerNetworking.isServerStopping()) {
             return createSessionConfig(false);
         }
@@ -84,17 +82,14 @@ public final class PlayerSessionManager {
         boolean enabled = config.enabled && compatible;
         if (compatible && enabled) {
             PlayerRequestState state = playerRegistry.get(player.getUUID());
-            boolean created = resetState || state == null;
+            boolean created = state == null;
             if (created) {
-                if (state != null) {
-                    state.clearAll();
-                }
                 state = new PlayerRequestState();
                 playerRegistry.put(player.getUUID(), state);
             }
             state.setClientCapabilities(clientCapabilities);
-            state.primeSendCredit(config.bandwidthBytesPerSecond());
             if (created) {
+                state.primeSendCredit(config.bandwidthBytesPerSecond());
                 existingColumnPreloader.schedule(player, state);
                 VSSLogger.info(logPrefix + " " + player.getGameProfile().getName() + " registered for VSS LOD sync");
             }

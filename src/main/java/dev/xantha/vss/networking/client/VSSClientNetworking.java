@@ -1,7 +1,8 @@
 package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.api.VSSApi;
-import dev.xantha.vss.common.PositionUtil;
+import dev.xantha.vss.api.VoxelColumnData;
+import dev.xantha.vss.networking.client.ClientColumnTransferAssembler.AssembledColumn;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.LodByteCompression;
@@ -101,7 +102,10 @@ public final class VSSClientNetworking {
             boolean newSession = manager == null || !wasEnabled;
             if (newSession) {
                 COLUMN_PROCESSOR.beginSession();
-                manager = new LodRequestManager(ClientLodPresenceCache.currentScope());
+                manager = new LodRequestManager(
+                        ClientLodPresenceCache.currentScope(),
+                        new ClientRequestTracker(),
+                        COLUMN_PROCESSOR::clearPendingTransfers);
             }
             boolean requestStateReset = manager.onSessionConfig(payload);
             if (requestStateReset && !newSession) {
@@ -159,6 +163,10 @@ public final class VSSClientNetworking {
         LodRequestManager manager = requestManager;
         if (manager != null) {
             manager.onDirtyColumns(payload.dirtyPositions(), payload.dirtyTimestamps());
+            ClientLevel level = Minecraft.getInstance().level;
+            if (level != null) {
+                COLUMN_PROCESSOR.invalidatePositions(level.dimension(), payload.dirtyPositions());
+            }
         }
     }
 
@@ -170,43 +178,31 @@ public final class VSSClientNetworking {
         bytesReceived.addAndGet(payload.estimatedBytes());
         logColumnReceive(payload);
         LodRequestManager manager = requestManager;
-        LodRequestManager.ColumnReceiveResult receiveResult;
-        if (payload.requestId() < 0) {
-            long packed = PositionUtil.packPosition(payload.chunkX(), payload.chunkZ());
-            receiveResult = new LodRequestManager.ColumnReceiveResult(true, true, false, packed);
-        } else if (manager != null) {
-            receiveResult = payload.completesRequest()
-                    ? manager.onColumnReceived(payload.requestId(), payload.columnTimestamp())
-                    : manager.onColumnPartReceived(payload.requestId());
-        } else {
-            receiveResult = new LodRequestManager.ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
+        if (manager == null) {
+            return;
         }
-        if (payload.requestId() >= 0
-                && payload.completesRequest()
-                && payload.completeColumn()
-                && !receiveResult.knownRequest()
-                && manager != null) {
-            receiveResult = manager.onLateColumnReceived(
-                    payload.dimension(),
-                    payload.chunkX(),
-                    payload.chunkZ(),
-                    payload.columnTimestamp());
-        }
+        LodRequestManager.ColumnReceiveResult receiveResult = manager.onColumnTransferPart(
+                payload.requestId(),
+                payload.dimension(),
+                payload.chunkX(),
+                payload.chunkZ(),
+                payload.columnTimestamp());
         if (!receiveResult.knownRequest()) {
+            if (receiveResult.packedPosition() != Long.MIN_VALUE) {
+                manager.onColumnTransferFailed(
+                        payload.requestId(),
+                        payload.transferId(),
+                        payload.dimension(),
+                        payload.chunkX(),
+                        payload.chunkZ());
+            }
             return;
         }
         boolean replaceMissingSections = shouldReplaceMissingSections(receiveResult, payload);
-        boolean queued = COLUMN_PROCESSOR.offer(
+        COLUMN_PROCESSOR.offer(
                 payload,
-                receiveResult.knownRequest(),
                 receiveResult.priority(),
                 replaceMissingSections);
-        if (queued && payload.requestId() < 0 && payload.completesRequest() && manager != null) {
-            manager.onPushedColumnReceived(payload.dimension(), payload.chunkX(), payload.chunkZ(), payload.columnTimestamp());
-        }
-        if (!queued && manager != null && receiveResult.packedPosition() != Long.MIN_VALUE) {
-            manager.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
-        }
     }
 
     static boolean shouldReplaceMissingSections(
@@ -214,31 +210,45 @@ public final class VSSClientNetworking {
             VoxelColumnS2CPayload payload) {
         return receiveResult.knownRequest()
                 && receiveResult.replaceExistingColumn()
-                && payload.completeColumn()
-                && payload.completesRequest();
+                && payload.completeColumn();
     }
 
-    public static void onColumnProcessingFailed(ResourceKey<Level> dimension, int cx, int cz) {
+    static void processAssembledColumn(
+            ClientLevel level,
+            AssembledColumn column,
+            VoxelColumnData columnData) {
+        LodRequestManager manager = requestManager;
+        if (manager == null) {
+            return;
+        }
+        manager.processColumnIfCurrent(
+                column.requestId(),
+                column.dimension(),
+                column.chunkX(),
+                column.chunkZ(),
+                column.columnTimestamp(),
+                () -> VSSApi.dispatchColumnAndReport(
+                        level,
+                        column.dimension(),
+                        column.chunkX(),
+                        column.chunkZ(),
+                        columnData));
+    }
+
+    public static void onColumnTransferFailed(
+            int requestId,
+            long transferId,
+            ResourceKey<Level> dimension,
+            int cx,
+            int cz) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!minecraft.isSameThread()) {
-            minecraft.execute(() -> onColumnProcessingFailed(dimension, cx, cz));
+            minecraft.execute(() -> onColumnTransferFailed(requestId, transferId, dimension, cx, cz));
             return;
         }
         LodRequestManager manager = requestManager;
         if (manager != null) {
-            manager.onColumnProcessingFailed(dimension, cx, cz);
-        }
-    }
-
-    public static void onClientChunkDropped(ResourceKey<Level> dimension, int cx, int cz) {
-        Minecraft minecraft = Minecraft.getInstance();
-        if (!minecraft.isSameThread()) {
-            minecraft.execute(() -> onClientChunkDropped(dimension, cx, cz));
-            return;
-        }
-        LodRequestManager manager = requestManager;
-        if (manager != null) {
-            manager.onClientChunkDropped(dimension, cx, cz);
+            manager.onColumnTransferFailed(requestId, transferId, dimension, cx, cz);
         }
     }
 
@@ -252,8 +262,8 @@ public final class VSSClientNetworking {
         if (!serverEnabled || manager == null || !isClientWorldReady()) {
             return;
         }
-        COLUMN_PROCESSOR.beginSession();
         manager.forceResync();
+        COLUMN_PROCESSOR.beginSession();
         VSSLogger.info("VSS LOD resync requested: " + reason);
     }
 

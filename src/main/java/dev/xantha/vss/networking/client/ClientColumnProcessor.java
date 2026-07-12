@@ -1,11 +1,17 @@
 package dev.xantha.vss.networking.client;
 
-import dev.xantha.vss.api.VSSApi;
 import dev.xantha.vss.api.VoxelColumnData;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
+import dev.xantha.vss.networking.client.ClientColumnTransferAssembler.AssembledColumn;
+import dev.xantha.vss.networking.client.ClientColumnTransferAssembler.FailedTransfer;
+import dev.xantha.vss.networking.client.ClientColumnTransferAssembler.OfferResult;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import io.netty.buffer.Unpooled;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -17,21 +23,25 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 
 final class ClientColumnProcessor {
     static final int MAX_QUEUED_COLUMNS = 1024;
-    private static final long MAX_QUEUED_BYTES = 32L * 1024L * 1024L;
+    static final long MAX_QUEUED_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_COLUMNS_PER_DRAIN = 64;
     private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 768;
     private static final int MAX_SECTIONS_PER_COLUMN = 64;
+    private static final long TRANSFER_IDLE_TIMEOUT_NANOS = 60_000_000_000L;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
-    private static final int SECTION_POOL_SIZE = 128;
 
-    private final ConcurrentLinkedQueue<QueuedColumn> priorityColumnQueue = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<QueuedColumn> columnQueue = new ConcurrentLinkedQueue<>();
+    private final ClientColumnTransferAssembler assembler =
+            new ClientColumnTransferAssembler(MAX_QUEUED_COLUMNS, MAX_QUEUED_BYTES);
+    private final ConcurrentLinkedQueue<AssembledColumn> priorityColumnQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<AssembledColumn> columnQueue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger queueSize = new AtomicInteger();
     private final AtomicInteger priorityQueueSize = new AtomicInteger();
     private final AtomicLong queueBytes = new AtomicLong();
@@ -41,35 +51,6 @@ final class ClientColumnProcessor {
     private volatile ExecutorService executor;
     private volatile boolean shuttingDown = true;
     private volatile long lastDropWarnMs;
-
-    private static class SectionPool {
-        private final ConcurrentLinkedQueue<LevelChunkSection> pool = new ConcurrentLinkedQueue<>();
-        private final int maxSize;
-
-        SectionPool(int maxSize) {
-            this.maxSize = maxSize;
-        }
-
-        LevelChunkSection acquire(Registry<Biome> biomeRegistry) {
-            LevelChunkSection section = pool.poll();
-            if (section == null) {
-                return new LevelChunkSection(biomeRegistry);
-            }
-            return section;
-        }
-
-        void release(LevelChunkSection section) {
-            if (pool.size() < maxSize) {
-                pool.offer(section);
-            }
-        }
-
-        void clear() {
-            pool.clear();
-        }
-    }
-
-    private final SectionPool sectionPool = new SectionPool(SECTION_POOL_SIZE);
 
     void beginSession() {
         sessionEpoch.incrementAndGet();
@@ -82,67 +63,52 @@ final class ClientColumnProcessor {
         shuttingDown = false;
     }
 
-    boolean offer(VoxelColumnS2CPayload payload, boolean knownRequest, boolean priority, boolean replaceMissingSections) {
+    boolean offer(
+            VoxelColumnS2CPayload payload,
+            boolean priority,
+            boolean replaceMissingSections) {
         if (shuttingDown) {
+            fail(FailedTransfer.from(payload));
             return false;
         }
-        if (knownRequest && payload.rawSectionBytesLength() <= 1) {
-            processEmptyColumn(payload, sessionEpoch.get(), replaceMissingSections);
-            return true;
-        }
 
-        int estimatedBytes = payload.estimatedBytes();
-        if (queueSize.get() < MAX_QUEUED_COLUMNS && queueBytes.get() + estimatedBytes <= MAX_QUEUED_BYTES) {
-            if (priority) {
-                priorityColumnQueue.add(new QueuedColumn(payload, replaceMissingSections));
-                priorityQueueSize.incrementAndGet();
-            } else {
-                columnQueue.add(new QueuedColumn(payload, replaceMissingSections));
+        OfferResult result = assembler.offer(
+                payload,
+                priority,
+                replaceMissingSections,
+                queueSize.get(),
+                queueBytes.get(),
+                System.nanoTime());
+        switch (result.status()) {
+            case ACCEPTED -> {
+                return true;
             }
-            queueSize.incrementAndGet();
-            queueBytes.addAndGet(estimatedBytes);
-            return true;
-        }
-
-        long dropped = columnsDropped.incrementAndGet();
-        long now = System.currentTimeMillis();
-        if (now - lastDropWarnMs > DROP_WARN_INTERVAL_MS) {
-            lastDropWarnMs = now;
-            VSSLogger.warn("Column processing queue full (" + MAX_QUEUED_COLUMNS + " columns, "
-                    + (MAX_QUEUED_BYTES / 1024L / 1024L) + " MiB), " + dropped + " columns dropped total");
-        }
-        return false;
-    }
-
-    private void processEmptyColumn(VoxelColumnS2CPayload payload, int epoch, boolean replaceMissingSections) {
-        Minecraft minecraft = Minecraft.getInstance();
-        minecraft.execute(() -> {
-            ClientLevel level = minecraft.level;
-            if (sessionEpoch.get() != epoch
-                    || shuttingDown
-                    || !VSSClientNetworking.isClientLodSessionActive()
-                    || level == null
-                    || !level.dimension().equals(payload.dimension())) {
-                return;
+            case COMPLETED -> {
+                AssembledColumn column = result.column();
+                if (column.priority()) {
+                    priorityColumnQueue.add(column);
+                    priorityQueueSize.incrementAndGet();
+                } else {
+                    columnQueue.add(column);
+                }
+                queueSize.incrementAndGet();
+                queueBytes.addAndGet(column.retainedBytes());
+                return true;
             }
-            VSSApi.dispatchColumn(
-                    level,
-                    payload.dimension(),
-                    payload.chunkX(),
-                    payload.chunkZ(),
-                    new VoxelColumnData(
-                            new VoxelColumnData.SectionData[0],
-                            payload.columnTimestamp(),
-                            replaceMissingSections,
-                            payload.replacementSectionYs(),
-                            payload.completesRequest()));
-        });
+            case REJECTED -> {
+                recordDrop();
+                fail(result.failedTransfer());
+                return false;
+            }
+            default -> throw new IllegalStateException("Unhandled transfer offer result: " + result.status());
+        }
     }
 
     void scheduleProcessing(boolean serverEnabled) {
         if (shuttingDown) {
             return;
         }
+        expireIdleTransfers();
         if (!serverEnabled || !VSSClientConfig.CONFIG.receiveServerLods) {
             clearQueue();
             return;
@@ -184,95 +150,121 @@ final class ClientColumnProcessor {
 
     private void drainColumnQueue(ClientLevel level, int epoch) {
         Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
-
-        boolean hasConsumers = VSSApi.hasVoxelConsumers();
-
-        QueuedColumn queuedColumn;
+        AssembledColumn column;
         int processedColumns = 0;
         int dispatchedSections = 0;
         while (processedColumns < MAX_COLUMNS_PER_DRAIN
                 && dispatchedSections < MAX_SECTIONS_DISPATCHED_PER_DRAIN
                 && !Thread.currentThread().isInterrupted()
                 && sessionEpoch.get() == epoch
-                && (queuedColumn = pollQueuedColumn()) != null) {
-            if (shuttingDown || !VSSClientNetworking.isClientLodSessionActive()) {
-                clearQueue();
-                return;
-            }
-            VoxelColumnS2CPayload payload = queuedColumn.payload();
-            queueSize.decrementAndGet();
-            int estimatedBytes = payload.estimatedBytes();
-            queueBytes.updateAndGet(value -> Math.max(0L, value - estimatedBytes));
-            byte[] decompressed = payload.decompressedSections();
-            if (sessionEpoch.get() != epoch || !level.dimension().equals(payload.dimension()) || decompressed == null || decompressed.length == 0) {
+                && (column = pollQueuedColumn()) != null) {
+            removeQueuedAccounting(column);
+            if (shuttingDown
+                    || !VSSClientNetworking.isClientLodSessionActive()
+                    || !level.dimension().equals(column.dimension())) {
                 continue;
             }
 
             try {
-                FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decompressed));
-                try {
-                    int sectionCount = Math.max(0, Math.min(buf.readVarInt(), MAX_SECTIONS_PER_COLUMN));
-                    VoxelColumnData.SectionData[] sections = new VoxelColumnData.SectionData[sectionCount];
-                    for (int i = 0; i < sectionCount; i++) {
-                        int sectionY = buf.readByte();
-                        LevelChunkSection section = sectionPool.acquire(biomeRegistry);
-                        section.read(buf);
-
-                        DataLayer blockLight = null;
-                        if (buf.readBoolean()) {
-                            byte[] light = new byte[DataLayer.SIZE];
-                            buf.readBytes(light);
-                            blockLight = new DataLayer(light);
-                        }
-
-                        DataLayer skyLight = null;
-                        if (buf.readBoolean()) {
-                            byte[] light = new byte[DataLayer.SIZE];
-                            buf.readBytes(light);
-                            skyLight = new DataLayer(light);
-                        }
-
-                        sections[i] = new VoxelColumnData.SectionData(sectionY, section, blockLight, skyLight);
-                    }
-                    if (sessionEpoch.get() != epoch || shuttingDown) {
-                        return;
-                    }
-                    if (!VSSClientNetworking.isClientLodSessionActive()) {
-                        clearQueue();
-                        return;
-                    }
-                    if (sessionEpoch.get() != epoch || shuttingDown || !VSSClientNetworking.isClientLodSessionActive()) {
-                        clearQueue();
-                        return;
-                    }
-                    if (hasConsumers) {
-                        VSSApi.dispatchColumn(
-                                level,
-                                payload.dimension(),
-                                payload.chunkX(),
-                                payload.chunkZ(),
-                                new VoxelColumnData(
-                                        sections,
-                                        payload.columnTimestamp(),
-                                        queuedColumn.replaceMissingSections(),
-                                        payload.replacementSectionYs(),
-                                        payload.completesRequest()));
-                    } else {
-                        if (processedColumns == 0) {
-                            VSSLogger.debug("Processing LOD column at " + payload.chunkX() + "," + payload.chunkZ()
-                                    + " with " + sections.length + " sections, but no consumers registered");
-                        }
-                    }
-                    processedColumns++;
-                    dispatchedSections += sections.length;
-                } finally {
-                    buf.release();
+                VoxelColumnData columnData = decodeColumn(column, biomeRegistry);
+                if (sessionEpoch.get() != epoch || shuttingDown) {
+                    return;
                 }
+                VSSClientNetworking.processAssembledColumn(level, column, columnData);
+                processedColumns++;
+                dispatchedSections += columnData.sections().length;
             } catch (Exception e) {
-                VSSLogger.error("Failed to process voxel column at " + payload.chunkX() + "," + payload.chunkZ(), e);
-                VSSClientNetworking.onColumnProcessingFailed(payload.dimension(), payload.chunkX(), payload.chunkZ());
+                VSSLogger.error("Failed to process voxel column transfer " + column.transferId()
+                        + " at " + column.chunkX() + "," + column.chunkZ(), e);
+                fail(new FailedTransfer(
+                        column.requestId(),
+                        column.transferId(),
+                        column.dimension(),
+                        column.chunkX(),
+                        column.chunkZ()));
             }
         }
+    }
+
+    private static VoxelColumnData decodeColumn(
+            AssembledColumn column,
+            Registry<Biome> biomeRegistry) {
+        ArrayList<VoxelColumnData.SectionData> decodedSections = new ArrayList<>();
+        Set<Integer> sectionYs = new HashSet<>();
+        for (VoxelColumnS2CPayload part : column.parts()) {
+            byte[] decompressed = part.decompressedSections();
+            if (decompressed == null || decompressed.length == 0) {
+                throw new IllegalArgumentException("Empty serialized section body");
+            }
+            FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decompressed));
+            try {
+                int sectionCount = buf.readVarInt();
+                if (sectionCount < 0 || decodedSections.size() + sectionCount > MAX_SECTIONS_PER_COLUMN) {
+                    throw new IllegalArgumentException("Invalid assembled section count");
+                }
+                for (int i = 0; i < sectionCount; i++) {
+                    int sectionY = buf.readByte();
+                    if (!sectionYs.add(sectionY)) {
+                        throw new IllegalArgumentException("Duplicate section " + sectionY);
+                    }
+                    LevelChunkSection section = new LevelChunkSection(biomeRegistry);
+                    section.read(buf);
+
+                    DataLayer blockLight = null;
+                    if (buf.readBoolean()) {
+                        byte[] light = new byte[DataLayer.SIZE];
+                        buf.readBytes(light);
+                        blockLight = new DataLayer(light);
+                    }
+
+                    DataLayer skyLight = null;
+                    if (buf.readBoolean()) {
+                        byte[] light = new byte[DataLayer.SIZE];
+                        buf.readBytes(light);
+                        skyLight = new DataLayer(light);
+                    }
+                    decodedSections.add(new VoxelColumnData.SectionData(
+                            sectionY,
+                            section,
+                            blockLight,
+                            skyLight));
+                }
+                if (buf.isReadable()) {
+                    throw new IllegalArgumentException("Trailing bytes in LOD transfer part " + part.partIndex());
+                }
+            } finally {
+                buf.release();
+            }
+        }
+
+        int[] replacementSectionYs = column.finalPart().replacementSectionYs();
+        if (replacementSectionYs.length != sectionYs.size()) {
+            throw new IllegalArgumentException("Replacement manifest does not match assembled sections");
+        }
+        for (int sectionY : replacementSectionYs) {
+            if (!sectionYs.contains(sectionY)) {
+                throw new IllegalArgumentException("Replacement manifest references missing section " + sectionY);
+            }
+        }
+
+        return new VoxelColumnData(
+                decodedSections.toArray(VoxelColumnData.SectionData[]::new),
+                column.columnTimestamp(),
+                column.replaceMissingSections(),
+                replacementSectionYs,
+                true);
+    }
+
+    void invalidatePositions(ResourceKey<Level> dimension, long[] packedPositions) {
+        assembler.invalidatePositions(dimension, packedPositions);
+        removeQueuedPositions(priorityColumnQueue, dimension, packedPositions, true);
+        removeQueuedPositions(columnQueue, dimension, packedPositions, false);
+    }
+
+    void clearPendingTransfers() {
+        sessionEpoch.incrementAndGet();
+        clearQueue();
+        processing.set(false);
     }
 
     void shutdown() {
@@ -282,7 +274,6 @@ final class ClientColumnProcessor {
         clearQueue();
         processing.set(false);
         executor = null;
-        sectionPool.clear();
         if (old != null) {
             old.shutdownNow();
         }
@@ -294,7 +285,7 @@ final class ClientColumnProcessor {
     }
 
     int getQueuedCount() {
-        return queueSize.get();
+        return queueSize.get() + assembler.activeLogicalColumns();
     }
 
     long getColumnsDropped() {
@@ -306,7 +297,18 @@ final class ClientColumnProcessor {
         lastDropWarnMs = 0L;
     }
 
+    private void expireIdleTransfers() {
+        List<FailedTransfer> expired = assembler.expireIdle(
+                System.nanoTime(),
+                TRANSFER_IDLE_TIMEOUT_NANOS);
+        for (FailedTransfer transfer : expired) {
+            recordDrop();
+            fail(transfer);
+        }
+    }
+
     private void clearQueue() {
+        assembler.clear();
         priorityColumnQueue.clear();
         columnQueue.clear();
         queueSize.set(0);
@@ -314,13 +316,72 @@ final class ClientColumnProcessor {
         queueBytes.set(0L);
     }
 
-    private QueuedColumn pollQueuedColumn() {
-        QueuedColumn queuedColumn = priorityColumnQueue.poll();
-        if (queuedColumn != null) {
+    private AssembledColumn pollQueuedColumn() {
+        AssembledColumn column = priorityColumnQueue.poll();
+        if (column != null) {
             priorityQueueSize.updateAndGet(value -> Math.max(0, value - 1));
-            return queuedColumn;
+            return column;
         }
         return columnQueue.poll();
+    }
+
+    private void removeQueuedAccounting(AssembledColumn column) {
+        queueSize.updateAndGet(value -> Math.max(0, value - 1));
+        queueBytes.updateAndGet(value -> Math.max(0L, value - column.retainedBytes()));
+    }
+
+    private void removeQueuedPositions(
+            ConcurrentLinkedQueue<AssembledColumn> queue,
+            ResourceKey<Level> dimension,
+            long[] packedPositions,
+            boolean priority) {
+        if (packedPositions == null || packedPositions.length == 0) {
+            return;
+        }
+        for (AssembledColumn column : queue) {
+            if (!dimension.equals(column.dimension()) || !containsPosition(packedPositions, column.chunkX(), column.chunkZ())) {
+                continue;
+            }
+            if (queue.remove(column)) {
+                removeQueuedAccounting(column);
+                if (priority) {
+                    priorityQueueSize.updateAndGet(value -> Math.max(0, value - 1));
+                }
+            }
+        }
+    }
+
+    private void recordDrop() {
+        long dropped = columnsDropped.incrementAndGet();
+        long now = System.currentTimeMillis();
+        if (now - lastDropWarnMs > DROP_WARN_INTERVAL_MS) {
+            lastDropWarnMs = now;
+            VSSLogger.warn("Column transfer queue rejected or expired data ("
+                    + MAX_QUEUED_COLUMNS + " columns, "
+                    + (MAX_QUEUED_BYTES / 1024L / 1024L) + " MiB), "
+                    + dropped + " transfers dropped total");
+        }
+    }
+
+    private static boolean containsPosition(long[] positions, int chunkX, int chunkZ) {
+        long packed = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
+        for (long position : positions) {
+            if (position == packed) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void fail(FailedTransfer transfer) {
+        if (transfer != null) {
+            VSSClientNetworking.onColumnTransferFailed(
+                    transfer.requestId(),
+                    transfer.transferId(),
+                    transfer.dimension(),
+                    transfer.chunkX(),
+                    transfer.chunkZ());
+        }
     }
 
     private static ExecutorService createExecutor() {
@@ -329,8 +390,5 @@ final class ClientColumnProcessor {
             thread.setDaemon(true);
             return thread;
         });
-    }
-
-    private record QueuedColumn(VoxelColumnS2CPayload payload, boolean replaceMissingSections) {
     }
 }

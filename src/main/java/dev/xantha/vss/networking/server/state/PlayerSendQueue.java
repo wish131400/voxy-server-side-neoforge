@@ -4,14 +4,12 @@ import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.function.IntConsumer;
 
 public final class PlayerSendQueue {
     private final BucketedPayloadQueue priorityQueue = new BucketedPayloadQueue();
@@ -23,25 +21,23 @@ public final class PlayerSendQueue {
     private int orderedForPlayerCz = Integer.MIN_VALUE;
     private long nextSequence;
 
-    public synchronized boolean enqueue(
+    public synchronized EnqueueResult enqueue(
             VoxelColumnS2CPayload payload,
             boolean priority,
             int queueLimit,
             int queueBytesLimit,
-            boolean networkCompressionEnabled,
-            IntConsumer clearRequest) {
-        return enqueue(List.of(payload), priority, queueLimit, queueBytesLimit, networkCompressionEnabled, clearRequest);
+            boolean networkCompressionEnabled) {
+        return enqueue(List.of(payload), priority, queueLimit, queueBytesLimit, networkCompressionEnabled);
     }
 
-    public synchronized boolean enqueue(
+    public synchronized EnqueueResult enqueue(
             List<VoxelColumnS2CPayload> payloads,
             boolean priority,
             int queueLimit,
             int queueBytesLimit,
-            boolean networkCompressionEnabled,
-            IntConsumer clearRequest) {
+            boolean networkCompressionEnabled) {
         if (payloads == null || payloads.isEmpty()) {
-            return true;
+            return EnqueueResult.accepted(List.of());
         }
 
         int currentQueueSize = queuedPayloadCount();
@@ -66,12 +62,27 @@ public final class PlayerSendQueue {
             batchRawBytes += rawBytes;
         }
 
-        if (currentQueueSize + queuedPayloads.size() > queueLimit || queuedBytes + batchWireBytes > queueBytesLimit) {
-            clearRequests(payloads, clearRequest);
-            if (currentQueueSize > queueLimit / 2) {
-                trimNormalQueue(clearRequest);
+        ArrayList<Integer> rejectedRequestIds = new ArrayList<>();
+        int incomingRing = hasOrderingCenter()
+                ? ringForPayload(payloads.get(0), orderedForPlayerCx, orderedForPlayerCz)
+                : Integer.MAX_VALUE;
+        while (currentQueueSize + queuedPayloads.size() > queueLimit
+                || queuedBytes + batchWireBytes > queueBytesLimit) {
+            PlayerRequestState.QueuedPayloadBatch candidate = normalQueue.peekFarthestUnstarted();
+            if (candidate == null
+                    || (!priority && (incomingRing == Integer.MAX_VALUE
+                    || ring(candidate, orderedForPlayerCx, orderedForPlayerCz) <= incomingRing))) {
+                addRequestIds(payloads, rejectedRequestIds);
+                return EnqueueResult.rejected(rejectedRequestIds);
             }
-            return false;
+            PlayerRequestState.QueuedPayloadBatch removed = normalQueue.poll(candidate);
+            if (removed == null) {
+                addRequestIds(payloads, rejectedRequestIds);
+                return EnqueueResult.rejected(rejectedRequestIds);
+            }
+            removeBatchAccounting(removed);
+            addRequestId(removed.requestId(), rejectedRequestIds);
+            currentQueueSize = queuedPayloadCount();
         }
 
         PlayerRequestState.QueuedPayloadBatch batch = new PlayerRequestState.QueuedPayloadBatch(
@@ -85,7 +96,7 @@ public final class PlayerSendQueue {
         addBatch(batch);
         nextSequence += queuedPayloads.size();
         queuedBytes += batchWireBytes;
-        return true;
+        return EnqueueResult.accepted(rejectedRequestIds);
     }
 
     public synchronized void prepareOrder(int playerCx, int playerCz) {
@@ -272,31 +283,15 @@ public final class PlayerSendQueue {
         return batch.priority() ? priorityQueue : normalQueue;
     }
 
-    private void trimNormalQueue(IntConsumer clearRequest) {
-        int toRemove = Math.max(1, normalQueue.size() / 10);
-        while (toRemove > 0 && !normalQueue.isEmpty()) {
-            PlayerRequestState.QueuedPayloadBatch removed = normalQueue.pollFarthestOrOldest();
-            if (removed != null) {
-                removeBatchAccounting(removed);
-                clearBatchRequest(removed, clearRequest);
-                toRemove -= removed.payloadCount();
-            }
-        }
-    }
-
-    private static void clearRequests(List<VoxelColumnS2CPayload> payloads, IntConsumer clearRequest) {
-        HashSet<Integer> cleared = new HashSet<>();
+    private static void addRequestIds(List<VoxelColumnS2CPayload> payloads, List<Integer> requestIds) {
         for (VoxelColumnS2CPayload payload : payloads) {
-            if (payload.requestId() >= 0 && cleared.add(payload.requestId())) {
-                clearRequest.accept(payload.requestId());
-            }
+            addRequestId(payload.requestId(), requestIds);
         }
     }
 
-    private static void clearBatchRequest(PlayerRequestState.QueuedPayloadBatch batch, IntConsumer clearRequest) {
-        int requestId = batch.requestId();
-        if (requestId >= 0) {
-            clearRequest.accept(requestId);
+    private static void addRequestId(int requestId, List<Integer> requestIds) {
+        if (requestId >= 0 && !requestIds.contains(requestId)) {
+            requestIds.add(requestId);
         }
     }
 
@@ -306,6 +301,10 @@ public final class PlayerSendQueue {
 
     private static int ring(PlayerRequestState.QueuedPayloadBatch batch, int playerCx, int playerCz) {
         VoxelColumnS2CPayload payload = batch.firstPayload().payload();
+        return ringForPayload(payload, playerCx, playerCz);
+    }
+
+    private static int ringForPayload(VoxelColumnS2CPayload payload, int playerCx, int playerCz) {
         return Math.max(Math.abs(payload.chunkX() - playerCx), Math.abs(payload.chunkZ() - playerCz));
     }
 
@@ -440,25 +439,24 @@ public final class PlayerSendQueue {
             payloadCount = Math.max(0, payloadCount - Math.max(0, amount));
         }
 
-        private PlayerRequestState.QueuedPayloadBatch pollFarthestOrOldest() {
-            PlayerRequestState.QueuedPayloadBatch removed;
+        private PlayerRequestState.QueuedPayloadBatch peekFarthestUnstarted() {
             if (!unordered.isEmpty()) {
-                removed = unordered.pollFirst();
-            } else {
-                Map.Entry<Integer, TreeSet<PlayerRequestState.QueuedPayloadBatch>> entry = buckets.lastEntry();
-                if (entry == null) {
-                    return null;
+                for (PlayerRequestState.QueuedPayloadBatch batch : unordered) {
+                    if (!batch.hasSentPayloads()) {
+                        return batch;
+                    }
                 }
-                removed = entry.getValue().pollFirst();
-                if (entry.getValue().isEmpty()) {
-                    buckets.pollLastEntry();
+                return null;
+            }
+            for (Map.Entry<Integer, TreeSet<PlayerRequestState.QueuedPayloadBatch>> entry
+                    : buckets.descendingMap().entrySet()) {
+                for (PlayerRequestState.QueuedPayloadBatch batch : entry.getValue()) {
+                    if (!batch.hasSentPayloads()) {
+                        return batch;
+                    }
                 }
             }
-            if (removed != null) {
-                batchRings.remove(removed);
-                payloadCount = Math.max(0, payloadCount - removed.payloadCount());
-            }
-            return removed;
+            return null;
         }
 
         private int size() {
@@ -502,6 +500,20 @@ public final class PlayerSendQueue {
                 return null;
             }
             return bucket.remove(batch) ? batch : null;
+        }
+    }
+
+    public record EnqueueResult(boolean accepted, List<Integer> rejectedRequestIds) {
+        public EnqueueResult {
+            rejectedRequestIds = List.copyOf(rejectedRequestIds);
+        }
+
+        private static EnqueueResult accepted(List<Integer> rejectedRequestIds) {
+            return new EnqueueResult(true, rejectedRequestIds);
+        }
+
+        private static EnqueueResult rejected(List<Integer> rejectedRequestIds) {
+            return new EnqueueResult(false, rejectedRequestIds);
         }
     }
 }

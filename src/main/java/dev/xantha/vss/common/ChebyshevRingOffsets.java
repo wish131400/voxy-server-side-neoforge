@@ -60,4 +60,19 @@ public final class ChebyshevRingOffsets {
     public static int ring(long offset) {
         return Math.max(Math.abs(decodeX(offset)), Math.abs(decodeZ(offset)));
     }
+
+    public static int firstIndexForRing(int ring) {
+        if (ring < 0) {
+            throw new IllegalArgumentException("ring must be non-negative");
+        }
+        if (ring == 0) {
+            return 0;
+        }
+        long side = 2L * ring - 1L;
+        long index = side * side;
+        if (index > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("ring is too large: " + ring);
+        }
+        return (int) index;
+    }
 }

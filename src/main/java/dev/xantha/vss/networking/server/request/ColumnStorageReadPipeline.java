@@ -178,7 +178,10 @@ public final class ColumnStorageReadPipeline {
                     readContext.cx(),
                     readContext.cz(),
                     VSSServerConfig.CONFIG.diskReadTimeoutMillis);
-            if (rawDiskData != null && rawDiskData.sectionBytes() != null && rawDiskData.sizeBytes() > 0) {
+            if (rawDiskData != null
+                    && rawDiskData.completeColumn()
+                    && rawDiskData.sectionBytes() != null
+                    && rawDiskData.sizeBytes() > 0) {
                 return new DiskNbtReadResult(EncodedColumnData.encode(rawDiskData, readContext.columnTimestamp()), false);
             }
             return DiskNbtReadResult.empty();
@@ -238,7 +241,10 @@ public final class ColumnStorageReadPipeline {
         }
         long latestDirtyTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), cx, cz);
         long effectiveColumnTimestamp = Math.max(columnTimestamp, latestDirtyTimestamp);
-        if (storedData != null && storedData.columnData() != null && storedData.timestamp() >= latestDirtyTimestamp) {
+        if (storedData != null
+                && storedData.columnData() != null
+                && storedData.columnData().completeColumn()
+                && storedData.timestamp() >= latestDirtyTimestamp) {
             sendStoredColumn(readContext, storedData, player, effectiveColumnTimestamp);
             return;
         }
@@ -257,7 +263,7 @@ public final class ColumnStorageReadPipeline {
             handleMissingDiskColumn(readContext, player, effectiveColumnTimestamp);
             return;
         }
-        if (diskData == null || !diskData.hasBody()) {
+        if (diskData == null || !diskData.hasBody() || !diskData.completeColumn()) {
             handleMissingDiskColumn(readContext, player, effectiveColumnTimestamp);
             return;
         }
