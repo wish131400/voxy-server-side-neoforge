@@ -13,7 +13,7 @@ class RingScanGateTest {
         long[] offsets = ChebyshevRingOffsets.generate(3);
         int ringTwoCursor = firstIndexOfRing(offsets, 2);
 
-        RingScanGate gate = RingScanGate.fromCursor(offsets, ringTwoCursor, offsets.length);
+        RingScanGate gate = RingScanGate.fromCursor(ringTwoCursor, offsets.length);
 
         assertTrue(gate.allows(2));
         assertFalse(gate.allows(3));
@@ -24,7 +24,7 @@ class RingScanGateTest {
         long[] offsets = ChebyshevRingOffsets.generate(2);
         int ringOneCursor = firstIndexOfRing(offsets, 1);
 
-        RingScanGate gate = RingScanGate.fromCursor(offsets, ringOneCursor, offsets.length);
+        RingScanGate gate = RingScanGate.fromCursor(ringOneCursor, offsets.length);
 
         assertTrue(gate.allows(1));
         assertFalse(gate.allows(2));

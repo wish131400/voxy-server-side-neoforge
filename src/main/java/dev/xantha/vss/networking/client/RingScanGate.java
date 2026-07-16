@@ -9,11 +9,11 @@ final class RingScanGate {
         this.ringLimit = ringLimit;
     }
 
-    static RingScanGate fromCursor(long[] orderedOffsets, int cursor, int totalCandidates) {
-        if (orderedOffsets.length == 0 || cursor >= totalCandidates) {
+    static RingScanGate fromCursor(int cursor, int totalCandidates) {
+        if (totalCandidates <= 0 || cursor >= totalCandidates) {
             return new RingScanGate(Integer.MAX_VALUE);
         }
-        return new RingScanGate(ChebyshevRingOffsets.ring(orderedOffsets[cursor]));
+        return new RingScanGate(ChebyshevRingOffsets.ringForIndex(cursor));
     }
 
     boolean allows(int ring) {

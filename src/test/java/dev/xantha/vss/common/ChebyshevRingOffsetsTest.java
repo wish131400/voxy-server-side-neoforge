@@ -81,6 +81,25 @@ class ChebyshevRingOffsetsTest {
         }
     }
 
+    @Test
+    void indexedOffsetsMatchGeneratedLayout() {
+        long[] offsets = ChebyshevRingOffsets.generate(32);
+        for (int index = 0; index < offsets.length; index++) {
+            assertEquals(offsets[index], ChebyshevRingOffsets.offsetAt(index));
+            assertEquals(ChebyshevRingOffsets.ring(offsets[index]), ChebyshevRingOffsets.ringForIndex(index));
+        }
+    }
+
+    @Test
+    void maximumClientDistanceCanBeScannedWithoutAllocatingTheWindow() {
+        int distance = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
+        int count = ChebyshevRingOffsets.count(distance);
+
+        assertEquals(268_468_225, count);
+        assertEquals(distance, ChebyshevRingOffsets.ringForIndex(count - 1));
+        assertEquals(distance, ChebyshevRingOffsets.ring(ChebyshevRingOffsets.offsetAt(count - 1)));
+    }
+
     private static int[][] decode(long[] offsets) {
         int[][] decoded = new int[offsets.length][2];
         for (int i = 0; i < offsets.length; i++) {

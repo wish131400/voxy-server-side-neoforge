@@ -23,7 +23,7 @@ public final class VSSConstants {
     public static final int FAR_PLAYER_VERTICAL_HANDOFF_BLOCKS = 16;
     public static final int ESTIMATED_COLUMN_OVERHEAD_BYTES = 25;
     public static final int LOD_DISTANCE_BUFFER = 32;
-    public static final int MAX_CLIENT_LOD_DISTANCE_CHUNKS = 512;
+    public static final int MAX_CLIENT_LOD_DISTANCE_CHUNKS = 8192;
     public static final int SYNC_NEAR_DISTANCE_CHUNKS = 32;
     public static final int SYNC_MID_DISTANCE_CHUNKS = 64;
     public static final int SYNC_FAR_DISTANCE_CHUNKS = 128;

@@ -12,8 +12,6 @@ import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongList;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -55,18 +53,6 @@ public final class LodRequestManager {
     private static final int ESTIMATED_SYNC_COLUMN_BYTES = 48 * 1024;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
-    private static final Map<Integer, long[]> OFFSET_CACHE = new ConcurrentHashMap<>();
-
-    static {
-        for (int dist : new int[]{32, 64, 96, 128, 192, 256}) {
-            OFFSET_CACHE.put(dist, generateOffsetsForDistance(dist));
-        }
-    }
-
-    private static long[] generateOffsetsForDistance(int lodDistance) {
-        return ChebyshevRingOffsets.generate(lodDistance);
-    }
-
     private final Long2LongOpenHashMap columnTimestamps = new Long2LongOpenHashMap();
     private final LongOpenHashSet dirtyColumns = new LongOpenHashSet();
     private final Long2LongOpenHashMap dirtyColumnTimestamps = new Long2LongOpenHashMap();
@@ -92,7 +78,7 @@ public final class LodRequestManager {
     private int lastPlayerChunkZ = Integer.MIN_VALUE;
     private int scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     private int orderedOffsetDistance = -1;
-    private long[] orderedOffsets = new long[0];
+    private int orderedOffsetCount;
     private int scanOffsetIndex;
     private int nearScanOffsetIndex;
     private int presenceAuditOffsetIndex;
@@ -732,7 +718,7 @@ public final class LodRequestManager {
             long now,
             ScanBudget scanBudget) {
         if (nearScanCompletedForCurrentOffsets
-                || orderedOffsets.length == 0
+                || orderedOffsetCount == 0
                 || !requestWindow.hasNormalCandidateCapacity(0)
                 || lodDistance <= 0
                 || !scanBudget.canScanMore()) {
@@ -740,7 +726,7 @@ public final class LodRequestManager {
         }
 
         int maxAllowedRing = Math.min(lodDistance, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS);
-        int totalCandidates = orderedOffsets.length;
+        int totalCandidates = orderedOffsetCount;
         while (count < maxCount
                 && requestWindow.hasNormalCandidateCapacity(0)
                 && scanBudget.canScanMore()) {
@@ -749,7 +735,7 @@ public final class LodRequestManager {
                 return count;
             }
 
-            long offset = orderedOffsets[nearScanOffsetIndex];
+            long offset = ChebyshevRingOffsets.offsetAt(nearScanOffsetIndex);
             int offsetRing = offsetRing(offset);
             if (offsetRing > maxAllowedRing) {
                 nearScanCompletedForCurrentOffsets = true;
@@ -803,7 +789,7 @@ public final class LodRequestManager {
             return;
         }
         ensureOrderedOffsets(lodDistance);
-        int candidateCount = orderedOffsets.length;
+        int candidateCount = orderedOffsetCount;
         if (candidateCount <= 0) {
             return;
         }
@@ -812,7 +798,7 @@ public final class LodRequestManager {
             if (presenceAuditOffsetIndex >= candidateCount) {
                 presenceAuditOffsetIndex = 0;
             }
-            long offset = orderedOffsets[presenceAuditOffsetIndex++];
+            long offset = ChebyshevRingOffsets.offsetAt(presenceAuditOffsetIndex++);
             long packed = PositionUtil.packPosition(
                     playerCx + decodeOffsetX(offset),
                     playerCz + decodeOffsetZ(offset));
@@ -953,7 +939,7 @@ public final class LodRequestManager {
             long now,
             int maxAllowedRing,
             ScanBudget scanBudget) {
-        if (!requestWindow.hasAnyNormalCandidateCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
+        if (!requestWindow.hasAnyNormalCandidateCapacity() || orderedOffsetCount == 0 || !scanBudget.canScanMore()) {
             return count;
         }
         if (scanCompletedForCurrentOffsets) {
@@ -964,9 +950,9 @@ public final class LodRequestManager {
             scanOffsetIndex = 0;
         }
 
-        int totalCandidates = orderedOffsets.length;
+        int totalCandidates = orderedOffsetCount;
 
-        RingScanGate ringGate = RingScanGate.fromCursor(orderedOffsets, scanOffsetIndex, totalCandidates);
+        RingScanGate ringGate = RingScanGate.fromCursor(scanOffsetIndex, totalCandidates);
 
         while (count < maxCount
                 && requestWindow.hasAnyNormalCandidateCapacity()
@@ -978,7 +964,7 @@ public final class LodRequestManager {
                 return count;
             }
 
-            long offset = orderedOffsets[scanOffsetIndex];
+            long offset = ChebyshevRingOffsets.offsetAt(scanOffsetIndex);
             int offsetRing = offsetRing(offset);
 
             if (offsetRing > maxAllowedRing) {
@@ -1611,16 +1597,16 @@ public final class LodRequestManager {
     }
 
     private void setScanCursorAtRing(int ring) {
-        if (orderedOffsets.length == 0 || ring <= 0) {
+        if (orderedOffsetCount == 0 || ring <= 0) {
             resetScanCursor();
             return;
         }
         int clampedRing = Math.min(ring, orderedOffsetDistance + 1);
-        int index = Math.min(orderedOffsets.length, ChebyshevRingOffsets.firstIndexForRing(clampedRing));
+        int index = Math.min(orderedOffsetCount, ChebyshevRingOffsets.firstIndexForRing(clampedRing));
         resetNearScanCursor();
         scanOffsetIndex = index;
         softFrontierRadius = Math.max(0, Math.min(ring - 1, orderedOffsetDistance));
-        scanCompletedForCurrentOffsets = index >= orderedOffsets.length;
+        scanCompletedForCurrentOffsets = index >= orderedOffsetCount;
         nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     }
@@ -1630,7 +1616,7 @@ public final class LodRequestManager {
             return;
         }
 
-        orderedOffsets = OFFSET_CACHE.computeIfAbsent(lodDistance, LodRequestManager::generateOffsetsForDistance);
+        orderedOffsetCount = ChebyshevRingOffsets.count(lodDistance);
         orderedOffsetDistance = lodDistance;
         resetScanCursor();
     }
