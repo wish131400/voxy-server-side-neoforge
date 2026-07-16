@@ -73,15 +73,10 @@ final class ClientPresenceReporter {
             ClientLevel level,
             ResourceKey<Level> dimension,
             long packed) {
-        byte[] expectedSectionYs = ClientLodPresenceCache.sectionManifest(scope, dimension, packed);
-        if (expectedSectionYs == null) {
-            return ModCompat.LocalColumnState.UNKNOWN;
-        }
         return ModCompat.getVoxyLocalColumnState(
                 level,
                 PositionUtil.unpackX(packed),
-                PositionUtil.unpackZ(packed),
-                expectedSectionYs);
+                PositionUtil.unpackZ(packed));
     }
 
     void updateWindow(
@@ -193,7 +188,6 @@ final class ClientPresenceReporter {
         delayedRegionDeadlines.clear();
         verificationRetryRegions.clear();
         verificationRetryDeadlines.clear();
-        ModCompat.resetVoxyLocalValidation();
         centerRegionX = Integer.MIN_VALUE;
         centerRegionZ = Integer.MIN_VALUE;
         maxRegionRing = -1;

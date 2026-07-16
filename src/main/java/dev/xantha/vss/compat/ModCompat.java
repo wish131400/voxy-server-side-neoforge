@@ -27,25 +27,9 @@ public final class ModCompat {
         return voxyLoaded ? VoxyCompat.getLocalColumnState(level, chunkX, chunkZ) : LocalColumnState.UNKNOWN;
     }
 
-    public static LocalColumnState getVoxyLocalColumnState(
-            net.minecraft.world.level.Level level,
-            int chunkX,
-            int chunkZ,
-            byte[] expectedSectionYs) {
-        return voxyLoaded
-                ? VoxyCompat.getLocalColumnState(level, chunkX, chunkZ, expectedSectionYs)
-                : LocalColumnState.UNKNOWN;
-    }
-
     public static void clientTick() {
         if (voxyLoaded) {
             VoxyCompat.clientTick();
-        }
-    }
-
-    public static void resetVoxyLocalValidation() {
-        if (voxyLoaded) {
-            VoxyCompat.resetLocalValidation();
         }
     }
 

@@ -199,8 +199,7 @@ final class ClientLodPresenceCache {
                 ModCompat.LocalColumnState state = ModCompat.getVoxyLocalColumnState(
                         level,
                         cx,
-                        cz,
-                        region.sectionManifest(slot));
+                        cz);
                 if (state == ModCompat.LocalColumnState.MISSING) {
                     if (!region.confirmMissing(slot, nowNanos)) {
                         complete = false;
