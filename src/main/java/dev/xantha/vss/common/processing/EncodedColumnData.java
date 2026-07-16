@@ -11,7 +11,7 @@ public record EncodedColumnData(
         long columnStamp,
         int schemaVersion,
         boolean completeColumn) {
-    public static final int SCHEMA_VERSION = 1;
+    public static final int SCHEMA_VERSION = 2;
 
     public static EncodedColumnData encode(LoadedColumnData rawColumn, long columnStamp) throws IOException {
         if (rawColumn == null || rawColumn.sectionBytes() == null) {

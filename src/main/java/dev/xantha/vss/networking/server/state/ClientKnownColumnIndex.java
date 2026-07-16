@@ -25,11 +25,22 @@ public final class ClientKnownColumnIndex {
             known.clear();
         }
         for (RegionPresenceC2SPayload.RegionEntry entry : entries) {
+            if (!isValidRegionSnapshot(entry)) {
+                continue;
+            }
             int baseX = entry.regionX() * RegionPresenceC2SPayload.REGION_SIZE;
             int baseZ = entry.regionZ() * RegionPresenceC2SPayload.REGION_SIZE;
+            long[] bitmap = entry.bitmap();
+            for (int slot = 0; slot < RegionPresenceC2SPayload.REGION_SLOT_COUNT; slot++) {
+                if ((bitmap[slot >>> 6] & (1L << (slot & 63))) == 0L) {
+                    int cx = baseX + (slot & (RegionPresenceC2SPayload.REGION_SIZE - 1));
+                    int cz = baseZ + (slot >>> 5);
+                    known.remove(PositionUtil.packPosition(cx, cz));
+                }
+            }
             int[] slots = entry.slots();
             long[] timestamps = entry.timestamps();
-            int count = Math.min(entry.count(), Math.min(slots.length, timestamps.length));
+            int count = entry.count();
             for (int i = 0; i < count; i++) {
                 int slot = slots[i];
                 long timestamp = timestamps[i];
@@ -41,6 +52,41 @@ public final class ClientKnownColumnIndex {
                 known.put(PositionUtil.packPosition(cx, cz), timestamp);
             }
         }
+    }
+
+    private static boolean isValidRegionSnapshot(RegionPresenceC2SPayload.RegionEntry entry) {
+        if (entry == null
+                || entry.count() < 0
+                || entry.count() > RegionPresenceC2SPayload.REGION_SLOT_COUNT
+                || entry.bitmap() == null
+                || entry.bitmap().length < RegionPresenceC2SPayload.REGION_BITMAP_LONGS
+                || entry.slots() == null
+                || entry.timestamps() == null
+                || entry.slots().length < entry.count()
+                || entry.timestamps().length < entry.count()) {
+            return false;
+        }
+
+        long[] expectedBitmap = new long[RegionPresenceC2SPayload.REGION_BITMAP_LONGS];
+        for (int i = 0; i < entry.count(); i++) {
+            int slot = entry.slots()[i];
+            long timestamp = entry.timestamps()[i];
+            if (slot < 0 || slot >= RegionPresenceC2SPayload.REGION_SLOT_COUNT || timestamp <= 0L) {
+                return false;
+            }
+            long mask = 1L << (slot & 63);
+            int word = slot >>> 6;
+            if ((expectedBitmap[word] & mask) != 0L) {
+                return false;
+            }
+            expectedBitmap[word] |= mask;
+        }
+        for (int i = 0; i < RegionPresenceC2SPayload.REGION_BITMAP_LONGS; i++) {
+            if (entry.bitmap()[i] != expectedBitmap[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public synchronized void markKnown(ResourceKey<Level> dimension, long packed, long timestamp) {

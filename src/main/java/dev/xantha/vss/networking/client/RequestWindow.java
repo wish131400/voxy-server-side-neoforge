@@ -40,6 +40,14 @@ final class RequestWindow {
         return generationRemaining > 0;
     }
 
+    boolean hasAnyNormalCandidateCapacity() {
+        return hasAnySyncCapacity() || hasGenerationCapacity();
+    }
+
+    boolean hasNormalCandidateCapacity(int ring) {
+        return hasSyncCapacity(ring) || hasGenerationCapacity();
+    }
+
     boolean hasNearSyncCapacity() {
         return nearSyncRemaining > 0;
     }

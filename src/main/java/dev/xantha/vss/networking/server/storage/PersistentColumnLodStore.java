@@ -53,6 +53,7 @@ public final class PersistentColumnLodStore {
     private long writes;
     private long writeFailures;
     private long invalidations;
+    private long corruptions;
     private long cleanupRuns;
     private long cleanupDeleted;
     private long indexScans;
@@ -140,6 +141,17 @@ public final class PersistentColumnLodStore {
                 misses++;
                 deleteQuietly(path);
                 markIndexed(server, dimension, cx, cz, null);
+                return null;
+            }
+
+            try {
+                decodeStoredBody(encodedBytes, header.method(), header.rawSize());
+            } catch (IOException e) {
+                misses++;
+                corruptions++;
+                deleteColumn(server, dimension, cx, cz);
+                VSSLogger.warn("Discarded corrupt persistent LOD column " + cx + "," + cz
+                        + ": " + e.getMessage());
                 return null;
             }
 
@@ -297,7 +309,7 @@ public final class PersistentColumnLodStore {
     public String diagnostics() {
         return String.format(
                 Locale.ROOT,
-                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
+                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, corruptions=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
                 config.enablePersistentColumnCache,
                 reads,
                 hits,
@@ -305,6 +317,7 @@ public final class PersistentColumnLodStore {
                 writes,
                 writeFailures,
                 invalidations,
+                corruptions,
                 cleanupRuns,
                 cleanupDeleted,
                 regionIndexCount(),
@@ -312,6 +325,10 @@ public final class PersistentColumnLodStore {
                 indexScans,
                 indexMissSkips,
                 indexEvictions);
+    }
+
+    static byte[] decodeStoredBody(byte[] encodedBytes, int method, int rawSize) throws IOException {
+        return LodByteCompression.decompress(encodedBytes, method, rawSize, MAX_COLUMN_BYTES);
     }
 
     private static boolean isReadableCompression(int method) {

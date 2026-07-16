@@ -69,7 +69,7 @@ public final class SectionSerializer {
                 PalettedContainer<BlockState> states = section.getStates().copy();
                 PalettedContainerRO<Holder<Biome>> biomes = section.getBiomes().recreate();
                 LightData skyLight = copyLightData(skyLightListener, sectionPos);
-                if (requiresSkyLight && !skyLight.present()) {
+                if (!skyLight.present()) {
                     missingSkyLight = true;
                 }
                 includedSections.add(new SectionSnapshot(sectionY, states, biomes, blockLight.data(), skyLight.data()));
@@ -79,7 +79,7 @@ public final class SectionSerializer {
             }
         }
 
-        boolean completeColumn = !missingSkyLight
+        boolean completeColumn = hasCompleteRequiredLighting(requiresSkyLight, missingSkyLight)
                 && isCompleteColumn(level, chunk, highestIncludedSectionY, includedSections.isEmpty());
         return new ColumnSnapshot(cx, cz, includedSections.toArray(SectionSnapshot[]::new), completeColumn);
     }
@@ -159,7 +159,7 @@ public final class SectionSerializer {
                     buf.writeBytes(info.blockLight.getData());
                 }
                 DataLayer skyLight = skyLightListener != null ? skyLightListener.getDataLayerData(info.sectionPos) : null;
-                if (requiresSkyLight && skyLight == null) {
+                if (skyLight == null) {
                     missingSkyLight = true;
                 }
                 boolean hasSkyLight = skyLight != null && hasNonZeroData(skyLight);
@@ -171,7 +171,7 @@ public final class SectionSerializer {
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            boolean completeColumn = !missingSkyLight
+            boolean completeColumn = hasCompleteRequiredLighting(requiresSkyLight, missingSkyLight)
                     && isCompleteColumn(level, chunk, highestIncludedSectionY, false);
             return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
         } finally {
@@ -211,6 +211,10 @@ public final class SectionSerializer {
             }
         }
         return false;
+    }
+
+    static boolean hasCompleteRequiredLighting(boolean requiresSkyLight, boolean missingSkyLight) {
+        return !requiresSkyLight || !missingSkyLight;
     }
 
     private static LightData copyLightData(LayerLightEventListener listener, SectionPos sectionPos) {

@@ -14,6 +14,7 @@ public final class LodByteCompression {
     private static final int BUFFER_SIZE = 8192;
     private static final int ZSTD_NETWORK_LEVEL = 7;
     private static final int ZSTD_STORAGE_LEVEL = 7;
+    private static final int ZSTD_FRAME_MAGIC = 0xFD2FB528;
     public static final int METHOD_NONE = 0;
     public static final int METHOD_DEFLATE = 1;
     public static final int METHOD_ZSTD = 2;
@@ -146,6 +147,9 @@ public final class LodByteCompression {
     }
 
     private static byte[] decompressZstd(byte[] compressed, int expectedLength) throws IOException {
+        if (!hasZstdFrameMagic(compressed)) {
+            throw new IOException("Invalid Zstd LOD frame header");
+        }
         ZstdBridge bridge = zstdBridge();
         if (bridge == null) {
             throw new MissingCompressionMethodException("Zstd is not available");
@@ -163,6 +167,16 @@ public final class LodByteCompression {
 
     public static boolean isZstdAvailable() {
         return zstdBridge() != null;
+    }
+
+    private static boolean hasZstdFrameMagic(byte[] bytes) {
+        return bytes != null
+                && bytes.length >= Integer.BYTES
+                && ((bytes[0] & 0xFF)
+                        | (bytes[1] & 0xFF) << 8
+                        | (bytes[2] & 0xFF) << 16
+                        | (bytes[3] & 0xFF) << 24)
+                        == ZSTD_FRAME_MAGIC;
     }
 
     private static ZstdBridge zstdBridge() {

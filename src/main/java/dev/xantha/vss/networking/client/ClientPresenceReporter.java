@@ -2,6 +2,7 @@ package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -21,13 +22,18 @@ final class ClientPresenceReporter {
     private static final int INTEGRATED_PACKETS_PER_TICK = 1;
     private static final long INCREMENTAL_RESEND_INTERVAL_NANOS = 5_000_000_000L;
     private static final int INCREMENTAL_RESENDS_PER_TICK = 32;
+    private static final long VERIFICATION_RETRY_INTERVAL_NANOS = 1_000_000_000L;
+    private static final int VERIFICATION_RETRIES_PER_TICK = 32;
 
     private final String scope;
+    private final ReconciliationListener reconciliationListener;
     private final LongOpenHashSet sentRegions = new LongOpenHashSet();
     private final LongOpenHashSet queuedRegions = new LongOpenHashSet();
     private final ArrayDeque<Long> pendingRegions = new ArrayDeque<>();
     private final ArrayDeque<Long> delayedRegions = new ArrayDeque<>();
     private final Long2LongOpenHashMap delayedRegionDeadlines = new Long2LongOpenHashMap();
+    private final ArrayDeque<Long> verificationRetryRegions = new ArrayDeque<>();
+    private final Long2LongOpenHashMap verificationRetryDeadlines = new Long2LongOpenHashMap();
 
     private ResourceKey<Level> dimension;
     private int centerRegionX = Integer.MIN_VALUE;
@@ -35,16 +41,27 @@ final class ClientPresenceReporter {
     private int maxRegionRing = -1;
     private boolean resetPending = true;
 
-    ClientPresenceReporter(String scope) {
+    ClientPresenceReporter(String scope, ReconciliationListener reconciliationListener) {
         this.scope = scope;
+        this.reconciliationListener = reconciliationListener;
         delayedRegionDeadlines.defaultReturnValue(0L);
+        verificationRetryDeadlines.defaultReturnValue(0L);
     }
 
-    void recordKnownColumn(ResourceKey<Level> dimension, long packed, long columnTimestamp) {
+    void recordKnownColumn(
+            ResourceKey<Level> dimension,
+            long packed,
+            long columnTimestamp,
+            int[] replacementSectionYs) {
         if (dimension == null || columnTimestamp <= 0L) {
             return;
         }
-        ClientLodPresenceCache.recordColumn(scope, dimension, packed, columnTimestamp);
+        ClientLodPresenceCache.recordColumn(
+                scope,
+                dimension,
+                packed,
+                columnTimestamp,
+                replacementSectionYs);
         queueRegionForColumn(dimension, packed);
     }
 
@@ -52,13 +69,27 @@ final class ClientPresenceReporter {
         ClientLodPresenceCache.removeColumn(scope, dimension, packed);
     }
 
+    ModCompat.LocalColumnState getLocalColumnState(
+            ClientLevel level,
+            ResourceKey<Level> dimension,
+            long packed) {
+        byte[] expectedSectionYs = ClientLodPresenceCache.sectionManifest(scope, dimension, packed);
+        if (expectedSectionYs == null) {
+            return ModCompat.LocalColumnState.UNKNOWN;
+        }
+        return ModCompat.getVoxyLocalColumnState(
+                level,
+                PositionUtil.unpackX(packed),
+                PositionUtil.unpackZ(packed),
+                expectedSectionYs);
+    }
+
     void updateWindow(
             ClientLevel level,
             ResourceKey<Level> dimension,
             int playerCx,
             int playerCz,
-            int lodDistance,
-            Long2LongOpenHashMap columnTimestamps) {
+            int lodDistance) {
         if (lodDistance <= 0) {
             return;
         }
@@ -88,15 +119,14 @@ final class ClientPresenceReporter {
         for (int ring = 0; ring <= nextMaxRegionRing; ring++) {
             queueRegionRing(nextCenterRegionX, nextCenterRegionZ, ring);
         }
-        seedRegion(level, dimension, nextCenterRegionX, nextCenterRegionZ, columnTimestamps);
     }
 
     void drain(
             ClientLevel level,
             ResourceKey<Level> dimension,
-            boolean allowZstd,
-            Long2LongOpenHashMap columnTimestamps) {
+            boolean allowZstd) {
         queueDueIncrementalRegions();
+        queueDueVerificationRetries();
         if (pendingRegions.isEmpty()) {
             if (resetPending) {
                 sendPayload(dimension, true, new ArrayList<>(), allowZstd);
@@ -105,11 +135,12 @@ final class ClientPresenceReporter {
             return;
         }
 
-        int packetsSent = 0;
+        int batchesProcessed = 0;
         int packetsPerTick = packetsPerTick();
         int regionsPerPacket = regionsPerPacket();
         int columnsPerPacket = columnsPerPacket();
-        while (packetsSent < packetsPerTick && !pendingRegions.isEmpty()) {
+        while (batchesProcessed < packetsPerTick && !pendingRegions.isEmpty()) {
+            batchesProcessed++;
             ArrayList<RegionPresenceC2SPayload.RegionEntry> entries = new ArrayList<>();
             int consumedRegions = 0;
             int columnCount = 0;
@@ -118,20 +149,23 @@ final class ClientPresenceReporter {
                     && !pendingRegions.isEmpty()) {
                 long key = pendingRegions.pollFirst();
                 queuedRegions.remove(key);
-                sentRegions.add(key);
                 consumedRegions++;
                 int regionX = ClientLodPresenceCache.regionKeyX(key);
                 int regionZ = ClientLodPresenceCache.regionKeyZ(key);
-                seedRegion(level, dimension, regionX, regionZ, columnTimestamps);
-                RegionPresenceC2SPayload.RegionEntry entry = ClientLodPresenceCache.regionEntry(
+                ClientLodPresenceCache.RegionReconciliation reconciliation = ClientLodPresenceCache.reconcileRegion(
                         scope,
                         dimension,
                         regionX,
                         regionZ,
                         level);
-                if (entry == null || entry.count() <= 0) {
+
+                applyReconciliation(reconciliation);
+                if (!reconciliation.complete()) {
+                    scheduleVerificationRetry(key);
                     continue;
                 }
+                sentRegions.add(key);
+                RegionPresenceC2SPayload.RegionEntry entry = reconciliation.entry();
                 entries.add(entry);
                 columnCount += entry.count();
             }
@@ -140,7 +174,6 @@ final class ClientPresenceReporter {
                 if (resetPending && pendingRegions.isEmpty()) {
                     sendPayload(dimension, true, entries, allowZstd);
                     resetPending = false;
-                    packetsSent++;
                 }
                 continue;
             }
@@ -148,7 +181,6 @@ final class ClientPresenceReporter {
             boolean reset = resetPending;
             resetPending = false;
             sendPayload(dimension, reset, entries, allowZstd);
-            packetsSent++;
         }
     }
 
@@ -159,6 +191,9 @@ final class ClientPresenceReporter {
         pendingRegions.clear();
         delayedRegions.clear();
         delayedRegionDeadlines.clear();
+        verificationRetryRegions.clear();
+        verificationRetryDeadlines.clear();
+        ModCompat.resetVoxyLocalValidation();
         centerRegionX = Integer.MIN_VALUE;
         centerRegionZ = Integer.MIN_VALUE;
         maxRegionRing = -1;
@@ -180,13 +215,23 @@ final class ClientPresenceReporter {
         }
     }
 
-    private void seedRegion(
-            ClientLevel level,
-            ResourceKey<Level> dimension,
-            int regionX,
-            int regionZ,
-            Long2LongOpenHashMap columnTimestamps) {
-        ClientLodPresenceCache.seedRegion(scope, dimension, regionX, regionZ, columnTimestamps, level);
+    private void applyReconciliation(ClientLodPresenceCache.RegionReconciliation reconciliation) {
+        RegionPresenceC2SPayload.RegionEntry entry = reconciliation.entry();
+        int baseX = entry.regionX() * RegionPresenceC2SPayload.REGION_SIZE;
+        int baseZ = entry.regionZ() * RegionPresenceC2SPayload.REGION_SIZE;
+        int[] slots = entry.slots();
+        long[] timestamps = entry.timestamps();
+        int count = Math.min(entry.count(), Math.min(slots.length, timestamps.length));
+        for (int i = 0; i < count; i++) {
+            int slot = slots[i];
+            long packed = PositionUtil.packPosition(
+                    baseX + (slot & (RegionPresenceC2SPayload.REGION_SIZE - 1)),
+                    baseZ + (slot >>> 5));
+            reconciliationListener.onPresent(packed, timestamps[i]);
+        }
+        for (long packed : reconciliation.missingColumns()) {
+            reconciliationListener.onMissing(packed);
+        }
     }
 
     private void queueRegionForColumn(ResourceKey<Level> dimension, long packed) {
@@ -202,9 +247,8 @@ final class ClientPresenceReporter {
         long key = ClientLodPresenceCache.regionKey(regionX, regionZ);
         if (!sentRegions.contains(key)) {
             queueRegion(regionX, regionZ, false);
-            return;
         }
-        if (queuedRegions.contains(key) || delayedRegionDeadlines.containsKey(key)) {
+        if (delayedRegionDeadlines.containsKey(key)) {
             return;
         }
         delayedRegionDeadlines.put(key, System.nanoTime() + INCREMENTAL_RESEND_INTERVAL_NANOS);
@@ -262,6 +306,39 @@ final class ClientPresenceReporter {
         }
     }
 
+    private void scheduleVerificationRetry(long key) {
+        if (verificationRetryDeadlines.containsKey(key)) {
+            return;
+        }
+        verificationRetryDeadlines.put(key, System.nanoTime() + VERIFICATION_RETRY_INTERVAL_NANOS);
+        verificationRetryRegions.addLast(key);
+    }
+
+    private void queueDueVerificationRetries() {
+        long now = System.nanoTime();
+        int moved = 0;
+        while (moved < VERIFICATION_RETRIES_PER_TICK && !verificationRetryRegions.isEmpty()) {
+            long key = verificationRetryRegions.peekFirst();
+            if (!verificationRetryDeadlines.containsKey(key)) {
+                verificationRetryRegions.pollFirst();
+                continue;
+            }
+            long deadline = verificationRetryDeadlines.get(key);
+            if (now - deadline < 0L) {
+                break;
+            }
+            verificationRetryRegions.pollFirst();
+            verificationRetryDeadlines.remove(key);
+            int regionX = ClientLodPresenceCache.regionKeyX(key);
+            int regionZ = ClientLodPresenceCache.regionKeyZ(key);
+            if (!isRegionInWindow(regionX, regionZ)) {
+                continue;
+            }
+            queueRegion(regionX, regionZ, true);
+            moved++;
+        }
+    }
+
     private boolean isRegionInWindow(int regionX, int regionZ) {
         return maxRegionRing >= 0
                 && Math.max(Math.abs(regionX - centerRegionX), Math.abs(regionZ - centerRegionZ)) <= maxRegionRing;
@@ -281,5 +358,11 @@ final class ClientPresenceReporter {
 
     private static boolean isIntegratedServer() {
         return Minecraft.getInstance().getSingleplayerServer() != null;
+    }
+
+    interface ReconciliationListener {
+        void onPresent(long packed, long timestamp);
+
+        void onMissing(long packed);
     }
 }

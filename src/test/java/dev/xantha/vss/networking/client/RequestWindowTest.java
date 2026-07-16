@@ -65,6 +65,20 @@ class RequestWindowTest {
     }
 
     @Test
+    void firstPassGenerationCanUseItsOwnSlotWhenSyncBudgetIsExhausted() {
+        RequestWindow window = new RequestWindow(0, 0, 0, 0, 1, 0);
+
+        assertTrue(window.hasAnyNormalCandidateCapacity());
+        assertTrue(window.hasNormalCandidateCapacity(VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS));
+        assertTrue(window.canSend(false, true, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS));
+
+        window.record(false, true, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS);
+
+        assertFalse(window.hasAnyNormalCandidateCapacity());
+        assertEquals(1, window.generationSent());
+    }
+
+    @Test
     void remainingNeverCountsNegativeBuckets() {
         RequestWindow window = new RequestWindow(0, 0, 0, 0, 0, 1);
 

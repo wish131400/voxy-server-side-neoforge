@@ -165,8 +165,7 @@ public final class VSSVoxyOptionsIntegration {
             Object page = invokeByName(configBuilder, "createOptionPage");
             invokeByName(page, "setName", Component.translatable("vss.voxy_options.title"));
 
-            if (canEditLocalServerConfig()) {
-                invokeByName(page, "addOptionGroup", sodium08Group(
+            invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.client",
                     sodium08BooleanOption(
@@ -225,7 +224,8 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::formatKbpsAuto,
                             VSSVoxyOptionsIntegration::saveClientConfig)));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+            if (canEditLocalServerConfig()) {
+                invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.server",
                     sodium08BooleanOption(
@@ -592,8 +592,7 @@ public final class VSSVoxyOptionsIntegration {
             Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
             Object serverStorage = oldStorage(VSSServerConfig.CONFIG, VSSVoxyOptionsIntegration::saveServerConfig);
 
-            if (canEditLocalServerConfig()) {
-                groups.add(oldGroup(
+            groups.add(oldGroup(
                     oldBooleanOption(
                             clientStorage,
                             "vss.voxy_options.receive_server_lods",
@@ -609,7 +608,7 @@ public final class VSSVoxyOptionsIntegration {
                             (VSSClientConfig config, Boolean value) -> config.offThreadSectionProcessing = value,
                             config -> config.offThreadSectionProcessing)));
 
-                groups.add(oldGroup(
+            groups.add(oldGroup(
                     oldIntOption(
                             clientStorage,
                             "vss.voxy_options.client_lod_distance",
@@ -636,6 +635,7 @@ public final class VSSVoxyOptionsIntegration {
                             },
                             config -> config.desiredBandwidthKbps)));
 
+            if (canEditLocalServerConfig()) {
                 groups.add(oldGroup(
                     oldBooleanOption(
                             serverStorage,

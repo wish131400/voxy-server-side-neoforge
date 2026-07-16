@@ -46,9 +46,12 @@ public final class LodRequestManager {
     private static final int SCAN_BOOST_TICKS = 100;
     private static final int MAX_DEFERRED_CANDIDATES_PER_TICK = 2048;
     private static final int MAX_DEFERRED_COLUMNS = 65536;
-    private static final int VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS = 2;
     private static final int FAST_MOVE_CHUNK_THRESHOLD = 8;
     private static final int FAST_MOVE_KEEP_RADIUS_CHUNKS = 48;
+    // Walk the whole active LOD window so stale cached entries cannot permanently
+    // suppress requests outside the near ring. The Voxy query itself is asynchronous.
+    private static final int PRESENCE_AUDIT_CANDIDATES_PER_TICK = 256;
+    private static final long FULL_SCAN_RETRY_INTERVAL_NANOS = 15_000_000_000L;
     private static final int ESTIMATED_SYNC_COLUMN_BYTES = 48 * 1024;
     private static final long REQUEST_DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
 
@@ -92,11 +95,13 @@ public final class LodRequestManager {
     private long[] orderedOffsets = new long[0];
     private int scanOffsetIndex;
     private int nearScanOffsetIndex;
+    private int presenceAuditOffsetIndex;
     private int scanBoostTicks;
     private int softFrontierRadius;
     private int lastEffectiveLodDistance = -1;
     private boolean scanCompletedForCurrentOffsets;
     private boolean nearScanCompletedForCurrentOffsets;
+    private long nextFullScanRetryNanos;
     private double generationRequestBudget;
     private double dirtyRefreshBudget;
     private long lastRequestDiagnosticNanos;
@@ -127,7 +132,17 @@ public final class LodRequestManager {
 
     LodRequestManager(String presenceScope, ClientRequestTracker requestTracker, Runnable transferReset) {
         this.requestTracker = requestTracker;
-        this.presenceReporter = new ClientPresenceReporter(presenceScope);
+        this.presenceReporter = new ClientPresenceReporter(presenceScope, new ClientPresenceReporter.ReconciliationListener() {
+            @Override
+            public void onPresent(long packed, long timestamp) {
+                restoreKnownColumn(packed, timestamp);
+            }
+
+            @Override
+            public void onMissing(long packed) {
+                reconcileMissingColumn(packed);
+            }
+        });
         this.transferReset = transferReset != null ? transferReset : () -> {
         };
         columnTimestamps.defaultReturnValue(-1L);
@@ -211,9 +226,10 @@ public final class LodRequestManager {
             lastPlayerChunkX = playerCx;
             lastPlayerChunkZ = playerCz;
         }
-        presenceReporter.updateWindow(level, level.dimension(), playerCx, playerCz, lodDistance, columnTimestamps);
+        presenceReporter.updateWindow(level, level.dimension(), playerCx, playerCz, lodDistance);
         boolean allowPresenceZstd = (sessionConfig.serverCapabilities() & VSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0;
-        presenceReporter.drain(level, level.dimension(), allowPresenceZstd, columnTimestamps);
+        presenceReporter.drain(level, level.dimension(), allowPresenceZstd);
+        auditKnownPresence(level, playerCx, playerCz, lodDistance);
         timeoutSweep();
 
         if (++scanTickCounter < SCAN_INTERVAL_TICKS) {
@@ -262,6 +278,7 @@ public final class LodRequestManager {
             int cx,
             int cz,
             long columnTimestamp,
+            int[] replacementSectionYs,
             BooleanSupplier processor) {
         if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) {
             return ColumnProcessingResult.STALE;
@@ -298,14 +315,18 @@ public final class LodRequestManager {
                 || !isColumnVersionAllowed(packed, columnTimestamp, true)) {
             return ColumnProcessingResult.STALE;
         }
-        acceptColumn(dimension, packed, columnTimestamp);
+        acceptColumn(dimension, packed, columnTimestamp, replacementSectionYs);
         return ColumnProcessingResult.APPLIED;
     }
 
-    private void acceptColumn(ResourceKey<Level> dimension, long packed, long columnTimestamp) {
+    private void acceptColumn(
+            ResourceKey<Level> dimension,
+            long packed,
+            long columnTimestamp,
+            int[] replacementSectionYs) {
         long requiredTimestamp = dirtyColumnTimestamps.get(packed);
         columnTimestamps.put(packed, columnTimestamp);
-        rememberKnownColumn(dimension, packed, columnTimestamp);
+        rememberKnownColumn(dimension, packed, columnTimestamp, replacementSectionYs);
         diskMissedColumns.remove(packed);
         deferredColumns.remove(packed);
         if (requiredTimestamp > 0L && columnTimestamp < requiredTimestamp) {
@@ -712,7 +733,7 @@ public final class LodRequestManager {
             ScanBudget scanBudget) {
         if (nearScanCompletedForCurrentOffsets
                 || orderedOffsets.length == 0
-                || !requestWindow.hasNearSyncCapacity()
+                || !requestWindow.hasNormalCandidateCapacity(0)
                 || lodDistance <= 0
                 || !scanBudget.canScanMore()) {
             return count;
@@ -721,7 +742,7 @@ public final class LodRequestManager {
         int maxAllowedRing = Math.min(lodDistance, VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS);
         int totalCandidates = orderedOffsets.length;
         while (count < maxCount
-                && requestWindow.hasNearSyncCapacity()
+                && requestWindow.hasNormalCandidateCapacity(0)
                 && scanBudget.canScanMore()) {
             if (nearScanOffsetIndex >= totalCandidates) {
                 nearScanCompletedForCurrentOffsets = true;
@@ -747,6 +768,9 @@ public final class LodRequestManager {
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
+            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+                break;
+            }
             nearScanOffsetIndex++;
             scanBudget.recordCandidate();
             updateSoftFrontier(offsetRing, lodDistance);
@@ -768,6 +792,38 @@ public final class LodRequestManager {
                     maxAllowedRing);
         }
         return count;
+    }
+
+    private void auditKnownPresence(
+            ClientLevel level,
+            int playerCx,
+            int playerCz,
+            int lodDistance) {
+        if (!ModCompat.isVoxyLoaded() || lodDistance <= 0) {
+            return;
+        }
+        ensureOrderedOffsets(lodDistance);
+        int candidateCount = orderedOffsets.length;
+        if (candidateCount <= 0) {
+            return;
+        }
+
+        for (int checked = 0; checked < PRESENCE_AUDIT_CANDIDATES_PER_TICK; checked++) {
+            if (presenceAuditOffsetIndex >= candidateCount) {
+                presenceAuditOffsetIndex = 0;
+            }
+            long offset = orderedOffsets[presenceAuditOffsetIndex++];
+            long packed = PositionUtil.packPosition(
+                    playerCx + decodeOffsetX(offset),
+                    playerCz + decodeOffsetZ(offset));
+            if (columnTimestamps.get(packed) <= 0L || requestTracker.contains(packed)) {
+                continue;
+            }
+            if (presenceReporter.getLocalColumnState(level, lastDimension, packed)
+                    == ModCompat.LocalColumnState.MISSING) {
+                reconcileMissingColumn(packed);
+            }
+        }
     }
 
     private int drainDeferredColumns(
@@ -897,11 +953,15 @@ public final class LodRequestManager {
             long now,
             int maxAllowedRing,
             ScanBudget scanBudget) {
-        if (!requestWindow.hasAnySyncCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
+        if (!requestWindow.hasAnyNormalCandidateCapacity() || orderedOffsets.length == 0 || !scanBudget.canScanMore()) {
             return count;
         }
         if (scanCompletedForCurrentOffsets) {
-            return count;
+            if (now - nextFullScanRetryNanos < 0L) {
+                return count;
+            }
+            scanCompletedForCurrentOffsets = false;
+            scanOffsetIndex = 0;
         }
 
         int totalCandidates = orderedOffsets.length;
@@ -909,11 +969,12 @@ public final class LodRequestManager {
         RingScanGate ringGate = RingScanGate.fromCursor(orderedOffsets, scanOffsetIndex, totalCandidates);
 
         while (count < maxCount
-                && requestWindow.hasAnySyncCapacity()
+                && requestWindow.hasAnyNormalCandidateCapacity()
                 && scanBudget.canScanMore()) {
             if (scanOffsetIndex >= totalCandidates) {
                 scanCompletedForCurrentOffsets = true;
                 softFrontierRadius = lodDistance;
+                nextFullScanRetryNanos = now + FULL_SCAN_RETRY_INTERVAL_NANOS;
                 return count;
             }
 
@@ -923,7 +984,7 @@ public final class LodRequestManager {
             if (offsetRing > maxAllowedRing) {
                 break;
             }
-            if (!requestWindow.hasSyncCapacity(offsetRing)) {
+            if (!requestWindow.hasNormalCandidateCapacity(offsetRing)) {
                 break;
             }
 
@@ -944,6 +1005,9 @@ public final class LodRequestManager {
                 scanBudget.recordCandidate();
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
+            }
+            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+                break;
             }
             scanOffsetIndex++;
             scanBudget.recordCandidate();
@@ -995,8 +1059,8 @@ public final class LodRequestManager {
         count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
                 positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
 
-        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dz++) {
-            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasSyncCapacity(centerRing); dx++) {
+        for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dz++) {
+            for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dx++) {
                 if (dx == 0 && dz == 0) {
                     continue;
                 }
@@ -1044,14 +1108,28 @@ public final class LodRequestManager {
             return count;
         }
 
-        boolean generationAllowed = requiresFirstPassGenerationFallback(packed);
-        if (!requestWindow.canSend(false, false, ring)) {
+        if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+            return count;
+        }
+        boolean generationCandidate = shouldUseFirstPassGenerationFallback(packed, ring, requestWindow);
+        if (!requestWindow.canSend(false, generationCandidate, ring)) {
             return count;
         }
 
-        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationAllowed, now);
-        requestWindow.record(false, false, ring);
+        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate, now);
+        requestWindow.record(false, generationCandidate, ring);
         return count;
+    }
+
+    private boolean shouldUseFirstPassGenerationFallback(long packed, int ring, RequestWindow requestWindow) {
+        if (!requestWindow.hasGenerationCapacity() || !requiresFirstPassGenerationFallback(packed)) {
+            return false;
+        }
+        return requestWindow.canSend(false, true, ring);
+    }
+
+    private boolean shouldWaitForFirstPassGenerationSlot(long packed, RequestWindow requestWindow) {
+        return requiresFirstPassGenerationFallback(packed) && !requestWindow.hasGenerationCapacity();
     }
 
     private boolean requiresFirstPassGenerationFallback(long packed) {
@@ -1139,8 +1217,43 @@ public final class LodRequestManager {
         return level != null && level.dimension().equals(dimension);
     }
 
-    private void rememberKnownColumn(ResourceKey<Level> dimension, long packed, long columnTimestamp) {
-        presenceReporter.recordKnownColumn(dimension, packed, columnTimestamp);
+    private void rememberKnownColumn(
+            ResourceKey<Level> dimension,
+            long packed,
+            long columnTimestamp,
+            int[] replacementSectionYs) {
+        presenceReporter.recordKnownColumn(
+                dimension,
+                packed,
+                columnTimestamp,
+                replacementSectionYs);
+    }
+
+    void restoreKnownColumn(long packed, long columnTimestamp) {
+        if (columnTimestamp > 0L) {
+            columnTimestamps.put(packed, Math.max(columnTimestamps.get(packed), columnTimestamp));
+            diskMissedColumns.remove(packed);
+            if (!dirtyColumns.contains(packed)) {
+                deferredColumns.remove(packed);
+                clearBackoff(packed);
+            }
+        }
+    }
+
+    boolean reconcileMissingColumn(long packed) {
+        columnTimestamps.remove(packed);
+        if (lastDimension != null) {
+            presenceReporter.removeKnownColumn(lastDimension, packed);
+        }
+        clearBackoff(packed);
+        if (requestTracker.contains(packed)) {
+            return false;
+        }
+        deferredColumns.remove(packed);
+        deferColumn(packed, dirtyColumns.contains(packed));
+        scanTickCounter = SCAN_INTERVAL_TICKS - 1;
+        armScanBoost();
+        return true;
     }
 
     private boolean isGenerationCandidate(long packed) {
@@ -1199,18 +1312,18 @@ public final class LodRequestManager {
             long[] timestamps,
             boolean[] allowGeneration,
             int count,
-            boolean generationAllowed,
+            boolean generationCandidate,
             long now) {
         int requestId = requestTracker.track(
                 packed,
-                false,
+                generationCandidate,
                 dirtyColumns.contains(packed),
                 timeoutFor(packed, requestTracker.size()),
                 now);
         requestIds[count] = requestId;
         positions[count] = packed;
         timestamps[count] = requestTimestampFor(packed);
-        allowGeneration[count] = generationAllowed;
+        allowGeneration[count] = generationCandidate;
         return count + 1;
     }
 
@@ -1452,10 +1565,12 @@ public final class LodRequestManager {
         lastPlayerChunkZ = Integer.MIN_VALUE;
         scanOffsetIndex = 0;
         nearScanOffsetIndex = 0;
+        presenceAuditOffsetIndex = 0;
         softFrontierRadius = 0;
         lastEffectiveLodDistance = -1;
         scanCompletedForCurrentOffsets = false;
         nearScanCompletedForCurrentOffsets = false;
+        nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
         generationRequestBudget = 0.0D;
         dirtyRefreshBudget = 0.0D;
@@ -1471,11 +1586,13 @@ public final class LodRequestManager {
         scanOffsetIndex = 0;
         resetNearScanCursor();
         scanCompletedForCurrentOffsets = false;
+        nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     }
 
     private void resetNearScanCursor() {
         nearScanOffsetIndex = 0;
+        presenceAuditOffsetIndex = 0;
         nearScanCompletedForCurrentOffsets = false;
     }
 
@@ -1504,6 +1621,7 @@ public final class LodRequestManager {
         scanOffsetIndex = index;
         softFrontierRadius = Math.max(0, Math.min(ring - 1, orderedOffsetDistance));
         scanCompletedForCurrentOffsets = index >= orderedOffsets.length;
+        nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
     }
 
@@ -1517,15 +1635,8 @@ public final class LodRequestManager {
         resetScanCursor();
     }
 
-    private static int getVanillaProtectedSyncDistance() {
-        try {
-            return Math.max(
-                    0,
-                    Minecraft.getInstance().options.renderDistance().get()
-                            + VANILLA_RENDER_DISTANCE_BUFFER_CHUNKS);
-        } catch (RuntimeException ignored) {
-            return 0;
-        }
+    static int getVanillaProtectedSyncDistance() {
+        return 0;
     }
 
     private static boolean isInsideProtectedSyncWindow(

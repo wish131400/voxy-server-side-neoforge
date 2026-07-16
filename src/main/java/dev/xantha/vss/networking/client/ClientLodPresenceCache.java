@@ -4,7 +4,6 @@ import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
-import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.InputStream;
@@ -25,13 +24,16 @@ import net.minecraft.world.level.Level;
 
 final class ClientLodPresenceCache {
     private static final int FILE_MAGIC = 0x56535043;
-    private static final int FILE_VERSION = 1;
+    // Versions before 3 did not store the section manifest needed to detect partial columns.
+    private static final int FILE_VERSION = 4;
     private static final int MAX_SCOPES = 64;
     private static final int MAX_DIMENSIONS_PER_SCOPE = 16;
     private static final int MAX_REGIONS_PER_DIMENSION = 262_144;
     private static final int MAX_COLUMNS_PER_DIMENSION = 1_000_000;
     private static final int SAVE_UPDATE_THRESHOLD = 512;
     private static final long SAVE_INTERVAL_NANOS = 10_000_000_000L;
+    private static final long POST_INGEST_VERIFY_DELAY_NANOS = 5_000_000_000L;
+    private static final long MISSING_CONFIRMATION_DELAY_NANOS = 2_000_000_000L;
     private static final String CACHE_FILE = "vss-lod-presence.dat";
 
     private static final Map<String, ScopeCache> scopes = new HashMap<>();
@@ -65,7 +67,12 @@ final class ClientLodPresenceCache {
         return "unknown";
     }
 
-    static synchronized void recordColumn(String scopeKey, ResourceKey<Level> dimension, long packed, long timestamp) {
+    static synchronized void recordColumn(
+            String scopeKey,
+            ResourceKey<Level> dimension,
+            long packed,
+            long timestamp,
+            int[] replacementSectionYs) {
         if (timestamp <= 0L) {
             return;
         }
@@ -84,10 +91,17 @@ final class ClientLodPresenceCache {
         }
         int slot = localSlot(cx, cz);
         long previous = region.timestamp(slot);
-        if (previous == timestamp) {
+        byte[] sectionManifest = encodeSectionManifest(replacementSectionYs);
+        if (previous == timestamp && Arrays.equals(region.sectionManifest(slot), sectionManifest)) {
+            region.markRecentlyAccepted(slot, System.nanoTime() + POST_INGEST_VERIFY_DELAY_NANOS);
             return;
         }
-        region.put(slot, timestamp);
+        region.put(
+                slot,
+                timestamp,
+                sectionManifest,
+                true,
+                System.nanoTime() + POST_INGEST_VERIFY_DELAY_NANOS);
         dimensionCache.columnCount += previous <= 0L ? 1 : 0;
         trimDimension(dimensionCache);
         markDirty();
@@ -117,7 +131,35 @@ final class ClientLodPresenceCache {
         }
     }
 
-    static synchronized RegionPresenceC2SPayload.RegionEntry regionEntry(
+    static synchronized byte[] sectionManifest(
+            String scopeKey,
+            ResourceKey<Level> dimension,
+            long packed) {
+        if (scopeKey == null || dimension == null) {
+            return null;
+        }
+        ensureLoaded();
+        DimensionCache dimensionCache = dimensionCache(scopeKey, dimension, false);
+        if (dimensionCache == null) {
+            return null;
+        }
+        int cx = PositionUtil.unpackX(packed);
+        int cz = PositionUtil.unpackZ(packed);
+        RegionPresence region = dimensionCache.regions.get(regionKey(
+                Math.floorDiv(cx, RegionPresenceC2SPayload.REGION_SIZE),
+                Math.floorDiv(cz, RegionPresenceC2SPayload.REGION_SIZE)));
+        if (region == null) {
+            return null;
+        }
+        int slot = localSlot(cx, cz);
+        if (region.timestamp(slot) <= 0L) {
+            return null;
+        }
+        byte[] manifest = region.sectionManifest(slot);
+        return Arrays.copyOf(manifest, manifest.length);
+    }
+
+    static synchronized RegionReconciliation reconcileRegion(
             String scopeKey,
             ResourceKey<Level> dimension,
             int regionX,
@@ -126,87 +168,23 @@ final class ClientLodPresenceCache {
         ensureLoaded();
         DimensionCache dimensionCache = dimensionCache(scopeKey, dimension, false);
         if (dimensionCache == null) {
-            return null;
+            return RegionReconciliation.complete(emptyRegionEntry(regionX, regionZ));
         }
         long key = regionKey(regionX, regionZ);
         RegionPresence region = dimensionCache.regions.get(key);
         if (region == null) {
-            return null;
-        }
-        RegionPresenceC2SPayload.RegionEntry entry = buildRegionEntry(dimensionCache, region, regionX, regionZ, level);
-        if (region.count == 0) {
-            dimensionCache.regions.remove(key);
-        }
-        return entry;
-    }
-
-    static synchronized int seedRegion(
-            String scopeKey,
-            ResourceKey<Level> dimension,
-            int regionX,
-            int regionZ,
-            Long2LongOpenHashMap target,
-            Level level) {
-        ensureLoaded();
-        DimensionCache dimensionCache = dimensionCache(scopeKey, dimension, false);
-        if (dimensionCache == null) {
-            return 0;
-        }
-        long key = regionKey(regionX, regionZ);
-        RegionPresence region = dimensionCache.regions.get(key);
-        if (region == null) {
-            return 0;
+            return RegionReconciliation.complete(emptyRegionEntry(regionX, regionZ));
         }
 
-        boolean verifyVoxy = ModCompat.isVoxyLoaded() && level != null;
-        int seeded = 0;
-        int removed = 0;
-        int baseX = regionX * RegionPresenceC2SPayload.REGION_SIZE;
-        int baseZ = regionZ * RegionPresenceC2SPayload.REGION_SIZE;
-        for (int slot = 0; slot < RegionPresenceC2SPayload.REGION_SLOT_COUNT; slot++) {
-            long timestamp = region.timestamp(slot);
-            if (timestamp <= 0L) {
-                continue;
-            }
-            int cx = baseX + (slot & (RegionPresenceC2SPayload.REGION_SIZE - 1));
-            int cz = baseZ + (slot >>> 5);
-            if (verifyVoxy) {
-                ModCompat.LocalColumnState state = ModCompat.getVoxyLocalColumnState(level, cx, cz);
-                if (state == ModCompat.LocalColumnState.MISSING) {
-                    if (region.remove(slot)) {
-                        removed++;
-                    }
-                    continue;
-                }
-                if (state != ModCompat.LocalColumnState.PRESENT) {
-                    continue;
-                }
-            }
-            target.put(PositionUtil.packPosition(cx, cz), timestamp);
-            seeded++;
-        }
-        if (removed > 0) {
-            dimensionCache.columnCount = Math.max(0, dimensionCache.columnCount - removed);
-            if (region.count == 0) {
-                dimensionCache.regions.remove(key);
-            }
-            markDirty();
-        }
-        return seeded;
-    }
-
-    private static RegionPresenceC2SPayload.RegionEntry buildRegionEntry(
-            DimensionCache dimensionCache,
-            RegionPresence region,
-            int regionX,
-            int regionZ,
-            Level level) {
         boolean verifyVoxy = ModCompat.isVoxyLoaded() && level != null;
         int[] slots = new int[Math.max(0, region.count)];
         long[] entryTimestamps = new long[Math.max(0, region.count)];
         long[] copiedBitmap = new long[RegionPresenceC2SPayload.REGION_BITMAP_LONGS];
+        long[] missingColumns = new long[Math.max(0, region.count)];
         int count = 0;
-        int removed = 0;
+        int missingCount = 0;
+        boolean complete = true;
+        long nowNanos = System.nanoTime();
         int baseX = regionX * RegionPresenceC2SPayload.REGION_SIZE;
         int baseZ = regionZ * RegionPresenceC2SPayload.REGION_SIZE;
         for (int slot = 0; slot < RegionPresenceC2SPayload.REGION_SLOT_COUNT; slot++) {
@@ -214,39 +192,67 @@ final class ClientLodPresenceCache {
             if (timestamp <= 0L) {
                 continue;
             }
-            if (verifyVoxy) {
-                int cx = baseX + (slot & (RegionPresenceC2SPayload.REGION_SIZE - 1));
-                int cz = baseZ + (slot >>> 5);
-                ModCompat.LocalColumnState state = ModCompat.getVoxyLocalColumnState(level, cx, cz);
+
+            int cx = baseX + (slot & (RegionPresenceC2SPayload.REGION_SIZE - 1));
+            int cz = baseZ + (slot >>> 5);
+            if (verifyVoxy && !region.isVerified(slot, nowNanos)) {
+                ModCompat.LocalColumnState state = ModCompat.getVoxyLocalColumnState(
+                        level,
+                        cx,
+                        cz,
+                        region.sectionManifest(slot));
                 if (state == ModCompat.LocalColumnState.MISSING) {
+                    if (!region.confirmMissing(slot, nowNanos)) {
+                        complete = false;
+                        continue;
+                    }
                     if (region.remove(slot)) {
-                        removed++;
+                        missingColumns[missingCount++] = PositionUtil.packPosition(cx, cz);
                     }
                     continue;
                 }
                 if (state != ModCompat.LocalColumnState.PRESENT) {
+                    complete = false;
                     continue;
                 }
+                region.markVerified(slot);
+                region.clearMissingConfirmation(slot);
             }
+
             copiedBitmap[slot >>> 6] |= 1L << (slot & 63);
             slots[count] = slot;
             entryTimestamps[count] = timestamp;
             count++;
         }
-        if (removed > 0) {
-            dimensionCache.columnCount = Math.max(0, dimensionCache.columnCount - removed);
+        if (missingCount > 0) {
+            dimensionCache.columnCount = Math.max(0, dimensionCache.columnCount - missingCount);
             markDirty();
         }
-        if (count == 0) {
-            return null;
+        if (region.count == 0) {
+            dimensionCache.regions.remove(key);
         }
-        return new RegionPresenceC2SPayload.RegionEntry(
+
+        RegionPresenceC2SPayload.RegionEntry entry = new RegionPresenceC2SPayload.RegionEntry(
                 regionX,
                 regionZ,
                 copiedBitmap,
                 Arrays.copyOf(slots, count),
                 Arrays.copyOf(entryTimestamps, count),
                 count);
+        return new RegionReconciliation(
+                entry,
+                Arrays.copyOf(missingColumns, missingCount),
+                complete);
+    }
+
+    private static RegionPresenceC2SPayload.RegionEntry emptyRegionEntry(int regionX, int regionZ) {
+        return new RegionPresenceC2SPayload.RegionEntry(
+                regionX,
+                regionZ,
+                new long[RegionPresenceC2SPayload.REGION_BITMAP_LONGS],
+                new int[0],
+                new long[0],
+                0);
     }
 
     static void flush() {
@@ -331,9 +337,18 @@ final class ClientLodPresenceCache {
                         for (int c = 0; c < columnCount; c++) {
                             int slot = in.readUnsignedShort();
                             long timestamp = in.readLong();
+                            int sectionCount = in.readUnsignedByte();
+                            if (sectionCount > 64) {
+                                throw new IllegalArgumentException("Invalid cached section manifest length");
+                            }
+                            byte[] sectionManifest = new byte[sectionCount];
+                            in.readFully(sectionManifest);
+                            if (!isValidSectionManifest(sectionManifest)) {
+                                throw new IllegalArgumentException("Invalid cached section manifest ordering");
+                            }
                             if (slot < RegionPresenceC2SPayload.REGION_SLOT_COUNT && timestamp > 0L) {
                                 long previous = region.timestamp(slot);
-                                region.put(slot, timestamp);
+                                region.put(slot, timestamp, sectionManifest, false, 0L);
                                 if (previous <= 0L) {
                                     dimension.columnCount++;
                                 }
@@ -434,7 +449,8 @@ final class ClientLodPresenceCache {
                     if (region.count > 0) {
                         regionSnapshots.put(regionEntry.getKey(), new RegionSnapshot(
                                 region.count,
-                                Arrays.copyOf(region.timestamps, region.timestamps.length)));
+                                Arrays.copyOf(region.timestamps, region.timestamps.length),
+                                copySectionManifests(region.sectionManifests)));
                     }
                 }
                 dimensionSnapshots.put(dimensionEntry.getKey(), new DimensionSnapshot(regionSnapshots));
@@ -467,11 +483,15 @@ final class ClientLodPresenceCache {
                             RegionSnapshot region = regionEntry.getValue();
                             out.writeInt(region.count);
                             long[] timestamps = region.timestamps();
+                            byte[][] sectionManifests = region.sectionManifests();
                             for (int slot = 0; slot < timestamps.length; slot++) {
                                 long timestamp = timestamps[slot];
                                 if (timestamp > 0L) {
                                     out.writeShort(slot);
                                     out.writeLong(timestamp);
+                                    byte[] sectionManifest = sectionManifests[slot];
+                                    out.writeByte(sectionManifest.length);
+                                    out.write(sectionManifest);
                                 }
                             }
                         }
@@ -507,6 +527,45 @@ final class ClientLodPresenceCache {
                 | ((cz & (RegionPresenceC2SPayload.REGION_SIZE - 1)) << 5);
     }
 
+    static byte[] encodeSectionManifest(int[] sectionYs) {
+        if (sectionYs == null || sectionYs.length == 0) {
+            return new byte[0];
+        }
+        if (sectionYs.length > 64) {
+            throw new IllegalArgumentException("Too many sections in LOD presence manifest");
+        }
+        int[] sorted = Arrays.copyOf(sectionYs, sectionYs.length);
+        Arrays.sort(sorted);
+        byte[] encoded = new byte[sorted.length];
+        int previous = Integer.MIN_VALUE;
+        for (int i = 0; i < sorted.length; i++) {
+            int sectionY = sorted[i];
+            if (sectionY < Byte.MIN_VALUE || sectionY > Byte.MAX_VALUE || sectionY == previous) {
+                throw new IllegalArgumentException("Invalid section Y in LOD presence manifest: " + sectionY);
+            }
+            encoded[i] = (byte) sectionY;
+            previous = sectionY;
+        }
+        return encoded;
+    }
+
+    private static boolean isValidSectionManifest(byte[] sectionYs) {
+        for (int i = 1; i < sectionYs.length; i++) {
+            if (sectionYs[i - 1] >= sectionYs[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static byte[][] copySectionManifests(byte[][] source) {
+        byte[][] copy = new byte[source.length][];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = Arrays.copyOf(source[i], source[i].length);
+        }
+        return copy;
+    }
+
     static long regionKey(int regionX, int regionZ) {
         return ((long) regionX << 32) ^ (regionZ & 0xFFFFFFFFL);
     }
@@ -539,17 +598,70 @@ final class ClientLodPresenceCache {
 
     private static final class RegionPresence {
         private final long[] timestamps = new long[RegionPresenceC2SPayload.REGION_SLOT_COUNT];
+        private final byte[][] sectionManifests = new byte[RegionPresenceC2SPayload.REGION_SLOT_COUNT][];
+        private final boolean[] verified = new boolean[RegionPresenceC2SPayload.REGION_SLOT_COUNT];
+        private final long[] verificationDeadlines = new long[RegionPresenceC2SPayload.REGION_SLOT_COUNT];
+        private final long[] missingConfirmationDeadlines = new long[RegionPresenceC2SPayload.REGION_SLOT_COUNT];
         private int count;
+
+        private RegionPresence() {
+            Arrays.setAll(sectionManifests, ignored -> new byte[0]);
+        }
 
         private long timestamp(int slot) {
             return timestamps[slot];
         }
 
-        private void put(int slot, long timestamp) {
+        private byte[] sectionManifest(int slot) {
+            return sectionManifests[slot];
+        }
+
+        private boolean isVerified(int slot, long nowNanos) {
+            long deadline = verificationDeadlines[slot];
+            if (deadline > 0L && nowNanos - deadline >= 0L) {
+                verificationDeadlines[slot] = 0L;
+                verified[slot] = false;
+            }
+            return verified[slot];
+        }
+
+        private void markVerified(int slot) {
+            verified[slot] = true;
+            verificationDeadlines[slot] = 0L;
+        }
+
+        private boolean confirmMissing(int slot, long nowNanos) {
+            long deadline = missingConfirmationDeadlines[slot];
+            if (deadline <= 0L) {
+                missingConfirmationDeadlines[slot] = nowNanos + MISSING_CONFIRMATION_DELAY_NANOS;
+                return false;
+            }
+            return nowNanos - deadline >= 0L;
+        }
+
+        private void clearMissingConfirmation(int slot) {
+            missingConfirmationDeadlines[slot] = 0L;
+        }
+
+        private void markRecentlyAccepted(int slot, long verificationDeadlineNanos) {
+            verified[slot] = true;
+            verificationDeadlines[slot] = verificationDeadlineNanos;
+            missingConfirmationDeadlines[slot] = 0L;
+        }
+
+        private void put(
+                int slot,
+                long timestamp,
+                byte[] sectionManifest,
+                boolean verified,
+                long verificationDeadlineNanos) {
             if (timestamps[slot] <= 0L) {
                 count++;
             }
             timestamps[slot] = timestamp;
+            sectionManifests[slot] = Arrays.copyOf(sectionManifest, sectionManifest.length);
+            this.verified[slot] = verified;
+            verificationDeadlines[slot] = verificationDeadlineNanos;
         }
 
         private boolean remove(int slot) {
@@ -557,6 +669,10 @@ final class ClientLodPresenceCache {
                 return false;
             }
             timestamps[slot] = 0L;
+            sectionManifests[slot] = new byte[0];
+            verified[slot] = false;
+            verificationDeadlines[slot] = 0L;
+            missingConfirmationDeadlines[slot] = 0L;
             count = Math.max(0, count - 1);
             return true;
         }
@@ -571,6 +687,15 @@ final class ClientLodPresenceCache {
     private record DimensionSnapshot(Map<Long, RegionSnapshot> regions) {
     }
 
-    private record RegionSnapshot(int count, long[] timestamps) {
+    private record RegionSnapshot(int count, long[] timestamps, byte[][] sectionManifests) {
+    }
+
+    record RegionReconciliation(
+            RegionPresenceC2SPayload.RegionEntry entry,
+            long[] missingColumns,
+            boolean complete) {
+        private static RegionReconciliation complete(RegionPresenceC2SPayload.RegionEntry entry) {
+            return new RegionReconciliation(entry, new long[0], true);
+        }
     }
 }

@@ -2,7 +2,6 @@ package dev.xantha.vss.mixin.voxy;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.xantha.vss.common.VSSLogger;
-import dev.xantha.vss.networking.client.VSSClientNetworking;
 import net.minecraft.client.Minecraft;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
@@ -44,10 +43,5 @@ public abstract class VoxyRenderSystemDefaultFramebufferMixin {
             VSSLogger.warn("Skipped Voxy LOD rendering because the default framebuffer was bound");
         }
         ci.cancel();
-    }
-
-    @Inject(method = "shutdown()V", at = @At("HEAD"), remap = false, require = 0)
-    private void vss$stopClientLodSessionBeforeVoxyShutdown(CallbackInfo ci) {
-        VSSClientNetworking.stopClientSessionForWorldShutdown();
     }
 }
