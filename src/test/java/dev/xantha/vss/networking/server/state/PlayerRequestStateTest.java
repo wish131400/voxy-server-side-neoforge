@@ -42,23 +42,28 @@ class PlayerRequestStateTest {
     }
 
     @Test
-    void priorityBypassesNormalSendCredit() {
+    void priorityUsesTheSamePersonalSendCredit() {
         PlayerRequestState state = new PlayerRequestState();
         long limit = 64L * 1024L;
 
         state.primeSendCredit(limit);
-        assertTrue(state.canSend(false, limit));
-        assertTrue(state.canSend(true, limit));
-
-        state.recordSend(false, 256 * 1024);
-
-        assertFalse(state.canSend(false, limit));
-        assertTrue(state.canSend(true, limit));
+        assertTrue(state.canSend(limit));
 
         state.recordSend(true, 256 * 1024);
 
-        assertTrue(state.canSend(true, limit));
-        assertEquals(512L * 1024L, state.totalBytesSent());
+        assertFalse(state.canSend(limit));
+        assertEquals(256L * 1024L, state.totalBytesSent());
         assertEquals(256L * 1024L, state.priorityBytesSent());
+    }
+
+    @Test
+    void unlimitedPersonalBandwidthUsesConfiguredQueueDepth() {
+        assertFalse(PlayerRequestState.shouldBackpressureNormalRequests(
+                1,
+                8L * 1024L * 1024L,
+                1000,
+                32L * 1024L * 1024L,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE));
     }
 }

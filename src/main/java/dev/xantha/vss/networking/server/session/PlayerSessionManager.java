@@ -63,9 +63,8 @@ public final class PlayerSessionManager {
     }
 
     private void primeAllSendCredits() {
-        long configuredLimit = VSSServerConfig.CONFIG.bandwidthBytesPerSecond();
         for (PlayerRequestState state : playerRegistry.states()) {
-            state.primeSendCredit(configuredLimit);
+            state.primeSendCredit(Long.MAX_VALUE);
         }
     }
 
@@ -89,7 +88,7 @@ public final class PlayerSessionManager {
             }
             state.setClientCapabilities(clientCapabilities);
             if (created) {
-                state.primeSendCredit(config.bandwidthBytesPerSecond());
+                state.primeSendCredit(Long.MAX_VALUE);
                 existingColumnPreloader.schedule(player, state);
                 VSSLogger.info(logPrefix + " " + player.getGameProfile().getName() + " registered for VSS LOD sync");
             }
@@ -119,10 +118,9 @@ public final class PlayerSessionManager {
                 config.midSyncRateLimitPerTick,
                 config.farSyncRateLimitPerTick,
                 config.distantSyncRateLimitPerTick,
-                config.generationRateLimitPerPlayer,
                 config.generationConcurrencyLimitPerPlayer,
                 config.enableChunkGeneration,
-                config.bandwidthBytesPerSecond(),
+                config.totalBandwidthBytesPerSecond(),
                 configRevision.get());
     }
 

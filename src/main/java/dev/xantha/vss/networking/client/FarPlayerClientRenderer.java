@@ -3,6 +3,7 @@ package dev.xantha.vss.networking.client;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.authlib.GameProfile;
 import com.mojang.blaze3d.vertex.PoseStack;
+import dev.xantha.vss.compat.CuriosCompat;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
@@ -453,6 +454,7 @@ public final class FarPlayerClientRenderer {
         private boolean wasSwinging;
         private boolean usingItem;
         private InteractionHand usingItemHand = InteractionHand.MAIN_HAND;
+        private CompoundTag appliedCuriosData;
         private FarPlayersS2CPayload.Entry lastEntry;
 
         private FarPlayerState(FarPlayersS2CPayload.Entry entry) {
@@ -647,6 +649,7 @@ public final class FarPlayerClientRenderer {
             applyImmediately(sample(System.nanoTime()));
             applyStateFlags(lastEntry);
             currentLevel.addEntity(player);
+            applyCuriosData(lastEntry.curiosData());
             VSSLogger.debug("Far player entity created: " + name + " at "
                     + player.getBlockX() + "," + player.getBlockY() + "," + player.getBlockZ());
         }
@@ -702,6 +705,7 @@ public final class FarPlayerClientRenderer {
             usingItem = false;
             usingItemHand = InteractionHand.MAIN_HAND;
             wasSwinging = false;
+            appliedCuriosData = null;
         }
 
         private void removeVehicles() {
@@ -836,6 +840,8 @@ public final class FarPlayerClientRenderer {
                 return;
             }
             applyEquipment(entry);
+            applyCuriosData(entry.curiosData());
+            player.setModelParts(entry.modelParts());
             player.setMainArm(entry.mainArm());
             player.setOnGround(entry.onGround());
             player.setSharedFlagOnFire(entry.onFire());
@@ -910,6 +916,15 @@ public final class FarPlayerClientRenderer {
                 if (!ItemStack.matches(player.getItemBySlot(slot), next)) {
                     player.setItemSlot(slot, next.copy());
                 }
+            }
+        }
+
+        private void applyCuriosData(CompoundTag curiosData) {
+            if (player == null || curiosData == null || curiosData.equals(appliedCuriosData)) {
+                return;
+            }
+            if (CuriosCompat.apply(player, curiosData)) {
+                appliedCuriosData = curiosData.copy();
             }
         }
 
@@ -1377,6 +1392,7 @@ public final class FarPlayerClientRenderer {
 
     private static final class VSSRemotePlayer extends RemotePlayer {
         private final UUID sourceUuid;
+        private int modelParts = 0x7F;
 
         private VSSRemotePlayer(ClientLevel level, GameProfile profile, UUID sourceUuid) {
             super(level, profile);
@@ -1384,8 +1400,18 @@ public final class FarPlayerClientRenderer {
         }
 
         @Override
+        public UUID getUUID() {
+            // UUID-keyed render integrations must see the real player's cached cosmetic state.
+            return manualFarPlayerRender ? sourceUuid : super.getUUID();
+        }
+
+        @Override
         public boolean shouldRenderAtSqrDistance(double distanceSqr) {
             return true;
+        }
+
+        private void setModelParts(int modelParts) {
+            this.modelParts = modelParts;
         }
 
         @Override
@@ -1401,7 +1427,7 @@ public final class FarPlayerClientRenderer {
 
         @Override
         public boolean isModelPartShown(PlayerModelPart part) {
-            return true;
+            return (modelParts & part.getMask()) != 0;
         }
 
         private PlayerInfo getSourcePlayerInfo() {

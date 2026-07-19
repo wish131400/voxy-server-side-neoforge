@@ -54,6 +54,8 @@ public record FarPlayersS2CPayload(Entry[] entries) implements CustomPacketPaylo
             buf.writeBoolean(entry.glowing());
             buf.writeBoolean(entry.onGround());
             buf.writeBoolean(entry.onFire());
+            buf.writeByte(entry.modelParts());
+            buf.writeNbt(entry.curiosData());
             writeEquipment(buf, entry);
             writeVehicles(buf, entry.vehicles());
         }
@@ -91,6 +93,8 @@ public record FarPlayersS2CPayload(Entry[] entries) implements CustomPacketPaylo
                     buf.readBoolean(),
                     buf.readBoolean(),
                     buf.readBoolean(),
+                    buf.readUnsignedByte(),
+                    buf.readNbt(),
                     ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
                     ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
                     ItemStack.OPTIONAL_STREAM_CODEC.decode(buf),
@@ -259,6 +263,8 @@ public record FarPlayersS2CPayload(Entry[] entries) implements CustomPacketPaylo
             boolean glowing,
             boolean onGround,
             boolean onFire,
+            int modelParts,
+            CompoundTag curiosData,
             ItemStack mainHand,
             ItemStack offHand,
             ItemStack head,

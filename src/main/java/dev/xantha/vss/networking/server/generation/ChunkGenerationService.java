@@ -82,7 +82,6 @@ public final class ChunkGenerationService {
     private long maxTicketWaitTicks;
     private long totalPackingWaitNanos;
     private long maxPackingWaitNanos;
-    private double startBudget;
     private int startsThisTick;
     private volatile long packingEpoch;
     private long nextPackingTaskSequence;
@@ -91,6 +90,13 @@ public final class ChunkGenerationService {
 
     public ChunkGenerationService(VSSServerConfig config) {
         this.config = config;
+    }
+
+    public synchronized void applyRuntimeConfig() {
+        ThreadPoolExecutor executor = this.packingExecutor;
+        if (executor != null && !executor.isShutdown()) {
+            resizePackingExecutor(executor, config.automaticGenerationPackingThreads());
+        }
     }
 
     public synchronized boolean submitGeneration(
@@ -170,7 +176,7 @@ public final class ChunkGenerationService {
         ChunkPos pos = new ChunkPos(cx, cz);
         PendingGeneration generation = new PendingGeneration(pos, level, minimumTimestamp);
         generation.callbacks.add(callback);
-        if (queued.isEmpty() && canStart(generation) && tryConsumeStartBudget()) {
+        if (queued.isEmpty() && canStart(generation) && tryStartThisTick()) {
             startGeneration(key, generation);
         } else {
             if (!ensureQueueCapacityFor(playerUuid, generation)) {
@@ -254,7 +260,6 @@ public final class ChunkGenerationService {
 
     public synchronized List<GenerationResult> tick(MinecraftServer server) {
         startsThisTick = 0;
-        refillStartBudget();
         List<GenerationResult> results = new ArrayList<>();
         drainPackingResults(results);
         drainDeferredGenerationResults(results);
@@ -274,7 +279,7 @@ public final class ChunkGenerationService {
 
             LevelChunk chunk = generation.level.getChunkSource().getChunkNow(generation.pos.x, generation.pos.z);
             if (chunk == null) {
-                if (generation.ticksWaiting <= config.generationTimeoutSeconds * 20) {
+                if (generation.ticksWaiting <= config.automaticGenerationTimeoutSeconds() * 20) {
                     continue;
                 }
                 VSSLogger.debug("Generation timeout for chunk " + generation.pos.x + ", " + generation.pos.z
@@ -295,7 +300,7 @@ public final class ChunkGenerationService {
                 continue;
             }
 
-            if (processedThisTick >= config.generationCompletionsPerTickLimit) {
+            if (processedThisTick >= config.automaticGenerationCompletionsPerTick()) {
                 continue;
             }
             if (!canSubmitPackingTask(generation.priority())) {
@@ -400,7 +405,7 @@ public final class ChunkGenerationService {
         double averageQueueWaitMs = totalQueuePromoted == 0L
                 ? 0.0D
                 : totalQueueWaitNanos / 1_000_000.0D / totalQueuePromoted;
-        return String.format("submitted=%d, completed=%d, ticketWaiting=%d, queued=%d, everQueued=%d, queueRejected=%d, queueEvicted=%d, queueWaitAvgMs=%.1f, queueWaitMaxMs=%.1f, timeouts=%d, ticketWaitAvgMs=%.1f, ticketWaitMaxMs=%d, heapRebuilds=%d, staleHeapEntries=%d, packingSubmitted=%d, packingFinished=%d, packingCompleted=%d, packingRejected=%d, packingCallbacksPending=%d, packingCallbacksCompleted=%d, packingActive=%d, packingQueued=%d, resultsPending=%d, packingFailures=%d, packingCancelled=%d, packingWaitAvgMs=%.1f, packingWaitMaxMs=%.1f, startBudget=%.1f",
+        return String.format("submitted=%d, completed=%d, ticketWaiting=%d, queued=%d, everQueued=%d, queueRejected=%d, queueEvicted=%d, queueWaitAvgMs=%.1f, queueWaitMaxMs=%.1f, timeouts=%d, ticketWaitAvgMs=%.1f, ticketWaitMaxMs=%d, heapRebuilds=%d, staleHeapEntries=%d, packingSubmitted=%d, packingFinished=%d, packingCompleted=%d, packingRejected=%d, packingCallbacksPending=%d, packingCallbacksCompleted=%d, packingActive=%d, packingQueued=%d, resultsPending=%d, packingFailures=%d, packingCancelled=%d, packingWaitAvgMs=%.1f, packingWaitMaxMs=%.1f, startsThisTick=%d",
                 totalSubmitted,
                 totalCompleted,
                 active.size(),
@@ -428,7 +433,7 @@ public final class ChunkGenerationService {
                 totalPackingCancelled,
                 averagePackingWaitMs,
                 maxPackingWaitNanos / 1_000_000.0D,
-                startBudget)
+                startsThisTick)
                 + String.format(", livePackingSubmitted=%d, livePackingCompleted=%d", totalLivePackingSubmitted, totalLivePackingCompleted);
     }
 
@@ -479,22 +484,21 @@ public final class ChunkGenerationService {
     }
 
     private void promoteQueued() {
-        if (queued.isEmpty() || startBudget < 1.0D || startsThisTick >= config.generationStartsPerTickLimit) {
+        if (queued.isEmpty() || startsThisTick >= config.automaticGenerationStartsPerTick()) {
             return;
         }
 
         ArrayList<QueuedGenerationEntry> blocked = new ArrayList<>();
         try {
             while (active.size() < config.generationConcurrencyLimitGlobal
-                    && startBudget >= 1.0D
-                    && startsThisTick < config.generationStartsPerTickLimit) {
+                    && startsThisTick < config.automaticGenerationStartsPerTick()) {
                 QueuedSelection selection = selectNearestStartableQueuedGeneration(blocked);
                 if (selection == null) {
                     break;
                 }
                 PendingGeneration generation = selection.generation();
 
-                if (!tryConsumeStartBudget()) {
+                if (!tryStartThisTick()) {
                     refreshQueuedPriority(selection.key(), generation);
                     break;
                 }
@@ -550,7 +554,7 @@ public final class ChunkGenerationService {
 
     private boolean canQueue(UUID playerUuid) {
         int queuedForPlayer = perPlayerQueuedCount.getOrDefault(playerUuid, 0);
-        int maxQueuedForPlayer = Math.max(1, config.generationRateLimitPerPlayer * config.generationTimeoutSeconds);
+        int maxQueuedForPlayer = Math.max(1, config.generationConcurrencyLimitPerPlayer);
         return queuedForPlayer < maxQueuedForPlayer;
     }
 
@@ -686,25 +690,10 @@ public final class ChunkGenerationService {
         return PositionUtil.chebyshevDistance(generation.pos.x, generation.pos.z, view.chunkX(), view.chunkZ());
     }
 
-    private void refillStartBudget() {
-        int playerCount = Math.max(1, trackedPlayerCount());
-        int globalStartRate = Math.max(1, Math.min(
-                config.generationConcurrencyLimitGlobal,
-                config.generationRateLimitPerPlayer * playerCount));
-        startBudget = Math.min(
-                Math.max(1, config.generationConcurrencyLimitGlobal),
-                startBudget + globalStartRate / 20.0D);
-    }
-
-    private int trackedPlayerCount() {
-        return Math.max(perPlayerActiveCount.size(), perPlayerQueuedCount.size());
-    }
-
-    private boolean tryConsumeStartBudget() {
-        if (startBudget < 1.0D || startsThisTick >= config.generationStartsPerTickLimit) {
+    private boolean tryStartThisTick() {
+        if (startsThisTick >= config.automaticGenerationStartsPerTick()) {
             return false;
         }
-        startBudget = Math.max(0.0D, startBudget - 1.0D);
         startsThisTick++;
         return true;
     }
@@ -759,7 +748,7 @@ public final class ChunkGenerationService {
 
     private boolean canSubmitPackingTask(boolean priority) {
         ThreadPoolExecutor executor = packingExecutor();
-        int queueLimit = Math.max(1, config.generationPackingQueueLimit);
+        int queueLimit = config.automaticGenerationPackingQueueLimit();
         if (priority) {
             queueLimit += PRIORITY_PACKING_QUEUE_EXTRA_LIMIT;
         }
@@ -901,11 +890,11 @@ public final class ChunkGenerationService {
     private ThreadPoolExecutor packingExecutor() {
         ThreadPoolExecutor executor = this.packingExecutor;
         if (executor != null && !executor.isShutdown()) {
-            resizePackingExecutor(executor, Math.max(1, config.generationPackingThreads));
+            resizePackingExecutor(executor, config.automaticGenerationPackingThreads());
             return executor;
         }
 
-        int threads = Math.max(1, config.generationPackingThreads);
+        int threads = config.automaticGenerationPackingThreads();
         ThreadPoolExecutor created = new ThreadPoolExecutor(
                 threads,
                 threads,

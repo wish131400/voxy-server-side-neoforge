@@ -74,9 +74,9 @@ final class VSSServerConfigScreen extends Screen {
         }).bounds(inputX, y - 4, inputWidth, 20).build());
         y += rowHeight;
 
-        addField("vss.config.server.bandwidth_kbps", config.getPerPlayerBandwidthKbpsRounded(),
-                VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER, VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER,
-                config::setPerPlayerBandwidthKbpsUnsaved,
+        addField("vss.config.server.bandwidth_kbps", config.getTotalBandwidthKbpsRounded(),
+                VSSServerConfig.MIN_TOTAL_BANDWIDTH_KBPS, VSSServerConfig.MAX_TOTAL_BANDWIDTH_KBPS,
+                config::setTotalBandwidthKbpsUnsaved,
                 left, inputX, inputWidth, y);
         y += rowHeight;
 
@@ -85,7 +85,8 @@ final class VSSServerConfigScreen extends Screen {
                 value -> config.lodDistanceChunks = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
-        addField("vss.config.server.send_queue", config.sendQueueLimitPerPlayer, 1, 100000,
+        addField("vss.config.server.send_queue", config.sendQueueLimitPerPlayer,
+                VSSServerConfig.MIN_SEND_QUEUE_LIMIT_PER_PLAYER, VSSServerConfig.MAX_SEND_QUEUE_LIMIT_PER_PLAYER,
                 value -> config.sendQueueLimitPerPlayer = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
@@ -130,32 +131,14 @@ final class VSSServerConfigScreen extends Screen {
                 value -> config.farPlayerSyncIntervalTicks = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
-        addField("vss.config.server.generation_player_concurrency", config.generationConcurrencyLimitPerPlayer, 1, 1000,
+        addField("vss.config.server.generation_player_concurrency", config.generationConcurrencyLimitPerPlayer,
+                VSSServerConfig.MIN_GENERATION_LIMIT, VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER,
                 value -> config.generationConcurrencyLimitPerPlayer = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
-        addField("vss.config.server.generation_global_concurrency", config.generationConcurrencyLimitGlobal, 1, 1000,
+        addField("vss.config.server.generation_global_concurrency", config.generationConcurrencyLimitGlobal,
+                VSSServerConfig.MIN_GENERATION_LIMIT, VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL,
                 value -> config.generationConcurrencyLimitGlobal = value, left, inputX, inputWidth, y);
-        y += rowHeight;
-
-        addField("vss.config.server.generation_starts_per_tick", config.generationStartsPerTickLimit, 1, 256,
-                value -> config.generationStartsPerTickLimit = value, left, inputX, inputWidth, y);
-        y += rowHeight;
-
-        addField("vss.config.server.generation_completions_per_tick", config.generationCompletionsPerTickLimit, 1, 256,
-                value -> config.generationCompletionsPerTickLimit = value, left, inputX, inputWidth, y);
-        y += rowHeight;
-
-        addField("vss.config.server.generation_packing_threads", config.generationPackingThreads, 1, 8,
-                value -> config.generationPackingThreads = value, left, inputX, inputWidth, y);
-        y += rowHeight;
-
-        addField("vss.config.server.generation_packing_queue", config.generationPackingQueueLimit, 1, 1024,
-                value -> config.generationPackingQueueLimit = value, left, inputX, inputWidth, y);
-        y += rowHeight;
-
-        addField("vss.config.server.generation_timeout", config.generationTimeoutSeconds, 1, 600,
-                value -> config.generationTimeoutSeconds = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
         maxScrollOffset = Math.max(0, y - listBottom);
@@ -178,7 +161,19 @@ final class VSSServerConfigScreen extends Screen {
 
     private void addField(String labelKey, int initialValue, int min, int max, IntSetter setter, int left, int inputX, int inputWidth, int y) {
         EditBox editBox = new EditBox(font, inputX, y - 4, inputWidth, 20, Component.translatable(labelKey));
-        editBox.setFilter(value -> value.isEmpty() || value.matches("\\d{0,9}"));
+        editBox.setFilter(value -> {
+            if (!value.matches("\\d{0,9}")) {
+                return false;
+            }
+            if (value.isEmpty()) {
+                return true;
+            }
+            try {
+                return Integer.parseInt(value) <= max;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        });
         editBox.setValue(Integer.toString(initialValue));
         fields.add(new ConfigNumberField(Component.translatable(labelKey), editBox, min, max, setter, left, y));
         addRenderableWidget(editBox);

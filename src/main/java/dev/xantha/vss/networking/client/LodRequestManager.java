@@ -6,6 +6,7 @@ import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.config.VSSClientConfig;
+import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import it.unimi.dsi.fastutil.longs.LongIterator;
@@ -88,7 +89,6 @@ public final class LodRequestManager {
     private boolean scanCompletedForCurrentOffsets;
     private boolean nearScanCompletedForCurrentOffsets;
     private long nextFullScanRetryNanos;
-    private double generationRequestBudget;
     private double dirtyRefreshBudget;
     private long lastRequestDiagnosticNanos;
 
@@ -133,7 +133,6 @@ public final class LodRequestManager {
         };
         columnTimestamps.defaultReturnValue(-1L);
         dirtyColumnTimestamps.defaultReturnValue(0L);
-        generationRequestBudget = 8.0;
         dirtyRefreshBudget = 16.0;
     }
 
@@ -143,12 +142,11 @@ public final class LodRequestManager {
         sessionConfig = config;
         if (shouldReset) {
             resetRequestStateAfterConfigChange();
-            primeRequestBudgets();
+            primeDirtyRefreshBudget();
             return true;
         }
 
-        clampRequestBudgets();
-        primeRequestBudgets();
+        primeDirtyRefreshBudget();
         if (previousConfig != null && previousConfig.generationEnabled() != config.generationEnabled()) {
             if (config.generationEnabled()) {
                 resumeGenerationCandidatesNearPlayer();
@@ -193,7 +191,7 @@ public final class LodRequestManager {
 
             if (isTeleport) {
                 resetRequestState();
-                primeRequestBudgets();
+                primeDirtyRefreshBudget();
                 armScanBoost();
             } else {
                 pruneAround(playerCx, playerCz, lodDistance + VSSConstants.LOD_DISTANCE_BUFFER);
@@ -513,27 +511,8 @@ public final class LodRequestManager {
         return tracker.markGenerationQueued(requestId, timeoutNanos, nowNanos);
     }
 
-    private void primeRequestBudgets() {
-        if (sessionConfig == null) {
-            return;
-        }
-        int generationRate = Math.max(1, sessionConfig.generationRateLimitPerPlayer());
-        generationRequestBudget = sessionConfig.generationEnabled()
-                ? Math.max(generationRequestBudget, generationRate)
-                : 0.0D;
+    private void primeDirtyRefreshBudget() {
         dirtyRefreshBudget = Math.max(dirtyRefreshBudget, DIRTY_REFRESH_RATE_LIMIT);
-        clampRequestBudgets();
-    }
-
-    private void clampRequestBudgets() {
-        if (sessionConfig == null) {
-            generationRequestBudget = 0.0D;
-            dirtyRefreshBudget = 0.0D;
-            return;
-        }
-        generationRequestBudget = sessionConfig.generationEnabled()
-                ? Math.min(generationRequestBudget, Math.max(1, sessionConfig.generationRateLimitPerPlayer()))
-                : 0.0D;
         dirtyRefreshBudget = Math.min(dirtyRefreshBudget, DIRTY_REFRESH_RATE_LIMIT);
     }
 
@@ -665,7 +644,6 @@ public final class LodRequestManager {
         }
 
         if (count > 0) {
-            generationRequestBudget = Math.max(0.0D, generationRequestBudget - requestWindow.generationSent());
             dirtyRefreshBudget = Math.max(0.0D, dirtyRefreshBudget - requestWindow.dirtySent());
             VSSClientNetworking.sendBatchRequest(new BatchChunkRequestC2SPayload(requestIds, positions, timestamps, allowGeneration, count));
             logRequestBatch(now, count, requestWindow.syncSent(), requestWindow.generationSent(), requestWindow.dirtySent(), lodDistance, playerCx, playerCz);
@@ -683,8 +661,6 @@ public final class LodRequestManager {
         int generationSlots = Math.max(0, generationConcurrencyLimit - generationInFlightCount);
         int dirtySlots = Math.max(0, DIRTY_REFRESH_CONCURRENCY_LIMIT - dirtyInFlightCount);
 
-        int generationRate = Math.max(1, sessionConfig.generationRateLimitPerPlayer());
-        generationRequestBudget = Math.min(generationRate, generationRequestBudget + generationRate / 20.0D);
         dirtyRefreshBudget = Math.min(DIRTY_REFRESH_RATE_LIMIT, dirtyRefreshBudget + DIRTY_REFRESH_RATE_LIMIT / 20.0D);
 
         return new RequestWindow(
@@ -692,15 +668,15 @@ public final class LodRequestManager {
                 syncBucketLimit(sessionConfig.midSyncRateLimitPerTick(), false),
                 syncBucketLimit(sessionConfig.farSyncRateLimitPerTick(), false),
                 syncBucketLimit(sessionConfig.distantSyncRateLimitPerTick(), false),
-                Math.min(generationSlots, (int) generationRequestBudget),
+                generationSlots,
                 Math.min(dirtySlots, (int) dirtyRefreshBudget));
     }
 
-    private static int syncBucketLimit(int configuredLimit, boolean zeroMeansUnlimited) {
+    static int syncBucketLimit(int configuredLimit, boolean zeroMeansUnlimited) {
         if (configuredLimit <= 0) {
             return zeroMeansUnlimited ? VSSConstants.MAX_BATCH_CHUNK_REQUESTS : 0;
         }
-        return Math.min(configuredLimit, VSSConstants.MAX_BATCH_CHUNK_REQUESTS);
+        return Math.min(configuredLimit, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK);
     }
 
     private int scanNearSyncColumns(
@@ -1394,8 +1370,8 @@ public final class LodRequestManager {
     }
 
     private long effectiveReceiveBandwidthBytesPerSecond() {
-        long serverLimit = sessionConfig != null && sessionConfig.playerBandwidthLimit() > 0L
-                ? sessionConfig.playerBandwidthLimit()
+        long serverLimit = sessionConfig != null && sessionConfig.serverBandwidthLimit() > 0L
+                ? sessionConfig.serverBandwidthLimit()
                 : Long.MAX_VALUE;
         long clientLimit = VSSClientConfig.CONFIG.desiredBandwidthKbps > 0
                 ? (long) VSSClientConfig.CONFIG.desiredBandwidthKbps * 1000L / 8L
@@ -1558,7 +1534,6 @@ public final class LodRequestManager {
         nearScanCompletedForCurrentOffsets = false;
         nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
-        generationRequestBudget = 0.0D;
         dirtyRefreshBudget = 0.0D;
         presenceReporter.reset(lastDimension);
         armScanBoost();

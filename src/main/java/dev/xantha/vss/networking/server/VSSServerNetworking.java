@@ -251,7 +251,7 @@ public final class VSSServerNetworking {
                 payload.replacementSectionYs());
         transferPayload.setAllowZstdEncoding(allowZstdColumns);
         VSSServerConfig config = VSSServerConfig.CONFIG;
-        long effectiveBandwidth = Math.min(config.bandwidthBytesPerSecond(), state.desiredBandwidth());
+        long effectiveBandwidth = Math.min(config.totalBandwidthBytesPerSecond(), state.desiredBandwidth());
         List<VoxelColumnS2CPayload> payloads = ColumnPayloadSplitter.splitForBandwidth(
                 player.serverLevel(),
                 transferPayload,

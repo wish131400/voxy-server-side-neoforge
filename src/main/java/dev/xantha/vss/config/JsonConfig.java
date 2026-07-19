@@ -2,9 +2,11 @@ package dev.xantha.vss.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import dev.xantha.vss.common.VSSLogger;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import net.neoforged.fml.loading.FMLPaths;
 
 public abstract class JsonConfig {
@@ -15,14 +17,31 @@ public abstract class JsonConfig {
     protected void validate() {
     }
 
+    protected Map<String, String> getConfigHelp() {
+        return Map.of();
+    }
+
     public void save() {
         try {
             Path path = resolvePath();
             Files.createDirectories(path.getParent());
-            Files.writeString(path, GSON.toJson(this));
+            Files.writeString(path, GSON.toJson(configWithHelp()));
         } catch (Exception e) {
             VSSLogger.error("Failed to save config " + getFileName(), e);
         }
+    }
+
+    private JsonObject configWithHelp() {
+        JsonObject result = new JsonObject();
+        Map<String, String> helpEntries = getConfigHelp();
+        if (!helpEntries.isEmpty()) {
+            JsonObject help = new JsonObject();
+            helpEntries.forEach(help::addProperty);
+            result.add("_help", help);
+        }
+        GSON.toJsonTree(this).getAsJsonObject().entrySet()
+                .forEach(entry -> result.add(entry.getKey(), entry.getValue()));
+        return result;
     }
 
     private Path resolvePath() {

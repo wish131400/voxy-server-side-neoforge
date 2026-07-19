@@ -1,7 +1,7 @@
 package dev.xantha.vss.common;
 
 /**
- * Per-player token bucket used by the LOD sender.
+ * Token bucket used by the LOD sender.
  *
  * <p>The bucket may go negative after an oversized column is sent. That debt is intentional:
  * it keeps VSS from pushing another large payload into Netty until the configured wire-byte
@@ -28,6 +28,12 @@ public final class BandwidthLimiter {
     public BandwidthLimiter(NanoClock clock) {
         this.clock = clock;
         this.lastRefillNanos = clock.nanoTime();
+    }
+
+    public void reset() {
+        availableBytes = 0L;
+        lastRefillNanos = clock.nanoTime();
+        totalBytesSent = 0L;
     }
 
     public void setDesiredBandwidth(long desiredBandwidth) {

@@ -38,8 +38,8 @@ public final class VSSServerCommands {
                                 .then(Commands.argument(
                                                 "bytes_per_second",
                                                 IntegerArgumentType.integer(
-                                                        VSSServerConfig.MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER,
-                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER))
+                                                        VSSServerConfig.MIN_TOTAL_BANDWIDTH_BYTES_PER_SECOND,
+                                                        VSSServerConfig.MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND))
                                         .executes(context -> setBandwidthBytes(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "bytes_per_second")))))
@@ -47,8 +47,8 @@ public final class VSSServerCommands {
                                 .then(Commands.argument(
                                                 "bytes_per_second",
                                                 IntegerArgumentType.integer(
-                                                        VSSServerConfig.MIN_BYTES_PER_SECOND_LIMIT_PER_PLAYER,
-                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER))
+                                                        VSSServerConfig.MIN_TOTAL_BANDWIDTH_BYTES_PER_SECOND,
+                                                        VSSServerConfig.MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND))
                                         .executes(context -> setBandwidthBytes(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "bytes_per_second")))))
@@ -56,8 +56,8 @@ public final class VSSServerCommands {
                                 .then(Commands.argument(
                                                 "kbps",
                                                 IntegerArgumentType.integer(
-                                                        VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
-                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER))
+                                                        VSSServerConfig.MIN_TOTAL_BANDWIDTH_KBPS,
+                                                        VSSServerConfig.MAX_TOTAL_BANDWIDTH_KBPS))
                                         .executes(context -> setBandwidthKbps(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "kbps")))))
@@ -66,7 +66,7 @@ public final class VSSServerCommands {
                                                 "mbps",
                                                 IntegerArgumentType.integer(
                                                         1,
-                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER / VSSServerConfig.KBPS_PER_MBPS))
+                                                        VSSServerConfig.MAX_TOTAL_BANDWIDTH_KBPS / VSSServerConfig.KBPS_PER_MBPS))
                                         .executes(context -> setBandwidthKbps(
                                                 context.getSource(),
                                                 Math.multiplyExact(
@@ -77,7 +77,7 @@ public final class VSSServerCommands {
                                                 "mib_per_second",
                                                 IntegerArgumentType.integer(
                                                         1,
-                                                        VSSServerConfig.MAX_BYTES_PER_SECOND_LIMIT_PER_PLAYER / VSSServerConfig.BYTES_PER_MIB))
+                                                        VSSServerConfig.MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND / VSSServerConfig.BYTES_PER_MIB))
                                         .executes(context -> setBandwidthMiB(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "mib_per_second"))))))
@@ -89,8 +89,8 @@ public final class VSSServerCommands {
                                 .then(Commands.argument(
                                                 "kbps",
                                                 IntegerArgumentType.integer(
-                                                        VSSServerConfig.MIN_BANDWIDTH_KBPS_PER_PLAYER,
-                                                        VSSServerConfig.MAX_BANDWIDTH_KBPS_PER_PLAYER))
+                                                VSSServerConfig.MIN_TOTAL_BANDWIDTH_KBPS,
+                                                VSSServerConfig.MAX_TOTAL_BANDWIDTH_KBPS))
                                         .executes(context -> setBandwidthKbps(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "kbps"))))))
@@ -99,7 +99,9 @@ public final class VSSServerCommands {
                         .then(Commands.literal("get")
                                 .executes(context -> showQueue(context.getSource())))
                         .then(Commands.literal("set_count")
-                                .then(Commands.argument("columns", IntegerArgumentType.integer(1, 100000))
+                                .then(Commands.argument("columns", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_SEND_QUEUE_LIMIT_PER_PLAYER,
+                                        VSSServerConfig.MAX_SEND_QUEUE_LIMIT_PER_PLAYER))
                                         .executes(context -> setQueueColumns(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "columns")))))
@@ -117,7 +119,9 @@ public final class VSSServerCommands {
                         .then(Commands.literal("查看")
                                 .executes(context -> showQueue(context.getSource())))
                         .then(Commands.literal("设置数量")
-                                .then(Commands.argument("列数", IntegerArgumentType.integer(1, 100000))
+                                .then(Commands.argument("列数", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_SEND_QUEUE_LIMIT_PER_PLAYER,
+                                        VSSServerConfig.MAX_SEND_QUEUE_LIMIT_PER_PLAYER))
                                         .executes(context -> setQueueColumns(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "列数")))))
@@ -247,40 +251,19 @@ public final class VSSServerCommands {
                         .then(Commands.literal("disable")
                                 .executes(context -> setGenerationEnabled(context.getSource(), false)))
                         .then(Commands.literal("set_player_concurrency")
-                                .then(Commands.argument("limit", IntegerArgumentType.integer(1, 1000))
+                                .then(Commands.argument("limit", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_GENERATION_LIMIT,
+                                        VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER))
                                         .executes(context -> setGenerationPlayerConcurrency(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "limit")))))
                         .then(Commands.literal("set_global_concurrency")
-                                .then(Commands.argument("limit", IntegerArgumentType.integer(1, 1000))
-                                        .executes(context -> setGenerationGlobalConcurrency(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "limit")))))
-                        .then(Commands.literal("set_starts_per_tick")
-                                .then(Commands.argument("limit", IntegerArgumentType.integer(1, 256))
-                                        .executes(context -> setGenerationStartsPerTick(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "limit")))))
-                        .then(Commands.literal("set_completions_per_tick")
-                                .then(Commands.argument("limit", IntegerArgumentType.integer(1, 256))
-                                        .executes(context -> setGenerationCompletionsPerTick(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "limit")))))
-                        .then(Commands.literal("set_packing_threads")
-                                .then(Commands.argument("threads", IntegerArgumentType.integer(1, 8))
-                                        .executes(context -> setGenerationPackingThreads(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "threads")))))
-                        .then(Commands.literal("set_packing_queue")
-                                .then(Commands.argument("limit", IntegerArgumentType.integer(1, 1024))
-                                        .executes(context -> setGenerationPackingQueue(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "limit")))))
-                        .then(Commands.literal("set_timeout")
-                                .then(Commands.argument("seconds", IntegerArgumentType.integer(1, 600))
-                                        .executes(context -> setGenerationTimeout(
-                                                context.getSource(),
-                                        IntegerArgumentType.getInteger(context, "seconds"))))))
+                                .then(Commands.argument("limit", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_GENERATION_LIMIT,
+                                        VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL))
+                                         .executes(context -> setGenerationGlobalConcurrency(
+                                                 context.getSource(),
+                                                 IntegerArgumentType.getInteger(context, "limit"))))))
                 .then(Commands.literal("生成")
                         .executes(context -> showGeneration(context.getSource()))
                         .then(Commands.literal("查看")
@@ -292,40 +275,19 @@ public final class VSSServerCommands {
                         .then(Commands.literal("关闭")
                                 .executes(context -> setGenerationEnabled(context.getSource(), false)))
                         .then(Commands.literal("设置每玩家")
-                                .then(Commands.argument("数量", IntegerArgumentType.integer(1, 1000))
+                                .then(Commands.argument("数量", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_GENERATION_LIMIT,
+                                        VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER))
                                         .executes(context -> setGenerationPlayerConcurrency(
                                                 context.getSource(),
                                                 IntegerArgumentType.getInteger(context, "数量")))))
                         .then(Commands.literal("设置全服")
-                                .then(Commands.argument("数量", IntegerArgumentType.integer(1, 1000))
-                                        .executes(context -> setGenerationGlobalConcurrency(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "数量")))))
-                        .then(Commands.literal("设置每tick启动")
-                                .then(Commands.argument("数量", IntegerArgumentType.integer(1, 256))
-                                        .executes(context -> setGenerationStartsPerTick(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "数量")))))
-                        .then(Commands.literal("设置每tick打包")
-                                .then(Commands.argument("数量", IntegerArgumentType.integer(1, 256))
-                                        .executes(context -> setGenerationCompletionsPerTick(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "数量")))))
-                        .then(Commands.literal("设置打包线程")
-                                .then(Commands.argument("线程数", IntegerArgumentType.integer(1, 8))
-                                        .executes(context -> setGenerationPackingThreads(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "线程数")))))
-                        .then(Commands.literal("设置打包队列")
-                                .then(Commands.argument("数量", IntegerArgumentType.integer(1, 1024))
-                                        .executes(context -> setGenerationPackingQueue(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "数量")))))
-                        .then(Commands.literal("设置超时")
-                                .then(Commands.argument("秒", IntegerArgumentType.integer(1, 600))
-                                        .executes(context -> setGenerationTimeout(
-                                                context.getSource(),
-                                                IntegerArgumentType.getInteger(context, "秒")))))));
+                                .then(Commands.argument("数量", IntegerArgumentType.integer(
+                                        VSSServerConfig.MIN_GENERATION_LIMIT,
+                                        VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL))
+                                         .executes(context -> setGenerationGlobalConcurrency(
+                                                 context.getSource(),
+                                                 IntegerArgumentType.getInteger(context, "数量")))))));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> requestLimitsCommand(
@@ -369,23 +331,23 @@ public final class VSSServerCommands {
                 .withStyle(ChatFormatting.GREEN)
                 .append(Component.translatable(
                         "vss.command.bandwidth.details",
-                        formatBits(config.getPerPlayerBandwidthKbpsRounded()),
-                        config.bandwidthBytesPerSecond())), false);
-        return config.bandwidthBytesPerSecond();
+                        formatBits(config.getTotalBandwidthKbpsRounded()),
+                        config.totalBandwidthBytesPerSecond())), false);
+        return config.totalBandwidthBytesPerSecond();
     }
 
     private static int setBandwidthBytes(CommandSourceStack source, int bytesPerSecond) {
-        VSSServerConfig.CONFIG.setPerPlayerBandwidthBytes(bytesPerSecond);
+        VSSServerConfig.CONFIG.setTotalBandwidthBytes(bytesPerSecond);
         return reportUpdated(source);
     }
 
     private static int setBandwidthKbps(CommandSourceStack source, int kbps) {
-        VSSServerConfig.CONFIG.setPerPlayerBandwidthKbps(kbps);
+        VSSServerConfig.CONFIG.setTotalBandwidthKbps(kbps);
         return reportUpdated(source);
     }
 
     private static int setBandwidthMiB(CommandSourceStack source, int mibPerSecond) {
-        VSSServerConfig.CONFIG.setPerPlayerBandwidthMiB(mibPerSecond);
+        VSSServerConfig.CONFIG.setTotalBandwidthMiB(mibPerSecond);
         return reportUpdated(source);
     }
 
@@ -394,8 +356,8 @@ public final class VSSServerCommands {
         VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.bandwidth.saved")
                 .withStyle(ChatFormatting.YELLOW)
-                .append(Component.translatable("vss.command.bandwidth.saved.details", formatBits(config.getPerPlayerBandwidthKbpsRounded()))), true);
-        return config.bandwidthBytesPerSecond();
+                .append(Component.translatable("vss.command.bandwidth.saved.details", formatBits(config.getTotalBandwidthKbpsRounded()))), true);
+        return config.totalBandwidthBytesPerSecond();
     }
 
     private static int showQueue(CommandSourceStack source) {
@@ -602,11 +564,11 @@ public final class VSSServerCommands {
                                 : Component.translatable("vss.command.disabled"),
                         config.generationConcurrencyLimitPerPlayer,
                         config.generationConcurrencyLimitGlobal,
-                        config.generationStartsPerTickLimit,
-                        config.generationCompletionsPerTickLimit,
-                        config.generationPackingThreads,
-                        config.generationPackingQueueLimit,
-                        config.generationTimeoutSeconds)), false);
+                        config.automaticGenerationStartsPerTick(),
+                        config.automaticGenerationCompletionsPerTick(),
+                        config.automaticGenerationPackingThreads(),
+                        config.automaticGenerationPackingQueueLimit(),
+                        config.automaticGenerationTimeoutSeconds())), false);
         return config.enableChunkGeneration ? 1 : 0;
     }
 
@@ -642,38 +604,9 @@ public final class VSSServerCommands {
         return reportGenerationUpdated(source);
     }
 
-    private static int setGenerationStartsPerTick(CommandSourceStack source, int limit) {
-        VSSServerConfig.CONFIG.generationStartsPerTickLimit = limit;
-        VSSServerConfig.CONFIG.normalizeAndSave();
-        return reportGenerationUpdated(source);
-    }
-
-    private static int setGenerationCompletionsPerTick(CommandSourceStack source, int limit) {
-        VSSServerConfig.CONFIG.generationCompletionsPerTickLimit = limit;
-        VSSServerConfig.CONFIG.normalizeAndSave();
-        return reportGenerationUpdated(source);
-    }
-
-    private static int setGenerationPackingThreads(CommandSourceStack source, int threads) {
-        VSSServerConfig.CONFIG.generationPackingThreads = threads;
-        VSSServerConfig.CONFIG.normalizeAndSave();
-        return reportGenerationUpdated(source);
-    }
-
-    private static int setGenerationPackingQueue(CommandSourceStack source, int limit) {
-        VSSServerConfig.CONFIG.generationPackingQueueLimit = limit;
-        VSSServerConfig.CONFIG.normalizeAndSave();
-        return reportGenerationUpdated(source);
-    }
-
-    private static int setGenerationTimeout(CommandSourceStack source, int seconds) {
-        VSSServerConfig.CONFIG.generationTimeoutSeconds = seconds;
-        VSSServerConfig.CONFIG.normalizeAndSave();
-        return reportGenerationUpdated(source);
-    }
-
     private static int reportGenerationUpdated(CommandSourceStack source) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
+        VSSServerNetworking.applyRuntimeConfig();
         VSSServerNetworking.bumpAndRefreshSessionConfigs(source.getServer());
         source.sendSuccess(() -> Component.translatable("vss.command.generation.saved")
                 .withStyle(ChatFormatting.YELLOW)
@@ -681,11 +614,11 @@ public final class VSSServerCommands {
                         "vss.command.generation.saved.details",
                         config.generationConcurrencyLimitPerPlayer,
                         config.generationConcurrencyLimitGlobal,
-                        config.generationStartsPerTickLimit,
-                        config.generationCompletionsPerTickLimit,
-                        config.generationPackingThreads,
-                        config.generationPackingQueueLimit,
-                        config.generationTimeoutSeconds)), true);
+                        config.automaticGenerationStartsPerTick(),
+                        config.automaticGenerationCompletionsPerTick(),
+                        config.automaticGenerationPackingThreads(),
+                        config.automaticGenerationPackingQueueLimit(),
+                        config.automaticGenerationTimeoutSeconds())), true);
         return 1;
     }
 

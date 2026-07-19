@@ -1,199 +1,129 @@
 # Voxy Server Side NeoForge
 
-Voxy Server Side, 简称 VSS，是给 Voxy 使用的服务端远景同步 mod。它让服务器把已经存在、已经缓存或允许服务端生成的 LOD 数据发送给客户端，客户端不再完全依赖本地慢慢生成远景。
+Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
-简单说，它解决的是大型整合包、服务器或预生成世界里的一个痛点：玩家进入世界、移动或高速飞行时，远景应该尽快按距离补齐，而不是让客户端 CPU 独自把所有 LOD 都算一遍。
+## 支持版本
 
-Forge 1.20.1 版本见：[wish131400/voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
-
-下载地址 / Download: [CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
-
-## 当前版本
-
-| 项目 | 状态 |
+| 项目 | 版本 |
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS 版本 | `0.2.8-neoforge-1.21.1` |
-| VSS 协议 | `38` |
-| 客户端渲染目标 | Voxy + Sodium 兼容环境 |
+| VSS | `0.2.9-neoforge-1.21.1` |
 
-客户端和服务端的 VSS 协议必须一致。协议不一致时玩家仍可进服，但本次会话不会启用 VSS LOD 同步。
+- Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
+- 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
 
-## 主要功能
-
-- 服务端向客户端同步 Voxy LOD 列数据。
-- 支持内存热缓存、持久化 `.vcl` 缓存、已加载区块快照、区块 NBT 读取和可选区块生成。
-- 客户端按玩家位置由近到远请求 LOD，避免远处任务长期占住近处刷新。
-- 服务端使用每玩家发送队列，按距离重排，优先发送更接近玩家的列。
-- 支持 Region Presence 摘要，客户端会上报自己已有的 LOD，减少重复下发。
-- 支持脏列刷新，方块变化后可以通知客户端刷新对应 LOD。
-- 支持 zstd / deflate / raw 的网络压缩回退。
-- VSS 会按自身压缩后的 wire bytes 统计流量，而不是依赖外部网络层猜测大小。
-- 支持低带宽发送预算和队列背压，避免把大量 LOD 包一次性塞进网络队列。
-- 支持远处玩家和载具同步，用于 Northstar 等远距离实体场景。
+客户端和服务端必须安装协议一致的 VSS，不要混用旧版 jar。
 
 ## 安装
 
 服务端需要：
 
 - NeoForge `21.1.x`
-- 本 mod
-- 推荐安装 ZstdNet，或任何提供 `com.github.luben.zstd.Zstd` 的 zstd 库
+- VSS
+- 可选但推荐(带宽压缩模组)：[ZstdNet](https://www.curseforge.com/minecraft/mc-mods/zstdnet)
 
 客户端需要：
 
 - NeoForge `21.1.x`
-- 本 mod
+- VSS
 - Voxy
 - Sodium 兼容渲染环境
-- 推荐安装 ZstdNet
+- 可选但推荐(带宽压缩模组)：[ZstdNet](https://www.curseforge.com/minecraft/mc-mods/zstdnet)
 
-没有 zstd 时，VSS 会回退到 deflate；如果压缩收益很小，则直接发送 raw 数据。历史 zstd 持久化缓存仍需要 zstd 支持才能读取。
 
-## 同步流程
+## 工作方式
 
-客户端以玩家所在 chunk 为中心扫描 LOD 请求。距离使用 Chebyshev ring：
+1. 客户端完成握手，取得服务端距离、速率、生成和带宽限制。
+2. 客户端以玩家位置为中心扫描 Voxy LOD，并上报本地已有列，避免重复下载。
+3. 服务端依次尝试内存缓存、持久化缓存、已加载区块、区块 NBT；允许时再提交区块生成。
+4. 完整列进入该玩家的发送队列；服务端按距离和优先级选择数据，再通过全服共享带宽池公平轮询发送。
+5. 客户端组装、解压并解码列数据，再交给 Voxy 或注册的 VSS API 消费者。
 
-```text
-ring = max(abs(dx), abs(dz))
-```
+方块发生变化时，服务端会广播脏列版本，客户端只刷新受影响的 LOD。
 
-请求大致按以下路径流动：
+## 远处玩家与兼容模组
 
-```text
-客户端扫描视野
--> 上报本地已有 LOD presence
--> 请求缺失或过期的 LOD 列
--> 服务端查询内存缓存 / 持久化缓存 / 已加载区块 / 区块 NBT / 可选生成
--> 进入每玩家发送队列
--> VSS 压缩并按 wire bytes 限速
--> 客户端解压并交给 Voxy ingest
-```
+VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步原版装备、皮肤部件、披风开关以及部分模组附加数据。
+远处玩家的位置和视角使用低频更新以节省带宽，因此不会像近处原版实体一样逐 tick 平滑同步。
 
-服务端查询顺序：
+## 配置
 
-```text
-内存列缓存
--> 持久化 .vcl + index.vci
--> 已加载区块快照
--> 可选区块 NBT
--> 可选区块生成
-```
+- 服务端：`config/vss-server-config.json`
+- 客户端：`config/vss-client-config.json`
+- 本地服务器可通过 Voxy/Sodium 设置页调整；专用服务器可编辑 JSON 或使用 `/vss` 命令。
 
-## 带宽和压缩
+### 服务端默认值
 
-VSS 的带宽限制按“VSS 自己实际发出的压缩后字节数”计算。也就是说，限速、队列大小、诊断日志使用的是 payload 编码和压缩后的 wire bytes，而不是原始 LOD 大小，也不是外部压缩 mod 显示的线路统计。
+下表是新配置首次加载并完成默认迁移后的有效值。旧版自定义带宽值会保留为全服总带宽，旧默认 `1 Mbps` 会升级到新默认值。
 
-发送端使用每玩家 token bucket。较大的 LOD 列包允许一次发出，但会产生发送债务，后续 tick 必须等预算恢复后才继续发送。这能避免低带宽下把 Netty 队列灌满，导致客户端看起来“待发送很多但迟迟不刷新”。
+| 配置 | 默认值 | 允许上限 |
+| --- | ---: | ---: |
+| LOD 距离 | `128` 区块 | `8192` |
+| 全服总带宽 | `8 Mbps` | `100 Mbps` |
+| 发送队列数量 | `1024` 列 | `8192` |
+| 发送队列内存 | `16 MiB` | `128 MiB` |
+| 磁盘读取线程 | `4` | `16` |
+| 近/中/远/超远请求 | `0 / 8 / 4 / 2` 每 tick | 手动值各 `256` |
+| 单玩家生成并发 | `4` | `128` |
+| 全服生成并发 | `32` | `1024` |
+| 脏列广播间隔 | `10` tick | `600` tick |
 
-需要注意：1 Mbps 和 5 Mbps 对初始 LOD 同步的体感差异会非常明显。LOD 初始同步可能包含几十 MB 的压缩后数据，1 Mbps 接近 `125 KB/s`，即使逻辑正确，也不可能像 5 Mbps 一样秒出。
+近距离请求的 `0` 是特殊值，表示不限速并可使用单个协议批次的 `1024` 请求容量。手动填写时四档最高均为 `256/tick`；中、远、超远三档的 `0` 表示关闭该档请求。
 
-## 持久化缓存
+全服总带宽由所有玩家共享。发送器逐玩家轮询；没有待发数据、被距离分档限制或设置了较低个人下载上限的玩家不会占用额度，剩余带宽会自动供其他玩家使用。单人游戏可独占完整的 `8 Mbps`。
 
-完整 LOD 列按世界、维度和 Region 存储：
+缺失 LOD 生成没有额外的每玩家每秒限速。单玩家与全服并发仍可手动调整；每 tick 启动量、完成量、打包线程、打包队列和超时由可用逻辑处理器与全服并发自动派生，可通过 `/vss generation get` 查看当前值。
 
-```text
-<world>/data/vss-column-cache/<dimension>/<regionX>_<regionZ>/<chunkX>_<chunkZ>.vcl
-<world>/data/vss-column-cache/<dimension>/<regionX>_<regionZ>/index.vci
-```
+### 客户端默认值
 
-例如：
-
-```text
-saves/New World/data/vss-column-cache/minecraft_overworld/0_0/12_8.vcl
-saves/New World/data/vss-column-cache/minecraft_overworld/0_0/index.vci
-```
-
-每个 Region 覆盖 `32 x 32` 个 chunk。`.vcl` 保存单列 LOD 数据，`index.vci` 保存该 Region 内有哪些列存在、时间戳、压缩方式、schema 和长度。服务端会缓存热点 Region 索引，避免频繁遍历目录。
-
-## 常用配置
-
-服务端配置：
-
-```text
-config/vss-server-config.json
-```
-
-客户端配置：
-
-```text
-config/vss-client-config.json
-```
-
-常用服务端配置：
-
-| 配置项 | 作用 |
-| --- | --- |
-| `enabled` | 是否启用 VSS 服务端同步 |
-| `lodDistanceChunks` | 服务端允许同步的最大 LOD 半径 |
-| `bytesPerSecondLimitPerPlayer` | 每玩家发送带宽上限 |
-| `sendQueueLimitPerPlayer` | 每玩家待发送 LOD 列数量上限 |
-| `sendQueueBytesLimitPerPlayer` | 每玩家待发送 LOD wire bytes 上限 |
-| `nearSyncRateLimitPerTick` | 近距离已有 LOD 请求限速 |
-| `midSyncRateLimitPerTick` | 中距离已有 LOD 请求限速 |
-| `farSyncRateLimitPerTick` | 远距离已有 LOD 请求限速 |
-| `distantSyncRateLimitPerTick` | 超远距离已有 LOD 请求限速 |
-| `enableChunkGeneration` | 缺失 LOD 时是否允许服务端生成区块 |
-| `generationRateLimitPerPlayer` | 每玩家缺失 LOD 生成速率 |
-| `generationConcurrencyLimitPerPlayer` | 每玩家生成并发 |
-| `generationConcurrencyLimitGlobal` | 全服生成并发 |
-| `generationPackingThreads` | 后台 LOD 打包线程数 |
-| `diskReaderThreads` | 持久化缓存和 NBT 读取线程数 |
-| `enableNetworkColumnCompression` | 是否启用网络 LOD 压缩 |
-| `enablePersistentColumnCache` | 是否启用 `.vcl` 持久化缓存 |
-| `dirtyBroadcastIntervalTicks` | 脏列刷新广播间隔 |
-| `farPlayerSyncEnabled` | 是否启用远处玩家同步 |
-
-常用客户端配置：
-
-| 配置项 | 作用 |
-| --- | --- |
-| `receiveServerLods` | 是否接收服务端 LOD |
-| `lodDistanceChunks` | 客户端请求距离，`0` 表示自动 |
-| `desiredBandwidthKbps` | 客户端期望下载限速，`0` 表示使用服务端限制 |
-| `offThreadSectionProcessing` | 是否在线程外处理收到的 LOD 再交给 Voxy |
+| 配置 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `receiveServerLods` | `true` | 接收服务端 LOD |
+| `lodDistanceChunks` | `0` | 自动跟随 Voxy 距离 |
+| `desiredBandwidthKbps` | `0` | 不设个人下载上限，仍受全服总带宽限制 |
+| `offThreadSectionProcessing` | `true` | 在线程外解码和处理收到的列 |
 
 ## 常用命令
+
+所有命令需要管理员权限，可使用游戏内自动补全查看完整参数。
 
 ```text
 /vss stats
 /vss bandwidth get
-/vss bandwidth set_kbps <kbps>
 /vss bandwidth set_mbps <mbps>
 /vss queue get
-/vss queue set_count <columns>
-/vss queue set_mib <MiB>
 /vss request_limits get
-/vss request_limits set_near <columns_per_tick>
-/vss request_limits set_mid <columns_per_tick>
-/vss request_limits set_far <columns_per_tick>
-/vss request_limits set_distant <columns_per_tick>
 /vss distance get
-/vss distance set <chunks>
-/vss storage get
-/vss storage set_disk_readers <threads>
 /vss generation get
 /vss generation stats
-/vss generation enable
-/vss generation disable
-/vss generation set_player_concurrency <limit>
-/vss generation set_global_concurrency <limit>
-/vss generation set_starts_per_tick <limit>
-/vss generation set_completions_per_tick <limit>
-/vss generation set_packing_threads <threads>
-/vss generation set_packing_queue <limit>
-/vss generation set_timeout <seconds>
+/vss generation set_player_concurrency <数量>
+/vss generation set_global_concurrency <数量>
+/vss storage get
 /vss dirty get
-/vss dirty set_interval <ticks>
 /vss farplayers get
-/vss farplayers enable
-/vss farplayers disable
-/vss farplayers set_interval <ticks>
 ```
 
-中文别名也可用，常用入口包括 `/vss 状态`、`/vss 带宽`、`/vss 距离`、`/vss 队列`、`/vss 请求限速`、`/vss 存储`、`/vss 刷新`、`/vss 生成`、`/vss 远处玩家`。
+并发命令修改会立即保存配置并刷新玩家会话限制，其余生成后台参数会自动重新计算。
+
+## 缓存与排错
+
+持久化缓存位于：
+
+```text
+<世界>/data/vss-column-cache/<维度>/<regionX>_<regionZ>/
+```
+
+`.vcl` 保存列数据，`index.vci` 保存 Region 索引。需要清空缓存时先关闭服务器，再删除 `vss-column-cache`；之后的 LOD 会重新读取或生成。
+
+排错建议：
+
+- 先执行 `/vss stats`、`/vss generation stats` 查看请求、队列和生成状态。
+- 确认两端 VSS 版本与协议一致，并确认客户端已加载 Voxy。
+- LOD 到达很慢时检查全服总带宽、在线玩家数量和客户端个人下载上限；默认 `8 Mbps` 约等于 `1 MB/s`，由活跃玩家动态共享。
+- 待发送数量持续增长时检查发送队列、客户端期望带宽和网络拥塞。
+- 生成排队但吞吐低时检查每 tick 启动限制，而不只是提高全服并发。
 
 ## License
 
-MIT. See `LICENSE`.
+MIT

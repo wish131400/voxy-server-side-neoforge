@@ -42,7 +42,7 @@ public final class ClientControlMessageHandler {
         PlayerRequestState state = playerRegistry.get(player.getUUID());
         if (state != null) {
             state.setDesiredBandwidth(payload.desiredRate());
-            state.primeSendCredit(VSSServerConfig.CONFIG.bandwidthBytesPerSecond());
+            state.primeSendCredit(Long.MAX_VALUE);
         }
     }
 

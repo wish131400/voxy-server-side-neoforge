@@ -30,7 +30,7 @@ public final class PlayerRequestState {
     private final PreloadColumnFrontier preloadColumnFrontier = new PreloadColumnFrontier();
     private final PreloadRegionWindow preloadRegionWindow = new PreloadRegionWindow();
     private final ClientKnownColumnIndex clientKnownColumns = new ClientKnownColumnIndex();
-    private final BandwidthLimiter normalBandwidthLimiter = new BandwidthLimiter(System::nanoTime);
+    private final BandwidthLimiter personalBandwidthLimiter = new BandwidthLimiter(System::nanoTime);
     private long priorityBytesSent;
     private int clientCapabilities;
 
@@ -231,7 +231,7 @@ public final class PlayerRequestState {
                 queuedBytes(),
                 config.sendQueueLimitPerPlayer,
                 config.sendQueueBytesLimitPerPlayer,
-                config.bandwidthBytesPerSecond(),
+                Long.MAX_VALUE,
                 desiredBandwidth());
     }
 
@@ -254,11 +254,7 @@ public final class PlayerRequestState {
     }
 
     public synchronized boolean canSend(long configuredLimit) {
-        return canSend(false, configuredLimit);
-    }
-
-    public synchronized boolean canSend(boolean priority, long configuredLimit) {
-        return priority || normalBandwidthLimiter.canSend(configuredLimit);
+        return personalBandwidthLimiter.canSend(configuredLimit);
     }
 
     public synchronized void recordSend(int wireBytes) {
@@ -266,29 +262,22 @@ public final class PlayerRequestState {
     }
 
     public synchronized void recordSend(boolean priority, int wireBytes) {
-        if (priority) {
-            if (wireBytes > 0) {
-                priorityBytesSent += wireBytes;
-            }
-            return;
+        personalBandwidthLimiter.recordSend(wireBytes);
+        if (priority && wireBytes > 0) {
+            priorityBytesSent += wireBytes;
         }
-        normalBandwidthLimiter.recordSend(wireBytes);
     }
 
     public synchronized void primeSendCredit(long configuredLimit) {
-        normalBandwidthLimiter.primeSendCredit(configuredLimit);
+        personalBandwidthLimiter.primeSendCredit(configuredLimit);
     }
 
     public synchronized long totalBytesSent() {
-        return normalBandwidthLimiter.totalBytesSent() + priorityBytesSent;
+        return personalBandwidthLimiter.totalBytesSent();
     }
 
-    public synchronized long sendCreditBytes() {
-        return normalSendCreditBytes();
-    }
-
-    public synchronized long normalSendCreditBytes() {
-        return normalBandwidthLimiter.availableBytes();
+    public synchronized long personalSendCreditBytes() {
+        return personalBandwidthLimiter.availableBytes();
     }
 
     public synchronized long priorityBytesSent() {
@@ -296,11 +285,11 @@ public final class PlayerRequestState {
     }
 
     public synchronized void setDesiredBandwidth(long desiredBandwidth) {
-        normalBandwidthLimiter.setDesiredBandwidth(desiredBandwidth);
+        personalBandwidthLimiter.setDesiredBandwidth(desiredBandwidth);
     }
 
     public synchronized long desiredBandwidth() {
-        return normalBandwidthLimiter.desiredBandwidth();
+        return personalBandwidthLimiter.desiredBandwidth();
     }
 
     public synchronized void setClientCapabilities(int clientCapabilities) {

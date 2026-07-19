@@ -165,4 +165,17 @@ class BandwidthLimiterTest {
 
         assertEquals(64L * 1024L, limiter.availableBytes());
     }
+
+    @Test
+    void resetClearsSharedCreditAndAccounting() {
+        FakeClock clock = new FakeClock();
+        BandwidthLimiter limiter = new BandwidthLimiter(clock);
+        limiter.primeSendCredit(1_000_000L);
+        limiter.recordSend(32 * 1024);
+
+        limiter.reset();
+
+        assertEquals(0L, limiter.availableBytes());
+        assertEquals(0L, limiter.totalBytesSent());
+    }
 }

@@ -52,6 +52,8 @@ public final class ServerNetworkingLifecycle {
     }
 
     public void applyRuntimeConfig() {
+        generationService.applyRuntimeConfig();
+        queuedColumnSender.applyRuntimeConfig();
         int resizedThreads = diskRuntime.resizeReadExecutor();
         if (resizedThreads > 0) {
             VSSLogger.info("VSS disk reader threads resized to " + resizedThreads);
@@ -91,6 +93,7 @@ public final class ServerNetworkingLifecycle {
 
     public void onServerStarting() {
         lifecycleGuard.start();
+        queuedColumnSender.reset();
         diskRuntime.restart();
         applyRuntimeConfig();
         idleMemoryReleased = true;
@@ -104,6 +107,7 @@ public final class ServerNetworkingLifecycle {
     public void onServerStopping(MinecraftServer server) {
         persistentColumnWriter.flushInvalidationsBlocking(server);
         lifecycleGuard.stop();
+        queuedColumnSender.reset();
         diskRuntime.shutdown();
         diskRuntime.resetPendingCounts();
         for (PlayerRequestState state : playerRegistry.states()) {

@@ -5,9 +5,23 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.xantha.vss.common.VSSConstants;
+import dev.xantha.vss.config.VSSServerConfig;
 import org.junit.jupiter.api.Test;
 
 class RequestWindowTest {
+
+    @Test
+    void zeroNearRateKeepsProtocolBatchUnlimited() {
+        assertEquals(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, LodRequestManager.syncBucketLimit(0, true));
+        assertEquals(0, LodRequestManager.syncBucketLimit(0, false));
+    }
+
+    @Test
+    void explicitSyncRateIsClampedToConfigMaximum() {
+        assertEquals(
+                VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK,
+                LodRequestManager.syncBucketLimit(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, true));
+    }
 
     @Test
     void emptyWindowHasNoCapacity() {
