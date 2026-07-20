@@ -30,6 +30,10 @@ public final class VSSServerCommands {
                         .executes(context -> showStats(context.getSource())))
                 .then(Commands.literal("状态")
                         .executes(context -> showStats(context.getSource())))
+                .then(Commands.literal("help")
+                        .executes(context -> showHelp(context.getSource())))
+                .then(Commands.literal("帮助")
+                        .executes(context -> showHelp(context.getSource())))
                 .then(Commands.literal("bandwidth")
                         .executes(context -> showBandwidth(context.getSource()))
                         .then(Commands.literal("get")
@@ -322,6 +326,22 @@ public final class VSSServerCommands {
         source.sendSuccess(() -> Component.translatable("vss.command.stats")
                 .withStyle(ChatFormatting.GREEN)
                 .append(VSSServerNetworking.diagnosticsComponent()), false);
+        return 1;
+    }
+
+    private static int showHelp(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.translatable("vss.command.help.title")
+                .withStyle(ChatFormatting.GOLD), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.stats"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.bandwidth"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.queue"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.request_limits"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.distance"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.far_players"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.dirty"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.storage"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.generation"), false);
+        source.sendSuccess(() -> Component.translatable("vss.command.help.help"), false);
         return 1;
     }
 

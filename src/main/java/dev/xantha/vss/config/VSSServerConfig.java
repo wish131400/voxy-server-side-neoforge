@@ -42,8 +42,6 @@ public class VSSServerConfig extends JsonConfig {
     private static final int CONSERVATIVE_GENERATION_CONCURRENCY_LIMIT_GLOBAL = 8;
     private static final int PREVIOUS_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = 4 * BYTES_PER_MIB;
     private static final int PREVIOUS_DEFAULT_GENERATION_CONCURRENCY_LIMIT_GLOBAL = 24;
-    private static final int LEGACY_DEFAULT_BANDWIDTH_KBPS_PER_PLAYER = KBPS_PER_MBPS;
-    private static final int LEGACY_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER = kbpsToBytesPerSecond(LEGACY_DEFAULT_BANDWIDTH_KBPS_PER_PLAYER);
     private static final int DEFAULT_TOTAL_BANDWIDTH_KBPS = 8 * KBPS_PER_MBPS;
     private static final int DEFAULT_TOTAL_BANDWIDTH_BYTES_PER_SECOND = kbpsToBytesPerSecond(DEFAULT_TOTAL_BANDWIDTH_KBPS);
     private static final int DEFAULT_SEND_QUEUE_LIMIT_PER_PLAYER = 1024;
@@ -428,26 +426,12 @@ public class VSSServerConfig extends JsonConfig {
     }
 
     private void migrateLegacyBandwidthIfNeeded() {
-        if (legacyBytesPerSecondLimitPerPlayer != null) {
-            totalBandwidthBytesPerSecond = upgradeLegacyDefaultBandwidth(legacyBytesPerSecondLimitPerPlayer);
-            legacyBytesPerSecondLimitPerPlayer = null;
+        if (legacyBytesPerSecondLimitPerPlayer != null || bandwidthLimitKbpsPerPlayer != null) {
+            // The old fields were per-player limits; they cannot be carried over to the shared total limit.
+            totalBandwidthBytesPerSecond = DEFAULT_TOTAL_BANDWIDTH_BYTES_PER_SECOND;
         }
-        if (bandwidthLimitKbpsPerPlayer != null) {
-            if (bandwidthLimitKbpsPerPlayer > 0) {
-                int legacyBytesPerSecond = kbpsToBytesPerSecond(clamp(
-                        bandwidthLimitKbpsPerPlayer,
-                        MIN_TOTAL_BANDWIDTH_KBPS,
-                        MAX_TOTAL_BANDWIDTH_KBPS));
-                totalBandwidthBytesPerSecond = upgradeLegacyDefaultBandwidth(legacyBytesPerSecond);
-            }
-            bandwidthLimitKbpsPerPlayer = null;
-        }
-    }
-
-    private static int upgradeLegacyDefaultBandwidth(int bytesPerSecond) {
-        return bytesPerSecond == LEGACY_DEFAULT_BYTES_PER_SECOND_LIMIT_PER_PLAYER
-                ? DEFAULT_TOTAL_BANDWIDTH_BYTES_PER_SECOND
-                : bytesPerSecond;
+        legacyBytesPerSecondLimitPerPlayer = null;
+        bandwidthLimitKbpsPerPlayer = null;
     }
 
     private static int bytesToKbpsCeil(int bytesPerSecond) {
