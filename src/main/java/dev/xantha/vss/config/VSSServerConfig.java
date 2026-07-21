@@ -104,7 +104,7 @@ public class VSSServerConfig extends JsonConfig {
     public int dirtyVersionCacheMaxEntries = 100000;
     public int dirtyVersionCacheRetentionSeconds = 43200;
     public boolean farPlayerSyncEnabled = true;
-    public int farPlayerSyncIntervalTicks = 2;
+    public int farPlayerSyncIntervalTicks = 10;
     public boolean enableColumnCache = true;
     public int columnCacheMaxEntries = 4096;
     public int columnCacheMaxBytes = 32 * BYTES_PER_MIB;
@@ -157,7 +157,7 @@ public class VSSServerConfig extends JsonConfig {
         help.put("dirtyVersionCacheMaxEntries", "脏列版本缓存最大条目数；默认 100000；范围 1-5000000。");
         help.put("dirtyVersionCacheRetentionSeconds", "脏列版本保留时间，单位秒；默认 43200；范围 60-604800。");
         help.put("farPlayerSyncEnabled", "是否同步超出原版跟踪范围的玩家和载具；默认 true。");
-        help.put("farPlayerSyncIntervalTicks", "远处玩家同步间隔，单位 tick；新配置默认 2，建议多人服使用 10；范围 1-100。");
+        help.put("farPlayerSyncIntervalTicks", "远处玩家同步间隔，单位 tick；默认 10；范围 1-100。");
         help.put("enableColumnCache", "是否启用内存列缓存；默认 true。");
         help.put("columnCacheMaxEntries", "内存列缓存最大条目数；默认 4096；范围 1-100000。");
         help.put("columnCacheMaxBytes", "内存列缓存最大字节数；默认 32 MiB；范围 1-512 MiB。");
