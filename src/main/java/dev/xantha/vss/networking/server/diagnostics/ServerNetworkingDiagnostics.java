@@ -61,7 +61,7 @@ public final class ServerNetworkingDiagnostics {
         DiskTaskRuntime.Snapshot disk = diskRuntime.snapshot();
         QueueTotals queue = queueTotals();
         return String.format(
-                "vssSessions=%d, queuedColumns=%d, priorityQueuedColumns=%d, queuedBytes=%.2f MiB, generation={%s}, storage={requests=%d, duplicates=%d, distanceRejected=%d, upToDate=%d, cacheHits=%d, diskSubmitted=%d, diskPending=%d, diskHits=%d, diskMisses=%d, diskFailures=%d, coalescedReads=%d, preloadReused=%d}, dirty={%s}, cache={%s}",
+                "vssSessions=%d, queuedColumns=%d, priorityQueuedColumns=%d, queuedBytes=%.2f MiB, generation={%s}, storage={requests=%d, duplicates=%d, distanceRejected=%d, upToDate=%d, cacheHits=%d, diskSubmitted=%d, diskPending=%d, diskHits=%d, diskMisses=%d, diskFailures=%d, coalescedReads=%d, preloadReused=%d, nbt={submitted=%d, completed=%d, hits=%d, misses=%d, failures=%d, active=%d, queued=%d, coalesced=%d, rejected=%d}}, dirty={%s}, cache={%s}",
                 playerRegistry.size(),
                 queue.queuedPayloads(),
                 queue.priorityQueuedPayloads(),
@@ -79,6 +79,15 @@ public final class ServerNetworkingDiagnostics {
                 stats.diskReadFailures(),
                 disk.coalescedReads(),
                 disk.preloadReadsReusedByLive(),
+                disk.nbtReadsSubmitted(),
+                disk.nbtReadsCompleted(),
+                disk.nbtReadHits(),
+                disk.nbtReadMisses(),
+                disk.nbtReadFailures(),
+                disk.nbtReadsActive(),
+                disk.nbtReadsQueued(),
+                disk.nbtReadsCoalesced(),
+                disk.nbtReadsRejected(),
                 DirtyColumnBroadcaster.diagnostics(),
                 columnCache.diagnostics() + ", " + persistentStore.diagnostics()
                         + ", persistentWritePending=" + diskRuntime.pendingWrites());
@@ -133,13 +142,20 @@ public final class ServerNetworkingDiagnostics {
                 disk.preloadReadsRejected(),
                 String.format(Locale.ROOT, "%.1f", averageWaitMs),
                 String.format(Locale.ROOT, "%.1f", disk.maxReadWaitNanos() / 1_000_000.0D))
-                .append(Component.literal("; coalesced=" + disk.coalescedReads()
-                        + ", preloadReused=" + disk.preloadReadsReusedByLive()
-                        + ", nbtActive=" + disk.nbtReadsActive()
-                        + ", nbtQueued=" + disk.nbtReadsQueued()
-                        + ", nbtSubmitted=" + disk.nbtReadsSubmitted()
-                        + ", nbtCompleted=" + disk.nbtReadsCompleted()
-                        + ", nbtRejected=" + disk.nbtReadsRejected()));
+                .append(Component.literal("; "))
+                .append(Component.translatable(
+                        "vss.command.storage.coalescing.extra",
+                        disk.coalescedReads(),
+                        disk.preloadReadsReusedByLive(),
+                        disk.nbtReadsSubmitted(),
+                        disk.nbtReadsCompleted(),
+                        disk.nbtReadHits(),
+                        disk.nbtReadMisses(),
+                        disk.nbtReadFailures(),
+                        disk.nbtReadsActive(),
+                        disk.nbtReadsQueued(),
+                        disk.nbtReadsCoalesced(),
+                        disk.nbtReadsRejected()));
     }
 
     private QueueTotals queueTotals() {

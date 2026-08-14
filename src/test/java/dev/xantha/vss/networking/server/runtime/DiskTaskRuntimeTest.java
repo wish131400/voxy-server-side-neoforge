@@ -243,6 +243,62 @@ class DiskTaskRuntimeTest {
         }
     }
 
+    @Test
+    void coalescedNbtReadCountsOnePhysicalHit() throws Exception {
+        DiskTaskRuntime runtime = runtime(() -> 2, () -> true);
+        AtomicReference<DiskTaskRuntime.AsyncReadCompletion<String>> completion = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch listenersCompleted = new CountDownLatch(2);
+        try {
+            runtime.restart();
+            DiskTaskRuntime.ReadKey key =
+                    new DiskTaskRuntime.ReadKey(ResourceLocation.parse("test:dimension"), 7, 9);
+            assertTrue(runtime.<String>submitCoalescedNbtRead(
+                    key,
+                    1,
+                    8,
+                    8,
+                    () -> true,
+                    pending -> {
+                        completion.set(pending);
+                        started.countDown();
+                    },
+                    ignored -> listenersCompleted.countDown(),
+                    ignored -> {
+                    }));
+            assertTrue(runtime.<String>submitCoalescedNbtRead(
+                    key,
+                    1,
+                    8,
+                    8,
+                    () -> true,
+                    ignored -> {
+                    },
+                    ignored -> listenersCompleted.countDown(),
+                    ignored -> {
+                    }));
+
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            DiskTaskRuntime.Snapshot active = runtime.snapshot();
+            assertEquals(1, active.nbtReadsSubmitted());
+            assertEquals(1, active.nbtReadsActive());
+            assertEquals(1, active.nbtReadsCoalesced());
+
+            if (completion.get().complete("hit")) {
+                runtime.recordNbtReadHit();
+            }
+            assertTrue(listenersCompleted.await(2, TimeUnit.SECONDS));
+
+            DiskTaskRuntime.Snapshot completed = runtime.snapshot();
+            assertEquals(1, completed.nbtReadsCompleted());
+            assertEquals(1, completed.nbtReadHits());
+            assertEquals(0, completed.nbtReadMisses());
+            assertEquals(0, completed.nbtReadFailures());
+        } finally {
+            runtime.shutdown();
+        }
+    }
+
     private static DiskTaskRuntime runtime(java.util.function.IntSupplier readThreads, java.util.function.BooleanSupplier accepting) {
         return new DiskTaskRuntime(1, 2, readThreads, accepting);
     }

@@ -28,7 +28,7 @@ public final class DiskTaskRuntime {
     public interface AsyncReadCompletion<T> {
         boolean execute(Runnable continuation);
 
-        void complete(T value);
+        boolean complete(T value);
 
         void fail(Throwable error);
 
@@ -58,6 +58,10 @@ public final class DiskTaskRuntime {
     private final ConcurrentHashMap<ReadKey, SharedRead<?>> inFlightReads = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ReadKey, SharedRead<?>> inFlightNbtReads = new ConcurrentHashMap<>();
     private final AsyncReadGate nbtReadGate = new AsyncReadGate();
+    private final AtomicLong nbtReadsCoalesced = new AtomicLong();
+    private final AtomicLong nbtReadHits = new AtomicLong();
+    private final AtomicLong nbtReadMisses = new AtomicLong();
+    private final AtomicLong nbtReadFailures = new AtomicLong();
     private final TrackedTaskExecutor readTasks = new TrackedTaskExecutor(this::readExecutor, pendingReads);
     private final TrackedTaskExecutor writeTasks = new TrackedTaskExecutor(this::writeExecutor, pendingWrites);
     private final Object executorLock = new Object();
@@ -197,6 +201,18 @@ public final class DiskTaskRuntime {
         return coalescedReads.get();
     }
 
+    public void recordNbtReadHit() {
+        nbtReadHits.incrementAndGet();
+    }
+
+    public void recordNbtReadMiss() {
+        nbtReadMisses.incrementAndGet();
+    }
+
+    public void recordNbtReadFailure() {
+        nbtReadFailures.incrementAndGet();
+    }
+
     @SuppressWarnings("unchecked")
     public <T> boolean submitCoalescedNbtRead(
             ReadKey key,
@@ -211,6 +227,7 @@ public final class DiskTaskRuntime {
         SharedRead<T> existing = (SharedRead<T>) inFlightNbtReads.get(key);
         if (existing != null) {
             coalescedReads.incrementAndGet();
+            nbtReadsCoalesced.incrementAndGet();
             existing.add(onComplete, onRejected, listenerActive);
             return true;
         }
@@ -219,6 +236,7 @@ public final class DiskTaskRuntime {
         existing = (SharedRead<T>) inFlightNbtReads.putIfAbsent(key, created);
         if (existing != null) {
             coalescedReads.incrementAndGet();
+            nbtReadsCoalesced.incrementAndGet();
             existing.add(onComplete, onRejected, listenerActive);
             return true;
         }
@@ -257,6 +275,7 @@ public final class DiskTaskRuntime {
                     }
                 },
                 error -> {
+                    nbtReadFailures.incrementAndGet();
                     nbtReadGate.complete(gateEpoch);
                     reject.accept(error);
                 });
@@ -404,6 +423,10 @@ public final class DiskTaskRuntime {
                 nbtReadGate.queued(),
                 nbtReadGate.submitted(),
                 nbtReadGate.completed(),
+                nbtReadHits.get(),
+                nbtReadMisses.get(),
+                nbtReadFailures.get(),
+                nbtReadsCoalesced.get(),
                 nbtReadGate.rejected());
     }
 
@@ -517,6 +540,10 @@ public final class DiskTaskRuntime {
             int nbtReadsQueued,
             long nbtReadsSubmitted,
             long nbtReadsCompleted,
+            long nbtReadHits,
+            long nbtReadMisses,
+            long nbtReadFailures,
+            long nbtReadsCoalesced,
             long nbtReadsRejected) {
     }
 
@@ -681,18 +708,21 @@ public final class DiskTaskRuntime {
         }
 
         @Override
-        public void complete(T value) {
+        public boolean complete(T value) {
             if (completed.compareAndSet(false, true)) {
                 pending.complete();
                 inFlightNbtReads.remove(key, shared);
                 nbtReadGate.complete(gateEpoch);
                 shared.complete(value);
+                return true;
             }
+            return false;
         }
 
         @Override
         public void fail(Throwable error) {
             if (completed.compareAndSet(false, true)) {
+                nbtReadFailures.incrementAndGet();
                 pending.complete();
                 inFlightNbtReads.remove(key, shared);
                 nbtReadGate.complete(gateEpoch);

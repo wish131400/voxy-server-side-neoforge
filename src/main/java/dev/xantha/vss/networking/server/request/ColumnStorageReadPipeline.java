@@ -165,7 +165,7 @@ public final class ColumnStorageReadPipeline {
         ColumnLodCache.Entry cached = columnCache.get(
                 readContext.level().dimension(), readContext.cx(), readContext.cz());
         if (cached != null && cached.completeColumn() && cached.timestamp() >= dirtyTimestamp) {
-            scheduleDiskReadFinish(readContext, storedData, new DiskNbtReadResult(cached.columnData(), false));
+            scheduleDiskReadFinish(readContext, storedData, DiskNbtReadResult.cached(cached.columnData()));
             return;
         }
         if (storedData != null
@@ -203,7 +203,7 @@ public final class ColumnStorageReadPipeline {
             DiskTaskRuntime.AsyncReadCompletion<DiskNbtReadResult> completion) {
         if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
                 || !completion.hasActiveListeners()) {
-            completion.complete(DiskNbtReadResult.empty());
+            completeNbtRead(completion, DiskNbtReadResult.empty());
             return;
         }
         try {
@@ -214,14 +214,18 @@ public final class ColumnStorageReadPipeline {
                             VSSServerConfig.CONFIG.diskReadTimeoutMillis)
                     .whenComplete((optionalTag, error) -> {
                         if (error != null) {
-                            completion.complete(new DiskNbtReadResult(null, true));
+                            completeNbtRead(
+                                    completion,
+                                    VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
+                                            ? DiskNbtReadResult.empty()
+                                            : DiskNbtReadResult.failure());
                             return;
                         }
                         completion.execute(() -> {
                             try {
                                 if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
                                         || !completion.hasActiveListeners()) {
-                                    completion.complete(DiskNbtReadResult.empty());
+                                    completeNbtRead(completion, DiskNbtReadResult.empty());
                                     return;
                                 }
                                 LoadedColumnData rawDiskData = NbtSectionSerializer.serializeTag(
@@ -235,16 +239,35 @@ public final class ColumnStorageReadPipeline {
                                                 && rawDiskData.sizeBytes() > 0
                                         ? EncodedColumnData.encode(rawDiskData, 0L)
                                         : null;
-                                completion.complete(new DiskNbtReadResult(encoded, false));
+                                completeNbtRead(
+                                        completion,
+                                        encoded == null
+                                                ? DiskNbtReadResult.miss()
+                                                : DiskNbtReadResult.hit(encoded));
                             } catch (Exception exception) {
                                 VSSLogger.warn("Failed to transcode chunk NBT at "
                                         + readContext.cx() + ", " + readContext.cz() + ": " + exception.getMessage());
-                                completion.complete(new DiskNbtReadResult(null, true));
+                                completeNbtRead(completion, DiskNbtReadResult.failure());
                             }
                         });
                     });
         } catch (Exception exception) {
-            completion.complete(new DiskNbtReadResult(null, true));
+            completeNbtRead(completion, DiskNbtReadResult.failure());
+        }
+    }
+
+    private void completeNbtRead(
+            DiskTaskRuntime.AsyncReadCompletion<DiskNbtReadResult> completion,
+            DiskNbtReadResult result) {
+        if (!completion.complete(result)) {
+            return;
+        }
+        if (result.outcome() == NbtReadOutcome.HIT) {
+            diskRuntime.recordNbtReadHit();
+        } else if (result.outcome() == NbtReadOutcome.MISS) {
+            diskRuntime.recordNbtReadMiss();
+        } else if (result.outcome() == NbtReadOutcome.FAILED) {
+            diskRuntime.recordNbtReadFailure();
         }
     }
 
@@ -469,10 +492,37 @@ public final class ColumnStorageReadPipeline {
             boolean priority) {
     }
 
-    private record DiskNbtReadResult(EncodedColumnData columnData, boolean failed) {
+    private record DiskNbtReadResult(EncodedColumnData columnData, NbtReadOutcome outcome) {
         static DiskNbtReadResult empty() {
-            return new DiskNbtReadResult(null, false);
+            return new DiskNbtReadResult(null, NbtReadOutcome.CANCELLED);
         }
+
+        static DiskNbtReadResult cached(EncodedColumnData columnData) {
+            return new DiskNbtReadResult(columnData, NbtReadOutcome.CANCELLED);
+        }
+
+        static DiskNbtReadResult hit(EncodedColumnData columnData) {
+            return new DiskNbtReadResult(columnData, NbtReadOutcome.HIT);
+        }
+
+        static DiskNbtReadResult miss() {
+            return new DiskNbtReadResult(null, NbtReadOutcome.MISS);
+        }
+
+        static DiskNbtReadResult failure() {
+            return new DiskNbtReadResult(null, NbtReadOutcome.FAILED);
+        }
+
+        boolean failed() {
+            return outcome == NbtReadOutcome.FAILED;
+        }
+    }
+
+    private enum NbtReadOutcome {
+        HIT,
+        MISS,
+        FAILED,
+        CANCELLED
     }
 
 }
