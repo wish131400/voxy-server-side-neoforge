@@ -106,7 +106,12 @@ public final class ServerNetworkingLifecycle {
 
     public void onServerStopping(MinecraftServer server) {
         persistentColumnWriter.flushInvalidationsBlocking(server);
+        persistentColumnWriter.flushWritesBlocking();
         lifecycleGuard.stop();
+        if (!diskRuntime.awaitWrites(10_000L)) {
+            VSSLogger.warn("Timed out while flushing VSS persistent column writes during shutdown");
+        }
+        persistentStore.flushDirtyIndexesBlocking(server);
         diskRuntime.clearCoalescedReads();
         queuedColumnSender.reset();
         diskRuntime.shutdown();

@@ -14,10 +14,13 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.stream.Stream;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
@@ -27,9 +30,9 @@ import net.minecraft.world.level.storage.LevelResource;
 
 public final class PersistentColumnLodStore {
     private static final int FILE_MAGIC = 0x5653534C;
-    private static final int FILE_VERSION_CURRENT = 6;
+    private static final int FILE_VERSION_CURRENT = 8;
     private static final int INDEX_MAGIC = 0x56535349;
-    private static final int INDEX_VERSION_CURRENT = 1;
+    private static final int INDEX_VERSION_CURRENT = 3;
     private static final int REGION_SIZE = 32;
     private static final int REGION_SLOT_COUNT = REGION_SIZE * REGION_SIZE;
     private static final int REGION_BITMAP_LONGS = REGION_SLOT_COUNT / Long.SIZE;
@@ -45,6 +48,7 @@ public final class PersistentColumnLodStore {
 
     private final VSSServerConfig config;
     private final Map<RegionKey, RegionIndex> regionIndexes = new LinkedHashMap<>(128, 0.75F, true);
+    private final Set<RegionKey> dirtyIndexes = new HashSet<>();
     private final Object[] columnLocks = createLocks(COLUMN_LOCK_STRIPES);
     private final Object[] regionLocks = createLocks(REGION_LOCK_STRIPES);
     private long reads;
@@ -78,6 +82,9 @@ public final class PersistentColumnLodStore {
 
     public void clearMemory() {
         clearRegionIndexes();
+        synchronized (this) {
+            dirtyIndexes.clear();
+        }
         nextCleanupMillis = 0L;
         knownCacheBytes = -1L;
         knownCacheEntries = -1;
@@ -144,14 +151,12 @@ public final class PersistentColumnLodStore {
                 return null;
             }
 
-            try {
-                decodeStoredBody(encodedBytes, header.method(), header.rawSize());
-            } catch (IOException e) {
+            if (EncodedColumnData.crc32c(encodedBytes) != header.encodedCrc32c()) {
                 misses++;
                 corruptions++;
                 deleteColumn(server, dimension, cx, cz);
                 VSSLogger.warn("Discarded corrupt persistent LOD column " + cx + "," + cz
-                        + ": " + e.getMessage());
+                        + ": compressed-frame CRC32C mismatch");
                 return null;
             }
 
@@ -165,7 +170,10 @@ public final class PersistentColumnLodStore {
                     encodedBytes,
                     header.timestamp(),
                     header.schemaVersion(),
-                    true));
+                    true,
+                    header.sectionYs(),
+                    header.sectionLengths(),
+                    header.encodedCrc32c()));
         } catch (Exception e) {
             misses++;
             deleteQuietly(path);
@@ -215,7 +223,8 @@ public final class PersistentColumnLodStore {
                 || columnData.rawSize() > MAX_COLUMN_BYTES
                 || columnData.encodedBytes().length <= 0
                 || columnData.encodedBytes().length > MAX_ENCODED_COLUMN_BYTES
-                || columnData.schemaVersion() != EncodedColumnData.SCHEMA_VERSION) {
+                || columnData.schemaVersion() != EncodedColumnData.SCHEMA_VERSION
+                || !columnData.hasValidEncodedCrc32c()) {
             return;
         }
 
@@ -240,10 +249,19 @@ public final class PersistentColumnLodStore {
                     out.writeInt(columnData.compression());
                     out.writeInt(columnData.rawSize());
                     out.writeInt(columnData.schemaVersion());
+                    int[] sectionYs = columnData.sectionYs();
+                    int[] sectionLengths = columnData.sectionLengths();
+                    out.writeInt(sectionYs.length);
+                    for (int i = 0; i < sectionYs.length; i++) {
+                        out.writeByte(sectionYs[i]);
+                        out.writeInt(sectionLengths[i]);
+                    }
+                    out.writeInt(columnData.encodedCrc32c());
                     out.writeInt(columnData.encodedBytes().length);
                     out.write(columnData.encodedBytes());
                 }
                 moveIntoPlace(tmp, path);
+                markRegionModified(path.getParent());
                 recordColumnWrite(previousSize, sizeIfRegular(path));
                 markIndexed(server, dimension, columnData.chunkX(), columnData.chunkZ(), IndexSlot.from(columnData));
                 writes++;
@@ -309,7 +327,7 @@ public final class PersistentColumnLodStore {
     public String diagnostics() {
         return String.format(
                 Locale.ROOT,
-                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, corruptions=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
+                "persistent={enabled=%s, reads=%d, hits=%d, misses=%d, writes=%d, writeFailures=%d, invalidations=%d, corruptions=%d, cleanupRuns=%d, cleanupDeleted=%d, indexRegions=%d/%d, dirtyIndexes=%d, indexScans=%d, indexMissSkips=%d, indexEvictions=%d}",
                 config.enablePersistentColumnCache,
                 reads,
                 hits,
@@ -322,9 +340,42 @@ public final class PersistentColumnLodStore {
                 cleanupDeleted,
                 regionIndexCount(),
                 maxRegionIndexCacheEntries(),
+                dirtyIndexCount(),
                 indexScans,
                 indexMissSkips,
                 indexEvictions);
+    }
+
+    public int dirtyIndexCount() {
+        synchronized (this) {
+            return dirtyIndexes.size();
+        }
+    }
+
+    public void flushDirtyIndexes(MinecraftServer server, int limit) {
+        ArrayList<RegionKey> batch = drainDirtyIndexes(limit);
+        for (RegionKey key : batch) {
+            RegionIndex index = cachedRegionIndex(key);
+            if (index != null) {
+                saveIndex(server, key, index);
+            }
+        }
+    }
+
+    public void flushDirtyIndexesBlocking(MinecraftServer server) {
+        while (dirtyIndexCount() > 0) {
+            flushDirtyIndexes(server, Integer.MAX_VALUE);
+        }
+    }
+
+    private synchronized ArrayList<RegionKey> drainDirtyIndexes(int limit) {
+        ArrayList<RegionKey> batch = new ArrayList<>(Math.min(Math.max(1, limit), dirtyIndexes.size()));
+        var iterator = dirtyIndexes.iterator();
+        while (iterator.hasNext() && batch.size() < Math.max(1, limit)) {
+            batch.add(iterator.next());
+            iterator.remove();
+        }
+        return batch;
     }
 
     static byte[] decodeStoredBody(byte[] encodedBytes, int method, int rawSize) throws IOException {
@@ -348,7 +399,33 @@ public final class PersistentColumnLodStore {
                 && slot.rawSize() <= MAX_COLUMN_BYTES
                 && slot.schemaVersion() == EncodedColumnData.SCHEMA_VERSION
                 && slot.length() > 0
-                && slot.length() <= MAX_ENCODED_COLUMN_BYTES;
+                && slot.length() <= MAX_ENCODED_COLUMN_BYTES
+                && validSectionManifest(slot);
+    }
+
+    private static boolean validSectionManifest(IndexSlot slot) {
+        int[] sectionYs = slot.sectionYs();
+        int[] sectionLengths = slot.sectionLengths();
+        if (sectionYs.length != sectionLengths.length || sectionYs.length > 64) {
+            return false;
+        }
+        long rawSize = varIntSize(sectionYs.length);
+        for (int i = 0; i < sectionYs.length; i++) {
+            if (i > 0 && sectionYs[i] <= sectionYs[i - 1] || sectionLengths[i] <= 0) {
+                return false;
+            }
+            rawSize += sectionLengths[i];
+        }
+        return rawSize == slot.rawSize();
+    }
+
+    private static int varIntSize(int value) {
+        int bytes = 1;
+        while ((value & ~0x7F) != 0) {
+            value >>>= 7;
+            bytes++;
+        }
+        return bytes;
     }
 
     private static boolean isReadableSlot(IndexSlot slot, long minimumTimestamp) {
@@ -482,7 +559,9 @@ public final class PersistentColumnLodStore {
             RegionIndex index = regionIndex(server, key);
             boolean changed = slot == null ? index.remove(cx, cz) : index.put(cx, cz, slot);
             if (changed) {
-                saveIndex(server, key, index);
+                synchronized (this) {
+                    dirtyIndexes.add(key);
+                }
             }
         }
     }
@@ -613,12 +692,23 @@ public final class PersistentColumnLodStore {
                 if (!RegionIndex.hasBit(bitmap, localIndex)) {
                     continue;
                 }
+                long timestamp = in.readLong();
+                int method = in.readInt();
+                int rawSize = in.readInt();
+                int schemaVersion = in.readInt();
+                int sectionCount = in.readUnsignedByte();
+                SectionManifest manifest = readSectionManifest(in, sectionCount);
+                int encodedCrc32c = in.readInt();
+                int length = in.readInt();
                 IndexSlot slot = new IndexSlot(
-                        in.readLong(),
-                        in.readInt(),
-                        in.readInt(),
-                        in.readInt(),
-                        in.readInt());
+                        timestamp,
+                        method,
+                        rawSize,
+                        schemaVersion,
+                        length,
+                        manifest.sectionYs(),
+                        manifest.sectionLengths(),
+                        encodedCrc32c);
                 if (!isPersistentSlot(slot)) {
                     deleteQuietly(path);
                     return null;
@@ -648,7 +738,7 @@ public final class PersistentColumnLodStore {
                 index.writeTo(out);
             }
             moveIntoPlace(tmp, path);
-            markIndexFresh(path);
+            markIndexFresh(path, path.getParent());
         } catch (IOException e) {
             deleteQuietly(tmp);
             VSSLogger.debug("Failed to write persistent LOD region index " + key.regionX() + ","
@@ -721,7 +811,9 @@ public final class PersistentColumnLodStore {
             synchronized (regionLock(key)) {
                 RegionIndex index = regionIndex(server, key);
                 if (index.remove(position.chunkX(), position.chunkZ())) {
-                    saveIndex(server, key, index);
+                    synchronized (this) {
+                        dirtyIndexes.add(key);
+                    }
                 }
             }
         } catch (NumberFormatException ignored) {
@@ -749,11 +841,22 @@ public final class PersistentColumnLodStore {
         int method = in.readInt();
         int rawSize = in.readInt();
         int schemaVersion = in.readInt();
+        int sectionCount = in.readInt();
+        SectionManifest manifest = readSectionManifest(in, sectionCount);
+        int encodedCrc32c = in.readInt();
         int length = in.readInt();
         if (storedCx != cx || storedCz != cz || !completeColumn) {
             return null;
         }
-        IndexSlot slot = new IndexSlot(timestamp, method, rawSize, schemaVersion, length);
+        IndexSlot slot = new IndexSlot(
+                timestamp,
+                method,
+                rawSize,
+                schemaVersion,
+                length,
+                manifest.sectionYs(),
+                manifest.sectionLengths(),
+                encodedCrc32c);
         return isPersistentSlot(slot) ? slot : null;
     }
 
@@ -835,8 +938,19 @@ public final class PersistentColumnLodStore {
         }
     }
 
-    private static void markIndexFresh(Path indexPath) throws IOException {
-        Files.setLastModifiedTime(indexPath, FileTime.fromMillis(System.currentTimeMillis()));
+    private static void markIndexFresh(Path indexPath, Path regionDir) throws IOException {
+        long timestamp = System.currentTimeMillis();
+        if (Files.isDirectory(regionDir)) {
+            timestamp = Math.max(timestamp, Files.getLastModifiedTime(regionDir).toMillis());
+        }
+        Files.setLastModifiedTime(indexPath, FileTime.fromMillis(timestamp));
+    }
+
+    private static void markRegionModified(Path regionDir) throws IOException {
+        long previous = Files.getLastModifiedTime(regionDir).toMillis();
+        Files.setLastModifiedTime(
+                regionDir,
+                FileTime.fromMillis(Math.max(System.currentTimeMillis(), previous + 1L)));
     }
 
     private record FileEntry(Path path, long sizeBytes, long lastAccessMillis) {
@@ -854,14 +968,87 @@ public final class PersistentColumnLodStore {
         }
     }
 
-    private record IndexSlot(long timestamp, int method, int rawSize, int schemaVersion, int length) {
+    private static SectionManifest readSectionManifest(DataInputStream in, int sectionCount) throws IOException {
+        if (sectionCount < 0 || sectionCount > 64) {
+            throw new IOException("Invalid persistent LOD section manifest size: " + sectionCount);
+        }
+        int[] sectionYs = new int[sectionCount];
+        int[] sectionLengths = new int[sectionCount];
+        for (int i = 0; i < sectionCount; i++) {
+            sectionYs[i] = in.readByte();
+            sectionLengths[i] = in.readInt();
+            if (i > 0 && sectionYs[i] <= sectionYs[i - 1]) {
+                throw new IOException("Persistent LOD section manifest is not strictly ordered");
+            }
+            if (sectionLengths[i] <= 0 || sectionLengths[i] > MAX_COLUMN_BYTES) {
+                throw new IOException("Invalid persistent LOD section length: " + sectionLengths[i]);
+            }
+        }
+        return new SectionManifest(sectionYs, sectionLengths);
+    }
+
+    private record SectionManifest(int[] sectionYs, int[] sectionLengths) {
+    }
+
+    private record IndexSlot(
+            long timestamp,
+            int method,
+            int rawSize,
+            int schemaVersion,
+            int length,
+            int[] sectionYs,
+            int[] sectionLengths,
+            int encodedCrc32c) {
+        private IndexSlot {
+            sectionYs = sectionYs != null ? sectionYs.clone() : new int[0];
+            sectionLengths = sectionLengths != null ? sectionLengths.clone() : new int[0];
+        }
+
+        @Override
+        public int[] sectionYs() {
+            return sectionYs.clone();
+        }
+
+        @Override
+        public int[] sectionLengths() {
+            return sectionLengths.clone();
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return this == other || other instanceof IndexSlot slot
+                    && timestamp == slot.timestamp
+                    && method == slot.method
+                    && rawSize == slot.rawSize
+                    && schemaVersion == slot.schemaVersion
+                    && length == slot.length
+                    && encodedCrc32c == slot.encodedCrc32c
+                    && Arrays.equals(sectionYs, slot.sectionYs)
+                    && Arrays.equals(sectionLengths, slot.sectionLengths);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Long.hashCode(timestamp);
+            result = 31 * result + method;
+            result = 31 * result + rawSize;
+            result = 31 * result + schemaVersion;
+            result = 31 * result + length;
+            result = 31 * result + Arrays.hashCode(sectionYs);
+            result = 31 * result + Arrays.hashCode(sectionLengths);
+            return 31 * result + encodedCrc32c;
+        }
+
         static IndexSlot from(EncodedColumnData columnData) {
             return new IndexSlot(
                     columnData.columnStamp(),
                     columnData.compression(),
                     columnData.rawSize(),
                     columnData.schemaVersion(),
-                    columnData.encodedBytes().length);
+                    columnData.encodedBytes().length,
+                    columnData.sectionYs(),
+                    columnData.sectionLengths(),
+                    columnData.encodedCrc32c());
         }
     }
 
@@ -914,6 +1101,14 @@ public final class PersistentColumnLodStore {
                 out.writeInt(slot.method());
                 out.writeInt(slot.rawSize());
                 out.writeInt(slot.schemaVersion());
+                out.writeByte(slot.sectionYs().length);
+                int[] sectionYs = slot.sectionYs();
+                int[] sectionLengths = slot.sectionLengths();
+                for (int sectionIndex = 0; sectionIndex < sectionYs.length; sectionIndex++) {
+                    out.writeByte(sectionYs[sectionIndex]);
+                    out.writeInt(sectionLengths[sectionIndex]);
+                }
+                out.writeInt(slot.encodedCrc32c());
                 out.writeInt(slot.length());
             }
         }

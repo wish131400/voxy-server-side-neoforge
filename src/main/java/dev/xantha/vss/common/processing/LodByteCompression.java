@@ -12,8 +12,8 @@ public final class LodByteCompression {
     private static final int MIN_COMPRESS_BYTES = 128;
     private static final int MIN_SAVINGS_BYTES = 16;
     private static final int BUFFER_SIZE = 8192;
-    private static final int ZSTD_NETWORK_LEVEL = 7;
-    private static final int ZSTD_STORAGE_LEVEL = 7;
+    private static final int ZSTD_NETWORK_LEVEL = 3;
+    private static final int ZSTD_STORAGE_LEVEL = 3;
     private static final int ZSTD_FRAME_MAGIC = 0xFD2FB528;
     public static final int METHOD_NONE = 0;
     public static final int METHOD_DEFLATE = 1;

@@ -73,6 +73,22 @@ public final class TrackedTaskExecutor {
         return submitManual(limit, task, onRejected, 0);
     }
 
+    boolean executeContinuation(
+            Runnable task,
+            Consumer<RejectedExecutionException> onRejected,
+            int priority) {
+        Objects.requireNonNull(task, "task");
+        try {
+            executorSupplier.get().execute(new PrioritizedTask(task, priority, sequence.incrementAndGet()));
+            return true;
+        } catch (RejectedExecutionException e) {
+            if (onRejected != null) {
+                onRejected.accept(e);
+            }
+            return false;
+        }
+    }
+
     boolean submitManual(
             int limit,
             Consumer<DiskTaskRuntime.PendingDiskTask> task,

@@ -236,7 +236,7 @@ public final class ExistingColumnPreloader {
                     }
                     long requiredTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(
                             level.dimension(), preload.chunkX(), preload.chunkZ());
-                    var cached = columnCache.get(level.dimension(), preload.chunkX(), preload.chunkZ());
+                    var cached = columnCache.peek(level.dimension(), preload.chunkX(), preload.chunkZ());
                     if (cached != null && cached.completeColumn() && cached.timestamp() >= requiredTimestamp) {
                         return new PersistentColumnLodStore.Entry(cached.columnData());
                     }
@@ -276,7 +276,7 @@ public final class ExistingColumnPreloader {
                         if (state.isClientKnownCurrent(level.dimension(), columnData.chunkX(), columnData.chunkZ(), requiredTimestamp)) {
                             return;
                         }
-                        columnCache.put(level.dimension(), columnData);
+                        columnCache.putPreloaded(level.dimension(), columnData);
                     } finally {
                         state.finishPreloadColumnRead();
                     }

@@ -7,7 +7,7 @@ final class AutomaticGenerationSettings {
     }
 
     static int packingThreads(int availableProcessors, int globalConcurrency) {
-        return Math.min(globalConcurrency, Math.max(1, availableProcessors / 2));
+        return Math.min(4, Math.min(globalConcurrency, Math.max(1, availableProcessors / 2)));
     }
 
     static int startsPerTick(int availableProcessors, int globalConcurrency) {

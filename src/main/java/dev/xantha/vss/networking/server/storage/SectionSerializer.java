@@ -24,6 +24,7 @@ import net.minecraft.world.level.lighting.LevelLightEngine;
 
 public final class SectionSerializer {
     private static final byte[] EMPTY_COLUMN_BYTES = new byte[] {0};
+    private static final byte[] EMPTY_LIGHT_DATA = new byte[DataLayer.SIZE];
 
     private SectionSerializer() {
     }
@@ -93,7 +94,10 @@ public final class SectionSerializer {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(sections.length * 1024));
         try {
             buf.writeVarInt(sections.length);
-            for (SectionSnapshot info : sections) {
+            int[] sectionLengths = new int[sections.length];
+            for (int i = 0; i < sections.length; i++) {
+                SectionSnapshot info = sections[i];
+                int sectionStart = buf.writerIndex();
                 LevelChunkSection section = new LevelChunkSection(info.states(), info.biomes());
                 buf.writeByte(info.sectionY());
                 section.write(buf);
@@ -105,11 +109,19 @@ public final class SectionSerializer {
                 if (info.skyLight() != null) {
                     buf.writeBytes(info.skyLight());
                 }
+                sectionLengths[i] = buf.writerIndex() - sectionStart;
             }
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
-            return new LoadedColumnData(snapshot.chunkX(), snapshot.chunkZ(), serialized, serialized.length, snapshot.completeColumn());
+            return new LoadedColumnData(
+                    snapshot.chunkX(),
+                    snapshot.chunkZ(),
+                    serialized,
+                    serialized.length,
+                    snapshot.completeColumn(),
+                    sectionYs(sections),
+                    sectionLengths);
         } finally {
             buf.release();
         }
@@ -150,7 +162,10 @@ public final class SectionSerializer {
             buf.writeVarInt(includedSections.size());
             LayerLightEventListener skyLightListener = lightEngine != null ? lightEngine.getLayerListener(LightLayer.SKY) : null;
             boolean missingSkyLight = false;
-            for (SectionInfo info : includedSections) {
+            int[] sectionLengths = new int[includedSections.size()];
+            for (int i = 0; i < includedSections.size(); i++) {
+                SectionInfo info = includedSections.get(i);
+                int sectionStart = buf.writerIndex();
                 LevelChunkSection section = sections[info.index];
                 buf.writeByte(info.sectionY);
                 section.write(buf);
@@ -167,13 +182,21 @@ public final class SectionSerializer {
                 if (hasSkyLight) {
                     buf.writeBytes(skyLight.getData());
                 }
+                sectionLengths[i] = buf.writerIndex() - sectionStart;
             }
 
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
             boolean completeColumn = hasCompleteRequiredLighting(requiresSkyLight, missingSkyLight)
                     && isCompleteColumn(level, chunk, highestIncludedSectionY, false);
-            return new LoadedColumnData(cx, cz, serialized, serialized.length, completeColumn);
+            return new LoadedColumnData(
+                    cx,
+                    cz,
+                    serialized,
+                    serialized.length,
+                    completeColumn,
+                    sectionYs(includedSections),
+                    sectionLengths);
         } finally {
             buf.release();
         }
@@ -205,12 +228,23 @@ public final class SectionSerializer {
     }
 
     private static boolean hasNonZeroData(DataLayer layer) {
-        for (byte b : layer.getData()) {
-            if (b != 0) {
-                return true;
-            }
+        return !Arrays.equals(layer.getData(), EMPTY_LIGHT_DATA);
+    }
+
+    private static int[] sectionYs(SectionSnapshot[] sections) {
+        int[] sectionYs = new int[sections.length];
+        for (int i = 0; i < sections.length; i++) {
+            sectionYs[i] = sections[i].sectionY();
         }
-        return false;
+        return sectionYs;
+    }
+
+    private static int[] sectionYs(ArrayList<SectionInfo> sections) {
+        int[] sectionYs = new int[sections.size()];
+        for (int i = 0; i < sections.size(); i++) {
+            sectionYs[i] = sections.get(i).sectionY();
+        }
+        return sectionYs;
     }
 
     static boolean hasCompleteRequiredLighting(boolean requiresSkyLight, boolean missingSkyLight) {
@@ -242,6 +276,16 @@ public final class SectionSerializer {
     }
 
     public record ColumnSnapshot(int chunkX, int chunkZ, SectionSnapshot[] sections, boolean completeColumn) {
+        private static final long ESTIMATED_CONTAINER_BYTES_PER_SECTION = 24L * 1024L;
+
+        public long estimatedRetainedBytes() {
+            long bytes = 128L + (long) sections.length * ESTIMATED_CONTAINER_BYTES_PER_SECTION;
+            for (SectionSnapshot section : sections) {
+                bytes += section.blockLight() != null ? section.blockLight().length : 0;
+                bytes += section.skyLight() != null ? section.skyLight().length : 0;
+            }
+            return bytes;
+        }
     }
 
     public record SectionSnapshot(

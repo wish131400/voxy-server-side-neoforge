@@ -96,6 +96,8 @@ public class VSSServerConfig extends JsonConfig {
     public int diskReaderThreads = DEFAULT_DISK_READER_THREADS;
     public int diskReadQueueLimit = 4096;
     public int diskReadTimeoutMillis = 1000;
+    public int maxConcurrentNbtReads = 2;
+    public int nbtReadQueueLimit = 256;
     public boolean enableChunkNbtColumnSync = true;
     public boolean enableChunkGeneration = true;
     public int nearSyncRateLimitPerTick = DEFAULT_NEAR_SYNC_RATE_LIMIT_PER_TICK;
@@ -104,6 +106,9 @@ public class VSSServerConfig extends JsonConfig {
     public int distantSyncRateLimitPerTick = DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK;
     public int generationConcurrencyLimitPerPlayer = 4;
     public int generationConcurrencyLimitGlobal = 32;
+    public int generationPackingThreads = 0;
+    public int generationPackingQueueMaxMiB = 64;
+    public int generationCompletionBudgetMillis = 4;
     @Deprecated
     public transient int dirtyBroadcastIntervalSeconds = 2;
     public int dirtyBroadcastIntervalTicks = 10;
@@ -115,6 +120,7 @@ public class VSSServerConfig extends JsonConfig {
     public boolean enableColumnCache = true;
     public int columnCacheMaxEntries = 4096;
     public int columnCacheMaxBytes = 32 * BYTES_PER_MIB;
+    public int preloadCacheMaxPercent = 25;
     public boolean enablePersistentColumnCache = true;
     public boolean enablePersistentColumnCompression = true;
     public boolean enableNetworkColumnCompression = true;
@@ -150,6 +156,8 @@ public class VSSServerConfig extends JsonConfig {
                 + MIN_DISK_READER_THREADS + "-" + MAX_DISK_READER_THREADS + "。");
         help.put("diskReadQueueLimit", "磁盘读取任务队列上限；默认 4096；范围 1-100000。");
         help.put("diskReadTimeoutMillis", "单次磁盘读取超时，单位毫秒；默认 1000；范围 100-60000。");
+        help.put("maxConcurrentNbtReads", "昂贵区块 NBT 读取/转码的最大并发；默认 2；范围 1-16。");
+        help.put("nbtReadQueueLimit", "昂贵区块 NBT 读取的有界等待队列；默认 256；范围 0-4096。");
         help.put("enableChunkNbtColumnSync", "是否允许从区块 NBT 读取 LOD；默认 true。");
         help.put("enableChunkGeneration", "缺少 LOD 时是否允许服务端生成；默认 true。");
         help.put("nearSyncRateLimitPerTick", "0-32 区块已有 LOD 请求数；默认 0；手动范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示不限速。");
@@ -158,6 +166,9 @@ public class VSSServerConfig extends JsonConfig {
         help.put("distantSyncRateLimitPerTick", "129 区块外已有 LOD 请求数；默认 2；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");
         help.put("generationConcurrencyLimitPerPlayer", "每名玩家在途生成任务数，不是线程数；默认 4；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER + "。");
         help.put("generationConcurrencyLimitGlobal", "全服在途生成任务数，不是线程数，也是自动后台调度的上界；默认 32；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL + "。");
+        help.put("generationPackingThreads", "LOD 打包线程数；0 表示自动且最多 4；范围 0-16。");
+        help.put("generationPackingQueueMaxMiB", "等待打包的生成快照内存上限；默认 64 MiB；范围 8-512。");
+        help.put("generationCompletionBudgetMillis", "每 tick 主线程处理生成完成回调的时间预算；默认 4ms；范围 1-20。");
         help.put("dirtyBroadcastIntervalTicks", "脏列版本广播间隔，单位 tick；默认 10；范围 "
                 + MIN_DIRTY_BROADCAST_INTERVAL_TICKS + "-" + MAX_DIRTY_BROADCAST_INTERVAL_TICKS + "。");
         help.put("dirtyVersionCacheEnabled", "是否启用脏列版本缓存；默认 true。");
@@ -168,6 +179,7 @@ public class VSSServerConfig extends JsonConfig {
         help.put("enableColumnCache", "是否启用内存列缓存；默认 true。");
         help.put("columnCacheMaxEntries", "内存列缓存最大条目数；默认 4096；范围 1-100000。");
         help.put("columnCacheMaxBytes", "内存列缓存最大字节数；默认 32 MiB；范围 1-512 MiB。");
+        help.put("preloadCacheMaxPercent", "未被实时请求使用的预加载项最多占缓存比例；默认 25%；范围 0-50。");
         help.put("enablePersistentColumnCache", "是否启用世界持久化 .vcl 缓存；默认 true。");
         help.put("enablePersistentColumnCompression", "是否压缩持久化 .vcl 数据；默认 true。");
         help.put("enableNetworkColumnCompression", "是否压缩网络 LOD 数据；默认 true。");
@@ -188,6 +200,9 @@ public class VSSServerConfig extends JsonConfig {
     }
 
     public int automaticGenerationPackingThreads() {
+        if (generationPackingThreads > 0) {
+            return Math.min(generationPackingThreads, generationConcurrencyLimitGlobal);
+        }
         return AutomaticGenerationSettings.packingThreads(availableProcessors(), generationConcurrencyLimitGlobal);
     }
 
@@ -223,18 +238,24 @@ public class VSSServerConfig extends JsonConfig {
         diskReaderThreads = clamp(diskReaderThreads, MIN_DISK_READER_THREADS, MAX_DISK_READER_THREADS);
         diskReadQueueLimit = clamp(diskReadQueueLimit, 1, 100000);
         diskReadTimeoutMillis = clamp(diskReadTimeoutMillis, 100, 60000);
+        maxConcurrentNbtReads = clamp(maxConcurrentNbtReads, 1, MAX_DISK_READER_THREADS);
+        nbtReadQueueLimit = clamp(nbtReadQueueLimit, 0, 4096);
         nearSyncRateLimitPerTick = clamp(nearSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         midSyncRateLimitPerTick = clamp(midSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         farSyncRateLimitPerTick = clamp(farSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         distantSyncRateLimitPerTick = clamp(distantSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         generationConcurrencyLimitPerPlayer = clamp(generationConcurrencyLimitPerPlayer, MIN_GENERATION_LIMIT, MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER);
         generationConcurrencyLimitGlobal = clamp(generationConcurrencyLimitGlobal, MIN_GENERATION_LIMIT, MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL);
+        generationPackingThreads = clamp(generationPackingThreads, 0, 16);
+        generationPackingQueueMaxMiB = clamp(generationPackingQueueMaxMiB, 8, 512);
+        generationCompletionBudgetMillis = clamp(generationCompletionBudgetMillis, 1, 20);
         dirtyBroadcastIntervalTicks = clamp(dirtyBroadcastIntervalTicks, MIN_DIRTY_BROADCAST_INTERVAL_TICKS, MAX_DIRTY_BROADCAST_INTERVAL_TICKS);
         dirtyVersionCacheMaxEntries = clamp(dirtyVersionCacheMaxEntries, 1, 5000000);
         dirtyVersionCacheRetentionSeconds = clamp(dirtyVersionCacheRetentionSeconds, 60, 604800);
         farPlayerSyncIntervalTicks = clamp(farPlayerSyncIntervalTicks, 1, 100);
         columnCacheMaxEntries = clamp(columnCacheMaxEntries, 1, 100000);
         columnCacheMaxBytes = clamp(columnCacheMaxBytes, 1 * BYTES_PER_MIB, 512 * BYTES_PER_MIB);
+        preloadCacheMaxPercent = clamp(preloadCacheMaxPercent, 0, 50);
         persistentColumnCacheMaxMiB = clamp(persistentColumnCacheMaxMiB, 64, 65536);
         persistentColumnCacheMaxEntries = clamp(persistentColumnCacheMaxEntries, 1024, 10000000);
         persistentColumnCacheWriteQueueLimit = clamp(persistentColumnCacheWriteQueueLimit, 1, 10000);

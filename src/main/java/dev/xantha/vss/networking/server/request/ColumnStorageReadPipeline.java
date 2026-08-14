@@ -113,18 +113,7 @@ public final class ColumnStorageReadPipeline {
                 VSSServerConfig.CONFIG.diskReadQueueLimit,
                 0,
                 () -> readPersistentColumn(server, readContext, dirtyTimestamp),
-                storedData -> {
-                    ColumnLodCache.Entry cached = columnCache.get(level.dimension(), cx, cz);
-                    DiskNbtReadResult diskNbtRead = cached != null && cached.completeColumn()
-                            && cached.timestamp() >= dirtyTimestamp
-                            ? new DiskNbtReadResult(cached.columnData(), false)
-                            : readExistingChunkNbt(readContext, storedData);
-                    server.execute(() -> finishDiskRead(
-                            readContext,
-                            storedData,
-                            diskNbtRead.columnData(),
-                            diskNbtRead.failed()));
-                },
+                storedData -> continueAfterPersistentRead(readContext, storedData, dirtyTimestamp),
                 e -> {
                     readContext.requestState().clearRequest(readContext.requestId());
                     sendBackpressured(player, readContext.requestId());
@@ -169,32 +158,108 @@ public final class ColumnStorageReadPipeline {
         }
     }
 
-    private DiskNbtReadResult readExistingChunkNbt(
+    private void continueAfterPersistentRead(
             DiskReadContext readContext,
-            PersistentColumnLodStore.Entry storedData) {
+            PersistentColumnLodStore.Entry storedData,
+            long dirtyTimestamp) {
+        ColumnLodCache.Entry cached = columnCache.get(
+                readContext.level().dimension(), readContext.cx(), readContext.cz());
+        if (cached != null && cached.completeColumn() && cached.timestamp() >= dirtyTimestamp) {
+            scheduleDiskReadFinish(readContext, storedData, new DiskNbtReadResult(cached.columnData(), false));
+            return;
+        }
         if (storedData != null
                 || readContext.preferLoadedColumn()
                 || !shouldReadExistingChunkNbt(readContext.allowGeneration())) {
-            return DiskNbtReadResult.empty();
+            scheduleDiskReadFinish(readContext, storedData, DiskNbtReadResult.empty());
+            return;
+        }
+
+        VSSServerConfig config = VSSServerConfig.CONFIG;
+        boolean submitted = diskRuntime.<DiskNbtReadResult>submitCoalescedNbtRead(
+                new DiskTaskRuntime.ReadKey(
+                        readContext.level().dimension().location(), readContext.cx(), readContext.cz()),
+                config.maxConcurrentNbtReads,
+                config.nbtReadQueueLimit,
+                config.diskReadQueueLimit,
+                () -> !VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
+                        && readContext.requestState().isActiveRequest(readContext.requestId()),
+                completion -> startChunkNbtRead(readContext, completion),
+                result -> scheduleDiskReadFinish(readContext, storedData, result),
+                error -> {
+                    readContext.requestState().clearRequest(readContext.requestId());
+                    ServerPlayer player = readContext.level().getServer().getPlayerList().getPlayer(readContext.playerId());
+                    if (player != null) {
+                        sendBackpressured(player, readContext.requestId());
+                    }
+                });
+        if (!submitted) {
+            readContext.requestState().clearRequest(readContext.requestId());
+        }
+    }
+
+    private void startChunkNbtRead(
+            DiskReadContext readContext,
+            DiskTaskRuntime.AsyncReadCompletion<DiskNbtReadResult> completion) {
+        if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
+                || !completion.hasActiveListeners()) {
+            completion.complete(DiskNbtReadResult.empty());
+            return;
         }
         try {
-            LoadedColumnData rawDiskData = NbtSectionSerializer.readAndSerializeSections(
-                    readContext.level(),
-                    readContext.level().getChunkSource().chunkMap,
-                    readContext.cx(),
-                    readContext.cz(),
-                    VSSServerConfig.CONFIG.diskReadTimeoutMillis);
-            if (rawDiskData != null
-                    && rawDiskData.completeColumn()
-                    && rawDiskData.sectionBytes() != null
-                    && rawDiskData.sizeBytes() > 0) {
-                return new DiskNbtReadResult(EncodedColumnData.encode(rawDiskData, readContext.columnTimestamp()), false);
-            }
-            return DiskNbtReadResult.empty();
-        } catch (Exception e) {
-            VSSLogger.warn("Failed to read chunk NBT from disk at "
-                    + readContext.cx() + ", " + readContext.cz() + ": " + e.getMessage());
-            return new DiskNbtReadResult(null, true);
+            NbtSectionSerializer.readSectionsAsync(
+                            readContext.level().getChunkSource().chunkMap,
+                            readContext.cx(),
+                            readContext.cz(),
+                            VSSServerConfig.CONFIG.diskReadTimeoutMillis)
+                    .whenComplete((optionalTag, error) -> {
+                        if (error != null) {
+                            completion.complete(new DiskNbtReadResult(null, true));
+                            return;
+                        }
+                        completion.execute(() -> {
+                            try {
+                                if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())
+                                        || !completion.hasActiveListeners()) {
+                                    completion.complete(DiskNbtReadResult.empty());
+                                    return;
+                                }
+                                LoadedColumnData rawDiskData = NbtSectionSerializer.serializeTag(
+                                        readContext.level(),
+                                        readContext.cx(),
+                                        readContext.cz(),
+                                        optionalTag);
+                                EncodedColumnData encoded = rawDiskData != null
+                                                && rawDiskData.completeColumn()
+                                                && rawDiskData.sectionBytes() != null
+                                                && rawDiskData.sizeBytes() > 0
+                                        ? EncodedColumnData.encode(rawDiskData, 0L)
+                                        : null;
+                                completion.complete(new DiskNbtReadResult(encoded, false));
+                            } catch (Exception exception) {
+                                VSSLogger.warn("Failed to transcode chunk NBT at "
+                                        + readContext.cx() + ", " + readContext.cz() + ": " + exception.getMessage());
+                                completion.complete(new DiskNbtReadResult(null, true));
+                            }
+                        });
+                    });
+        } catch (Exception exception) {
+            completion.complete(new DiskNbtReadResult(null, true));
+        }
+    }
+
+    private void scheduleDiskReadFinish(
+            DiskReadContext readContext,
+            PersistentColumnLodStore.Entry storedData,
+            DiskNbtReadResult result) {
+        try {
+            readContext.level().getServer().execute(() -> finishDiskRead(
+                    readContext,
+                    storedData,
+                    result.columnData(),
+                    result.failed()));
+        } catch (RejectedExecutionException error) {
+            readContext.requestState().clearRequest(readContext.requestId());
         }
     }
 

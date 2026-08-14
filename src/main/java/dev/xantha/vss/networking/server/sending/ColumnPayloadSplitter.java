@@ -30,11 +30,7 @@ public final class ColumnPayloadSplitter {
             throw new IllegalArgumentException("LOD transfer id must be assigned before splitting");
         }
 
-        byte[] rawSections = payload.decompressedSections();
-        ParsedSections parsed = readSections(level, payload, rawSections);
-        int[] replacementSectionYs = payload.completeColumn() && parsed.valid()
-                ? replacementSectionYs(parsed.sections())
-                : payload.replacementSectionYs();
+        int[] replacementSectionYs = payload.replacementSectionYs();
         VoxelColumnS2CPayload normalized = payload.withTransferMetadata(
                 payload.transferId(),
                 0,
@@ -45,6 +41,16 @@ public final class ColumnPayloadSplitter {
             return List.of(normalized);
         }
 
+        byte[] rawSections = payload.decompressedSections();
+        ParsedSections parsed = readSections(level, payload, rawSections);
+        if (payload.completeColumn() && replacementSectionYs.length == 0 && parsed.valid()) {
+            replacementSectionYs = replacementSectionYs(parsed.sections());
+            normalized = payload.withTransferMetadata(
+                    payload.transferId(),
+                    0,
+                    1,
+                    replacementSectionYs);
+        }
         if (!parsed.valid() || parsed.sections().size() <= 1) {
             return List.of(normalized);
         }
@@ -103,6 +109,10 @@ public final class ColumnPayloadSplitter {
         if (rawSections == null || rawSections.length == 0) {
             return ParsedSections.invalid();
         }
+        ParsedSections manifestParsed = readManifestSections(payload, rawSections);
+        if (manifestParsed.valid()) {
+            return manifestParsed;
+        }
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(rawSections));
         try {
             int sectionCount = buf.readVarInt();
@@ -139,6 +149,38 @@ public final class ColumnPayloadSplitter {
             VSSLogger.debug("Failed to split oversized LOD column at "
                     + payload.chunkX() + "," + payload.chunkZ()
                     + ": " + e.getMessage());
+            return ParsedSections.invalid();
+        } finally {
+            buf.release();
+        }
+    }
+
+    private static ParsedSections readManifestSections(
+            VoxelColumnS2CPayload payload,
+            byte[] rawSections) {
+        int[] sectionYs = payload.encodedSectionYs();
+        int[] sectionLengths = payload.encodedSectionLengths();
+        if (sectionYs.length == 0 || sectionYs.length != sectionLengths.length) {
+            return ParsedSections.invalid();
+        }
+        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(rawSections));
+        try {
+            int sectionCount = buf.readVarInt();
+            if (sectionCount != sectionYs.length) {
+                return ParsedSections.invalid();
+            }
+            ArrayList<SerializedSection> sections = new ArrayList<>(sectionCount);
+            for (int i = 0; i < sectionCount; i++) {
+                int length = sectionLengths[i];
+                if (length <= 0 || length > buf.readableBytes()) {
+                    return ParsedSections.invalid();
+                }
+                byte[] bytes = new byte[length];
+                buf.readBytes(bytes);
+                sections.add(new SerializedSection(sectionYs[i], bytes));
+            }
+            return buf.isReadable() ? ParsedSections.invalid() : new ParsedSections(sections, true);
+        } catch (Exception ignored) {
             return ParsedSections.invalid();
         } finally {
             buf.release();

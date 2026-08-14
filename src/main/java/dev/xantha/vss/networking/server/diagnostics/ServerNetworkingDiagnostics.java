@@ -134,7 +134,12 @@ public final class ServerNetworkingDiagnostics {
                 String.format(Locale.ROOT, "%.1f", averageWaitMs),
                 String.format(Locale.ROOT, "%.1f", disk.maxReadWaitNanos() / 1_000_000.0D))
                 .append(Component.literal("; coalesced=" + disk.coalescedReads()
-                        + ", preloadReused=" + disk.preloadReadsReusedByLive()));
+                        + ", preloadReused=" + disk.preloadReadsReusedByLive()
+                        + ", nbtActive=" + disk.nbtReadsActive()
+                        + ", nbtQueued=" + disk.nbtReadsQueued()
+                        + ", nbtSubmitted=" + disk.nbtReadsSubmitted()
+                        + ", nbtCompleted=" + disk.nbtReadsCompleted()
+                        + ", nbtRejected=" + disk.nbtReadsRejected()));
     }
 
     private QueueTotals queueTotals() {

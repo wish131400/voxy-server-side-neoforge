@@ -38,6 +38,8 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     private final byte[] encodedSectionBytes;
     private final int encodedCompression;
     private final int encodedRawSize;
+    private final int[] encodedSectionYs;
+    private final int[] encodedSectionLengths;
     private final boolean completeColumn;
     private final int[] replacementSectionYs;
     private boolean allowZstdEncoding;
@@ -104,12 +106,21 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedSectionBytes = null;
         this.encodedCompression = LodByteCompression.METHOD_NONE;
         this.encodedRawSize = sectionBytes != null ? sectionBytes.length : 0;
+        this.encodedSectionYs = new int[0];
+        this.encodedSectionLengths = new int[0];
         this.completeColumn = completeColumn;
         this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
     }
 
     public VoxelColumnS2CPayload(int requestId, ResourceKey<Level> dimension, EncodedColumnData columnData) {
-        this(requestId, dimension, columnData, 0L, 0, 1, new int[0]);
+        this(
+                requestId,
+                dimension,
+                columnData,
+                0L,
+                0,
+                1,
+                columnData.completeColumn() ? columnData.sectionYs() : new int[0]);
     }
 
     @Deprecated
@@ -143,8 +154,15 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedSectionBytes = columnData.encodedBytes();
         this.encodedCompression = columnData.compression();
         this.encodedRawSize = columnData.rawSize();
+        this.encodedSectionYs = columnData.sectionYs();
+        this.encodedSectionLengths = columnData.sectionLengths();
         this.completeColumn = columnData.completeColumn();
-        this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
+        int[] effectiveReplacementSectionYs = replacementSectionYs;
+        if (completeColumn
+                && (effectiveReplacementSectionYs == null || effectiveReplacementSectionYs.length == 0)) {
+            effectiveReplacementSectionYs = columnData.sectionYs();
+        }
+        this.replacementSectionYs = sanitizeReplacementSections(effectiveReplacementSectionYs);
     }
 
     VoxelColumnS2CPayload(
@@ -174,6 +192,40 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             int partIndex,
             int partCount,
             int[] replacementSectionYs) {
+        this(
+                requestId,
+                chunkX,
+                chunkZ,
+                dimension,
+                columnTimestamp,
+                encodedSectionBytes,
+                encodedCompression,
+                encodedRawSize,
+                completeColumn,
+                transferId,
+                partIndex,
+                partCount,
+                replacementSectionYs,
+                new int[0],
+                new int[0]);
+    }
+
+    private VoxelColumnS2CPayload(
+            int requestId,
+            int chunkX,
+            int chunkZ,
+            ResourceKey<Level> dimension,
+            long columnTimestamp,
+            byte[] encodedSectionBytes,
+            int encodedCompression,
+            int encodedRawSize,
+            boolean completeColumn,
+            long transferId,
+            int partIndex,
+            int partCount,
+            int[] replacementSectionYs,
+            int[] encodedSectionYs,
+            int[] encodedSectionLengths) {
         validateTransferMetadata(transferId, partIndex, partCount);
         this.requestId = requestId;
         this.transferId = transferId;
@@ -187,6 +239,8 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         this.encodedSectionBytes = encodedSectionBytes;
         this.encodedCompression = encodedCompression;
         this.encodedRawSize = encodedRawSize;
+        this.encodedSectionYs = sanitizeReplacementSections(encodedSectionYs);
+        this.encodedSectionLengths = sanitizeSectionLengths(this.encodedSectionYs, encodedSectionLengths);
         this.completeColumn = completeColumn;
         this.replacementSectionYs = sanitizeReplacementSections(replacementSectionYs);
     }
@@ -280,7 +334,9 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
                 transferId,
                 partIndex,
                 partCount,
-                replacementSectionYs);
+                replacementSectionYs,
+                encodedSectionYs,
+                encodedSectionLengths);
     }
 
     public int[] replacementSectionYs() {
@@ -304,6 +360,14 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
 
     public int encodedCompression() {
         return encodedCompression;
+    }
+
+    public int[] encodedSectionYs() {
+        return Arrays.copyOf(encodedSectionYs, encodedSectionYs.length);
+    }
+
+    public int[] encodedSectionLengths() {
+        return Arrays.copyOf(encodedSectionLengths, encodedSectionLengths.length);
     }
 
     public int estimatedBytes() {
@@ -543,6 +607,22 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         for (int i = 1; i < sanitized.length; i++) {
             if (sanitized[i] == sanitized[i - 1]) {
                 throw new IllegalArgumentException("Duplicate replacement section: " + sanitized[i]);
+            }
+        }
+        return sanitized;
+    }
+
+    private static int[] sanitizeSectionLengths(int[] sectionYs, int[] sectionLengths) {
+        if (sectionLengths == null || sectionLengths.length == 0) {
+            return new int[0];
+        }
+        if (sectionLengths.length != sectionYs.length) {
+            throw new IllegalArgumentException("LOD section length manifest does not match section Y manifest");
+        }
+        int[] sanitized = Arrays.copyOf(sectionLengths, sectionLengths.length);
+        for (int length : sanitized) {
+            if (length <= 0 || length > MAX_SECTIONS_SIZE) {
+                throw new IllegalArgumentException("Invalid LOD section length: " + length);
             }
         }
         return sanitized;

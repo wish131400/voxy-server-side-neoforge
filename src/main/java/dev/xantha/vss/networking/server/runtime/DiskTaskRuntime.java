@@ -14,12 +14,27 @@ import net.minecraft.resources.ResourceLocation;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.IntSupplier;
+import java.util.function.LongConsumer;
+import java.util.ArrayDeque;
+import java.util.Objects;
 
 public final class DiskTaskRuntime {
     public interface PendingDiskTask {
         void complete();
 
         boolean isComplete();
+    }
+
+    public interface AsyncReadCompletion<T> {
+        boolean execute(Runnable continuation);
+
+        void complete(T value);
+
+        void fail(Throwable error);
+
+        boolean isComplete();
+
+        boolean hasActiveListeners();
     }
 
     private final int minThreads;
@@ -41,6 +56,8 @@ public final class DiskTaskRuntime {
     private final AtomicLong coalescedReads = new AtomicLong();
     private final AtomicLong preloadReadsReusedByLive = new AtomicLong();
     private final ConcurrentHashMap<ReadKey, SharedRead<?>> inFlightReads = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ReadKey, SharedRead<?>> inFlightNbtReads = new ConcurrentHashMap<>();
+    private final AsyncReadGate nbtReadGate = new AsyncReadGate();
     private final TrackedTaskExecutor readTasks = new TrackedTaskExecutor(this::readExecutor, pendingReads);
     private final TrackedTaskExecutor writeTasks = new TrackedTaskExecutor(this::writeExecutor, pendingWrites);
     private final Object executorLock = new Object();
@@ -180,6 +197,74 @@ public final class DiskTaskRuntime {
         return coalescedReads.get();
     }
 
+    @SuppressWarnings("unchecked")
+    public <T> boolean submitCoalescedNbtRead(
+            ReadKey key,
+            int maxConcurrent,
+            int queueLimit,
+            int diskTaskLimit,
+            BooleanSupplier listenerActive,
+            Consumer<AsyncReadCompletion<T>> starter,
+            Consumer<T> onComplete,
+            Consumer<RejectedExecutionException> onRejected) {
+        Objects.requireNonNull(starter, "starter");
+        SharedRead<T> existing = (SharedRead<T>) inFlightNbtReads.get(key);
+        if (existing != null) {
+            coalescedReads.incrementAndGet();
+            existing.add(onComplete, onRejected, listenerActive);
+            return true;
+        }
+        SharedRead<T> created = new SharedRead<>(false);
+        created.add(onComplete, onRejected, listenerActive);
+        existing = (SharedRead<T>) inFlightNbtReads.putIfAbsent(key, created);
+        if (existing != null) {
+            coalescedReads.incrementAndGet();
+            existing.add(onComplete, onRejected, listenerActive);
+            return true;
+        }
+
+        Consumer<RejectedExecutionException> reject = error -> {
+            inFlightNbtReads.remove(key, created);
+            created.fail(error);
+        };
+        return nbtReadGate.submit(
+                maxConcurrent,
+                queueLimit,
+                gateEpoch -> startNbtRead(key, created, diskTaskLimit, starter, reject, gateEpoch),
+                reject);
+    }
+
+    private <T> void startNbtRead(
+            ReadKey key,
+            SharedRead<T> shared,
+            int diskTaskLimit,
+            Consumer<AsyncReadCompletion<T>> starter,
+            Consumer<RejectedExecutionException> reject,
+            long gateEpoch) {
+        boolean submitted = submitManualRead(
+                diskTaskLimit,
+                pending -> {
+                    AsyncReadCompletionImpl<T> completion =
+                            new AsyncReadCompletionImpl<>(key, shared, pending, gateEpoch);
+                    try {
+                        if (completion.hasActiveListeners()) {
+                            starter.accept(completion);
+                        } else {
+                            completion.complete(null);
+                        }
+                    } catch (Throwable error) {
+                        completion.fail(error);
+                    }
+                },
+                error -> {
+                    nbtReadGate.complete(gateEpoch);
+                    reject.accept(error);
+                });
+        if (!submitted) {
+            return;
+        }
+    }
+
     public boolean submitWrite(int limit, Runnable task, Consumer<RejectedExecutionException> onRejected) {
         return writeTasks.submit(limit, task, onRejected);
     }
@@ -201,7 +286,6 @@ public final class DiskTaskRuntime {
             executor.setCorePoolSize(desiredThreads);
             executor.setMaximumPoolSize(desiredThreads);
         }
-        executor.prestartAllCoreThreads();
         return desiredThreads;
     }
 
@@ -239,6 +323,12 @@ public final class DiskTaskRuntime {
                 entry.getValue().fail(stopped);
             }
         }
+        nbtReadGate.clear(stopped);
+        for (var entry : inFlightNbtReads.entrySet()) {
+            if (inFlightNbtReads.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().fail(stopped);
+            }
+        }
     }
 
     public void resetPendingCounts() {
@@ -255,6 +345,19 @@ public final class DiskTaskRuntime {
         return pendingWrites.get();
     }
 
+    public boolean awaitWrites(long timeoutMillis) {
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, timeoutMillis));
+        while (pendingWrites() > 0 && System.nanoTime() < deadlineNanos) {
+            try {
+                Thread.sleep(5L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return pendingWrites() == 0;
+    }
+
     public int pendingPreloadReads() {
         return pendingPreloadReads.get();
     }
@@ -264,7 +367,12 @@ public final class DiskTaskRuntime {
     }
 
     public boolean hasPreloadReadCapacity(int totalLimit, int reservedManualSlots) {
-        return pendingReads() < preloadLimit(totalLimit, reservedManualSlots);
+        return !hasLiveReadPressure()
+                && pendingReads() < preloadLimit(totalLimit, reservedManualSlots);
+    }
+
+    public boolean hasLiveReadPressure() {
+        return pendingReads() > pendingPreloadReads() || nbtReadGate.active() > 0 || nbtReadGate.queued() > 0;
     }
 
     public boolean hasWriteCapacity(int limit) {
@@ -291,7 +399,12 @@ public final class DiskTaskRuntime {
                 readWaitNanos.get(),
                 maxReadWaitNanos.get(),
                 coalescedReads.get(),
-                preloadReadsReusedByLive.get());
+                preloadReadsReusedByLive.get(),
+                nbtReadGate.active(),
+                nbtReadGate.queued(),
+                nbtReadGate.submitted(),
+                nbtReadGate.completed(),
+                nbtReadGate.rejected());
     }
 
     private ThreadPoolExecutor readExecutor() {
@@ -342,7 +455,8 @@ public final class DiskTaskRuntime {
                     return thread;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
-        executor.prestartAllCoreThreads();
+        executor.setKeepAliveTime(45L, TimeUnit.SECONDS);
+        executor.allowCoreThreadTimeOut(true);
         return executor;
     }
 
@@ -398,7 +512,12 @@ public final class DiskTaskRuntime {
             long readWaitNanos,
             long maxReadWaitNanos,
             long coalescedReads,
-            long preloadReadsReusedByLive) {
+            long preloadReadsReusedByLive,
+            int nbtReadsActive,
+            int nbtReadsQueued,
+            long nbtReadsSubmitted,
+            long nbtReadsCompleted,
+            long nbtReadsRejected) {
     }
 
     public record ReadKey(ResourceLocation dimension, int chunkX, int chunkZ) {
@@ -417,21 +536,40 @@ public final class DiskTaskRuntime {
         }
 
         void add(Consumer<T> onComplete, Consumer<RejectedExecutionException> onRejected) {
+            add(onComplete, onRejected, () -> true);
+        }
+
+        void add(
+                Consumer<T> onComplete,
+                Consumer<RejectedExecutionException> onRejected,
+                BooleanSupplier active) {
             T value;
             RejectedExecutionException failure;
             synchronized (this) {
                 if (!completed) {
-                    listeners.add(new Listener<>(onComplete, onRejected));
+                    listeners.add(new Listener<>(onComplete, onRejected, active));
                     return;
                 }
                 value = result;
                 failure = error;
+            }
+            if (!active.getAsBoolean()) {
+                return;
             }
             if (failure == null) {
                 onComplete.accept(value);
             } else if (onRejected != null) {
                 onRejected.accept(failure);
             }
+        }
+
+        synchronized boolean hasActiveListeners() {
+            for (Listener<T> listener : listeners) {
+                if (listener.active().getAsBoolean()) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         void complete(T value) {
@@ -445,7 +583,9 @@ public final class DiskTaskRuntime {
                 pending = drainLocked();
             }
             for (Listener<T> listener : pending) {
-                listener.onComplete().accept(value);
+                if (listener.active().getAsBoolean()) {
+                    listener.onComplete().accept(value);
+                }
             }
         }
 
@@ -460,7 +600,7 @@ public final class DiskTaskRuntime {
                 pending = drainLocked();
             }
             for (Listener<T> listener : pending) {
-                if (listener.onRejected() != null) {
+                if (listener.active().getAsBoolean() && listener.onRejected() != null) {
                     listener.onRejected().accept(error);
                 }
             }
@@ -477,7 +617,10 @@ public final class DiskTaskRuntime {
         private RejectedExecutionException error;
     }
 
-    private record Listener<T>(Consumer<T> onComplete, Consumer<RejectedExecutionException> onRejected) {
+    private record Listener<T>(
+            Consumer<T> onComplete,
+            Consumer<RejectedExecutionException> onRejected,
+            BooleanSupplier active) {
     }
 
     private static final class MeasuredPendingDiskTask implements PendingDiskTask {
@@ -502,5 +645,171 @@ public final class DiskTaskRuntime {
         public boolean isComplete() {
             return delegate.isComplete();
         }
+    }
+
+    private final class AsyncReadCompletionImpl<T> implements AsyncReadCompletion<T> {
+        private final ReadKey key;
+        private final SharedRead<T> shared;
+        private final PendingDiskTask pending;
+        private final long gateEpoch;
+        private final AtomicBoolean completed = new AtomicBoolean();
+
+        private AsyncReadCompletionImpl(
+                ReadKey key,
+                SharedRead<T> shared,
+                PendingDiskTask pending,
+                long gateEpoch) {
+            this.key = key;
+            this.shared = shared;
+            this.pending = pending;
+            this.gateEpoch = gateEpoch;
+        }
+
+        @Override
+        public boolean execute(Runnable continuation) {
+            if (completed.get()) {
+                return false;
+            }
+            return readTasks.executeContinuation(
+                    () -> {
+                        if (!completed.get()) {
+                            continuation.run();
+                        }
+                    },
+                    this::fail,
+                    0);
+        }
+
+        @Override
+        public void complete(T value) {
+            if (completed.compareAndSet(false, true)) {
+                pending.complete();
+                inFlightNbtReads.remove(key, shared);
+                nbtReadGate.complete(gateEpoch);
+                shared.complete(value);
+            }
+        }
+
+        @Override
+        public void fail(Throwable error) {
+            if (completed.compareAndSet(false, true)) {
+                pending.complete();
+                inFlightNbtReads.remove(key, shared);
+                nbtReadGate.complete(gateEpoch);
+                shared.fail(error instanceof RejectedExecutionException rejected
+                        ? rejected
+                        : new RejectedExecutionException("VSS asynchronous NBT read failed", error));
+            }
+        }
+
+        @Override
+        public boolean isComplete() {
+            return completed.get();
+        }
+
+        @Override
+        public boolean hasActiveListeners() {
+            return shared.hasActiveListeners();
+        }
+    }
+
+    private static final class AsyncReadGate {
+        private final ArrayDeque<GateEntry> queue = new ArrayDeque<>();
+        private long submitted;
+        private long completed;
+        private long rejected;
+        private long epoch = 1L;
+        private int active;
+        private int maxConcurrent = 1;
+
+        boolean submit(
+                int maxConcurrent,
+                int queueLimit,
+                LongConsumer starter,
+            Consumer<RejectedExecutionException> onRejected) {
+            GateEntry entry;
+            RejectedExecutionException rejection = null;
+            synchronized (this) {
+                this.maxConcurrent = Math.max(1, maxConcurrent);
+                submitted++;
+                entry = new GateEntry(starter, onRejected, epoch);
+                if (active < this.maxConcurrent) {
+                    active++;
+                } else if (queue.size() < Math.max(0, queueLimit)) {
+                    queue.addLast(entry);
+                    entry = null;
+                } else {
+                    rejected++;
+                    rejection = new RejectedExecutionException("VSS NBT read queue is full");
+                    entry = null;
+                }
+            }
+            if (rejection != null) {
+                onRejected.accept(rejection);
+                return false;
+            }
+            if (entry != null) {
+                entry.starter().accept(entry.epoch());
+            }
+            return true;
+        }
+
+        void complete(long completedEpoch) {
+            GateEntry next;
+            synchronized (this) {
+                if (completedEpoch != epoch) {
+                    return;
+                }
+                completed++;
+                active = Math.max(0, active - 1);
+                next = active < maxConcurrent ? queue.pollFirst() : null;
+                if (next != null) {
+                    active++;
+                }
+            }
+            if (next != null) {
+                next.starter().accept(next.epoch());
+            }
+        }
+
+        void clear(RejectedExecutionException stopped) {
+            ArrayDeque<GateEntry> pending;
+            synchronized (this) {
+                pending = new ArrayDeque<>(queue);
+                queue.clear();
+                rejected += pending.size() + active;
+                active = 0;
+                epoch++;
+            }
+            for (GateEntry entry : pending) {
+                entry.onRejected().accept(stopped);
+            }
+        }
+
+        synchronized int active() {
+            return active;
+        }
+
+        synchronized int queued() {
+            return queue.size();
+        }
+
+        synchronized long submitted() {
+            return submitted;
+        }
+
+        synchronized long completed() {
+            return completed;
+        }
+
+        synchronized long rejected() {
+            return rejected;
+        }
+    }
+
+    private record GateEntry(
+            LongConsumer starter,
+            Consumer<RejectedExecutionException> onRejected,
+            long epoch) {
     }
 }

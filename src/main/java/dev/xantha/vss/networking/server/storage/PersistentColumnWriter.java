@@ -10,7 +10,10 @@ import dev.xantha.vss.config.VSSServerConfig;
 import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
@@ -20,6 +23,9 @@ public final class PersistentColumnWriter {
     private final DiskTaskRuntime diskRuntime;
     private final Map<ResourceKey<Level>, Long2LongLinkedOpenHashMap> pendingInvalidations = new HashMap<>();
     private final Map<ResourceKey<Level>, Long2LongLinkedOpenHashMap> invalidationWatermarks = new HashMap<>();
+    private final LinkedHashMap<WriteKey, PendingWrite> pendingWrites = new LinkedHashMap<>();
+    private final AtomicBoolean indexFlushPending = new AtomicBoolean();
+    private boolean writeDrainScheduled;
 
     public PersistentColumnWriter(PersistentColumnLodStore persistentStore, DiskTaskRuntime diskRuntime) {
         this.persistentStore = persistentStore;
@@ -33,12 +39,83 @@ public final class PersistentColumnWriter {
                 || !isWriteFresh(dimension, columnData)) {
             return;
         }
-        long lifecycleEpoch = VSSServerNetworking.lifecycleEpoch();
-        diskRuntime.submitWrite(VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit, () -> {
-            if (!VSSServerNetworking.isLifecycleStale(lifecycleEpoch) && isWriteFresh(dimension, columnData)) {
-                persistentStore.write(server, dimension, columnData);
+        WriteKey key = new WriteKey(dimension, columnData.chunkX(), columnData.chunkZ());
+        synchronized (this) {
+            PendingWrite previous = pendingWrites.get(key);
+            if (previous != null && previous.columnData().columnStamp() > columnData.columnStamp()) {
+                return;
             }
-        }, e -> VSSLogger.debug("Persistent LOD write rejected: " + e.getMessage()));
+            int limit = Math.max(1, VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit);
+            if (previous == null && pendingWrites.size() >= limit) {
+                pendingWrites.remove(pendingWrites.entrySet().iterator().next().getKey());
+            }
+            pendingWrites.put(key, new PendingWrite(server, dimension, columnData));
+        }
+        scheduleWriteDrain();
+    }
+
+    private void scheduleWriteDrain() {
+        synchronized (this) {
+            if (writeDrainScheduled || pendingWrites.isEmpty() || VSSServerNetworking.isServerStopping()) {
+                return;
+            }
+            writeDrainScheduled = true;
+        }
+        long lifecycleEpoch = VSSServerNetworking.lifecycleEpoch();
+        boolean submitted = diskRuntime.submitWrite(
+                VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit,
+                () -> runWriteDrain(lifecycleEpoch),
+                error -> {
+                    synchronized (this) {
+                        writeDrainScheduled = false;
+                    }
+                    VSSLogger.debug("Persistent LOD write batch rejected: " + error.getMessage());
+                });
+        if (!submitted) {
+            synchronized (this) {
+                writeDrainScheduled = false;
+            }
+        }
+    }
+
+    private void runWriteDrain(long lifecycleEpoch) {
+        try {
+            for (PendingWrite write : drainWrites(32)) {
+                if (!VSSServerNetworking.isLifecycleStale(lifecycleEpoch)
+                        && isWriteFresh(write.dimension(), write.columnData())) {
+                    persistentStore.write(write.server(), write.dimension(), write.columnData());
+                }
+            }
+        } finally {
+            synchronized (this) {
+                writeDrainScheduled = false;
+            }
+            scheduleWriteDrain();
+        }
+    }
+
+    public void flushWritesBlocking() {
+        while (true) {
+            ArrayList<PendingWrite> batch = drainWrites(64);
+            if (batch.isEmpty()) {
+                return;
+            }
+            for (PendingWrite write : batch) {
+                if (isWriteFresh(write.dimension(), write.columnData())) {
+                    persistentStore.write(write.server(), write.dimension(), write.columnData());
+                }
+            }
+        }
+    }
+
+    private synchronized ArrayList<PendingWrite> drainWrites(int limit) {
+        ArrayList<PendingWrite> batch = new ArrayList<>(Math.min(limit, pendingWrites.size()));
+        var iterator = pendingWrites.entrySet().iterator();
+        while (iterator.hasNext() && batch.size() < limit) {
+            batch.add(iterator.next().getValue());
+            iterator.remove();
+        }
+        return batch;
     }
 
     public synchronized void invalidate(ResourceKey<Level> dimension, int cx, int cz, long dirtyTimestamp) {
@@ -64,6 +141,8 @@ public final class PersistentColumnWriter {
         if (VSSServerNetworking.isServerStopping() || !persistentStore.enabled()) {
             return;
         }
+        scheduleWriteDrain();
+        flushIndexes(server);
         InvalidationBatch batch = drainInvalidations(VSSServerConfig.CONFIG.persistentColumnInvalidationBatchSize);
         if (batch.isEmpty()) {
             return;
@@ -78,6 +157,25 @@ public final class PersistentColumnWriter {
         }, e -> VSSLogger.debug("Persistent LOD invalidation rejected: " + e.getMessage()));
         if (!submitted) {
             restoreInvalidations(batch);
+        }
+    }
+
+    private void flushIndexes(MinecraftServer server) {
+        if (persistentStore.dirtyIndexCount() == 0 || !indexFlushPending.compareAndSet(false, true)) {
+            return;
+        }
+        boolean submitted = diskRuntime.submitWrite(
+                VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit,
+                () -> {
+                    try {
+                        persistentStore.flushDirtyIndexes(server, 64);
+                    } finally {
+                        indexFlushPending.set(false);
+                    }
+                },
+                error -> indexFlushPending.set(false));
+        if (!submitted) {
+            indexFlushPending.set(false);
         }
     }
 
@@ -199,6 +297,15 @@ public final class PersistentColumnWriter {
     }
 
     private record Invalidation(ResourceKey<Level> dimension, long packed, long dirtyTimestamp) {
+    }
+
+    private record WriteKey(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+    }
+
+    private record PendingWrite(
+            MinecraftServer server,
+            ResourceKey<Level> dimension,
+            EncodedColumnData columnData) {
     }
 
     private static final class InvalidationBatch {

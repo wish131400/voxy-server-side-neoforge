@@ -21,10 +21,10 @@ class AutomaticGenerationSettingsTest {
     @Test
     void processorCountScalesAutomaticThroughput() {
         assertEquals(1, AutomaticGenerationSettings.packingThreads(1, 128));
-        assertEquals(8, AutomaticGenerationSettings.packingThreads(16, 128));
+        assertEquals(4, AutomaticGenerationSettings.packingThreads(16, 128));
         assertEquals(16, AutomaticGenerationSettings.startsPerTick(16, 128));
-        assertEquals(16, AutomaticGenerationSettings.completionsPerTick(16, 128));
-        assertEquals(128, AutomaticGenerationSettings.packingQueueLimit(16, 128));
+        assertEquals(8, AutomaticGenerationSettings.completionsPerTick(16, 128));
+        assertEquals(64, AutomaticGenerationSettings.packingQueueLimit(16, 128));
     }
 
     private static void assertBetweenOneAndGlobal(int value, int globalConcurrency) {

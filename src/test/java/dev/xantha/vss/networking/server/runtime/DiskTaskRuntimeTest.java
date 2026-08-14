@@ -8,6 +8,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
 class DiskTaskRuntimeTest {
@@ -186,6 +188,56 @@ class DiskTaskRuntimeTest {
             }));
             assertTrue(runtime.submitManualRead(1, pending -> pending.complete(), e -> {
             }));
+        } finally {
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void clearingNbtReadsInvalidatesOldGateLease() throws Exception {
+        DiskTaskRuntime runtime = runtime(() -> 2, () -> true);
+        AtomicReference<DiskTaskRuntime.AsyncReadCompletion<String>> oldCompletion = new AtomicReference<>();
+        CountDownLatch oldStarted = new CountDownLatch(1);
+        CountDownLatch oldRejected = new CountDownLatch(1);
+        CountDownLatch newCompleted = new CountDownLatch(1);
+        try {
+            runtime.restart();
+            assertTrue(runtime.<String>submitCoalescedNbtRead(
+                    new DiskTaskRuntime.ReadKey(ResourceLocation.parse("test:dimension"), 1, 2),
+                    1,
+                    1,
+                    8,
+                    () -> true,
+                    completion -> {
+                        oldCompletion.set(completion);
+                        oldStarted.countDown();
+                    },
+                    ignored -> {
+                    },
+                    ignored -> oldRejected.countDown()));
+            assertTrue(oldStarted.await(2, TimeUnit.SECONDS));
+            assertEquals(1, runtime.snapshot().nbtReadsActive());
+
+            runtime.clearCoalescedReads();
+            assertTrue(oldRejected.await(2, TimeUnit.SECONDS));
+            assertEquals(0, runtime.snapshot().nbtReadsActive());
+
+            assertTrue(runtime.<String>submitCoalescedNbtRead(
+                    new DiskTaskRuntime.ReadKey(ResourceLocation.parse("test:dimension"), 3, 4),
+                    1,
+                    1,
+                    8,
+                    () -> true,
+                    completion -> completion.complete("new"),
+                    value -> newCompleted.countDown(),
+                    ignored -> {
+                    }));
+            assertTrue(newCompleted.await(2, TimeUnit.SECONDS));
+            assertEquals(0, runtime.snapshot().nbtReadsActive());
+
+            oldCompletion.get().complete("old");
+            assertEquals(0, runtime.snapshot().nbtReadsActive());
+            waitForPendingReads(runtime, 0);
         } finally {
             runtime.shutdown();
         }
