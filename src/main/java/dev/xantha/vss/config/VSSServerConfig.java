@@ -124,7 +124,7 @@ public class VSSServerConfig extends JsonConfig {
     public boolean enablePersistentColumnCache = true;
     public boolean enablePersistentColumnCompression = true;
     public boolean enableNetworkColumnCompression = true;
-    public int persistentColumnCacheMaxMiB = 512;
+    public int persistentColumnCacheMaxMiB = 1024;
     public int persistentColumnCacheMaxEntries = 250000;
     public int persistentColumnCacheWriteQueueLimit = 128;
     public int persistentColumnInvalidationBatchSize = 2048;
@@ -183,7 +183,7 @@ public class VSSServerConfig extends JsonConfig {
         help.put("enablePersistentColumnCache", "是否启用世界持久化 .vcl 缓存；默认 true。");
         help.put("enablePersistentColumnCompression", "是否压缩持久化 .vcl 数据；默认 true。");
         help.put("enableNetworkColumnCompression", "是否压缩网络 LOD 数据；默认 true。");
-        help.put("persistentColumnCacheMaxMiB", "持久化列缓存大小，单位 MiB；默认 512；范围 64-65536。");
+        help.put("persistentColumnCacheMaxMiB", "持久化列缓存大小，单位 MiB；默认 1024；范围 64-65536。");
         help.put("persistentColumnCacheMaxEntries", "持久化列缓存最大条目数；默认 250000；范围 1024-10000000。");
         help.put("persistentColumnCacheWriteQueueLimit", "持久化缓存写入队列上限；默认 128；范围 1-10000。");
         help.put("persistentColumnInvalidationBatchSize", "持久化缓存失效处理批量大小；默认 2048；范围 1-" + VSSConstants.MAX_DIRTY_COLUMN_POSITIONS + "。");
@@ -381,7 +381,7 @@ public class VSSServerConfig extends JsonConfig {
             columnCacheMaxBytes = 32 * BYTES_PER_MIB;
         }
         if (persistentColumnCacheMaxMiB == 2048) {
-            persistentColumnCacheMaxMiB = 512;
+            persistentColumnCacheMaxMiB = 1024;
         }
         if (persistentColumnCacheMaxEntries == 500000) {
             persistentColumnCacheMaxEntries = 250000;
