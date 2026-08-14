@@ -4,6 +4,8 @@ import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
+import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
+import dev.xantha.vss.networking.payloads.ServerIdentityS2CPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import net.minecraft.client.Minecraft;
@@ -45,6 +47,10 @@ public final class VSSClientPacketHandlers {
         runOnClientThread(() -> VSSClientNetworking.handleSessionConfig(payload));
     }
 
+    public static void handleServerIdentity(ServerIdentityS2CPayload payload) {
+        ClientConnectionIdentity.acceptServerIdentity(payload);
+    }
+
     public static void handleBatchResponse(BatchResponseS2CPayload payload) {
         runOnClientThread(() -> VSSClientNetworking.handleBatchResponse(payload));
     }
@@ -61,6 +67,10 @@ public final class VSSClientPacketHandlers {
         runOnClientThread(() -> FarPlayerClientRenderer.handleFarPlayers(payload));
     }
 
+    public static void handleHandshakeRequest(HandshakeRequestS2CPayload payload) {
+        runOnClientThread(() -> VSSClientNetworking.handleHandshakeRequest(payload));
+    }
+
     private static void handleDirectPayload(CustomPacketPayload payload) {
         if (payload instanceof SessionConfigS2CPayload sessionConfig) {
             VSSClientNetworking.handleSessionConfig(sessionConfig);
@@ -72,6 +82,8 @@ public final class VSSClientPacketHandlers {
             VSSClientNetworking.handleVoxelColumn(voxelColumn);
         } else if (payload instanceof FarPlayersS2CPayload farPlayers) {
             FarPlayerClientRenderer.handleFarPlayers(farPlayers);
+        } else if (payload instanceof HandshakeRequestS2CPayload handshakeRequest) {
+            VSSClientNetworking.handleHandshakeRequest(handshakeRequest);
         }
     }
 

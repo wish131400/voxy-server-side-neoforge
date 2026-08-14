@@ -15,6 +15,7 @@ import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
@@ -134,6 +135,15 @@ public final class VSSClientNetworking {
             FarPlayerClientRenderer.clear();
             COLUMN_PROCESSOR.shutdown();
         }
+    }
+
+    public static void handleHandshakeRequest(HandshakeRequestS2CPayload payload) {
+        if (!VSSClientConfig.CONFIG.receiveServerLods || requestManager != null || serverEnabled) {
+            return;
+        }
+        waitingForHandshake = true;
+        handshakeSent = false;
+        handshakeRetryTicks = 0;
     }
 
     public static void handleBatchResponse(BatchResponseS2CPayload payload) {
@@ -287,10 +297,12 @@ public final class VSSClientNetworking {
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         stopClientSessionForWorldShutdown();
+        ClientConnectionIdentity.endSession();
     }
 
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
+        ModCompat.init();
         ensureHandshakePending();
         tryPendingHandshake();
         LodRequestManager manager = requestManager;
@@ -336,11 +348,13 @@ public final class VSSClientNetworking {
     }
 
     private static void tryPendingHandshake() {
-        if (!waitingForHandshake || requestManager != null || !VSSClientConfig.CONFIG.receiveServerLods) {
-            return;
-        }
         Minecraft mc = Minecraft.getInstance();
-        if (mc.getConnection() == null || !isClientWorldReady()) {
+        if (mc.getConnection() == null || !shouldAttemptHandshake(
+                waitingForHandshake,
+                requestManager != null,
+                VSSClientConfig.CONFIG.receiveServerLods,
+                isClientWorldReady(),
+                VSSApi.hasVoxelConsumers())) {
             return;
         }
 
@@ -388,6 +402,19 @@ public final class VSSClientNetworking {
             clientCaps |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
         }
         return clientCaps;
+    }
+
+    static boolean shouldAttemptHandshake(
+            boolean waiting,
+            boolean requestManagerPresent,
+            boolean receiveServerLods,
+            boolean worldReady,
+            boolean hasVoxelConsumers) {
+        return waiting
+                && !requestManagerPresent
+                && receiveServerLods
+                && worldReady
+                && hasVoxelConsumers;
     }
 
     private static boolean isClientWorldReady() {

@@ -9,10 +9,13 @@ import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.DirtyColumnsS2CPayload;
 import dev.xantha.vss.networking.payloads.FarPlayersS2CPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
+import dev.xantha.vss.networking.payloads.ServerIdentityS2CPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
+import dev.xantha.vss.networking.server.ServerIdentityConfigurationTask;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -20,6 +23,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.HandlerThread;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
@@ -34,6 +38,11 @@ public final class VSSNetworking {
     public static void register(RegisterPayloadHandlersEvent event) {
         PayloadRegistrar registrar = event.registrar(PROTOCOL).executesOn(HandlerThread.MAIN);
 
+        registrar.configurationToClient(
+                ServerIdentityS2CPayload.TYPE,
+                ServerIdentityS2CPayload.STREAM_CODEC,
+                VSSNetworking::handleServerIdentity);
+
         registrar.playToServer(HandshakeC2SPayload.TYPE, HandshakeC2SPayload.STREAM_CODEC, VSSServerNetworking::handleHandshake);
         registrar.playToServer(BatchChunkRequestC2SPayload.TYPE, BatchChunkRequestC2SPayload.STREAM_CODEC, VSSServerNetworking::handleBatchRequest);
         registrar.playToServer(CancelRequestC2SPayload.TYPE, CancelRequestC2SPayload.STREAM_CODEC, VSSServerNetworking::handleCancel);
@@ -45,6 +54,11 @@ public final class VSSNetworking {
         registrar.playToClient(DirtyColumnsS2CPayload.TYPE, DirtyColumnsS2CPayload.STREAM_CODEC, VSSNetworking::handleDirtyColumns);
         registrar.playToClient(VoxelColumnS2CPayload.TYPE, VoxelColumnS2CPayload.STREAM_CODEC, VSSNetworking::handleVoxelColumn);
         registrar.playToClient(FarPlayersS2CPayload.TYPE, FarPlayersS2CPayload.STREAM_CODEC, VSSNetworking::handleFarPlayers);
+        registrar.playToClient(HandshakeRequestS2CPayload.TYPE, HandshakeRequestS2CPayload.STREAM_CODEC, VSSNetworking::handleHandshakeRequest);
+    }
+
+    public static void registerConfigurationTasks(RegisterConfigurationTasksEvent event) {
+        event.register(new ServerIdentityConfigurationTask(event.getListener()));
     }
 
     public static void sendToServer(CustomPacketPayload payload) {
@@ -88,6 +102,14 @@ public final class VSSNetworking {
 
     private static void handleFarPlayers(FarPlayersS2CPayload payload, IPayloadContext context) {
         invokeClientHandler("handleFarPlayers", new Class<?>[] {FarPlayersS2CPayload.class}, payload);
+    }
+
+    private static void handleHandshakeRequest(HandshakeRequestS2CPayload payload, IPayloadContext context) {
+        invokeClientHandler("handleHandshakeRequest", new Class<?>[] {HandshakeRequestS2CPayload.class}, payload);
+    }
+
+    private static void handleServerIdentity(ServerIdentityS2CPayload payload, IPayloadContext context) {
+        invokeClientHandler("handleServerIdentity", new Class<?>[] {ServerIdentityS2CPayload.class}, payload);
     }
 
     private static Object invokeClientHandler(String methodName, Class<?>[] parameterTypes, Object... args) {

@@ -16,12 +16,14 @@
     "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
+    "client.ClientPacketListenerServerIdentityMixin",
     "client.ClientLevelFarPlayerLeaveEventMixin",
     "client.EntityFallFlyingFlagAccessorMixin",
     "client.LevelRendererFarPlayerChunkMixin",
     "voxy.ModelBakerySubsystemShutdownMixin",
     "voxy.ModelFactoryFluidBakeOrderMixin",
     "voxy.NormalRenderPipelineDepthMaskMixin",
+    "voxy.VoxyClientInstanceStoragePathMixin",
     "voxy.VoxyRenderSystemDefaultFramebufferMixin"
   ],
   "injectors": {

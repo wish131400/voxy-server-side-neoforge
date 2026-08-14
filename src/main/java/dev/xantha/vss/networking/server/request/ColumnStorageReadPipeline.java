@@ -105,9 +105,26 @@ public final class ColumnStorageReadPipeline {
                 preferLoadedColumn,
                 allowGeneration,
                 priority);
-        boolean submitted = diskRuntime.submitManualRead(
+        DiskTaskRuntime.ReadKey readKey = new DiskTaskRuntime.ReadKey(
+                level.dimension().location(), cx, cz);
+        boolean submitted = diskRuntime.submitCoalescedRead(
+                readKey,
+                false,
                 VSSServerConfig.CONFIG.diskReadQueueLimit,
-                pendingRead -> readFromDisk(server, readContext, pendingRead, dirtyTimestamp),
+                0,
+                () -> readPersistentColumn(server, readContext, dirtyTimestamp),
+                storedData -> {
+                    ColumnLodCache.Entry cached = columnCache.get(level.dimension(), cx, cz);
+                    DiskNbtReadResult diskNbtRead = cached != null && cached.completeColumn()
+                            && cached.timestamp() >= dirtyTimestamp
+                            ? new DiskNbtReadResult(cached.columnData(), false)
+                            : readExistingChunkNbt(readContext, storedData);
+                    server.execute(() -> finishDiskRead(
+                            readContext,
+                            storedData,
+                            diskNbtRead.columnData(),
+                            diskNbtRead.failed()));
+                },
                 e -> {
                     readContext.requestState().clearRequest(readContext.requestId());
                     sendBackpressured(player, readContext.requestId());
@@ -117,17 +134,22 @@ public final class ColumnStorageReadPipeline {
         }
     }
 
-    private void readFromDisk(
+    private PersistentColumnLodStore.Entry readPersistentColumn(
             MinecraftServer server,
             DiskReadContext readContext,
-            DiskTaskRuntime.PendingDiskTask pendingRead,
             long dirtyTimestamp) {
-        boolean handedOffToServer = false;
         try {
             if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())) {
-                return;
+                return null;
             }
-
+            ColumnLodCache.Entry cached = columnCache.get(
+                    readContext.level().dimension(), readContext.cx(), readContext.cz());
+            if (cached != null
+                    && cached.completeColumn()
+                    && cached.timestamp() >= dirtyTimestamp) {
+                requestStats.recordPreloadReuse();
+                return new PersistentColumnLodStore.Entry(cached.columnData());
+            }
             PersistentColumnLodStore.Entry storedData = persistentStore.read(
                     server,
                     readContext.level().dimension(),
@@ -135,31 +157,15 @@ public final class ColumnStorageReadPipeline {
                     readContext.cz(),
                     dirtyTimestamp > 0L ? dirtyTimestamp : 0L);
             if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())) {
-                return;
+                return null;
             }
-
-            DiskNbtReadResult diskNbtRead = readExistingChunkNbt(readContext, storedData);
-            if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())) {
-                return;
-            }
-
-            server.execute(() -> finishDiskRead(
-                    readContext,
-                    pendingRead,
-                    storedData,
-                    diskNbtRead.columnData(),
-                    diskNbtRead.failed()));
-            handedOffToServer = true;
+            return storedData;
         } catch (RejectedExecutionException e) {
-            readContext.requestState().clearRequest(readContext.requestId());
+            throw e;
         } catch (Exception e) {
-            readContext.requestState().clearRequest(readContext.requestId());
             VSSLogger.warn("Failed to finish VSS disk read at "
                     + readContext.cx() + ", " + readContext.cz() + ": " + e.getMessage());
-        } finally {
-            if (!handedOffToServer) {
-                pendingRead.complete();
-            }
+            return null;
         }
     }
 
@@ -209,11 +215,9 @@ public final class ColumnStorageReadPipeline {
 
     private void finishDiskRead(
             DiskReadContext readContext,
-            DiskTaskRuntime.PendingDiskTask pendingRead,
             PersistentColumnLodStore.Entry storedData,
             EncodedColumnData diskData,
             boolean readFailed) {
-        pendingRead.complete();
         if (VSSServerNetworking.isLifecycleStale(readContext.lifecycleEpoch())) {
             return;
         }
@@ -405,4 +409,5 @@ public final class ColumnStorageReadPipeline {
             return new DiskNbtReadResult(null, false);
         }
     }
+
 }

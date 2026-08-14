@@ -14,6 +14,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.network.event.RegisterConfigurationTasksEvent;
 
 @Mod(VSSConstants.MOD_ID)
 public final class VSSMod {
@@ -21,6 +22,7 @@ public final class VSSMod {
 
     public VSSMod(IEventBus modBus, ModContainer modContainer) {
         modBus.addListener(RegisterPayloadHandlersEvent.class, VSSNetworking::register);
+        modBus.addListener(RegisterConfigurationTasksEvent.class, VSSNetworking::registerConfigurationTasks);
         NeoForge.EVENT_BUS.register(VSSServerNetworking.class);
         NeoForge.EVENT_BUS.register(FarPlayerBroadcaster.class);
         NeoForge.EVENT_BUS.register(VSSServerCommands.class);

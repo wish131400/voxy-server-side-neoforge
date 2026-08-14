@@ -8,7 +8,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.2.9-neoforge-1.21.1` |
+| VSS | `0.2.10-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
@@ -123,6 +123,12 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 - LOD 到达很慢时检查全服总带宽、在线玩家数量和客户端个人下载上限；默认 `8 Mbps` 约等于 `1 MB/s`，由活跃玩家动态共享。
 - 待发送数量持续增长时检查发送队列、客户端期望带宽和网络拥塞。
 - 生成排队但吞吐低时检查每 tick 启动限制，而不只是提高全服并发。
+
+## Server identity
+
+- `serverIdentity` is generated once as an 8-character code and persisted in `config/vss-server-config.json`.
+- With `sharedWorld=true` (the default), every node serving the same world must use the same `serverIdentity`; changing IP or port only renames the readable endpoint suffix in the client Voxy cache folder.
+- With `sharedWorld=false`, set a different `nodeIdentity` for each independent node. The cache key then includes both the server and node codes.
 
 ## License
 

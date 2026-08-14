@@ -30,6 +30,7 @@ import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.CancelRequestC2SPayload;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
+import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.List;
@@ -195,8 +196,8 @@ public final class VSSServerNetworking {
         return NETWORKING_DIAGNOSTICS.diagnostics();
     }
 
-    public static Component diagnosticsComponent() {
-        return NETWORKING_DIAGNOSTICS.diagnosticsComponent();
+    public static Component diagnosticsComponent(MinecraftServer server) {
+        return NETWORKING_DIAGNOSTICS.diagnosticsComponent(server);
     }
 
     public static void handleHandshake(HandshakeC2SPayload payload, IPayloadContext context) {
@@ -336,6 +337,13 @@ public final class VSSServerNetworking {
             return;
         }
         CONTROL_MESSAGE_HANDLER.handleRegionPresence(player, payload);
+    }
+
+    @SubscribeEvent
+    public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player && !isServerStopping()) {
+            VSSNetworking.sendToPlayer(player, new HandshakeRequestS2CPayload());
+        }
     }
 
     @SubscribeEvent

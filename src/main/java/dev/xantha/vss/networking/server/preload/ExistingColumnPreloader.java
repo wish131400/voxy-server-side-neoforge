@@ -23,7 +23,7 @@ import net.minecraft.server.level.ServerPlayer;
 public final class ExistingColumnPreloader {
     private static final int PRELOAD_COLUMNS_PER_REGION = 1024;
     private static final int PRELOAD_COLUMN_QUEUE_RESUME_THRESHOLD = 2048;
-    private static final int PRELOAD_FRONTIER_RING_SLACK = 1;
+    private static final int PRELOAD_FRONTIER_RING_SLACK = 8;
     private static final int PRELOAD_PENDING_DISK_LIMIT = 256;
     private static final int MANUAL_DISK_READ_RESERVE = 32;
 
@@ -225,25 +225,36 @@ public final class ExistingColumnPreloader {
         MinecraftServer server = player.server;
         long lifecycleEpoch = VSSServerNetworking.lifecycleEpoch();
         state.beginPreloadColumnRead();
-        diskRuntime.submitPreloadRead(preloadReadLimit(), manualReadReserve(), () -> {
-            PersistentColumnLodStore.Entry storedData = null;
-            if (!VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
-                storedData = persistentStore.read(
-                        server,
-                        level.dimension(),
-                        preload.chunkX(),
-                        preload.chunkZ(),
-                        DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), preload.chunkX(), preload.chunkZ()));
-            }
-            if (storedData == null
-                    || storedData.columnData() == null
-                    || !storedData.columnData().completeColumn()
-                    || VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
-                state.finishPreloadColumnRead();
-                return;
-            }
-            EncodedColumnData columnData = storedData.columnData();
-            try {
+        diskRuntime.submitCoalescedRead(
+                new DiskTaskRuntime.ReadKey(level.dimension().location(), preload.chunkX(), preload.chunkZ()),
+                true,
+                preloadReadLimit(),
+                manualReadReserve(),
+                () -> {
+                    if (VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
+                        return null;
+                    }
+                    long requiredTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(
+                            level.dimension(), preload.chunkX(), preload.chunkZ());
+                    var cached = columnCache.get(level.dimension(), preload.chunkX(), preload.chunkZ());
+                    if (cached != null && cached.completeColumn() && cached.timestamp() >= requiredTimestamp) {
+                        return new PersistentColumnLodStore.Entry(cached.columnData());
+                    }
+                    return persistentStore.read(
+                            server,
+                            level.dimension(),
+                            preload.chunkX(),
+                            preload.chunkZ(),
+                            requiredTimestamp);
+                },
+                storedData -> {
+                    if (storedData == null || storedData.columnData() == null || !storedData.columnData().completeColumn()
+                            || VSSServerNetworking.isLifecycleStale(lifecycleEpoch)) {
+                        state.finishPreloadColumnRead();
+                        return;
+                    }
+                    EncodedColumnData columnData = storedData.columnData();
+                    try {
                 server.execute(() -> {
                     try {
                         if (VSSServerNetworking.isLifecycleStale(lifecycleEpoch) || !playerRegistry.isCurrent(playerId, state)) {
@@ -270,11 +281,11 @@ public final class ExistingColumnPreloader {
                         state.finishPreloadColumnRead();
                     }
                 });
-            } catch (RejectedExecutionException e) {
+                    } catch (RejectedExecutionException e) {
                 state.finishPreloadColumnRead();
                 VSSLogger.debug("Existing LOD preload read handoff rejected: " + e.getMessage());
             }
-        }, e -> {
+                }, e -> {
             state.finishPreloadColumnRead();
             VSSLogger.debug("Existing LOD preload read rejected: " + e.getMessage());
         });

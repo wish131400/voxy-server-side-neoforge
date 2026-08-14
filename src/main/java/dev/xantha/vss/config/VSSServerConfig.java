@@ -1,13 +1,17 @@
 package dev.xantha.vss.config;
 
 import com.google.gson.annotations.SerializedName;
+import dev.xantha.vss.common.ServerStorageIdentity;
 import dev.xantha.vss.common.VSSConstants;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public class VSSServerConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-server-config.json";
-    public static final String CURRENT_CONFIG_VERSION = "v0.2.9";
+    public static final String CURRENT_CONFIG_VERSION = "v0.2.10";
+    public static final int SERVER_IDENTITY_LENGTH = ServerStorageIdentity.SERVER_IDENTITY_LENGTH;
+    public static final int MAX_NODE_IDENTITY_LENGTH = ServerStorageIdentity.MAX_NODE_IDENTITY_LENGTH;
     public static final int MIN_LOD_DISTANCE_CHUNKS = 1;
     public static final int MAX_LOD_DISTANCE_CHUNKS = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
     public static final int BYTES_PER_MIB = 1024 * 1024;
@@ -54,6 +58,9 @@ public class VSSServerConfig extends JsonConfig {
     public static final VSSServerConfig CONFIG = load(VSSServerConfig.class, FILE_NAME);
 
     public String configVersion;
+    public String serverIdentity = "";
+    public boolean sharedWorld = true;
+    public String nodeIdentity = "";
     @Deprecated
     @SerializedName("memorySafeDefaultsApplied")
     private Boolean legacyMemorySafeDefaultsApplied;
@@ -170,6 +177,9 @@ public class VSSServerConfig extends JsonConfig {
         help.put("persistentColumnInvalidationBatchSize", "持久化缓存失效处理批量大小；默认 2048；范围 1-" + VSSConstants.MAX_DIRTY_COLUMN_POSITIONS + "。");
         help.put("ftbChunksSafeForceLoad", "是否启用 FTB Chunks 安全强制加载兼容；默认 true。");
         help.put("ftbChunksForceLoadTicketsPerTick", "FTB Chunks 每 tick 强制加载票据数；默认 4；范围 1-64。");
+        help.put("serverIdentity", "Stable 8-character server code. Copy the same value to every node that shares one world.");
+        help.put("sharedWorld", "When true, nodes with the same serverIdentity share one client Voxy cache. Default: true.");
+        help.put("nodeIdentity", "Node code used only when sharedWorld is false. Leave empty to generate one automatically.");
         return help;
     }
 
@@ -205,6 +215,7 @@ public class VSSServerConfig extends JsonConfig {
     protected void validate() {
         migrateLegacyBandwidthIfNeeded();
         migrateConfigVersion();
+        normalizeStorageIdentity();
         lodDistanceChunks = clamp(lodDistanceChunks, MIN_LOD_DISTANCE_CHUNKS, MAX_LOD_DISTANCE_CHUNKS);
         totalBandwidthBytesPerSecond = clamp(totalBandwidthBytesPerSecond, MIN_TOTAL_BANDWIDTH_BYTES_PER_SECOND, MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND);
         sendQueueLimitPerPlayer = clamp(sendQueueLimitPerPlayer, MIN_SEND_QUEUE_LIMIT_PER_PLAYER, MAX_SEND_QUEUE_LIMIT_PER_PLAYER);
@@ -229,6 +240,23 @@ public class VSSServerConfig extends JsonConfig {
         persistentColumnCacheWriteQueueLimit = clamp(persistentColumnCacheWriteQueueLimit, 1, 10000);
         persistentColumnInvalidationBatchSize = clamp(persistentColumnInvalidationBatchSize, 1, VSSConstants.MAX_DIRTY_COLUMN_POSITIONS);
         ftbChunksForceLoadTicketsPerTick = clamp(ftbChunksForceLoadTicketsPerTick, 1, 64);
+    }
+
+    public String storageIdentity() {
+        ServerStorageIdentity identity = ServerStorageIdentity.create(serverIdentity, sharedWorld, nodeIdentity);
+        return identity == null ? serverIdentity : identity.cacheKey();
+    }
+
+    private void normalizeStorageIdentity() {
+        String normalizedServerIdentity = ServerStorageIdentity.normalizeServerIdentity(serverIdentity);
+        serverIdentity = normalizedServerIdentity == null
+                ? ServerStorageIdentity.generateIdentity()
+                : normalizedServerIdentity;
+
+        nodeIdentity = ServerStorageIdentity.normalizeNodeIdentity(nodeIdentity);
+        if (!sharedWorld && nodeIdentity.isEmpty()) {
+            nodeIdentity = ServerStorageIdentity.generateIdentity().toLowerCase(Locale.ROOT);
+        }
     }
 
     private void migrateConfigVersion() {

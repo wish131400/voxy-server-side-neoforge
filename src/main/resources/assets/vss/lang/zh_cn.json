@@ -99,7 +99,7 @@
   "vss.command.help.generation": "/vss 生成 [查看]：查看缺失 LOD 生成；状态、开启、关闭、设置每玩家、设置全服 用于查看和控制。",
   "vss.command.help.help": "/vss 帮助：显示本指令说明。",
   "vss.command.stats": "VSS 状态：",
-  "vss.command.stats.details": "在线玩家 %s 人，待发送远景 %s 个，缓存占用 %s MiB；%s；%s",
+  "vss.command.stats.details": "在线玩家 %s 人，VSS 活跃会话 %s 个，待发送远景 %s 个，缓存占用 %s MiB；%s；%s",
   "vss.command.stats.dirty": "待广播刷新世界 %s 个，待广播远景 %s 个；已记录变动世界 %s 个，已记录变动远景 %s 个",
   "vss.command.bandwidth.show": "VSS 全服总发送带宽：",
   "vss.command.bandwidth.details": "%s（%s 字节/秒）",

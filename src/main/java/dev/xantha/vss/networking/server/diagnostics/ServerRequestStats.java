@@ -12,6 +12,7 @@ public final class ServerRequestStats {
     private final AtomicLong diskReadHits = new AtomicLong();
     private final AtomicLong diskReadMisses = new AtomicLong();
     private final AtomicLong diskReadFailures = new AtomicLong();
+    private final AtomicLong preloadReusedReads = new AtomicLong();
 
     public void recordColumnRequest() {
         columnRequests.incrementAndGet();
@@ -47,6 +48,10 @@ public final class ServerRequestStats {
 
     public void recordDiskReadFailure() {
         diskReadFailures.incrementAndGet();
+    }
+
+    public void recordPreloadReuse() {
+        preloadReusedReads.incrementAndGet();
     }
 
     public Snapshot snapshot() {

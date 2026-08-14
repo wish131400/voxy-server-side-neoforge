@@ -7,10 +7,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class TrackedTaskExecutor {
     private final Supplier<? extends Executor> executorSupplier;
     private final AtomicInteger pendingTasks;
+    private final AtomicLong sequence = new AtomicLong();
 
     public TrackedTaskExecutor(Supplier<? extends Executor> executorSupplier, AtomicInteger pendingTasks) {
         this.executorSupplier = Objects.requireNonNull(executorSupplier, "executorSupplier");
@@ -36,6 +38,10 @@ public final class TrackedTaskExecutor {
     }
 
     boolean submit(int limit, Runnable task, Consumer<RejectedExecutionException> onRejected) {
+        return submit(limit, task, onRejected, 1);
+    }
+
+    boolean submit(int limit, Runnable task, Consumer<RejectedExecutionException> onRejected, int priority) {
         Objects.requireNonNull(task, "task");
         PendingTask pendingTask = tryBeginTask(limit);
         if (pendingTask == null) {
@@ -43,13 +49,13 @@ public final class TrackedTaskExecutor {
             return false;
         }
         try {
-            executorSupplier.get().execute(() -> {
+            executorSupplier.get().execute(new PrioritizedTask(() -> {
                 try {
                     task.run();
                 } finally {
                     pendingTask.complete();
                 }
-            });
+            }, priority, sequence.incrementAndGet()));
             return true;
         } catch (RejectedExecutionException e) {
             pendingTask.complete();
@@ -64,6 +70,14 @@ public final class TrackedTaskExecutor {
             int limit,
             Consumer<DiskTaskRuntime.PendingDiskTask> task,
             Consumer<RejectedExecutionException> onRejected) {
+        return submitManual(limit, task, onRejected, 0);
+    }
+
+    boolean submitManual(
+            int limit,
+            Consumer<DiskTaskRuntime.PendingDiskTask> task,
+            Consumer<RejectedExecutionException> onRejected,
+            int priority) {
         Objects.requireNonNull(task, "task");
         PendingTask pendingTask = tryBeginTask(limit);
         if (pendingTask == null) {
@@ -71,7 +85,7 @@ public final class TrackedTaskExecutor {
             return false;
         }
         try {
-            executorSupplier.get().execute(() -> {
+            executorSupplier.get().execute(new PrioritizedTask(() -> {
                 try {
                     task.accept(pendingTask);
                 } catch (RuntimeException e) {
@@ -81,7 +95,7 @@ public final class TrackedTaskExecutor {
                     pendingTask.complete();
                     throw e;
                 }
-            });
+            }, priority, sequence.incrementAndGet()));
             return true;
         } catch (RejectedExecutionException e) {
             pendingTask.complete();
@@ -118,6 +132,19 @@ public final class TrackedTaskExecutor {
 
         public boolean isComplete() {
             return complete.get();
+        }
+    }
+
+    private record PrioritizedTask(Runnable delegate, int priority, long sequence) implements Runnable, Comparable<PrioritizedTask> {
+        @Override
+        public void run() {
+            delegate.run();
+        }
+
+        @Override
+        public int compareTo(PrioritizedTask other) {
+            int priorityOrder = Integer.compare(priority, other.priority);
+            return priorityOrder != 0 ? priorityOrder : Long.compare(sequence, other.sequence);
         }
     }
 }

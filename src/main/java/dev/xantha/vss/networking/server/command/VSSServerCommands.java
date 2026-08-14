@@ -325,7 +325,7 @@ public final class VSSServerCommands {
     private static int showStats(CommandSourceStack source) {
         source.sendSuccess(() -> Component.translatable("vss.command.stats")
                 .withStyle(ChatFormatting.GREEN)
-                .append(VSSServerNetworking.diagnosticsComponent()), false);
+                .append(VSSServerNetworking.diagnosticsComponent(source.getServer())), false);
         return 1;
     }
 

@@ -99,7 +99,7 @@
   "vss.command.help.generation": "/vss generation [get]: show missing-LOD generation; stats, enable, disable, set_player_concurrency, and set_global_concurrency control it.",
   "vss.command.help.help": "/vss help: show this command reference.",
   "vss.command.stats": "VSS status: ",
-  "vss.command.stats.details": "%s online players, %s LOD chunks waiting to send, %s MiB cached; %s; %s",
+  "vss.command.stats.details": "%s online players, %s active VSS sessions, %s LOD chunks waiting to send, %s MiB cached; %s; %s",
   "vss.command.stats.dirty": "%s worlds pending refresh, %s LOD chunks pending refresh, %s worlds with remembered changes, %s remembered changed LOD chunks",
   "vss.command.bandwidth.show": "VSS total server send bandwidth: ",
   "vss.command.bandwidth.details": "%s (%s bytes/s)",

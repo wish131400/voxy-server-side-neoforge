@@ -59,12 +59,13 @@ final class ClientLodPresenceCache {
         }
         try {
             var serverData = minecraft.getCurrentServer();
-            if (serverData != null && serverData.ip != null && !serverData.ip.isBlank()) {
-                return "server:" + serverData.ip.toLowerCase(java.util.Locale.ROOT);
+            if (serverData != null) {
+                ClientConnectionIdentity.updateSession(serverData);
             }
         } catch (Exception ignored) {
         }
-        return "unknown";
+        String connectionScope = ClientConnectionIdentity.currentPresenceScope();
+        return connectionScope != null ? connectionScope : ClientConnectionIdentity.ensurePresenceScope();
     }
 
     static synchronized void recordColumn(

@@ -1,12 +1,16 @@
 package dev.xantha.vss.networking.server.runtime;
 
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+import net.minecraft.resources.ResourceLocation;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.IntSupplier;
@@ -34,6 +38,9 @@ public final class DiskTaskRuntime {
     private final AtomicLong readWaitSamples = new AtomicLong();
     private final AtomicLong readWaitNanos = new AtomicLong();
     private final AtomicLong maxReadWaitNanos = new AtomicLong();
+    private final AtomicLong coalescedReads = new AtomicLong();
+    private final AtomicLong preloadReadsReusedByLive = new AtomicLong();
+    private final ConcurrentHashMap<ReadKey, SharedRead<?>> inFlightReads = new ConcurrentHashMap<>();
     private final TrackedTaskExecutor readTasks = new TrackedTaskExecutor(this::readExecutor, pendingReads);
     private final TrackedTaskExecutor writeTasks = new TrackedTaskExecutor(this::writeExecutor, pendingWrites);
     private final Object executorLock = new Object();
@@ -48,7 +55,7 @@ public final class DiskTaskRuntime {
     }
 
     public boolean submitRead(int limit, Runnable task, Consumer<RejectedExecutionException> onRejected) {
-        return readTasks.submit(limit, task, onRejected);
+        return readTasks.submit(limit, task, onRejected, 0);
     }
 
     public boolean submitManualRead(
@@ -74,7 +81,7 @@ public final class DiskTaskRuntime {
                     if (onRejected != null) {
                         onRejected.accept(error);
                     }
-                });
+                }, 0);
         if (submitted) {
             manualReadsSubmitted.incrementAndGet();
         }
@@ -106,11 +113,71 @@ public final class DiskTaskRuntime {
                     if (onRejected != null) {
                         onRejected.accept(error);
                     }
-                });
+                }, 1);
         if (submitted) {
             preloadReadsSubmitted.incrementAndGet();
         }
         return submitted;
+    }
+
+    /** Shares one persistent-column read between live requests and preload work. */
+    @SuppressWarnings("unchecked")
+    public <T> boolean submitCoalescedRead(
+            ReadKey key,
+            boolean preload,
+            int totalLimit,
+            int reservedManualSlots,
+            Supplier<T> task,
+            Consumer<T> onComplete,
+            Consumer<RejectedExecutionException> onRejected) {
+        SharedRead<T> existing = (SharedRead<T>) inFlightReads.get(key);
+        if (existing != null) {
+            coalescedReads.incrementAndGet();
+            if (!preload && existing.preload()) {
+                preloadReadsReusedByLive.incrementAndGet();
+            }
+            existing.add(onComplete, onRejected);
+            return true;
+        }
+        SharedRead<T> created = new SharedRead<>(preload);
+        created.add(onComplete, onRejected);
+        existing = (SharedRead<T>) inFlightReads.putIfAbsent(key, created);
+        if (existing != null) {
+            coalescedReads.incrementAndGet();
+            if (!preload && existing.preload()) {
+                preloadReadsReusedByLive.incrementAndGet();
+            }
+            existing.add(onComplete, onRejected);
+            return true;
+        }
+        Runnable work = () -> {
+            try {
+                T value = task.get();
+                created.complete(value);
+                inFlightReads.remove(key, created);
+            } catch (Throwable error) {
+                created.fail(new RejectedExecutionException("VSS coalesced disk read failed", error));
+                inFlightReads.remove(key, created);
+            }
+        };
+        Consumer<RejectedExecutionException> reject = error -> {
+            inFlightReads.remove(key, created);
+            created.fail(error);
+        };
+        boolean submitted = preload
+                ? submitPreloadRead(totalLimit, reservedManualSlots, work, reject)
+                : submitManualRead(totalLimit, pending -> {
+                    try {
+                        work.run();
+                    } finally {
+                        pending.complete();
+                    }
+                }, reject);
+        return submitted;
+    }
+
+    public long coalescedReads() {
+        return coalescedReads.get();
     }
 
     public boolean submitWrite(int limit, Runnable task, Consumer<RejectedExecutionException> onRejected) {
@@ -144,8 +211,8 @@ public final class DiskTaskRuntime {
         synchronized (executorLock) {
             oldRead = readExecutor;
             oldWrite = writeExecutor;
-            readExecutor = createDiskExecutor("VSS-DiskReader", readThreadSupplier.getAsInt());
-            writeExecutor = createDiskExecutor("VSS-DiskWriter", 1);
+            readExecutor = createDiskExecutor("VSS-DiskReader", readThreadSupplier.getAsInt(), true);
+            writeExecutor = createDiskExecutor("VSS-DiskWriter", 1, false);
         }
         shutdownExecutor(oldRead);
         shutdownExecutor(oldWrite);
@@ -162,6 +229,16 @@ public final class DiskTaskRuntime {
         }
         shutdownExecutor(oldRead);
         shutdownExecutor(oldWrite);
+        clearCoalescedReads();
+    }
+
+    public void clearCoalescedReads() {
+        RejectedExecutionException stopped = new RejectedExecutionException("VSS disk read runtime stopped");
+        for (var entry : inFlightReads.entrySet()) {
+            if (inFlightReads.remove(entry.getKey(), entry.getValue())) {
+                entry.getValue().fail(stopped);
+            }
+        }
     }
 
     public void resetPendingCounts() {
@@ -212,7 +289,9 @@ public final class DiskTaskRuntime {
                 preloadReadsRejected.get(),
                 readWaitSamples.get(),
                 readWaitNanos.get(),
-                maxReadWaitNanos.get());
+                maxReadWaitNanos.get(),
+                coalescedReads.get(),
+                preloadReadsReusedByLive.get());
     }
 
     private ThreadPoolExecutor readExecutor() {
@@ -237,8 +316,8 @@ public final class DiskTaskRuntime {
                 return executor;
             }
             ThreadPoolExecutor created = read
-                    ? createDiskExecutor("VSS-DiskReader", readThreadSupplier.getAsInt())
-                    : createDiskExecutor("VSS-DiskWriter", 1);
+                    ? createDiskExecutor("VSS-DiskReader", readThreadSupplier.getAsInt(), true)
+                    : createDiskExecutor("VSS-DiskWriter", 1, false);
             if (read) {
                 readExecutor = created;
             } else {
@@ -248,7 +327,7 @@ public final class DiskTaskRuntime {
         }
     }
 
-    private ThreadPoolExecutor createDiskExecutor(String threadName, int threads) {
+    private ThreadPoolExecutor createDiskExecutor(String threadName, int threads, boolean read) {
         int clampedThreads = Math.max(minThreads, Math.min(maxThreads, threads));
         AtomicInteger threadId = new AtomicInteger();
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
@@ -256,7 +335,7 @@ public final class DiskTaskRuntime {
                 clampedThreads,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(),
+                read ? new PriorityBlockingQueue<>() : new LinkedBlockingQueue<>(),
                 task -> {
                     Thread thread = new Thread(task, threadName + "-" + threadId.incrementAndGet());
                     thread.setDaemon(true);
@@ -317,7 +396,88 @@ public final class DiskTaskRuntime {
             long preloadReadsRejected,
             long readWaitSamples,
             long readWaitNanos,
-            long maxReadWaitNanos) {
+            long maxReadWaitNanos,
+            long coalescedReads,
+            long preloadReadsReusedByLive) {
+    }
+
+    public record ReadKey(ResourceLocation dimension, int chunkX, int chunkZ) {
+    }
+
+    private static final class SharedRead<T> {
+        private final boolean preload;
+        private final java.util.ArrayList<Listener<T>> listeners = new java.util.ArrayList<>();
+
+        private SharedRead(boolean preload) {
+            this.preload = preload;
+        }
+
+        boolean preload() {
+            return preload;
+        }
+
+        void add(Consumer<T> onComplete, Consumer<RejectedExecutionException> onRejected) {
+            T value;
+            RejectedExecutionException failure;
+            synchronized (this) {
+                if (!completed) {
+                    listeners.add(new Listener<>(onComplete, onRejected));
+                    return;
+                }
+                value = result;
+                failure = error;
+            }
+            if (failure == null) {
+                onComplete.accept(value);
+            } else if (onRejected != null) {
+                onRejected.accept(failure);
+            }
+        }
+
+        void complete(T value) {
+            java.util.ArrayList<Listener<T>> pending;
+            synchronized (this) {
+                if (completed) {
+                    return;
+                }
+                completed = true;
+                result = value;
+                pending = drainLocked();
+            }
+            for (Listener<T> listener : pending) {
+                listener.onComplete().accept(value);
+            }
+        }
+
+        void fail(RejectedExecutionException error) {
+            java.util.ArrayList<Listener<T>> pending;
+            synchronized (this) {
+                if (completed) {
+                    return;
+                }
+                completed = true;
+                this.error = error;
+                pending = drainLocked();
+            }
+            for (Listener<T> listener : pending) {
+                if (listener.onRejected() != null) {
+                    listener.onRejected().accept(error);
+                }
+            }
+        }
+
+        private java.util.ArrayList<Listener<T>> drainLocked() {
+            java.util.ArrayList<Listener<T>> result = new java.util.ArrayList<>(listeners);
+            listeners.clear();
+            return result;
+        }
+
+        private boolean completed;
+        private T result;
+        private RejectedExecutionException error;
+    }
+
+    private record Listener<T>(Consumer<T> onComplete, Consumer<RejectedExecutionException> onRejected) {
     }
 
     private static final class MeasuredPendingDiskTask implements PendingDiskTask {

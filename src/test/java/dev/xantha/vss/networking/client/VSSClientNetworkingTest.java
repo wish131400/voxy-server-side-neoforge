@@ -9,6 +9,18 @@ import org.junit.jupiter.api.Test;
 class VSSClientNetworkingTest {
 
     @Test
+    void handshakeWaitsForRegisteredVoxelConsumer() {
+        assertFalse(VSSClientNetworking.shouldAttemptHandshake(true, false, true, true, false));
+        assertTrue(VSSClientNetworking.shouldAttemptHandshake(true, false, true, true, true));
+    }
+
+    @Test
+    void handshakeDoesNotRestartAnExistingSession() {
+        assertFalse(VSSClientNetworking.shouldAttemptHandshake(true, true, true, true, true));
+        assertFalse(VSSClientNetworking.shouldAttemptHandshake(false, false, true, true, true));
+    }
+
+    @Test
     void allReplacementPartsKeepLogicalReplacementSemantics() {
         LodRequestManager.ColumnReceiveResult replacingKnownColumn =
                 new LodRequestManager.ColumnReceiveResult(true, false, true, 42L);

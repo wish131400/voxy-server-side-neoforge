@@ -107,6 +107,7 @@ public final class ServerNetworkingLifecycle {
     public void onServerStopping(MinecraftServer server) {
         persistentColumnWriter.flushInvalidationsBlocking(server);
         lifecycleGuard.stop();
+        diskRuntime.clearCoalescedReads();
         queuedColumnSender.reset();
         diskRuntime.shutdown();
         diskRuntime.resetPendingCounts();
