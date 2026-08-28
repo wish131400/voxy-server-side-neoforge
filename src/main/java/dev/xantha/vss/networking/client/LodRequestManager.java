@@ -13,6 +13,7 @@ import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongList;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import java.util.Collection;
 import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -35,6 +36,9 @@ public final class LodRequestManager {
     private static final int GENERATION_BACKOFF_MAX_SHIFT = 1;
     private static final int DIRTY_REFRESH_RATE_LIMIT = 512;
     private static final int DIRTY_REFRESH_CONCURRENCY_LIMIT = 64;
+    // Unknown columns after a teleport are cache probes first. Keep their
+    // bounded in-flight budget separate from actual worldgen requests.
+    private static final int CACHE_PROBE_CONCURRENCY_LIMIT = 32;
     private static final int MAX_SCAN_CANDIDATES_PER_TICK = 4096;
     private static final int BOOSTED_SCAN_CANDIDATES_PER_TICK = 32768;
     private static final int MAX_REQUESTS_PER_TICK = 256;
@@ -72,6 +76,7 @@ public final class LodRequestManager {
     private final LongOpenHashSet diskMissedColumns = new LongOpenHashSet();
     private final ClientPresenceReporter presenceReporter;
     private final Runnable transferReset;
+    private final CacheOnlyReloadTracker cacheOnlyReload = new CacheOnlyReloadTracker();
 
     private SessionConfigS2CPayload sessionConfig;
     private ResourceKey<Level> lastDimension;
@@ -97,6 +102,7 @@ public final class LodRequestManager {
         final long[] positions = new long[VSSConstants.MAX_BATCH_CHUNK_REQUESTS];
         final long[] timestamps = new long[VSSConstants.MAX_BATCH_CHUNK_REQUESTS];
         final boolean[] allowGeneration = new boolean[VSSConstants.MAX_BATCH_CHUNK_REQUESTS];
+        final boolean[] cacheProbe = new boolean[VSSConstants.MAX_BATCH_CHUNK_REQUESTS];
     }
 
     private final RequestBuffers requestBuffers = new RequestBuffers();
@@ -148,7 +154,7 @@ public final class LodRequestManager {
 
         primeDirtyRefreshBudget();
         if (previousConfig != null && previousConfig.generationEnabled() != config.generationEnabled()) {
-            if (config.generationEnabled()) {
+            if (generationAllowed()) {
                 resumeGenerationCandidatesNearPlayer();
             } else {
                 suspendGenerationCandidates();
@@ -170,8 +176,12 @@ public final class LodRequestManager {
             return;
         }
 
-        if (lastDimension != null && !lastDimension.equals(level.dimension())) {
+        boolean dimensionChanged = lastDimension != null && !lastDimension.equals(level.dimension());
+        if (dimensionChanged) {
             resetRequestState();
+        }
+        if (lastDimension == null || dimensionChanged) {
+            cacheOnlyReload.enter(level.dimension().location().toString());
         }
         lastDimension = level.dimension();
         int playerBlockX = player.getBlockX();
@@ -221,6 +231,7 @@ public final class LodRequestManager {
         }
         scanTickCounter = 0;
         scanAndSend(level, player);
+        finishCacheOnlyReloadPassIfReady();
     }
 
     public synchronized ColumnReceiveResult onColumnTransferPart(
@@ -367,6 +378,7 @@ public final class LodRequestManager {
     public synchronized void onColumnNotGenerated(int requestId) {
         boolean dirtyRefreshRequest = requestTracker.isDirtyRefreshRequest(requestId);
         boolean generationRequest = requestTracker.isGenerationRequest(requestId);
+        boolean cacheProbeRequest = requestTracker.isCacheProbeRequest(requestId);
         long packed = requestTracker.remove(requestId);
         if (packed != Long.MIN_VALUE) {
             if (dirtyRefreshRequest && hasKnownColumn(packed)) {
@@ -388,7 +400,9 @@ public final class LodRequestManager {
                 markBackoff(packed, true);
                 deferredColumns.remove(packed);
                 deferColumn(packed);
-            } else if (sessionConfig != null && sessionConfig.generationEnabled()) {
+            } else if (cacheProbeRequest) {
+                handleCacheProbeMiss(packed);
+            } else if (generationAllowed()) {
                 columnTimestamps.remove(packed);
                 clearBackoff(packed);
                 deferredColumns.remove(packed);
@@ -400,7 +414,11 @@ public final class LodRequestManager {
                 }
             } else {
                 columnTimestamps.put(packed, 0L);
-                diskMissedColumns.add(packed);
+                if (cacheOnlyReload.isActive()) {
+                    diskMissedColumns.remove(packed);
+                } else {
+                    diskMissedColumns.add(packed);
+                }
                 clearBackoff(packed);
                 deferredColumns.remove(packed);
             }
@@ -416,14 +434,18 @@ public final class LodRequestManager {
                 dirtyColumns.remove(packed);
                 dirtyColumnTimestamps.remove(packed);
                 deferredColumns.remove(packed);
-                if (sessionConfig != null && sessionConfig.generationEnabled()) {
+                if (generationAllowed()) {
                     columnTimestamps.remove(packed);
                     diskMissedColumns.add(packed);
                     clearBackoff(packed);
                     deferColumn(packed);
                 } else {
                     columnTimestamps.put(packed, 0L);
-                    diskMissedColumns.add(packed);
+                    if (cacheOnlyReload.isActive()) {
+                        diskMissedColumns.remove(packed);
+                    } else {
+                        diskMissedColumns.add(packed);
+                    }
                     clearBackoff(packed);
                 }
                 return;
@@ -457,6 +479,23 @@ public final class LodRequestManager {
         }
     }
 
+    /**
+     * A cache probe deliberately asks the server not to generate. Only after
+     * the server confirms that no cached column exists do we hand the column
+     * back to the normal generation candidate queue.
+     */
+    private void handleCacheProbeMiss(long packed) {
+        columnTimestamps.remove(packed);
+        clearBackoff(packed);
+        deferredColumns.remove(packed);
+        if (generationAllowed() && shouldPromoteNotGeneratedToGeneration(packed)) {
+            diskMissedColumns.add(packed);
+            deferColumn(packed);
+            return;
+        }
+        clearMissState(packed);
+    }
+
     public synchronized void onBackpressured(int requestId) {
         long packed = requestTracker.remove(requestId);
         if (packed != Long.MIN_VALUE) {
@@ -467,12 +506,57 @@ public final class LodRequestManager {
     }
 
     public synchronized void disconnect() {
+        cacheOnlyReload.clear();
         resetRequestState();
         ClientLodPresenceCache.flush();
     }
 
     public synchronized void forceResync() {
+        cacheOnlyReload.clear();
         resetRequestStateAfterConfigChange();
+    }
+
+    public synchronized void forceResyncWithoutGeneration(
+            Collection<String> dimensions,
+            ResourceKey<Level> currentDimension) {
+        cacheOnlyReload.begin(
+                dimensions,
+                currentDimension != null ? currentDimension.location().toString() : null);
+        resetRequestStateAfterConfigChange();
+    }
+
+    private void finishCacheOnlyReloadPassIfReady() {
+        if (!cacheOnlyReplayReadyToComplete(
+                cacheOnlyReload.isActive(),
+                scanCompletedForCurrentOffsets,
+                requestTracker.size(),
+                deferredColumns.queuedEntries(),
+                VSSClientNetworking.hasPendingColumnWork(),
+                ModCompat.hasPendingXaeroMapWork())) {
+            return;
+        }
+        if (!cacheOnlyReload.completeActive()) {
+            return;
+        }
+        VSSLogger.info("Xaero cache-only LOD replay completed for "
+                + (lastDimension != null ? lastDimension.location() : "unknown")
+                + "; all cached columns committed without generation, pending dimensions="
+                + cacheOnlyReload.pendingCount());
+    }
+
+    static boolean cacheOnlyReplayReadyToComplete(
+            boolean active,
+            boolean scanComplete,
+            int requestsInFlight,
+            int deferredColumns,
+            boolean columnPipelinePending,
+            boolean xaeroWorkPending) {
+        return active
+                && scanComplete
+                && requestsInFlight == 0
+                && deferredColumns == 0
+                && !columnPipelinePending
+                && !xaeroWorkPending;
     }
 
     public synchronized int getPendingCount() {
@@ -601,6 +685,9 @@ public final class LodRequestManager {
     }
 
     private void scanAndSend(ClientLevel level, LocalPlayer player) {
+        if (ModCompat.shouldBackpressureXaeroMapInput()) {
+            return;
+        }
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int lodDistance = getEffectiveLodDistance();
@@ -617,6 +704,7 @@ public final class LodRequestManager {
         long[] positions = requestBuffers.positions;
         long[] timestamps = requestBuffers.timestamps;
         boolean[] allowGeneration = requestBuffers.allowGeneration;
+        boolean[] cacheProbe = requestBuffers.cacheProbe;
         int count = 0;
 
         if (lodDistance <= 0) {
@@ -630,22 +718,28 @@ public final class LodRequestManager {
         ScanBudget scanBudget = ScanBudget.create(scanBoostTicks > 0);
 
         count = scanNearSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, count, maxCount, requestWindow, now, scanBudget);
+                timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, scanBudget);
         count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
+                timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
                 DeferredDrainMode.DIRTY_ONLY);
-        count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions, timestamps,
-                allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget);
-        count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
-                DeferredDrainMode.ALL);
+        // Keep one visible loading frontier after a teleport. The outer scan
+        // and ordinary deferred work start only after the near scan has fully
+        // crossed its first 32-chunk ring.
+        if (shouldRunOuterScan(nearScanCompletedForCurrentOffsets)) {
+            count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions, timestamps,
+                    allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget);
+            count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
+                    timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
+                    DeferredDrainMode.ALL);
+        }
         if (scanBoostTicks > 0) {
             scanBoostTicks--;
         }
 
         if (count > 0) {
             dirtyRefreshBudget = Math.max(0.0D, dirtyRefreshBudget - requestWindow.dirtySent());
-            VSSClientNetworking.sendBatchRequest(new BatchChunkRequestC2SPayload(requestIds, positions, timestamps, allowGeneration, count));
+            VSSClientNetworking.sendBatchRequest(new BatchChunkRequestC2SPayload(
+                    requestIds, positions, timestamps, allowGeneration, cacheProbe, count));
             logRequestBatch(now, count, requestWindow.syncSent(), requestWindow.generationSent(), requestWindow.dirtySent(), lodDistance, playerCx, playerCz);
         }
     }
@@ -669,6 +763,7 @@ public final class LodRequestManager {
                 syncBucketLimit(sessionConfig.farSyncRateLimitPerTick(), false),
                 syncBucketLimit(sessionConfig.distantSyncRateLimitPerTick(), false),
                 generationSlots,
+                Math.max(0, CACHE_PROBE_CONCURRENCY_LIMIT - requestTracker.cacheProbeSize()),
                 Math.min(dirtySlots, (int) dirtyRefreshBudget));
     }
 
@@ -677,6 +772,10 @@ public final class LodRequestManager {
             return zeroMeansUnlimited ? VSSConstants.MAX_BATCH_CHUNK_REQUESTS : 0;
         }
         return Math.min(configuredLimit, VSSServerConfig.MAX_SYNC_RATE_LIMIT_PER_TICK);
+    }
+
+    static boolean shouldRunOuterScan(boolean nearScanComplete) {
+        return nearScanComplete;
     }
 
     private int scanNearSyncColumns(
@@ -688,6 +787,7 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbe,
             int count,
             int maxCount,
             RequestWindow requestWindow,
@@ -730,7 +830,7 @@ public final class LodRequestManager {
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
-            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+            if (shouldWaitForFirstPassCacheProbe(packed, requestWindow)) {
                 break;
             }
             nearScanOffsetIndex++;
@@ -747,6 +847,7 @@ public final class LodRequestManager {
                     positions,
                     timestamps,
                     allowGeneration,
+                    cacheProbe,
                     count,
                     maxCount,
                     requestWindow,
@@ -797,6 +898,7 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbeFlags,
             int count,
             int maxCount,
             RequestWindow requestWindow,
@@ -880,8 +982,12 @@ public final class LodRequestManager {
             }
 
             boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
+            boolean cacheProbe = !dirtyRefresh
+                    && !generationCandidate
+                    && requiresFirstPassCacheProbe(packed);
             if (!dirtyRefresh
                     && !generationCandidate
+                    && !cacheProbe
                     && isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)) {
                 continue;
             }
@@ -889,13 +995,23 @@ public final class LodRequestManager {
                 requeueDeferredColumn(packed, false);
                 continue;
             }
-            if (!requestWindow.canSend(dirtyRefresh, generationCandidate, ring)) {
+            if (!requestWindow.canSend(dirtyRefresh, generationCandidate, cacheProbe, ring)) {
                 requeueDeferredColumn(packed, dirtyRefresh);
                 continue;
             }
 
-            count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate, now);
-            requestWindow.record(dirtyRefresh, generationCandidate, ring);
+            count = appendRequest(
+                    packed,
+                    requestIds,
+                    positions,
+                    timestamps,
+                    allowGeneration,
+                    cacheProbeFlags,
+                    count,
+                    generationCandidate,
+                    cacheProbe,
+                    now);
+            requestWindow.record(dirtyRefresh, generationCandidate, cacheProbe, ring);
         }
         return count;
     }
@@ -909,6 +1025,7 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbe,
             int count,
             int maxCount,
             RequestWindow requestWindow,
@@ -968,7 +1085,7 @@ public final class LodRequestManager {
                 updateSoftFrontier(offsetRing, lodDistance);
                 continue;
             }
-            if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+            if (shouldWaitForFirstPassCacheProbe(packed, requestWindow)) {
                 break;
             }
             scanOffsetIndex++;
@@ -985,6 +1102,7 @@ public final class LodRequestManager {
                     positions,
                     timestamps,
                     allowGeneration,
+                    cacheProbe,
                     count,
                     maxCount,
                     requestWindow,
@@ -1005,6 +1123,7 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbe,
             int count,
             int maxCount,
             RequestWindow requestWindow,
@@ -1019,7 +1138,7 @@ public final class LodRequestManager {
         }
 
         count = appendClusterCandidate(centerPacked, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
-                positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
+                positions, timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, centerRing);
 
         for (int dz = -1; dz <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dz++) {
             for (int dx = -1; dx <= 1 && count < maxCount && requestWindow.hasNormalCandidateCapacity(centerRing); dx++) {
@@ -1031,7 +1150,7 @@ public final class LodRequestManager {
 
                 if (neighborRing <= centerRing && neighborRing <= maxAllowedRing) {
                     count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds,
-                            positions, timestamps, allowGeneration, count, maxCount, requestWindow, now, centerRing);
+                            positions, timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, centerRing);
                 }
             }
         }
@@ -1048,6 +1167,7 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbeFlags,
             int count,
             int maxCount,
             RequestWindow requestWindow,
@@ -1070,33 +1190,45 @@ public final class LodRequestManager {
             return count;
         }
 
-        if (shouldWaitForFirstPassGenerationSlot(packed, requestWindow)) {
+        if (shouldWaitForFirstPassCacheProbe(packed, requestWindow)) {
             return count;
         }
-        boolean generationCandidate = shouldUseFirstPassGenerationFallback(packed, ring, requestWindow);
-        if (!requestWindow.canSend(false, generationCandidate, ring)) {
+        boolean generationCandidate = isGenerationCandidate(packed);
+        boolean cacheProbe = !generationCandidate
+                && shouldUseFirstPassCacheProbe(packed, ring, requestWindow);
+        if (!requestWindow.canSend(false, generationCandidate, cacheProbe, ring)) {
             return count;
         }
 
-        count = appendRequest(packed, requestIds, positions, timestamps, allowGeneration, count, generationCandidate, now);
-        requestWindow.record(false, generationCandidate, ring);
+        count = appendRequest(
+                packed,
+                requestIds,
+                positions,
+                timestamps,
+                allowGeneration,
+                cacheProbeFlags,
+                count,
+                generationCandidate,
+                cacheProbe,
+                now);
+        requestWindow.record(false, generationCandidate, cacheProbe, ring);
         return count;
     }
 
-    private boolean shouldUseFirstPassGenerationFallback(long packed, int ring, RequestWindow requestWindow) {
-        if (!requestWindow.hasGenerationCapacity() || !requiresFirstPassGenerationFallback(packed)) {
+    private boolean shouldUseFirstPassCacheProbe(long packed, int ring, RequestWindow requestWindow) {
+        if (!requestWindow.hasCacheProbeCapacity() || !requiresFirstPassCacheProbe(packed)) {
             return false;
         }
-        return requestWindow.canSend(false, true, ring);
+        return requestWindow.canSend(false, false, true, ring);
     }
 
-    private boolean shouldWaitForFirstPassGenerationSlot(long packed, RequestWindow requestWindow) {
-        return requiresFirstPassGenerationFallback(packed) && !requestWindow.hasGenerationCapacity();
+    private boolean shouldWaitForFirstPassCacheProbe(long packed, RequestWindow requestWindow) {
+        return requiresFirstPassCacheProbe(packed) && !requestWindow.hasCacheProbeCapacity();
     }
 
-    private boolean requiresFirstPassGenerationFallback(long packed) {
+    private boolean requiresFirstPassCacheProbe(long packed) {
         return sessionConfig != null
-                && sessionConfig.generationEnabled()
+                && sessionConfig.enabled()
                 && columnTimestamps.get(packed) <= 0L
                 && !hasKnownColumn(packed);
     }
@@ -1219,7 +1351,7 @@ public final class LodRequestManager {
     }
 
     private boolean isGenerationCandidate(long packed) {
-        if (sessionConfig == null || !sessionConfig.generationEnabled()) {
+        if (!generationAllowed()) {
             return false;
         }
         return diskMissedColumns.contains(packed);
@@ -1245,7 +1377,7 @@ public final class LodRequestManager {
     }
 
     private boolean shouldPromoteNotGeneratedToGeneration(long packed) {
-        if (sessionConfig == null || !sessionConfig.generationEnabled()) {
+        if (!generationAllowed()) {
             return false;
         }
         Minecraft minecraft = Minecraft.getInstance();
@@ -1273,12 +1405,15 @@ public final class LodRequestManager {
             long[] positions,
             long[] timestamps,
             boolean[] allowGeneration,
+            boolean[] cacheProbeFlags,
             int count,
             boolean generationCandidate,
+            boolean cacheProbeRequest,
             long now) {
         int requestId = requestTracker.track(
                 packed,
                 generationCandidate,
+                cacheProbeRequest,
                 dirtyColumns.contains(packed),
                 timeoutFor(packed, requestTracker.size()),
                 now);
@@ -1286,7 +1421,12 @@ public final class LodRequestManager {
         positions[count] = packed;
         timestamps[count] = requestTimestampFor(packed);
         allowGeneration[count] = generationCandidate;
+        cacheProbeFlags[count] = cacheProbeRequest;
         return count + 1;
+    }
+
+    private boolean generationAllowed() {
+        return !cacheOnlyReload.isActive() && sessionConfig != null && sessionConfig.generationEnabled();
     }
 
     long requestTimestampFor(long packed) {
@@ -1425,7 +1565,7 @@ public final class LodRequestManager {
     }
 
     private void pruneStaleGenerationWorkAround(int playerCx, int playerCz, int lodDistance) {
-        if (sessionConfig == null || !sessionConfig.generationEnabled()) {
+        if (!generationAllowed()) {
             return;
         }
 

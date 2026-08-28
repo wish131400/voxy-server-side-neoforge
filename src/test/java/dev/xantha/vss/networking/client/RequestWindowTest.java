@@ -79,6 +79,23 @@ class RequestWindowTest {
     }
 
     @Test
+    void cacheProbeUsesIndependentBudget() {
+        RequestWindow window = new RequestWindow(0, 0, 0, 0, 0, 2, 0);
+
+        assertFalse(window.hasAnySyncCapacity());
+        assertFalse(window.hasGenerationCapacity());
+        assertTrue(window.hasCacheProbeCapacity());
+        assertTrue(window.canSend(false, false, true, 128));
+
+        window.record(false, false, true, 128);
+        window.record(false, false, true, 128);
+
+        assertEquals(0, window.cacheProbeRemaining());
+        assertEquals(0, window.generationSent());
+        assertFalse(window.hasAnyNormalCandidateCapacity());
+    }
+
+    @Test
     void firstPassGenerationCanUseItsOwnSlotWhenSyncBudgetIsExhausted() {
         RequestWindow window = new RequestWindow(0, 0, 0, 0, 1, 0);
 

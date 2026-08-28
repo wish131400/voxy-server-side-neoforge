@@ -3,6 +3,7 @@ package dev.xantha.vss.client;
 import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.networking.client.FarPlayerClientRenderer;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
+import dev.xantha.vss.networking.client.VSSClientCommands;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.neoforge.common.NeoForge;
 
@@ -16,6 +17,7 @@ public final class VSSClientBootstrap {
         VSSEmbeddiumOptionsEventBridge.register();
         ModCompat.init();
         NeoForge.EVENT_BUS.register(VSSClientNetworking.class);
+        NeoForge.EVENT_BUS.register(VSSClientCommands.class);
         NeoForge.EVENT_BUS.register(FarPlayerClientRenderer.class);
     }
 }

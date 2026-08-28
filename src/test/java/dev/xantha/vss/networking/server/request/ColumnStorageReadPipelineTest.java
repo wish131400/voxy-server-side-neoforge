@@ -27,4 +27,10 @@ class ColumnStorageReadPipelineTest {
     void generationPathSkipsExistingChunkNbtWhenNbtSyncIsDisabled() {
         assertFalse(ColumnStorageReadPipeline.shouldReadExistingChunkNbt(false, true, true));
     }
+
+    @Test
+    void cacheProbeAlwaysSkipsExistingChunkNbt() {
+        assertFalse(ColumnStorageReadPipeline.shouldReadExistingChunkNbt(true, true, true, true));
+        assertFalse(ColumnStorageReadPipeline.shouldReadExistingChunkNbt(false, false, false, true));
+    }
 }

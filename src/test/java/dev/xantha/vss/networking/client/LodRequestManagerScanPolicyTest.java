@@ -9,4 +9,10 @@ class LodRequestManagerScanPolicyTest {
     void firstScanDoesNotTrustClientRenderDistanceAsServerCoverage() {
         assertEquals(0, LodRequestManager.getVanillaProtectedSyncDistance());
     }
+
+    @Test
+    void outerScanWaitsForNearScanToComplete() {
+        assertEquals(false, LodRequestManager.shouldRunOuterScan(false));
+        assertEquals(true, LodRequestManager.shouldRunOuterScan(true));
+    }
 }

@@ -19,6 +19,7 @@ final class ClientRequestTracker {
     private final Int2LongOpenHashMap requestDeadlineTimes = new Int2LongOpenHashMap();
     private final PriorityQueue<RequestDeadline> requestDeadlines = new PriorityQueue<>();
     private final LongOpenHashSet generationInFlight = new LongOpenHashSet();
+    private final LongOpenHashSet cacheProbeInFlight = new LongOpenHashSet();
     private final LongOpenHashSet dirtyRefreshInFlight = new LongOpenHashSet();
     private final IntConsumer cancelSender;
 
@@ -38,10 +39,23 @@ final class ClientRequestTracker {
     }
 
     int track(long packed, boolean generationRequest, boolean dirtyRefreshRequest, long timeoutNanos, long nowNanos) {
+        return track(packed, generationRequest, false, dirtyRefreshRequest, timeoutNanos, nowNanos);
+    }
+
+    int track(
+            long packed,
+            boolean generationRequest,
+            boolean cacheProbeRequest,
+            boolean dirtyRefreshRequest,
+            long timeoutNanos,
+            long nowNanos) {
         int requestId = allocateRequestId();
         inFlight.add(packed);
         if (generationRequest) {
             generationInFlight.add(packed);
+        }
+        if (cacheProbeRequest) {
+            cacheProbeInFlight.add(packed);
         }
         if (dirtyRefreshRequest) {
             dirtyRefreshInFlight.add(packed);
@@ -104,12 +118,13 @@ final class ClientRequestTracker {
                 continue;
             }
             boolean generationRequest = generationInFlight.contains(packed);
+            boolean cacheProbeRequest = cacheProbeInFlight.contains(packed);
             boolean dirtyRefreshRequest = dirtyRefreshInFlight.contains(packed);
             int requestId = removeTrackedPosition(packed);
             if (requestId != -1) {
                 cancelSender.accept(requestId);
             }
-            timedOut.add(new TimedOutRequest(packed, generationRequest, dirtyRefreshRequest));
+            timedOut.add(new TimedOutRequest(packed, generationRequest, cacheProbeRequest, dirtyRefreshRequest));
         }
         compactDeadlineHeapIfNeeded();
         return timedOut;
@@ -151,6 +166,11 @@ final class ClientRequestTracker {
         return packed != Long.MIN_VALUE && generationInFlight.contains(packed);
     }
 
+    boolean isCacheProbeRequest(int requestId) {
+        long packed = requestIdToPosition.get(requestId);
+        return packed != Long.MIN_VALUE && cacheProbeInFlight.contains(packed);
+    }
+
     boolean markGenerationQueued(int requestId, long timeoutNanos, long nowNanos) {
         long packed = requestIdToPosition.get(requestId);
         if (packed == Long.MIN_VALUE || !matches(requestId, packed)) {
@@ -163,6 +183,10 @@ final class ClientRequestTracker {
 
     boolean isGenerationPosition(long packed) {
         return generationInFlight.contains(packed);
+    }
+
+    boolean isCacheProbePosition(long packed) {
+        return cacheProbeInFlight.contains(packed);
     }
 
     boolean isDirtyRefreshPosition(long packed) {
@@ -179,6 +203,10 @@ final class ClientRequestTracker {
 
     int generationSize() {
         return generationInFlight.size();
+    }
+
+    int cacheProbeSize() {
+        return cacheProbeInFlight.size();
     }
 
     int nextRequestId() {
@@ -215,6 +243,7 @@ final class ClientRequestTracker {
         requestDeadlineTimes.clear();
         requestDeadlines.clear();
         generationInFlight.clear();
+        cacheProbeInFlight.clear();
         dirtyRefreshInFlight.clear();
         deadlineTombstones = 0;
     }
@@ -249,6 +278,7 @@ final class ClientRequestTracker {
             deadlineTombstones++;
         }
         generationInFlight.remove(packed);
+        cacheProbeInFlight.remove(packed);
         dirtyRefreshInFlight.remove(packed);
         compactDeadlineHeapIfNeeded();
         return requestId;
@@ -280,7 +310,11 @@ final class ClientRequestTracker {
         }
     }
 
-    record TimedOutRequest(long packed, boolean generationRequest, boolean dirtyRefreshRequest) {
+    record TimedOutRequest(
+            long packed,
+            boolean generationRequest,
+            boolean cacheProbeRequest,
+            boolean dirtyRefreshRequest) {
     }
 
     private record RequestDeadline(long packed, int requestId, long timeoutAtNanos) implements Comparable<RequestDeadline> {

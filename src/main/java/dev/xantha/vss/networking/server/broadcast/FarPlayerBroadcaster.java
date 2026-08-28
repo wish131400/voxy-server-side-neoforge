@@ -44,7 +44,7 @@ public final class FarPlayerBroadcaster {
     private static final int MAX_VEHICLE_NBT_BYTES = VSSConstants.MAX_FAR_VEHICLE_DATA_BYTES;
     private static final int MAX_FAR_PLAYERS_PACKET_BYTES = VSSConstants.MAX_FAR_PLAYERS_PACKET_BYTES;
     private static final int FAR_PLAYER_BUCKET_CHUNKS = 32;
-    private static final Map<UUID, Map<UUID, VehicleSyncCache>> VEHICLE_SYNC_CACHES = new HashMap<>();
+    private static final Map<UUID, Map<UUID, FarVehicleSyncPolicy.Cache>> VEHICLE_SYNC_CACHES = new HashMap<>();
     private static int tickCounter;
     private static long nextDiagnosticNanos;
 
@@ -93,6 +93,7 @@ public final class FarPlayerBroadcaster {
             NorthstarRocketCompat.beginViewer(viewer);
             List<FarPlayersS2CPayload.Entry> entries = new ArrayList<>();
             Set<Integer> sentVehicleIds = new HashSet<>();
+            Set<Integer> attemptedVehicleIds = new HashSet<>();
             int skippedUnavailable = 0;
             int skippedDistance = 0;
             int vehicleSnapshotsSent = 0;
@@ -112,7 +113,8 @@ public final class FarPlayerBroadcaster {
                         continue;
                     }
 
-                    FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(viewer, target, sentVehicleIds);
+                    FarPlayersS2CPayload.VehicleSnapshot[] vehicles = vehicleSnapshots(
+                            viewer, target, sentVehicleIds, attemptedVehicleIds);
                     vehicleSnapshotsSent += vehicles.length;
                     entries.add(new FarPlayersS2CPayload.Entry(
                             target.getUUID(),
@@ -152,7 +154,9 @@ public final class FarPlayerBroadcaster {
                     }
                 }
 
-                VSSNetworking.sendToPlayer(viewer, safePayload(viewer, entries));
+                FarPlayersS2CPayload finalPayload = safePayload(viewer, entries);
+                VSSNetworking.sendToPlayer(viewer, finalPayload);
+                finalizeVehicleSyncCaches(viewer, entries, finalPayload, System.nanoTime());
                 maybeLogBroadcast(viewer, players.size(), entries.size(), vehicleSnapshotsSent, skippedUnavailable, skippedDistance);
             } finally {
                 NorthstarRocketCompat.finishViewer(viewer);
@@ -255,6 +259,69 @@ public final class FarPlayerBroadcaster {
                 if (vehicle != null && vehicle.fullData()) {
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+
+    private static void finalizeVehicleSyncCaches(
+            ServerPlayer viewer,
+            List<FarPlayersS2CPayload.Entry> attemptedEntries,
+            FarPlayersS2CPayload finalPayload,
+            long now) {
+        Map<UUID, FarPlayersS2CPayload.Entry> deliveredEntries = new HashMap<>();
+        for (FarPlayersS2CPayload.Entry entry : finalPayload.entries()) {
+            deliveredEntries.put(entry.uuid(), entry);
+        }
+
+        Map<UUID, FarVehicleSyncPolicy.Cache> viewerCaches = VEHICLE_SYNC_CACHES.get(viewer.getUUID());
+        if (viewerCaches == null) {
+            return;
+        }
+        for (FarPlayersS2CPayload.Entry attempted : attemptedEntries) {
+            if (!hasFullVehicleData(attempted.vehicles())) {
+                continue;
+            }
+            FarVehicleSyncPolicy.Cache cache = viewerCaches.get(attempted.uuid());
+            if (cache == null) {
+                continue;
+            }
+            FarPlayersS2CPayload.Entry delivered = deliveredEntries.get(attempted.uuid());
+            cache.recordFinalPayload(true, containsAttemptedFullData(attempted.vehicles(), delivered), now);
+        }
+    }
+
+    private static boolean containsAttemptedFullData(
+            FarPlayersS2CPayload.VehicleSnapshot[] attempted,
+            FarPlayersS2CPayload.Entry deliveredEntry) {
+        if (deliveredEntry == null || deliveredEntry.vehicles() == null) {
+            return false;
+        }
+        Map<Integer, FarPlayersS2CPayload.VehicleSnapshot> deliveredById = new HashMap<>();
+        for (FarPlayersS2CPayload.VehicleSnapshot delivered : deliveredEntry.vehicles()) {
+            if (delivered != null) {
+                deliveredById.put(delivered.sourceEntityId(), delivered);
+            }
+        }
+        for (FarPlayersS2CPayload.VehicleSnapshot snapshot : attempted) {
+            if (snapshot == null || !snapshot.fullData()) {
+                continue;
+            }
+            FarPlayersS2CPayload.VehicleSnapshot delivered = deliveredById.get(snapshot.sourceEntityId());
+            if (delivered == null || !delivered.fullData()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasFullVehicleData(FarPlayersS2CPayload.VehicleSnapshot[] vehicles) {
+        if (vehicles == null) {
+            return false;
+        }
+        for (FarPlayersS2CPayload.VehicleSnapshot vehicle : vehicles) {
+            if (vehicle != null && vehicle.fullData()) {
+                return true;
             }
         }
         return false;
@@ -438,7 +505,11 @@ public final class FarPlayerBroadcaster {
         return modelParts;
     }
 
-    private static FarPlayersS2CPayload.VehicleSnapshot[] vehicleSnapshots(ServerPlayer viewer, ServerPlayer target, Set<Integer> sentVehicleIds) {
+    private static FarPlayersS2CPayload.VehicleSnapshot[] vehicleSnapshots(
+            ServerPlayer viewer,
+            ServerPlayer target,
+            Set<Integer> sentVehicleIds,
+            Set<Integer> attemptedVehicleIds) {
         List<Entity> chain = vehicleChain(target);
         if (chain.isEmpty()) {
             clearVehicleCache(viewer, target);
@@ -447,25 +518,49 @@ public final class FarPlayerBroadcaster {
 
         NorthstarRocketCompat.sync(viewer, target, chain);
 
-        VehicleSyncCache cache = vehicleCache(viewer, target);
+        FarVehicleSyncPolicy.Cache cache = vehicleCache(viewer, target);
         long now = System.nanoTime();
+        List<FarVehicleSyncPolicy.VehicleIdentity> chainIdentities = new ArrayList<>(chain.size());
+        for (Entity entity : chain) {
+            ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+            chainIdentities.add(new FarVehicleSyncPolicy.VehicleIdentity(
+                    entity.getId(), typeId != null ? typeId.toString() : "unknown", entity.getUUID()));
+        }
+        cache.observeChain(chainIdentities);
+        boolean requestFullData = cache.shouldAttemptFullData(now, FULL_VEHICLE_DATA_INTERVAL_NANOS);
         List<FarPlayersS2CPayload.VehicleSnapshot> snapshots = new ArrayList<>();
-        boolean sentFullData = false;
+        boolean attemptedFullData = false;
+        boolean capturedAllFullData = true;
         for (int i = 0; i < chain.size(); i++) {
             Entity vehicle = chain.get(i);
-            boolean fullData = !sentVehicleIds.contains(vehicle.getId())
-                    && cache.shouldSendFullData(vehicle, i, now);
-            sentFullData |= fullData;
+            boolean fullData = requestFullData
+                    && !sentVehicleIds.contains(vehicle.getId())
+                    && attemptedVehicleIds.add(vehicle.getId());
+            attemptedFullData |= fullData;
             FarPlayersS2CPayload.VehicleSnapshot snapshot = vehicleSnapshot(vehicle, fullData);
             if (snapshot == null) {
+                if (fullData) {
+                    capturedAllFullData = false;
+                }
                 break;
+            }
+            if (fullData && !snapshot.fullData()) {
+                capturedAllFullData = false;
             }
             snapshots.add(snapshot);
         }
-        for (FarPlayersS2CPayload.VehicleSnapshot snapshot : snapshots) {
-            sentVehicleIds.add(snapshot.sourceEntityId());
+        if (attemptedFullData && !capturedAllFullData) {
+            FarPlayersS2CPayload.VehicleSnapshot[] poseOnly = poseOnlyVehicles(
+                    snapshots.toArray(FarPlayersS2CPayload.VehicleSnapshot[]::new));
+            snapshots.clear();
+            java.util.Collections.addAll(snapshots, poseOnly);
+            cache.recordFinalPayload(true, false, now);
         }
-        cache.remember(chain, now, sentFullData);
+        for (FarPlayersS2CPayload.VehicleSnapshot snapshot : snapshots) {
+            if (snapshot.fullData()) {
+                sentVehicleIds.add(snapshot.sourceEntityId());
+            }
+        }
         return snapshots.toArray(FarPlayersS2CPayload.VehicleSnapshot[]::new);
     }
 
@@ -483,14 +578,14 @@ public final class FarPlayerBroadcaster {
         return chain;
     }
 
-    private static VehicleSyncCache vehicleCache(ServerPlayer viewer, ServerPlayer target) {
+    private static FarVehicleSyncPolicy.Cache vehicleCache(ServerPlayer viewer, ServerPlayer target) {
         return VEHICLE_SYNC_CACHES
                 .computeIfAbsent(viewer.getUUID(), ignored -> new HashMap<>())
-                .computeIfAbsent(target.getUUID(), ignored -> new VehicleSyncCache());
+                .computeIfAbsent(target.getUUID(), ignored -> new FarVehicleSyncPolicy.Cache());
     }
 
     private static void clearVehicleCache(ServerPlayer viewer, ServerPlayer target) {
-        Map<UUID, VehicleSyncCache> viewerCache = VEHICLE_SYNC_CACHES.get(viewer.getUUID());
+        Map<UUID, FarVehicleSyncPolicy.Cache> viewerCache = VEHICLE_SYNC_CACHES.get(viewer.getUUID());
         if (viewerCache != null) {
             viewerCache.remove(target.getUUID());
             if (viewerCache.isEmpty()) {
@@ -509,6 +604,15 @@ public final class FarPlayerBroadcaster {
             return null;
         }
 
+        CompoundTag entityData = null;
+        byte[] spawnData = new byte[0];
+        boolean capturedFullData = false;
+        if (fullData) {
+            entityData = captureEntityData(vehicle);
+            spawnData = captureSpawnData(vehicle);
+            capturedFullData = FarVehicleSyncPolicy.hasInitializationData(entityData != null, spawnData.length);
+        }
+
         return new FarPlayersS2CPayload.VehicleSnapshot(
                 vehicle.getId(),
                 entityTypeId,
@@ -524,9 +628,9 @@ public final class FarPlayerBroadcaster {
                 vehicle.isInvisible(),
                 vehicle.isCurrentlyGlowing(),
                 NorthstarRocketCompat.finalLiftVelocity(vehicle),
-                fullData,
-                fullData ? captureEntityData(vehicle) : null,
-                fullData ? captureSpawnData(vehicle) : new byte[0]);
+                capturedFullData,
+                capturedFullData ? entityData : null,
+                capturedFullData ? spawnData : new byte[0]);
     }
 
     private static float vehicleBodyYaw(Entity vehicle) {
@@ -599,29 +703,8 @@ public final class FarPlayerBroadcaster {
         }
 
         VEHICLE_SYNC_CACHES.entrySet().removeIf(entry -> !online.contains(entry.getKey()));
-        for (Map<UUID, VehicleSyncCache> viewerCache : VEHICLE_SYNC_CACHES.values()) {
+        for (Map<UUID, FarVehicleSyncPolicy.Cache> viewerCache : VEHICLE_SYNC_CACHES.values()) {
             viewerCache.entrySet().removeIf(entry -> !online.contains(entry.getKey()));
-        }
-    }
-
-    private static final class VehicleSyncCache {
-        private final List<Integer> entityIds = new ArrayList<>();
-        private long lastFullDataNanos;
-
-        private boolean shouldSendFullData(Entity entity, int index, long now) {
-            return entityIds.size() <= index
-                    || entityIds.get(index) != entity.getId()
-                    || now - lastFullDataNanos >= FULL_VEHICLE_DATA_INTERVAL_NANOS;
-        }
-
-        private void remember(List<Entity> chain, long now, boolean sentFullData) {
-            entityIds.clear();
-            for (Entity entity : chain) {
-                entityIds.add(entity.getId());
-            }
-            if (sentFullData) {
-                lastFullDataNanos = now;
-            }
         }
     }
 }

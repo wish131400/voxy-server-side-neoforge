@@ -8,6 +8,7 @@ final class RequestWindow {
     private int farSyncRemaining;
     private int distantSyncRemaining;
     private int generationRemaining;
+    private int cacheProbeRemaining;
     private int dirtyRemaining;
     private int syncSent;
     private int generationSent;
@@ -20,16 +21,35 @@ final class RequestWindow {
             int distantSyncRemaining,
             int generationRemaining,
             int dirtyRemaining) {
+        this(
+                nearSyncRemaining,
+                midSyncRemaining,
+                farSyncRemaining,
+                distantSyncRemaining,
+                generationRemaining,
+                0,
+                dirtyRemaining);
+    }
+
+    RequestWindow(
+            int nearSyncRemaining,
+            int midSyncRemaining,
+            int farSyncRemaining,
+            int distantSyncRemaining,
+            int generationRemaining,
+            int cacheProbeRemaining,
+            int dirtyRemaining) {
         this.nearSyncRemaining = nearSyncRemaining;
         this.midSyncRemaining = midSyncRemaining;
         this.farSyncRemaining = farSyncRemaining;
         this.distantSyncRemaining = distantSyncRemaining;
         this.generationRemaining = generationRemaining;
+        this.cacheProbeRemaining = cacheProbeRemaining;
         this.dirtyRemaining = dirtyRemaining;
     }
 
     boolean hasCapacity() {
-        return hasAnySyncCapacity() || generationRemaining > 0 || dirtyRemaining > 0;
+        return hasAnySyncCapacity() || generationRemaining > 0 || cacheProbeRemaining > 0 || dirtyRemaining > 0;
     }
 
     boolean hasAnySyncCapacity() {
@@ -40,12 +60,16 @@ final class RequestWindow {
         return generationRemaining > 0;
     }
 
+    boolean hasCacheProbeCapacity() {
+        return cacheProbeRemaining > 0;
+    }
+
     boolean hasAnyNormalCandidateCapacity() {
-        return hasAnySyncCapacity() || hasGenerationCapacity();
+        return hasAnySyncCapacity() || hasGenerationCapacity() || hasCacheProbeCapacity();
     }
 
     boolean hasNormalCandidateCapacity(int ring) {
-        return hasSyncCapacity(ring) || hasGenerationCapacity();
+        return hasSyncCapacity(ring) || hasGenerationCapacity() || hasCacheProbeCapacity();
     }
 
     boolean hasNearSyncCapacity() {
@@ -62,23 +86,45 @@ final class RequestWindow {
                 + Math.max(0, farSyncRemaining)
                 + Math.max(0, distantSyncRemaining)
                 + Math.max(0, generationRemaining)
+                + Math.max(0, cacheProbeRemaining)
                 + Math.max(0, dirtyRemaining);
     }
 
     boolean canSend(boolean dirtyRefresh, boolean generationCandidate, int ring) {
+        return canSend(dirtyRefresh, generationCandidate, false, ring);
+    }
+
+    boolean canSend(
+            boolean dirtyRefresh,
+            boolean generationCandidate,
+            boolean cacheProbe,
+            int ring) {
         if (dirtyRefresh) {
             return dirtyRemaining > 0;
         }
-        return generationCandidate ? generationRemaining > 0 : hasSyncCapacity(ring);
+        if (generationCandidate) {
+            return generationRemaining > 0;
+        }
+        return cacheProbe ? cacheProbeRemaining > 0 : hasSyncCapacity(ring);
     }
 
     void record(boolean dirtyRefresh, boolean generationCandidate, int ring) {
+        record(dirtyRefresh, generationCandidate, false, ring);
+    }
+
+    void record(
+            boolean dirtyRefresh,
+            boolean generationCandidate,
+            boolean cacheProbe,
+            int ring) {
         if (dirtyRefresh) {
             dirtyRemaining--;
             dirtySent++;
         } else if (generationCandidate) {
             generationRemaining--;
             generationSent++;
+        } else if (cacheProbe) {
+            cacheProbeRemaining--;
         } else {
             decrementSyncRemaining(ring);
             syncSent++;
@@ -91,6 +137,10 @@ final class RequestWindow {
 
     int generationSent() {
         return generationSent;
+    }
+
+    int cacheProbeRemaining() {
+        return cacheProbeRemaining;
     }
 
     int dirtySent() {

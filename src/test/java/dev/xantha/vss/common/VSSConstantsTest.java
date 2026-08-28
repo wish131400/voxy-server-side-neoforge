@@ -9,7 +9,7 @@ class VSSConstantsTest {
 
     @Test
     void protocolVersionMatchesGenerationQueueProtocol() {
-        assertEquals(43, VSSConstants.PROTOCOL_VERSION);
+        assertEquals(44, VSSConstants.PROTOCOL_VERSION);
     }
 
     @Test

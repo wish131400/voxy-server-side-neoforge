@@ -6,7 +6,7 @@ import java.util.Map;
 
 public class VSSClientConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-client-config.json";
-    public static final String CURRENT_CONFIG_VERSION = "v0.2.9";
+    public static final String CURRENT_CONFIG_VERSION = "v0.2.11";
     public static final int MAX_LOD_DISTANCE_CHUNKS = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
     public static final int MAX_DESIRED_BANDWIDTH_KBPS = 100_000;
     private static final Map<String, String> CONFIG_HELP = createConfigHelp();
@@ -19,6 +19,7 @@ public class VSSClientConfig extends JsonConfig {
     @Deprecated
     private Integer desiredBandwidthMiB;
     public boolean offThreadSectionProcessing = true;
+    public boolean enableXaeroMapBridge = true;
     public boolean debugLogging = false;
 
     @Override
@@ -40,12 +41,16 @@ public class VSSClientConfig extends JsonConfig {
         help.put("desiredBandwidthKbps", "客户端期望的 LOD 下载带宽上限，单位 Kbps；默认 0；范围 0-"
                 + MAX_DESIRED_BANDWIDTH_KBPS + "（最高 100 Mbps），0 表示不额外限速，仍受服务端上限控制。");
         help.put("offThreadSectionProcessing", "是否在后台线程处理收到的 LOD 区块以减少主线程卡顿；默认 true。");
+        help.put("enableXaeroMapBridge", "是否将服务端远景写入 Xaero 世界地图；默认 true。可用 /vssclient xaero disable 临时关闭。");
         help.put("debugLogging", "是否输出客户端 VSS 调试日志；默认 false。");
         return help;
     }
 
     @Override
     protected void validate() {
+        if (!CURRENT_CONFIG_VERSION.equals(configVersion)) {
+            enableXaeroMapBridge = true;
+        }
         configVersion = CURRENT_CONFIG_VERSION;
         lodDistanceChunks = clamp(lodDistanceChunks, 0, MAX_LOD_DISTANCE_CHUNKS);
         if (desiredBandwidthMiB != null) {

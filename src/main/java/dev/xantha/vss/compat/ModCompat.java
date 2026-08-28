@@ -5,6 +5,8 @@ import net.neoforged.fml.ModList;
 
 public final class ModCompat {
     private static volatile boolean voxyLoaded;
+    private static volatile boolean xaeroLoaded;
+    private static volatile boolean xaeroInitialized;
     private static volatile long nextInitAttemptNanos;
     private static final long INIT_RETRY_INTERVAL_NANOS = 5_000_000_000L;
 
@@ -12,7 +14,7 @@ public final class ModCompat {
     }
 
     public static void init() {
-        if (voxyLoaded) {
+        if (voxyLoaded && xaeroInitialized) {
             return;
         }
         long now = System.nanoTime();
@@ -20,8 +22,12 @@ public final class ModCompat {
             return;
         }
         nextInitAttemptNanos = now + INIT_RETRY_INTERVAL_NANOS;
-        if (ModList.get().isLoaded("voxy") || classExists("me.cortex.voxy.common.world.service.VoxelIngestService")) {
+        if (!voxyLoaded && (ModList.get().isLoaded("voxy") || classExists("me.cortex.voxy.common.world.service.VoxelIngestService"))) {
             voxyLoaded = VoxyCompat.init();
+        }
+        if (!xaeroInitialized && (ModList.get().isLoaded("xaeroworldmap") || classExists("xaero.map.WorldMapSession"))) {
+            xaeroInitialized = true;
+            xaeroLoaded = XaeroMapCompat.init();
         }
     }
 
@@ -33,6 +39,18 @@ public final class ModCompat {
         return voxyLoaded;
     }
 
+    public static boolean isXaeroMapBridgeActive() {
+        return XaeroMapCompat.isActive();
+    }
+
+    public static boolean shouldBackpressureXaeroMapInput() {
+        return XaeroMapCompat.shouldBackpressureInput();
+    }
+
+    public static boolean hasPendingXaeroMapWork() {
+        return XaeroMapCompat.hasPendingWork();
+    }
+
     public static LocalColumnState getVoxyLocalColumnState(net.minecraft.world.level.Level level, int chunkX, int chunkZ) {
         return voxyLoaded ? VoxyCompat.getLocalColumnState(level, chunkX, chunkZ) : LocalColumnState.UNKNOWN;
     }
@@ -40,6 +58,21 @@ public final class ModCompat {
     public static void clientTick() {
         if (voxyLoaded) {
             VoxyCompat.clientTick();
+        }
+        if (xaeroLoaded) {
+            XaeroMapCompat.clientTick();
+        }
+    }
+
+    public static void renderFrame() {
+        if (xaeroLoaded) {
+            XaeroMapCompat.renderFrame();
+        }
+    }
+
+    public static void onDisconnect() {
+        if (xaeroLoaded) {
+            XaeroMapCompat.onDisconnect();
         }
     }
 

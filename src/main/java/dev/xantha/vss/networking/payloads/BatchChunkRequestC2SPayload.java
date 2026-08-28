@@ -11,6 +11,7 @@ public record BatchChunkRequestC2SPayload(
         long[] packedPositions,
         long[] clientTimestamps,
         boolean[] allowGeneration,
+        boolean[] cacheProbe,
         int count) implements CustomPacketPayload {
     public static final CustomPacketPayload.Type<BatchChunkRequestC2SPayload> TYPE = VSSPayloadCodecs.type("batch_chunk_request");
     public static final StreamCodec<RegistryFriendlyByteBuf, BatchChunkRequestC2SPayload> STREAM_CODEC =
@@ -28,6 +29,7 @@ public record BatchChunkRequestC2SPayload(
             buf.writeLong(payload.packedPositions[i]);
             buf.writeLong(payload.clientTimestamps[i]);
             buf.writeBoolean(payload.allowGeneration[i]);
+            buf.writeBoolean(payload.cacheProbe[i]);
         }
     }
 
@@ -40,12 +42,20 @@ public record BatchChunkRequestC2SPayload(
         long[] packedPositions = new long[count];
         long[] clientTimestamps = new long[count];
         boolean[] allowGeneration = new boolean[count];
+        boolean[] cacheProbe = new boolean[count];
         for (int i = 0; i < count; i++) {
             requestIds[i] = buf.readVarInt();
             packedPositions[i] = buf.readLong();
             clientTimestamps[i] = buf.readLong();
             allowGeneration[i] = buf.readBoolean();
+            cacheProbe[i] = buf.readBoolean();
         }
-        return new BatchChunkRequestC2SPayload(requestIds, packedPositions, clientTimestamps, allowGeneration, count);
+        return new BatchChunkRequestC2SPayload(
+                requestIds,
+                packedPositions,
+                clientTimestamps,
+                allowGeneration,
+                cacheProbe,
+                count);
     }
 }

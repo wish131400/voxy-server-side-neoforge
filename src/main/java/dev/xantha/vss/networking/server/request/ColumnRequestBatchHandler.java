@@ -99,6 +99,12 @@ public final class ColumnRequestBatchHandler {
             state.markClientKnownColumn(level.dimension(), packed, clientTimestamp);
         }
         boolean allowGeneration = index < payload.allowGeneration().length && payload.allowGeneration()[index];
+        boolean cacheProbe = index < payload.cacheProbe().length && payload.cacheProbe()[index];
+        if (cacheProbe) {
+            // A cache probe is explicitly non-generating, even for malformed or
+            // future clients that accidentally set both flags.
+            allowGeneration = false;
+        }
         long dirtyTimestamp = DirtyColumnBroadcaster.latestDirtyTimestamp(level.dimension(), cx, cz);
         boolean priorityRefresh = clientTimestamp > 0L;
         if (!priorityRefresh && state.shouldBackpressureNormalRequests()) {
@@ -118,7 +124,19 @@ public final class ColumnRequestBatchHandler {
             return;
         }
 
-        submitColumnWork(player, state, level, requestId, cx, cz, columnTimestamp, dirtyTimestamp, allowGeneration, priorityRefresh, index);
+        submitColumnWork(
+                player,
+                state,
+                level,
+                requestId,
+                cx,
+                cz,
+                columnTimestamp,
+                dirtyTimestamp,
+                allowGeneration,
+                cacheProbe,
+                priorityRefresh,
+                index);
     }
 
     private boolean tryServeCachedColumn(
@@ -171,9 +189,10 @@ public final class ColumnRequestBatchHandler {
             long columnTimestamp,
             long dirtyTimestamp,
             boolean allowGeneration,
+            boolean cacheProbe,
             boolean priorityRefresh,
             int index) {
-        LevelChunk chunk = level.getChunkSource().getChunkNow(cx, cz);
+        LevelChunk chunk = cacheProbe ? null : level.getChunkSource().getChunkNow(cx, cz);
         if (chunk != null) {
             if (storageReadPipeline.submitLoadedColumn(player, state, level, chunk, requestId, cx, cz, columnTimestamp, priorityRefresh)) {
                 if (index == 0) {
@@ -191,6 +210,7 @@ public final class ColumnRequestBatchHandler {
                     dirtyTimestamp,
                     true,
                     allowGeneration,
+                    cacheProbe,
                     priorityRefresh);
             return;
         }
@@ -208,6 +228,7 @@ public final class ColumnRequestBatchHandler {
                 dirtyTimestamp,
                 false,
                 allowGeneration,
+                cacheProbe,
                 priorityRefresh);
     }
 

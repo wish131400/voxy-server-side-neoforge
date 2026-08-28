@@ -35,6 +35,8 @@
   "vss.voxy_options.group.generation": "生成（单人/内置服务端）",
   "vss.voxy_options.receive_server_lods": "接收服务端远景",
   "vss.voxy_options.receive_server_lods.tooltip": "开启后，客户端会从服务器下载 Voxy 远景数据。",
+  "vss.voxy_options.xaero_map_bridge": "写入 Xaero 世界地图",
+  "vss.voxy_options.xaero_map_bridge.tooltip": "把收到的远处地形持久写入 Xaero 世界地图。默认开启。可用 /vssclient xaero disable 关闭，/vssclient xaero reload 重载全服缓存且不生成新的 LOD。",
   "vss.voxy_options.off_thread_processing": "后台处理远景数据",
   "vss.voxy_options.off_thread_processing.tooltip": "在后台线程处理收到的远景区块，减少主线程卡顿。",
   "vss.voxy_options.client_lod_distance": "客户端远景范围",
@@ -137,5 +139,9 @@
   "vss.command.generation.toggle": "VSS 自动补远景",
   "vss.command.generation.synced": "，已同步给在线玩家",
   "vss.command.generation.saved": "VSS 自动补远景设置已保存：",
-  "vss.command.generation.saved.details": "单人并发 %s，全服并发 %s；自动值：每 tick 启动 %s、提交打包 %s、打包线程 %s、打包队列 %s、超时 %s 秒"
+  "vss.command.generation.saved.details": "单人并发 %s，全服并发 %s；自动值：每 tick 启动 %s、提交打包 %s、打包线程 %s、打包队列 %s、超时 %s 秒",
+  "vss.command.xaero_reload.started": "Xaero 全服地图重载已开始；已清除 %s 个本地记录，正在自动请求已有 LOD 缓存。重载阶段不会生成新 LOD，完成后会恢复正常自动加载。",
+  "vss.command.xaero_reload.no_session": "请先启用 Xaero 地图桥并进入已启用 VSS 的世界，再重载地图。",
+  "vss.command.xaero.disabled": "Xaero 小地图加载已关闭；重新连接或执行 /vssclient xaero enable 可恢复。",
+  "vss.command.xaero.enabled": "Xaero 小地图加载已开启。"
 }

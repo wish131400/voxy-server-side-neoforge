@@ -29,6 +29,7 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 public final class VSSClientNetworking {
     private static volatile boolean serverEnabled;
@@ -62,6 +63,10 @@ public final class VSSClientNetworking {
 
     static int getQueuedColumnCount() {
         return COLUMN_PROCESSOR.getQueuedCount();
+    }
+
+    static boolean hasPendingColumnWork() {
+        return COLUMN_PROCESSOR.hasPendingWork();
     }
 
     public static long getColumnsReceived() {
@@ -127,6 +132,7 @@ public final class VSSClientNetworking {
                     + ", reset=" + requestStateReset
                     + ", consumers=" + hasConsumers);
         } else {
+            ModCompat.onDisconnect();
             LodRequestManager manager = requestManager;
             requestManager = null;
             if (manager != null) {
@@ -279,8 +285,43 @@ public final class VSSClientNetworking {
         VSSLogger.info("VSS LOD resync requested: " + reason);
     }
 
+    public static int reloadXaeroMapData() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (!minecraft.isSameThread()) {
+            minecraft.execute(VSSClientNetworking::reloadXaeroMapData);
+            return -1;
+        }
+        ClientLevel level = minecraft.level;
+        LodRequestManager manager = requestManager;
+        if (!serverEnabled || manager == null || level == null
+                || !ModCompat.isXaeroMapBridgeActive()) {
+            return -1;
+        }
+        ClientLodPresenceCache.ScopeClearResult cleared = ClientLodPresenceCache.clearScopeWithDimensions(
+                ClientLodPresenceCache.currentScope());
+        manager.forceResyncWithoutGeneration(cleared.dimensions(), level.dimension());
+        COLUMN_PROCESSOR.beginSession();
+        ClientLodPresenceCache.flush();
+        VSSLogger.info("Xaero map reload requested for current server: cleared " + cleared.columns()
+                + " cached column(s) across " + cleared.dimensions().size()
+                + " known dimension(s); cache-only replay started");
+        return cleared.columns();
+    }
+
+    public static int setXaeroMapBridge(boolean enabled) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (!minecraft.isSameThread()) {
+            minecraft.execute(() -> setXaeroMapBridge(enabled));
+            return -1;
+        }
+        VSSClientConfig.CONFIG.enableXaeroMapBridge = enabled;
+        VSSClientConfig.CONFIG.normalizeAndSave();
+        return enabled ? 1 : 0;
+    }
+
     @SubscribeEvent
     public static void onClientLogin(ClientPlayerNetworkEvent.LoggingIn event) {
+        ModCompat.onDisconnect();
         serverEnabled = false;
         serverLodDistance = 0;
         waitingForHandshake = false;
@@ -311,6 +352,13 @@ public final class VSSClientNetworking {
         }
         COLUMN_PROCESSOR.scheduleProcessing(serverEnabled);
         ModCompat.clientTick();
+    }
+
+    @SubscribeEvent
+    public static void onRenderLevel(RenderLevelStageEvent event) {
+        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
+            ModCompat.renderFrame();
+        }
     }
 
     public static void sendBandwidthPreference() {
@@ -429,6 +477,7 @@ public final class VSSClientNetworking {
     }
 
     private static void stopClientSession(boolean resetStats) {
+        ModCompat.onDisconnect();
         LodRequestManager manager = requestManager;
         requestManager = null;
         serverEnabled = false;

@@ -35,6 +35,8 @@
   "vss.voxy_options.group.generation": "Generation (single-player/integrated server)",
   "vss.voxy_options.receive_server_lods": "Receive server LODs",
   "vss.voxy_options.receive_server_lods.tooltip": "Download Voxy LOD data from the server.",
+  "vss.voxy_options.xaero_map_bridge": "Write LODs to Xaero's World Map",
+  "vss.voxy_options.xaero_map_bridge.tooltip": "Persist received distant terrain in Xaero's World Map. Enabled by default. Use /vssclient xaero disable to turn it off, or /vssclient xaero reload to reload all cached server dimensions without generating new LODs.",
   "vss.voxy_options.off_thread_processing": "Process LOD data in background",
   "vss.voxy_options.off_thread_processing.tooltip": "Process received LOD chunks on a background thread to reduce main-thread stutter.",
   "vss.voxy_options.client_lod_distance": "Client LOD range",
@@ -137,5 +139,9 @@
   "vss.command.generation.toggle": "VSS missing LOD generation ",
   "vss.command.generation.synced": ", synced to online players",
   "vss.command.generation.saved": "VSS missing LOD generation settings saved: ",
-  "vss.command.generation.saved.details": "per-player concurrency %s, global concurrency %s; automatic: start %s/tick, submit %s packing jobs/tick, %s packing threads, %s queued packing jobs, %ss timeout"
+  "vss.command.generation.saved.details": "per-player concurrency %s, global concurrency %s; automatic: start %s/tick, submit %s packing jobs/tick, %s packing threads, %s queued packing jobs, %ss timeout",
+  "vss.command.xaero_reload.started": "Xaero map reload started; cleared %s local records and is automatically requesting existing LOD cache. The reload pass will not generate LODs, and normal automatic loading resumes afterward.",
+  "vss.command.xaero_reload.no_session": "Enable the Xaero map bridge and join a VSS-enabled world before reloading the map.",
+  "vss.command.xaero.disabled": "Xaero map loading is now disabled; reconnect or run /vssclient xaero enable to restore it.",
+  "vss.command.xaero.enabled": "Xaero map loading is now enabled."
 }

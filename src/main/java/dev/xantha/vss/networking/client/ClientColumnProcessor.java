@@ -288,6 +288,10 @@ final class ClientColumnProcessor {
         return queueSize.get() + assembler.activeLogicalColumns();
     }
 
+    boolean hasPendingWork() {
+        return processing.get() || getQueuedCount() > 0;
+    }
+
     long getColumnsDropped() {
         return columnsDropped.get();
     }

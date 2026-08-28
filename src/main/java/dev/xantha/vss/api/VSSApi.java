@@ -20,6 +20,12 @@ public final class VSSApi {
         VSSLogger.info("Registered voxel column consumer: " + consumer.getClass().getName());
     }
 
+    public static void removeColumnConsumer(VoxelColumnConsumer consumer) {
+        if (COLUMN_CONSUMERS.remove(consumer)) {
+            VSSLogger.info("Removed voxel column consumer: " + consumer.getClass().getName());
+        }
+    }
+
     public static void registerColumnProcessingConsumer(VoxelColumnProcessingConsumer consumer) {
         PROCESSING_COLUMN_CONSUMERS.add(consumer);
         VSSLogger.info("Registered voxel column processing consumer: " + consumer.getClass().getName());

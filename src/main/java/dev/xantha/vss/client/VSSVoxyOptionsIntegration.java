@@ -180,6 +180,16 @@ public final class VSSVoxyOptionsIntegration {
                             VSSVoxyOptionsIntegration::saveClientConfig),
                     sodium08BooleanOption(
                             configBuilder,
+                            "xaero_map_bridge",
+                            "vss.voxy_options.xaero_map_bridge",
+                            "vss.voxy_options.xaero_map_bridge.tooltip",
+                            "MEDIUM",
+                            true,
+                            value -> VSSClientConfig.CONFIG.enableXaeroMapBridge = value,
+                            () -> VSSClientConfig.CONFIG.enableXaeroMapBridge,
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(
+                            configBuilder,
                             "off_thread_processing",
                             "vss.voxy_options.off_thread_processing",
                             "vss.voxy_options.off_thread_processing.tooltip",
@@ -530,6 +540,13 @@ public final class VSSVoxyOptionsIntegration {
                             "MEDIUM",
                             (VSSClientConfig config, Boolean value) -> config.receiveServerLods = value,
                             config -> config.receiveServerLods),
+                    oldBooleanOption(
+                            clientStorage,
+                            "vss.voxy_options.xaero_map_bridge",
+                            "vss.voxy_options.xaero_map_bridge.tooltip",
+                            "MEDIUM",
+                            (VSSClientConfig config, Boolean value) -> config.enableXaeroMapBridge = value,
+                            config -> config.enableXaeroMapBridge),
                     oldBooleanOption(
                             clientStorage,
                             "vss.voxy_options.off_thread_processing",

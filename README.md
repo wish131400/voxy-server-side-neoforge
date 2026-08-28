@@ -8,7 +8,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.2.10-neoforge-1.21.1` |
+| VSS | `0.2.11-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
@@ -27,7 +27,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 - NeoForge `21.1.x`
 - VSS
-- Voxy
+- Voxy，或仅安装 Xaero's World Map 作为远景地图消费者
 - Sodium 兼容渲染环境
 - 可选但推荐(带宽压缩模组)：[ZstdNet](https://www.curseforge.com/minecraft/mc-mods/zstdnet)
 
@@ -41,6 +41,14 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 5. 客户端组装、解压并解码列数据，再交给 Voxy 或注册的 VSS API 消费者。
 
 方块发生变化时，服务端会广播脏列版本，客户端只刷新受影响的 LOD。
+
+## Xaero 世界地图加载
+
+客户端安装 [Xaero's World Map](https://modrinth.com/mod/xaeros-world-map) 后，VSS 会把服务端发送的远景列写入世界地图，使地图覆盖范围不再受原版渲染距离限制。桥接完全在客户端完成，不修改协议，也不要求安装 Voxy；原版已经加载的近处区块仍由 Xaero 自己绘制。
+
+该功能默认开启，可在 VSS 的 Embeddium/Sodium 设置页控制，需要临时关闭地图写入时执行 `/vssclient xaero disable`，恢复时执行 `/vssclient xaero enable`。执行 `/vssclient xaero reload` 会清除当前服务器所有维度的客户端列存在性记录并自动重新请求已有 LOD 缓存。
+
+Xaero `1.40.x`、`1.41.x`、`1.42.x`、`1.43.x`、`1.44.x` 和 `1.45.0` 已适配；低于 `1.40.0` 的版本不受支持，高于 `1.45.0` 的版本尚未验证。反射接口不兼容时，Xaero 桥接会自动停用，不影响 VSS/Voxy 的 LOD 功能。
 
 ## 远处玩家与兼容模组
 
@@ -79,6 +87,7 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 | `lodDistanceChunks` | `0` | 自动跟随 Voxy 距离 |
 | `desiredBandwidthKbps` | `0` | 不设个人下载上限，仍受全服总带宽限制 |
 | `offThreadSectionProcessing` | `true` | 在线程外解码和处理收到的列 |
+| `enableXaeroMapBridge` | `true` | 将服务端远景写入 Xaero 世界地图 |
 
 ## 常用命令
 
@@ -104,6 +113,8 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 
 `/vss help` 和 `/vss 帮助` 会显示每个根指令及其重要子指令的用途。
 
+Xaero 地图命令是客户端命令，不需要管理员权限：`/vssclient xaero disable`、`/vssclient xaero enable`、`/vssclient xaero reload`。
+
 并发命令修改会立即保存配置并刷新玩家会话限制，其余生成后台参数会自动重新计算。
 
 ## 缓存与排错
@@ -123,12 +134,6 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 - LOD 到达很慢时检查全服总带宽、在线玩家数量和客户端个人下载上限；默认 `8 Mbps` 约等于 `1 MB/s`，由活跃玩家动态共享。
 - 待发送数量持续增长时检查发送队列、客户端期望带宽和网络拥塞。
 - 生成排队但吞吐低时检查每 tick 启动限制，而不只是提高全服并发。
-
-## Server identity
-
-- `serverIdentity` is generated once as an 8-character code and persisted in `config/vss-server-config.json`.
-- With `sharedWorld=true` (the default), every node serving the same world must use the same `serverIdentity`; changing IP or port only renames the readable endpoint suffix in the client Voxy cache folder.
-- With `sharedWorld=false`, set a different `nodeIdentity` for each independent node. The cache key then includes both the server and node codes.
 
 ## License
 
