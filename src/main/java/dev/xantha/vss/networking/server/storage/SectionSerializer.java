@@ -7,6 +7,7 @@ import java.util.Arrays;
 import java.util.OptionalInt;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.LightLayer;
@@ -68,7 +69,11 @@ public final class SectionSerializer {
                 }
 
                 PalettedContainer<BlockState> states = section.getStates().copy();
-                PalettedContainerRO<Holder<Biome>> biomes = section.getBiomes().recreate();
+                // `recreate()` only initializes a new container from the first
+                // palette value; it drops all per-cell biome entries.  Keep a
+                // detached copy so custom biome grass/foliage colors survive
+                // asynchronous packing and transmission to Voxy.
+                PalettedContainer<Holder<Biome>> biomes = copyBiomes(level, section.getBiomes());
                 LightData skyLight = copyLightData(skyLightListener, sectionPos);
                 if (!skyLight.present()) {
                     missingSkyLight = true;
@@ -245,6 +250,33 @@ public final class SectionSerializer {
             sectionYs[i] = sections.get(i).sectionY();
         }
         return sectionYs;
+    }
+
+    private static PalettedContainer<Holder<Biome>> copyBiomes(
+            ServerLevel level,
+            PalettedContainerRO<Holder<Biome>> source) {
+        if (source instanceof PalettedContainer<?> container) {
+            @SuppressWarnings("unchecked")
+            PalettedContainer<Holder<Biome>> typed = (PalettedContainer<Holder<Biome>>) container;
+            return typed.copy();
+        }
+
+        // NeoForge normally uses PalettedContainer, but retain a serialization
+        // fallback for compatibility implementations that expose only the
+        // PalettedContainerRO interface.
+        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(source.getSerializedSize()));
+        try {
+            source.write(buf);
+            LevelChunkSection detached = new LevelChunkSection(
+                    level.registryAccess().registryOrThrow(Registries.BIOME));
+            detached.readBiomes(buf);
+            @SuppressWarnings("unchecked")
+            PalettedContainer<Holder<Biome>> typed =
+                    (PalettedContainer<Holder<Biome>>) detached.getBiomes();
+            return typed;
+        } finally {
+            buf.release();
+        }
     }
 
     static boolean hasCompleteRequiredLighting(boolean requiresSkyLight, boolean missingSkyLight) {

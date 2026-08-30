@@ -16,7 +16,8 @@ public record EncodedColumnData(
         int[] sectionYs,
         int[] sectionLengths,
         int encodedCrc32c) {
-    public static final int SCHEMA_VERSION = 4;
+    /** Bumped because older snapshots discarded the per-cell biome palette. */
+    public static final int SCHEMA_VERSION = 5;
 
     public EncodedColumnData {
         sectionYs = immutableSectionYs(sectionYs);

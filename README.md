@@ -8,7 +8,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.2.12-neoforge-1.21.1` |
+| VSS | `0.2.13-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
@@ -125,7 +125,7 @@ Xaero 地图命令是客户端命令，不需要管理员权限：`/vssclient xa
 <世界>/data/vss-column-cache/<维度>/<regionX>_<regionZ>/
 ```
 
-`.vcl` 保存列数据，`index.vci` 保存 Region 索引。需要清空缓存时先关闭服务器，再删除 `vss-column-cache`；之后的 LOD 会重新读取或生成。
+`.vcl` 保存列数据，`index.vci` 保存 Region 索引。Biome 快照修复会自动提高缓存 schema，升级后旧格式列会被视为无效并重新读取或生成；不需要手动清理。需要手动清空缓存时先关闭服务器，再删除 `vss-column-cache`。
 
 排错建议：
 
