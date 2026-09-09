@@ -1,0 +1,97 @@
+allprojects {
+    afterEvaluate {
+        sourceSets.create('rustReference') {
+            java.srcDir 'tools/rust/java'
+            compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+        }
+        tasks.register('captureRustReference', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.RustReferenceMain'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            args providers.gradleProperty('vssCaptureOutput').getOrElse('build/reports/rust-reference')
+            if (providers.gradleProperty('vssCaptureBiome').isPresent()) {
+                args providers.gradleProperty('vssCaptureBiome').get()
+            }
+        }
+        tasks.register('captureVanillaKernels', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaKernelReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            args 'tools/rust/vss-native-core/tests/fixtures/minecraft-1.21.1-kernels.jsonl'
+        }
+        tasks.register('verifyNativeNoise', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.NativeNoiseReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            args providers.gradleProperty('vssNoiseLibrary').getOrElse('tools/rust/vss-native-core/target/release/vss_native_core.dll')
+        }
+        tasks.register('referenceVanillaNoiseDependencies', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaNoiseDependencyReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            args 'tools/rust/vss-native-core/tests/fixtures/minecraft-1.21.1-noise-dependencies.jsonl'
+        }
+        tasks.register('referenceVanillaWorldgen', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaWorldgenReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            args 'tools/rust/vss-native-core/tests/fixtures/worldgen'
+        }
+        tasks.register('referenceVanillaSurface', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaSurfaceReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            args 'tools/rust/vss-native-core/tests/fixtures/worldgen'
+        }
+        tasks.register('referenceVanillaVegetation', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaVegetationReference'
+            jvmArgs '--add-opens=java.base/java.util=ALL-UNNAMED'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            args 'tools/rust/vss-native-core/tests/fixtures/worldgen'
+        }
+        tasks.register('verifyNativeWorldgen', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.NativeWorldgenReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            args providers.gradleProperty('vssWorldgenLibrary').getOrElse('tools/rust/vss-native-core/target/release/vss_native_core.dll')
+        }
+        tasks.register('verifyNativeWorldgenIntegration', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.NativeWorldgenIntegration'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '2G'
+            if (providers.gradleProperty('vssNativeLive').getOrElse('false') == 'true') args '--live'
+        }
+        tasks.register('referenceVanillaBeard', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaBeardReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            args 'tools/rust/vss-native-core/tests/fixtures/worldgen/beard.jsonl'
+        }
+        tasks.register('referenceVanillaBeehive', JavaExec) {
+            dependsOn tasks.named('rustReferenceClasses')
+            classpath = sourceSets.rustReference.runtimeClasspath
+            mainClass = 'dev.xantha.vss.client.prediction.VanillaBeehiveReference'
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            jvmArgs '--add-opens=java.base/java.util=ALL-UNNAMED'
+            args 'tools/rust/vss-native-core/tests/fixtures/worldgen'
+        }
+    }
+}

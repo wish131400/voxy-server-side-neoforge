@@ -1,0 +1,25 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        if (providers.gradleProperty('vssLiveSnapshot').isPresent()) {
+            systemProperty 'vss.liveSnapshot', providers.gradleProperty('vssLiveSnapshot').get()
+        }
+        if (providers.gradleProperty('vssTestNativeLibrary').isPresent()) {
+            systemProperty 'vss.testNativeLibrary', providers.gradleProperty('vssTestNativeLibrary').get()
+        }
+        if (providers.gradleProperty('vssEpicTerrainJars').isPresent()) {
+            systemProperty 'vss.epicTerrainJars', providers.gradleProperty('vssEpicTerrainJars').get()
+        }
+        if (providers.gradleProperty('vssFreeTerraForgedJar').isPresent()) {
+            systemProperty 'vss.freeTerraForgedJar', providers.gradleProperty('vssFreeTerraForgedJar').get()
+        }
+        if (providers.gradleProperty('vssLithostitchedJar').isPresent()) {
+            systemProperty 'vss.lithostitchedJar', providers.gradleProperty('vssLithostitchedJar').get()
+        }
+        if (providers.gradleProperty('vssTectonicJar').isPresent()) {
+            systemProperty 'vss.tectonicJar', providers.gradleProperty('vssTectonicJar').get()
+        }
+        if (providers.gradleProperty('vssVoxyJar').isPresent()) {
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+        }
+    }
+}

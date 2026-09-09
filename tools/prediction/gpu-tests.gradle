@@ -1,0 +1,6 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        systemProperty 'vss.gpuTests', 'true'
+        testLogging.showStandardStreams = true
+    }
+}

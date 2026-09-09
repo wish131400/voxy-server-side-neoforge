@@ -26,3 +26,10 @@ out/
 .idea/
 *.iml
 .vscode/
+
+# Local game state and ad-hoc build output.
+/cache/
+/config/
+/.intentionally-empty-file.o
+/b.txt
+/build_out.txt
