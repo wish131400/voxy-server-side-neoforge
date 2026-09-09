@@ -1,0 +1,22 @@
+[package]
+name = "vss-native-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Minecraft 1.21.1 terrain, surface, biome and vegetation computations for VSS predictive LOD"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+fastnoise-lite = { version = "=1.1.1", features = ["f64"] }
+md-5 = "0.10.6"
+jni = { version = "0.21.1", default-features = false }
+
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
