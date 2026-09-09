@@ -1,6 +1,5 @@
 package dev.xantha.vss.networking.client;
 
-import dev.xantha.vss.client.prediction.ClientPredictionState;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -33,12 +32,7 @@ public final class VSSClientCommands {
                                                 else source.sendFailure(Component.literal("VSS reference capture failed: " + failure.getMessage()));
                                             }));
                                     return 1;
-                                }))
-                        .executes(context -> {
-                            context.getSource().sendSuccess(
-                                    () -> Component.literal(ClientPredictionState.diagnostics()), false);
-                            return 1;
-                        }))
+                                })))
                 .then(Commands.literal("xaero")
                         .then(Commands.literal("disable")
                                 .executes(context -> {
