@@ -119,6 +119,15 @@ public final class ClientConnectionIdentity {
         return currentPresenceScope();
     }
 
+    /** Stable identity for client prediction data; unresolved sessions are not persisted. */
+    public static String currentPredictionScope() {
+        SessionIdentity session = currentSession;
+        if (session == null) return null;
+        if (session.storageIdentity() != null) return "vss:" + session.storageIdentity().cacheKey().toLowerCase(Locale.ROOT);
+        if (session.address() == null) return null;
+        return (session.realm() ? "realm:" : "server:") + session.address().toLowerCase(Locale.ROOT);
+    }
+
     public static Path currentVoxyStoragePath(Path gameDirectory) {
         if (gameDirectory == null) {
             return null;

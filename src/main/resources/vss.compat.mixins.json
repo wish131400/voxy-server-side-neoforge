@@ -16,13 +16,18 @@
     "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
+    "client.FreeTerraForgedPredictionFiltersMixin",
     "client.ClientPacketListenerServerIdentityMixin",
     "client.ClientLevelFarPlayerLeaveEventMixin",
     "client.EntityFallFlyingFlagAccessorMixin",
     "client.LevelRendererFarPlayerChunkMixin",
+    "client.SpriteContentsImageAccessor",
     "voxy.ModelBakerySubsystemShutdownMixin",
     "voxy.ModelFactoryFluidBakeOrderMixin",
+    "voxy.IrisVoxyRenderPipelineDepthMaskMixin",
+    "voxy.IrisVoxyPredictionMixin",
     "voxy.NormalRenderPipelineDepthMaskMixin",
+    "voxy.PredictionFogShaderMixin",
     "voxy.VoxyClientInstanceStoragePathMixin",
     "voxy.VoxyRenderSystemDefaultFramebufferMixin"
   ],

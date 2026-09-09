@@ -300,6 +300,10 @@ public final class PlayerRequestState {
         return (clientCapabilities & dev.xantha.vss.common.VSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0;
     }
 
+    public synchronized boolean supportsPredictiveWorldgen() {
+        return (clientCapabilities & dev.xantha.vss.common.VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) != 0;
+    }
+
     public synchronized void clearAll() {
         cancelled.clear();
         requestPositions.clear();

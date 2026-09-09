@@ -54,7 +54,9 @@ sourceSets {
         resources {
             setSrcDirs(['src/main/resources'])
             include 'META-INF/neoforge.mods.toml'
+            include 'META-INF/THIRD_PARTY_LICENSES.md'
             include 'META-INF/accesstransformer.cfg'
+            include 'META-INF/vss-natives/**'
             include 'pack.mcmeta'
             include 'icon.png'
             include 'vss.compat.mixins.json'

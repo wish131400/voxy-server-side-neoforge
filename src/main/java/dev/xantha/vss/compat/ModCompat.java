@@ -35,6 +35,11 @@ public final class ModCompat {
         return voxyLoaded ? VoxyCompat.getViewDistanceChunks() : OptionalInt.empty();
     }
 
+    /** Diagnostics for the exact-coverage sweep; empty when Voxy is absent. */
+    public static String voxyLocalIndexDiagnostics() {
+        return voxyLoaded ? VoxyCompat.localIndexDiagnostics() : "voxy-absent";
+    }
+
     public static boolean isVoxyLoaded() {
         return voxyLoaded;
     }

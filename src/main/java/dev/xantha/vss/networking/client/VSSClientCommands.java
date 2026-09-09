@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.client;
 
+import dev.xantha.vss.client.prediction.ClientPredictionState;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -12,6 +13,32 @@ public final class VSSClientCommands {
     @SubscribeEvent
     public static void register(RegisterClientCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("vssclient")
+                .then(Commands.literal("stats")
+                        .executes(context -> {
+                            context.getSource().sendSuccess(
+                                    () -> Component.translatable(
+                                            "vss.command.client_stats",
+                                            VSSClientNetworking.diagnostics()),
+                                    false);
+                            return 1;
+                        }))
+                .then(Commands.literal("prediction")
+                        .then(Commands.literal("capture")
+                                .executes(context -> {
+                                    var source = context.getSource();
+                                    source.sendSuccess(() -> Component.literal("VSS: collecting Rust reference data in the background..."), false);
+                                    dev.xantha.vss.client.prediction.RustReferenceExport.start().whenComplete((path, failure) ->
+                                            net.minecraft.client.Minecraft.getInstance().execute(() -> {
+                                                if (failure == null) source.sendSuccess(() -> Component.literal("VSS reference data: " + path), false);
+                                                else source.sendFailure(Component.literal("VSS reference capture failed: " + failure.getMessage()));
+                                            }));
+                                    return 1;
+                                }))
+                        .executes(context -> {
+                            context.getSource().sendSuccess(
+                                    () -> Component.literal(ClientPredictionState.diagnostics()), false);
+                            return 1;
+                        }))
                 .then(Commands.literal("xaero")
                         .then(Commands.literal("disable")
                                 .executes(context -> {

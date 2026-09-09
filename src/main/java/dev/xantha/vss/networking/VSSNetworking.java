@@ -14,6 +14,7 @@ import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.ServerIdentityS2CPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
+import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.networking.server.ServerIdentityConfigurationTask;
 import java.lang.reflect.InvocationTargetException;
@@ -55,6 +56,7 @@ public final class VSSNetworking {
         registrar.playToClient(VoxelColumnS2CPayload.TYPE, VoxelColumnS2CPayload.STREAM_CODEC, VSSNetworking::handleVoxelColumn);
         registrar.playToClient(FarPlayersS2CPayload.TYPE, FarPlayersS2CPayload.STREAM_CODEC, VSSNetworking::handleFarPlayers);
         registrar.playToClient(HandshakeRequestS2CPayload.TYPE, HandshakeRequestS2CPayload.STREAM_CODEC, VSSNetworking::handleHandshakeRequest);
+        registrar.playToClient(WorldgenProfileS2CPayload.TYPE, WorldgenProfileS2CPayload.STREAM_CODEC, VSSNetworking::handleWorldgenProfile);
     }
 
     public static void registerConfigurationTasks(RegisterConfigurationTasksEvent event) {
@@ -106,6 +108,10 @@ public final class VSSNetworking {
 
     private static void handleHandshakeRequest(HandshakeRequestS2CPayload payload, IPayloadContext context) {
         invokeClientHandler("handleHandshakeRequest", new Class<?>[] {HandshakeRequestS2CPayload.class}, payload);
+    }
+
+    private static void handleWorldgenProfile(WorldgenProfileS2CPayload payload, IPayloadContext context) {
+        invokeClientHandler("handleWorldgenProfile", new Class<?>[] {WorldgenProfileS2CPayload.class}, payload);
     }
 
     private static void handleServerIdentity(ServerIdentityS2CPayload payload, IPayloadContext context) {

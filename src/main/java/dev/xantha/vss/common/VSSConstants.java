@@ -4,10 +4,12 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 44;
+    public static final int PROTOCOL_VERSION = 46;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     public static final int CAPABILITY_ZSTD_COLUMNS = 1 << 1;
+    /** Client can receive VSS worldgen metadata and generate deterministic far predictions. */
+    public static final int CAPABILITY_PREDICTIVE_WORLDGEN = 1 << 2;
     public static final int MAX_BATCH_CHUNK_REQUESTS = 1024;
     public static final int MAX_BATCH_RESPONSES = 4096;
     public static final int MAX_DIRTY_COLUMN_POSITIONS = 10240;

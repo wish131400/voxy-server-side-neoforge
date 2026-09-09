@@ -12,6 +12,7 @@ import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.HandshakeC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
+import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.server.MinecraftServer;
@@ -42,6 +43,11 @@ public final class PlayerSessionManager {
                 payload.capabilities(),
                 "Player");
         VSSNetworking.sendToPlayer(player, config);
+        if (config.enabled()
+                && (payload.capabilities() & VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) != 0
+                && VSSServerConfig.CONFIG.enablePredictionSync) {
+            sendWorldgenProfile(player.server, player);
+        }
     }
 
     public void bumpAndRefresh(MinecraftServer server) {
@@ -58,6 +64,13 @@ public final class PlayerSessionManager {
             ServerPlayer player = server.getPlayerList().getPlayer(uuid);
             if (player != null) {
                 sendSessionConfig(player);
+                PlayerRequestState state = playerRegistry.get(uuid);
+                if (state != null
+                        && state.supportsPredictiveWorldgen()
+                        && VSSServerConfig.CONFIG.enabled
+                        && VSSServerConfig.CONFIG.enablePredictionSync) {
+                    sendWorldgenProfile(server, player);
+                }
             }
         }
     }
@@ -129,7 +142,23 @@ public final class PlayerSessionManager {
         if (LodByteCompression.isZstdAvailable()) {
             capabilities |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
         }
+        if (VSSServerConfig.CONFIG.enablePredictionSync) {
+            capabilities |= VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN;
+        }
         return capabilities;
+    }
+
+    private void sendWorldgenProfile(MinecraftServer server, ServerPlayer player) {
+        try {
+            WorldgenProfileS2CPayload payload = WorldgenProfileHolder.payloadFor(server, configRevision.get());
+            VSSNetworking.sendToPlayer(player, payload);
+        } catch (RuntimeException exception) {
+            // A third-party generator may expose a density codec unavailable
+            // to this runtime. Keep the VSS session alive and fall back to
+            // authoritative columns instead of failing the login.
+            VSSLogger.warn("VSS could not encode the worldgen profile for "
+                    + player.getGameProfile().getName() + "; predictive LOD disabled", exception);
+        }
     }
 
     public static boolean isCompatibleClient(int clientProtocolVersion, int clientCapabilities) {

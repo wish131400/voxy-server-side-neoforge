@@ -9,7 +9,7 @@ import java.util.Map;
 
 public class VSSServerConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-server-config.json";
-    public static final String CURRENT_CONFIG_VERSION = "v0.2.10";
+    public static final String CURRENT_CONFIG_VERSION = "v0.2.13";
     public static final int SERVER_IDENTITY_LENGTH = ServerStorageIdentity.SERVER_IDENTITY_LENGTH;
     public static final int MAX_NODE_IDENTITY_LENGTH = ServerStorageIdentity.MAX_NODE_IDENTITY_LENGTH;
     public static final int MIN_LOD_DISTANCE_CHUNKS = 1;
@@ -124,6 +124,9 @@ public class VSSServerConfig extends JsonConfig {
     public boolean enablePersistentColumnCache = true;
     public boolean enablePersistentColumnCompression = true;
     public boolean enableNetworkColumnCompression = true;
+    /** Send the VSS worldgen profile used by the client-side prediction sampler. */
+    @SerializedName("enablePredictionSync")
+    public boolean enablePredictionSync = true;
     public int persistentColumnCacheMaxMiB = 1024;
     public int persistentColumnCacheMaxEntries = 250000;
     public int persistentColumnCacheWriteQueueLimit = 128;
@@ -183,6 +186,7 @@ public class VSSServerConfig extends JsonConfig {
         help.put("enablePersistentColumnCache", "是否启用世界持久化 .vcl 缓存；默认 true。");
         help.put("enablePersistentColumnCompression", "是否压缩持久化 .vcl 数据；默认 true。");
         help.put("enableNetworkColumnCompression", "是否压缩网络 LOD 数据；默认 true。");
+        help.put("enablePredictionSync", "是否同步种子和维度生成元数据，让客户端生成远处预测地形；默认 true。");
         help.put("persistentColumnCacheMaxMiB", "持久化列缓存大小，单位 MiB；默认 1024；范围 64-65536。");
         help.put("persistentColumnCacheMaxEntries", "持久化列缓存最大条目数；默认 250000；范围 1024-10000000。");
         help.put("persistentColumnCacheWriteQueueLimit", "持久化缓存写入队列上限；默认 128；范围 1-10000。");

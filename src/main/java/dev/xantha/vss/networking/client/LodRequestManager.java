@@ -5,6 +5,7 @@ import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.compat.ModCompat;
+import dev.xantha.vss.client.prediction.ClientPredictionState;
 import dev.xantha.vss.config.VSSClientConfig;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.payloads.BatchChunkRequestC2SPayload;
@@ -43,6 +44,8 @@ public final class LodRequestManager {
     private static final int BOOSTED_SCAN_CANDIDATES_PER_TICK = 32768;
     private static final int MAX_REQUESTS_PER_TICK = 256;
     private static final int INTEGRATED_MAX_REQUESTS_PER_TICK = 96;
+    /** Keep VSS/Voxy moving while Xaero drains its own map-update backlog. */
+    private static final int XAERO_BACKPRESSURE_MAX_REQUESTS_PER_TICK = 8;
     private static final long MAX_SCAN_NANOS_PER_TICK = 1_500_000L;
     private static final long INTEGRATED_MAX_SCAN_NANOS_PER_TICK = 750_000L;
     private static final int SCAN_DEADLINE_CHECK_INTERVAL = 64;
@@ -685,9 +688,6 @@ public final class LodRequestManager {
     }
 
     private void scanAndSend(ClientLevel level, LocalPlayer player) {
-        if (ModCompat.shouldBackpressureXaeroMapInput()) {
-            return;
-        }
         int playerCx = player.getBlockX() >> 4;
         int playerCz = player.getBlockZ() >> 4;
         int lodDistance = getEffectiveLodDistance();
@@ -700,6 +700,8 @@ public final class LodRequestManager {
         int maxCount = Math.min(
                 Math.min(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, requestWindow.remaining()),
                 maxRequestsPerTick());
+        maxCount = limitForXaeroBackpressure(maxCount,
+                ModCompat.shouldBackpressureXaeroMapInput());
         int[] requestIds = requestBuffers.requestIds;
         long[] positions = requestBuffers.positions;
         long[] timestamps = requestBuffers.timestamps;
@@ -1246,6 +1248,16 @@ public final class LodRequestManager {
         if (timestamp > 0L && !dirty) {
             return false;
         }
+        // VSS prediction owns the distant band once a tile is ready. Dirty
+        // columns and the near band always remain authoritative.
+        if (!dirty && timestamp <= 0L && lastDimension != null
+                && ClientPredictionState.shouldDeferExactColumn(
+                        lastDimension,
+                        PositionUtil.unpackX(packed),
+                        PositionUtil.unpackZ(packed),
+                        now)) {
+            return false;
+        }
         if (dirty) {
             return true;
         }
@@ -1422,6 +1434,12 @@ public final class LodRequestManager {
         timestamps[count] = requestTimestampFor(packed);
         allowGeneration[count] = generationCandidate;
         cacheProbeFlags[count] = cacheProbeRequest;
+        if (lastDimension != null) {
+            ClientPredictionState.markRequested(
+                    lastDimension,
+                    PositionUtil.unpackX(packed),
+                    PositionUtil.unpackZ(packed));
+        }
         return count + 1;
     }
 
@@ -1438,7 +1456,20 @@ public final class LodRequestManager {
         return dirtyTimestamp > 1L ? dirtyTimestamp - 1L : 1L;
     }
 
+    int effectiveLodDistanceChunks() {
+        return getEffectiveLodDistance();
+    }
+
+    static int limitForXaeroBackpressure(int maxCount, boolean backpressure) {
+        if (maxCount <= 0) return 0;
+        return backpressure ? Math.min(maxCount, XAERO_BACKPRESSURE_MAX_REQUESTS_PER_TICK)
+                : maxCount;
+    }
+
     private int getEffectiveLodDistance() {
+        if (sessionConfig == null || !sessionConfig.enabled()) {
+            return 0;
+        }
         int serverDistance = sessionConfig.lodDistanceChunks();
         int clientDistance = VSSClientConfig.CONFIG.lodDistanceChunks;
         int hardClientLimit = VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS;

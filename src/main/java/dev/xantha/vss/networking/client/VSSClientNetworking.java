@@ -2,9 +2,12 @@ package dev.xantha.vss.networking.client;
 
 import dev.xantha.vss.api.VSSApi;
 import dev.xantha.vss.api.VoxelColumnData;
+import dev.xantha.vss.client.prediction.ClientPredictionState;
+import dev.xantha.vss.client.prediction.PredictionRenderer;
 import dev.xantha.vss.networking.client.ClientColumnTransferAssembler.AssembledColumn;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.config.VSSClientConfig;
@@ -19,6 +22,7 @@ import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
+import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -29,11 +33,14 @@ import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 public final class VSSClientNetworking {
     private static volatile boolean serverEnabled;
     private static volatile int serverLodDistance;
+    private static volatile int serverCapabilities;
+    private static volatile long sessionConfigRevision;
     private static volatile boolean waitingForHandshake;
     private static volatile boolean handshakeSent;
     private static int handshakeRetryTicks;
@@ -61,6 +68,33 @@ public final class VSSClientNetworking {
         return serverLodDistance;
     }
 
+    /** Returns the authoritative VSS radius after server, client and Voxy limits. */
+    public static int getEffectiveLodDistanceChunks() {
+        LodRequestManager manager = requestManager;
+        if (manager != null) {
+            return manager.effectiveLodDistanceChunks();
+        }
+        if (!serverEnabled || serverLodDistance <= 0) {
+            return 0;
+        }
+        int clientDistance = VSSClientConfig.CONFIG.lodDistanceChunks;
+        int hardClientLimit = VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS;
+        if (clientDistance > 0) {
+            return Math.min(Math.min(clientDistance, serverLodDistance), hardClientLimit);
+        }
+        int voxyDistance = ModCompat.getVoxyViewDistanceChunks().orElse(hardClientLimit);
+        return Math.min(Math.min(serverLodDistance, voxyDistance), hardClientLimit);
+    }
+
+    public static int getServerCapabilities() {
+        return serverCapabilities;
+    }
+
+    public static boolean isPredictionActive() {
+        return (getServerCapabilities() & VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) != 0
+                && VSSClientConfig.CONFIG.enablePrediction;
+    }
+
     static int getQueuedColumnCount() {
         return COLUMN_PROCESSOR.getQueuedCount();
     }
@@ -79,6 +113,17 @@ public final class VSSClientNetworking {
 
     public static long getColumnsDropped() {
         return COLUMN_PROCESSOR.getColumnsDropped();
+    }
+
+    public static String diagnostics() {
+        return "session=" + isClientLodSessionActive()
+                + ",serverDistance=" + serverLodDistance
+                + ",effectiveDistance=" + getEffectiveLodDistanceChunks()
+                + ",predictionCapability=" + ((serverCapabilities & VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) != 0)
+                + ",prediction=" + ClientPredictionState.diagnostics()
+                + ",columns=" + columnsReceived.get()
+                + ",columnBytes=" + bytesReceived.get()
+                + ",queuedColumns=" + COLUMN_PROCESSOR.getQueuedCount();
     }
 
     public static void handleSessionConfig(SessionConfigS2CPayload payload) {
@@ -103,6 +148,12 @@ public final class VSSClientNetworking {
         handshakeRetryTicks = 0;
         serverEnabled = payload.enabled();
         serverLodDistance = payload.lodDistanceChunks();
+        serverCapabilities = payload.serverCapabilities();
+        sessionConfigRevision = payload.configRevision();
+        if (!payload.enabled()
+                || (payload.serverCapabilities() & VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) == 0) {
+            ClientPredictionState.clear();
+        }
         if (payload.enabled()) {
             LodRequestManager manager = requestManager;
             boolean newSession = manager == null || !wasEnabled;
@@ -183,6 +234,7 @@ public final class VSSClientNetworking {
             ClientLevel level = Minecraft.getInstance().level;
             if (level != null) {
                 COLUMN_PROCESSOR.invalidatePositions(level.dimension(), payload.dirtyPositions());
+                ClientPredictionState.onDirtyColumns(level.dimension(), payload.dirtyPositions());
             }
         }
     }
@@ -245,12 +297,33 @@ public final class VSSClientNetworking {
                 column.chunkZ(),
                 column.columnTimestamp(),
                 columnData.replacementSectionYs(),
-                () -> VSSApi.dispatchColumnAndReport(
-                        level,
-                        column.dimension(),
-                        column.chunkX(),
-                        column.chunkZ(),
-                        columnData));
+                () -> {
+                    boolean accepted = VSSApi.dispatchColumnAndReport(
+                            level,
+                            column.dimension(),
+                            column.chunkX(),
+                            column.chunkZ(),
+                            columnData);
+                    if (accepted) {
+                        ClientPredictionState.onExactColumn(column.dimension(), column.chunkX(), column.chunkZ(), columnData);
+                    }
+                    return accepted;
+                });
+    }
+
+    public static void handleWorldgenProfile(WorldgenProfileS2CPayload payload) {
+        if (!isClientWorldReady() || !serverEnabled
+                || (serverCapabilities & VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN) == 0) {
+            return;
+        }
+        if (payload.revision() < sessionConfigRevision) {
+            VSSLogger.debug("Ignoring stale VSS prediction profile revision " + payload.revision()
+                    + " (current " + sessionConfigRevision + ")");
+            return;
+        }
+        ClientPredictionState.accept(payload);
+        VSSLogger.info("VSS prediction profile received; decoding: dimensions=" + payload.dimensions().size()
+                + ", revision=" + payload.revision());
     }
 
     public static void onColumnTransferFailed(
@@ -265,6 +338,7 @@ public final class VSSClientNetworking {
             return;
         }
         LodRequestManager manager = requestManager;
+        ClientPredictionState.releaseRequested(dimension, cx, cz);
         if (manager != null) {
             manager.onColumnTransferFailed(requestId, transferId, dimension, cx, cz);
         }
@@ -321,9 +395,12 @@ public final class VSSClientNetworking {
 
     @SubscribeEvent
     public static void onClientLogin(ClientPlayerNetworkEvent.LoggingIn event) {
+        ClientPredictionState.clear();
         ModCompat.onDisconnect();
         serverEnabled = false;
         serverLodDistance = 0;
+        serverCapabilities = 0;
+        sessionConfigRevision = 0L;
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
@@ -350,8 +427,16 @@ public final class VSSClientNetworking {
         if (manager != null && serverEnabled) {
             manager.tick();
         }
+        ClientPredictionState.tick();
         COLUMN_PROCESSOR.scheduleProcessing(serverEnabled);
         ModCompat.clientTick();
+    }
+
+    @SubscribeEvent
+    public static void onRenderFrame(RenderFrameEvent.Pre event) {
+        // PredictionRenderer is called through this registered subscriber.
+        // Its per-frame budget and retired GPU resources need the same route.
+        PredictionRenderer.onRenderFrame(event);
     }
 
     @SubscribeEvent
@@ -359,6 +444,10 @@ public final class VSSClientNetworking {
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_ENTITIES) {
             ModCompat.renderFrame();
         }
+        // Keep prediction rendering on the already registered networking
+        // subscriber. This avoids depending on static subscriber discovery
+        // for a second class and preserves deterministic ordering with Voxy.
+        PredictionRenderer.onRenderLevel(event);
     }
 
     public static void sendBandwidthPreference() {
@@ -446,6 +535,9 @@ public final class VSSClientNetworking {
 
     private static int clientCapabilities() {
         int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
+        if (VSSClientConfig.CONFIG.enablePrediction) {
+            clientCaps |= VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN;
+        }
         if (LodByteCompression.isZstdAvailable()) {
             clientCaps |= VSSConstants.CAPABILITY_ZSTD_COLUMNS;
         }
@@ -477,11 +569,14 @@ public final class VSSClientNetworking {
     }
 
     private static void stopClientSession(boolean resetStats) {
+        ClientPredictionState.clear();
         ModCompat.onDisconnect();
         LodRequestManager manager = requestManager;
         requestManager = null;
         serverEnabled = false;
         serverLodDistance = 0;
+        serverCapabilities = 0;
+        sessionConfigRevision = 0L;
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;

@@ -8,6 +8,7 @@ import dev.xantha.vss.networking.payloads.HandshakeRequestS2CPayload;
 import dev.xantha.vss.networking.payloads.ServerIdentityS2CPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
+import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
@@ -71,6 +72,10 @@ public final class VSSClientPacketHandlers {
         runOnClientThread(() -> VSSClientNetworking.handleHandshakeRequest(payload));
     }
 
+    public static void handleWorldgenProfile(WorldgenProfileS2CPayload payload) {
+        runOnClientThread(() -> VSSClientNetworking.handleWorldgenProfile(payload));
+    }
+
     private static void handleDirectPayload(CustomPacketPayload payload) {
         if (payload instanceof SessionConfigS2CPayload sessionConfig) {
             VSSClientNetworking.handleSessionConfig(sessionConfig);
@@ -84,6 +89,8 @@ public final class VSSClientPacketHandlers {
             FarPlayerClientRenderer.handleFarPlayers(farPlayers);
         } else if (payload instanceof HandshakeRequestS2CPayload handshakeRequest) {
             VSSClientNetworking.handleHandshakeRequest(handshakeRequest);
+        } else if (payload instanceof WorldgenProfileS2CPayload worldgenProfile) {
+            VSSClientNetworking.handleWorldgenProfile(worldgenProfile);
         }
     }
 

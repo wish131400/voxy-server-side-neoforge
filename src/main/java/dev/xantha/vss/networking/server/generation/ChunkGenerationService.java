@@ -97,6 +97,17 @@ public final class ChunkGenerationService {
     }
 
     public synchronized void applyRuntimeConfig() {
+        if (!config.enableChunkGeneration) {
+            List<GenerationResult> cancelled = new ArrayList<>();
+            for (RequestKey key : List.copyOf(requestIndex.keySet())) {
+                GenerationLocation location = requestIndex.get(key);
+                if (location != null && location.stage() != GenerationStage.PACKING) {
+                    cancelIndexedRequestAsStale(key, null, cancelled);
+                }
+            }
+            deferredGenerationResults.addAll(cancelled);
+            queuedPriority.clear();
+        }
         ThreadPoolExecutor executor = this.packingExecutor;
         if (executor != null && !executor.isShutdown()) {
             resizePackingExecutor(executor, config.automaticGenerationPackingThreads());
@@ -131,6 +142,7 @@ public final class ChunkGenerationService {
             int cz,
             long minimumTimestamp,
             boolean priority) {
+        if (!config.enableChunkGeneration) return false;
         PendingGenerationKey key = new PendingGenerationKey(level.dimension(), cx, cz);
         currentGenerationView(playerUuid, level);
         GenerationCallback callback = new GenerationCallback(playerUuid, requestState, requestId, priority);
@@ -502,7 +514,7 @@ public final class ChunkGenerationService {
     }
 
     private void promoteQueued() {
-        if (queued.isEmpty() || startsThisTick >= config.automaticGenerationStartsPerTick()) {
+        if (!config.enableChunkGeneration || queued.isEmpty() || startsThisTick >= config.automaticGenerationStartsPerTick()) {
             return;
         }
 

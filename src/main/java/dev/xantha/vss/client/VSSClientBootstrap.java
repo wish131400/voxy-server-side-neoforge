@@ -4,6 +4,8 @@ import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.networking.client.FarPlayerClientRenderer;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import dev.xantha.vss.networking.client.VSSClientCommands;
+import dev.xantha.vss.client.prediction.PredictionRenderer;
+import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.neoforge.common.NeoForge;
 
@@ -11,7 +13,7 @@ public final class VSSClientBootstrap {
     private VSSClientBootstrap() {
     }
 
-    public static void init(ModContainer modContainer) {
+    public static void init(IEventBus modBus, ModContainer modContainer) {
         VSSClientConfigScreens.register(modContainer);
         VSSSodiumOptionsEventBridge.register();
         VSSEmbeddiumOptionsEventBridge.register();

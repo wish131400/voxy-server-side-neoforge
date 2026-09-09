@@ -27,15 +27,15 @@ public final class VSSMod {
         NeoForge.EVENT_BUS.register(FarPlayerBroadcaster.class);
         NeoForge.EVENT_BUS.register(VSSServerCommands.class);
         if (FMLEnvironment.dist.isClient()) {
-            initClient(modContainer);
+            initClient(modBus, modContainer);
         }
     }
 
-    private static void initClient(ModContainer modContainer) {
+    private static void initClient(IEventBus modBus, ModContainer modContainer) {
         try {
             Class<?> bootstrapClass = Class.forName(CLIENT_BOOTSTRAP_CLASS);
-            Method init = bootstrapClass.getMethod("init", ModContainer.class);
-            init.invoke(null, modContainer);
+            Method init = bootstrapClass.getMethod("init", IEventBus.class, ModContainer.class);
+            init.invoke(null, modBus, modContainer);
         } catch (InvocationTargetException e) {
             Throwable cause = e.getCause();
             if (cause instanceof RuntimeException runtimeException) {

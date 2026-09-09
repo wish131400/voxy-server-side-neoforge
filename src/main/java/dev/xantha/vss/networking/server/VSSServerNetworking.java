@@ -15,6 +15,7 @@ import dev.xantha.vss.networking.server.sending.GeneratedColumnFlusher;
 import dev.xantha.vss.networking.server.sending.ColumnPayloadSplitter;
 import dev.xantha.vss.networking.server.sending.QueuedColumnSender;
 import dev.xantha.vss.networking.server.session.PlayerSessionManager;
+import dev.xantha.vss.networking.server.session.WorldgenProfileHolder;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
 import dev.xantha.vss.networking.server.state.PlayerSendQueue;
@@ -172,6 +173,10 @@ public final class VSSServerNetworking {
     }
 
     public static void bumpAndRefreshSessionConfigs(MinecraftServer server) {
+        if (!server.isSameThread()) {
+            server.execute(() -> bumpAndRefreshSessionConfigs(server));
+            return;
+        }
         applyRuntimeConfig();
         SESSION_MANAGER.bumpAndRefresh(server);
     }
@@ -360,12 +365,22 @@ public final class VSSServerNetworking {
 
     @SubscribeEvent
     public static void onServerStarting(ServerStartingEvent event) {
+        WorldgenProfileHolder.clear();
         SERVER_RUNTIME.onServerStarting();
+    }
+
+    @SubscribeEvent
+    public static void onWorldgenDataReload(net.neoforged.neoforge.event.OnDatapackSyncEvent event) {
+        if (event.getPlayer() == null) {
+            WorldgenProfileHolder.clear();
+            bumpAndRefreshSessionConfigs(event.getPlayerList().getServer());
+        }
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
         SERVER_RUNTIME.onServerStopping(event.getServer());
+        WorldgenProfileHolder.clear();
     }
 
 }

@@ -38,6 +38,23 @@ class ClientConnectionIdentityTest {
     }
 
     @Test
+    void predictionUsesStableServerIdentityAndRejectsUnknownSessions() {
+        assertNull(ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.beginSession((String) null, false);
+        assertNull(ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.updateSession("Example.COM:25565", false);
+        assertEquals("server:example.com:25565", ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.acceptServerIdentity("7K4M9PXA", false, "node-a");
+        assertEquals("vss:7k4m9pxa-node-a", ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.updateSession("new.example:25566", false);
+        assertEquals("vss:7k4m9pxa-node-a", ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.acceptServerIdentity("7K4M9PXA", true, "node-b");
+        assertEquals("vss:7k4m9pxa", ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.endSession();
+        assertNull(ClientConnectionIdentity.currentPredictionScope());
+    }
+
+    @Test
     void unresolvedConnectionNeverReusesThePreviousServer() {
         ClientConnectionIdentity.beginSession("alpha.example:25565", false);
         String alphaScope = ClientConnectionIdentity.currentPresenceScope();

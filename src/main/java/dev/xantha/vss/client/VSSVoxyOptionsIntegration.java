@@ -197,14 +197,37 @@ public final class VSSVoxyOptionsIntegration {
                             true,
                             value -> VSSClientConfig.CONFIG.offThreadSectionProcessing = value,
                             () -> VSSClientConfig.CONFIG.offThreadSectionProcessing,
-                            VSSVoxyOptionsIntegration::saveClientConfig)));
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "prediction",
+                            "vss.voxy_options.prediction",
+                            "vss.voxy_options.prediction.tooltip",
+                            "HIGH",
+                            true,
+                            value -> VSSClientConfig.CONFIG.enablePrediction = value,
+                            () -> VSSClientConfig.CONFIG.enablePrediction,
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(configBuilder, "prediction_trees", "vss.voxy_options.prediction_trees",
+                            "vss.voxy_options.prediction_trees.tooltip", "HIGH", true,
+                            value -> VSSClientConfig.CONFIG.predictionTrees = value,
+                            () -> VSSClientConfig.CONFIG.predictionTrees, VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(configBuilder, "prediction_structures", "vss.voxy_options.prediction_structures",
+                            "vss.voxy_options.prediction_structures.tooltip", "HIGH", true,
+                            value -> VSSClientConfig.CONFIG.predictionStructures = value,
+                            () -> VSSClientConfig.CONFIG.predictionStructures, VSSVoxyOptionsIntegration::saveClientConfig)));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.client_limits",
-                    sodium08IntOption(
-                            configBuilder,
-                            "client_lod_distance",
+                     sodium08IntOption(configBuilder, "prediction_surface_distance", "vss.voxy_options.prediction_surface_distance",
+                             "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 768, 128, 2048, 128,
+                             value -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks = value,
+                             () -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks,
+                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig),
+                     sodium08IntOption(
+                             configBuilder,
+                             "client_lod_distance",
                             "vss.voxy_options.client_lod_distance",
                             "vss.voxy_options.client_lod_distance.tooltip",
                             "LOW",
@@ -213,10 +236,24 @@ public final class VSSVoxyOptionsIntegration {
                             VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS,
                             16,
                             value -> VSSClientConfig.CONFIG.lodDistanceChunks = value,
-                            () -> VSSClientConfig.CONFIG.lodDistanceChunks,
-                            VSSVoxyOptionsIntegration::formatChunksAuto,
-                            VSSVoxyOptionsIntegration::saveClientConfig),
-                    sodium08IntOption(
+                             () -> VSSClientConfig.CONFIG.lodDistanceChunks,
+                             VSSVoxyOptionsIntegration::formatChunksAuto,
+                             VSSVoxyOptionsIntegration::saveClientConfig),
+                     sodium08IntOption(
+                             configBuilder,
+                             "prediction_distance_blocks",
+                             "vss.voxy_options.prediction_distance_blocks",
+                             "vss.voxy_options.prediction_distance_blocks.tooltip",
+                             "HIGH",
+                             8_192,
+                             VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
+                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
+                             1_024,
+                             value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,
+                             () -> VSSClientConfig.CONFIG.predictionDistanceBlocks,
+                             VSSVoxyOptionsIntegration::formatBlocks,
+                             VSSVoxyOptionsIntegration::saveClientConfig),
+                     sodium08IntOption(
                             configBuilder,
                             "desired_bandwidth",
                             "vss.voxy_options.desired_bandwidth",
@@ -257,6 +294,16 @@ public final class VSSVoxyOptionsIntegration {
                             true,
                             value -> VSSServerConfig.CONFIG.enableChunkGeneration = value,
                             () -> VSSServerConfig.CONFIG.enableChunkGeneration,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08BooleanOption(
+                            configBuilder,
+                            "prediction_sync",
+                            "vss.voxy_options.prediction_sync",
+                            "vss.voxy_options.prediction_sync.tooltip",
+                            "HIGH",
+                            true,
+                            value -> VSSServerConfig.CONFIG.enablePredictionSync = value,
+                            () -> VSSServerConfig.CONFIG.enablePredictionSync,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
 
                 invokeByName(page, "addOptionGroup", sodium08Group(
@@ -553,21 +600,50 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.off_thread_processing.tooltip",
                             "LOW",
                             (VSSClientConfig config, Boolean value) -> config.offThreadSectionProcessing = value,
-                            config -> config.offThreadSectionProcessing)));
+                            config -> config.offThreadSectionProcessing),
+                    oldBooleanOption(
+                            clientStorage,
+                            "vss.voxy_options.prediction",
+                            "vss.voxy_options.prediction.tooltip",
+                            "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.enablePrediction = value,
+                            config -> config.enablePrediction),
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",
+                            "vss.voxy_options.prediction_trees.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionTrees = value, config -> config.predictionTrees),
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_structures",
+                            "vss.voxy_options.prediction_structures.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionStructures = value, config -> config.predictionStructures)));
 
             groups.add(oldGroup(
-                    oldIntOption(
-                            clientStorage,
-                            "vss.voxy_options.client_lod_distance",
+                     oldIntOption(clientStorage, "vss.voxy_options.prediction_surface_distance",
+                             "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 128, 2048, 128,
+                             VSSVoxyOptionsIntegration::formatBlocks,
+                             (VSSClientConfig config, Integer value) -> config.predictionSurfaceDistanceBlocks = value,
+                             config -> config.predictionSurfaceDistanceBlocks),
+                     oldIntOption(
+                             clientStorage,
+                             "vss.voxy_options.client_lod_distance",
                             "vss.voxy_options.client_lod_distance.tooltip",
                             "LOW",
                             0,
                             VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS,
                             16,
-                            VSSVoxyOptionsIntegration::formatChunksAuto,
-                            (VSSClientConfig config, Integer value) -> config.lodDistanceChunks = value,
-                            config -> config.lodDistanceChunks),
-                    oldIntOption(
+                             VSSVoxyOptionsIntegration::formatChunksAuto,
+                             (VSSClientConfig config, Integer value) -> config.lodDistanceChunks = value,
+                             config -> config.lodDistanceChunks),
+                     oldIntOption(
+                             clientStorage,
+                             "vss.voxy_options.prediction_distance_blocks",
+                              "vss.voxy_options.prediction_distance_blocks.tooltip",
+                              "HIGH",
+                              VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
+                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
+                             1_024,
+                             VSSVoxyOptionsIntegration::formatBlocks,
+                             (VSSClientConfig config, Integer value) -> config.predictionDistanceBlocks = value,
+                             config -> config.predictionDistanceBlocks),
+                     oldIntOption(
                             clientStorage,
                             "vss.voxy_options.desired_bandwidth",
                             "vss.voxy_options.desired_bandwidth.tooltip",
@@ -597,7 +673,14 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation.tooltip",
                             "HIGH",
                             (VSSServerConfig config, Boolean value) -> config.enableChunkGeneration = value,
-                            config -> config.enableChunkGeneration)));
+                            config -> config.enableChunkGeneration),
+                    oldBooleanOption(
+                            serverStorage,
+                            "vss.voxy_options.prediction_sync",
+                            "vss.voxy_options.prediction_sync.tooltip",
+                            "HIGH",
+                            (VSSServerConfig config, Boolean value) -> config.enablePredictionSync = value,
+                            config -> config.enablePredictionSync)));
 
                 groups.add(oldGroup(
                     oldBooleanOption(
@@ -1039,6 +1122,10 @@ public final class VSSVoxyOptionsIntegration {
 
     private static Component formatChunks(int value) {
         return Component.translatable("vss.voxy_options.chunks", value);
+    }
+
+    private static Component formatBlocks(int value) {
+        return Component.translatable("vss.voxy_options.blocks", value);
     }
 
     private static Component formatKbpsAuto(int value) {
