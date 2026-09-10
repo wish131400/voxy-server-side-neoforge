@@ -108,6 +108,12 @@ class PredictionFirstCoverageTest {
             blockFine.set(true);
             try {
                 enqueue(manager,first); assertTrue(entered.await(5,TimeUnit.SECONDS));
+                // A new uncovered region starts a coverage pass while an old
+                // fine job drains; it must bypass ordinary refinement slots.
+                var coverage=PredictionTileManager.class.getDeclaredField("mediumCoverage");coverage.setAccessible(true);
+                coverage.set(manager,new PredictionMediumCoverage(Set.of(preview),Set.of(preview)));
+                var coverageWaiting=PredictionTileManager.class.getDeclaredField("mediumCoveragePending");coverageWaiting.setAccessible(true);
+                coverageWaiting.setBoolean(manager,true);
                 enqueue(manager,second);enqueue(manager,preview);
                 long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
                 while(manager.readyTiles().stream().noneMatch(t->t.key().equals(preview)) && System.nanoTime()<deadline) Thread.sleep(5);
@@ -116,6 +122,8 @@ class PredictionFirstCoverageTest {
             } finally {blockFine.set(false);release.countDown();}
             awaitIdle(manager);
             waiting.setBoolean(manager,false);
+            var coverageWaiting=PredictionTileManager.class.getDeclaredField("mediumCoveragePending");coverageWaiting.setAccessible(true);
+            coverageWaiting.setBoolean(manager,false);
             enqueue(manager,preview);awaitIdle(manager);
             enqueue(manager,preview);awaitIdle(manager);
             enqueue(manager,second);awaitIdle(manager);

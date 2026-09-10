@@ -73,6 +73,7 @@ public final class PredictionTileManager implements AutoCloseable {
     private volatile VssLodFocus buildFocus;
     private volatile PredictionWorkView workView;
     private final Set<PredictionTileKey> backgroundPending = ConcurrentHashMap.newKeySet();
+    private final Set<PredictionTileKey> refinementPending = ConcurrentHashMap.newKeySet();
     private RenderSnapshot renderSnapshot;
     private volatile int surfaceRadius = 768;
     private final Set<PredictionTileKey> pending = ConcurrentHashMap.newKeySet();
@@ -200,6 +201,16 @@ public final class PredictionTileManager implements AutoCloseable {
     private int backgroundLimit() {
         return Math.min(executor.getCorePoolSize(), Math.max(1, Math.min(4,
                 VSSClientConfig.CONFIG.predictionBackgroundWorkers)));
+    }
+
+    private int refinementLimit() {
+        return Math.min(executor.getCorePoolSize(), Math.max(1, Math.min(6,
+                VSSClientConfig.CONFIG.predictionRefinementWorkers)));
+    }
+
+    private boolean ordinaryRefinement(PredictionTileKey key) {
+        return !(mediumCoveragePending && mediumCoverage.paths().contains(key))
+                && !PredictionWorkOrder.scoped(key, layout, buildFocus) && !dirtyTiles.contains(key);
     }
 
     public void tick(int centerChunkX, int centerChunkZ) {
@@ -334,6 +345,7 @@ public final class PredictionTileManager implements AutoCloseable {
         refreshQueuedWork(executor.getQueue(), pending,
                 key -> key.lod() >= 0 && key.lod() < layout.levelCount() && effectivelyDesired(key)
                         && mediumWorkAllowed(key, false)
+                        && (!ordinaryRefinement(key) || refinementPending.contains(key))
                         && (!backgroundWork(key) || backgroundPending.contains(key)),
                 (key, surface) -> dirtyTiles.contains(key) ? Integer.MIN_VALUE + 1 + key.lod()
                         : workPriority(key, surface),
@@ -686,6 +698,8 @@ public final class PredictionTileManager implements AutoCloseable {
                 + ",terrainRemaining=" + desiredKeys.stream().filter(this::terrainBuildNeeded).count()
                 + ",foregroundPending=" + pending.stream().filter(key -> !backgroundWork(key)).count()
                 + ",backgroundSlots=" + backgroundPending.stream().filter(pending::contains).count()
+                + ",refinementSlots=" + refinementPending.stream().filter(pending::contains).count()
+                + ",refinementLimit=" + refinementLimit()
                 + ",backgroundLimit=" + backgroundLimit()
                 + ",mediumSinceSurface=" + mediumSinceSurface.get()
                 + ",mediumCoveragePending=" + mediumCoveragePending
@@ -1084,6 +1098,9 @@ public final class PredictionTileManager implements AutoCloseable {
         if (!retryReady(key)) return;
         if (pending.contains(key)) return;
         backgroundPending.retainAll(pending);
+        refinementPending.retainAll(pending);
+        boolean ordinary = ordinaryRefinement(key);
+        if (ordinary && refinementPending.size() >= refinementLimit()) return;
         boolean background = backgroundWork(key);
         if (background && backgroundPending.size() >= backgroundLimit()) return;
         boolean surfaceTurn = surface && surfaceTurnReady(key);
@@ -1098,6 +1115,7 @@ public final class PredictionTileManager implements AutoCloseable {
         long revision = meshRevision.get();
         long captureEpoch = captureEpochs.getOrDefault(key, 0L);
         if (background) backgroundPending.add(key);
+        if (ordinary) refinementPending.add(key);
         VssLodLayout tileLayout = layout;
         int buildSurfaceSettings = surfaceSettings;
         try {
@@ -1110,6 +1128,9 @@ public final class PredictionTileManager implements AutoCloseable {
             activeBuildThreads.add(Thread.currentThread());
             try {
                 if (closed || paused || revision != meshRevision.get() || !effectivelyDesired(key)) return;
+                // A queued coverage/scope task may have become ordinary work.
+                // Release it for bounded admission instead of filling the CPU.
+                if (ordinaryRefinement(key) && !refinementPending.contains(key)) return;
                 if (!mediumWorkAllowed(key, surface)) return;
                 if (!surface && !terrainBuildNeeded(key)) return;
                 if (surface && !surfaceBuildReady(key)) return;
@@ -1329,11 +1350,13 @@ public final class PredictionTileManager implements AutoCloseable {
                 if (detailSlot) activeDetailBuilds.decrementAndGet();
                 if (reservation != null) reservation.close();
                 backgroundPending.remove(key);
+                refinementPending.remove(key);
                 pending.remove(key);
             }
             }));
         } catch (RejectedExecutionException rejected) {
             backgroundPending.remove(key);
+            refinementPending.remove(key);
             pending.remove(key);
             dev.xantha.vss.common.VSSLogger.debug("VSS prediction executor rejected tile " + key);
         }
@@ -1720,6 +1743,7 @@ public final class PredictionTileManager implements AutoCloseable {
         residentMemory.clear();
         pending.clear();
         backgroundPending.clear();
+        refinementPending.clear();
         pendingCaptures.clear();
         latestCaptures.clear();
         captureVersions.clear();

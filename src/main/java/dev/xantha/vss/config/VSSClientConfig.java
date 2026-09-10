@@ -30,6 +30,7 @@ public class VSSClientConfig extends JsonConfig {
     public int predictionDistanceBlocks = 8_192;
     public int predictionFineDistanceBlocks = 1_536;
     public int predictionBackgroundWorkers = 2;
+    public int predictionRefinementWorkers = 4;
     /** Prediction detail profile: low, normal, high or extreme. */
     public String predictionDetail = "normal";
     /** Include deterministic feature stamps in predicted tiles. */
@@ -72,6 +73,7 @@ public class VSSClientConfig extends JsonConfig {
         help.put("predictionDetail", "预测地形细节等级 low/normal/high/extreme；影响屏幕像素阈值。");
         help.put("predictionFineDistanceBlocks", "普通精细地形距离，单位方块；默认 1536，范围 256-4096，独立于预测远景距离；高空按实际距离降低精度，望远镜可突破此距离。");
         help.put("predictionBackgroundWorkers", "视野外地形的后台任务槽；默认 2，范围 1-4。近处和当前视野优先，已加载的远景仍保留。");
+        help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修任务槽，包含视野内地形和植被；默认 4，范围 1-6。缺失覆盖、望远镜目标和脏列修复不受此限制。");
         help.put("predictionTrees", "是否生成近处及望远镜目标区域的原版树木、草等地表植被；默认 true。");
         help.put("predictionStructures", "是否生成近处及望远镜区域的原版地表结构；默认 true。");
         help.put("predictionSurfaceDistanceBlocks", "在已知近处地形外额外细化地表的范围，单位方块；默认 768，范围 128-2048；随真实地形覆盖边界向外延伸，远处只由望远镜触发。");
@@ -101,6 +103,7 @@ public class VSSClientConfig extends JsonConfig {
         predictionSurfaceDistanceBlocks = clamp(predictionSurfaceDistanceBlocks, 128, 2048);
         predictionFineDistanceBlocks = clamp(predictionFineDistanceBlocks, 256, 4096);
         predictionBackgroundWorkers = clamp(predictionBackgroundWorkers, 1, 4);
+        predictionRefinementWorkers = clamp(predictionRefinementWorkers, 1, 6);
         if (predictionDetail == null) predictionDetail = "normal";
         predictionDetail = switch (predictionDetail.toLowerCase(java.util.Locale.ROOT)) {
             case "low", "normal", "high", "extreme" -> predictionDetail.toLowerCase(java.util.Locale.ROOT);
