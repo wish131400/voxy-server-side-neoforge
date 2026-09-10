@@ -33,3 +33,9 @@ out/
 /.intentionally-empty-file.o
 /b.txt
 /build_out.txt
+
+# Local prediction validation records and terrain matrix tooling stay untracked.
+/tools/prediction/*_20[0-9][0-9]-*.md
+/tools/prediction/terrain-releases.json
+/tools/prediction/terrain-version-matrix.ps1
+/tools/rust/vss-native-core/examples/sparse_bench.rs
