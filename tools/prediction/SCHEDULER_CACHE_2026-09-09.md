@@ -2,11 +2,9 @@
 
 All changes are in the desktop `main` working directory, `C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1`.
 
-## Scheduling comparison and changes
+## Scheduling changes
 
-At the user's request, inspected `C:/Users/Administrator/Desktop/meridian/decompiled-20260904/com/leclowndu93150/meridian/client/lod/LodTileManager.java`. Its pool uses `max(1, availableProcessors - 2)`, a distance-priority queue, at most 512 in-flight tasks, and separately bounded GPU uploads. No dependency on its JAR, native library, or implementation was added.
-
-VSS already used a priority queue with distance bands, progressive stages and a telescope focus. Its separate limits were unnecessarily restrictive: half the logical processors overall and half of those for detail while previews were pending. The machine has 16 logical processors; the limits were 8 total / 4 detail. They are now 14 total / 13 detail while previews are pending, then up to all 14 for detail. One worker remains available to advance previews so long full-grid jobs cannot occupy every worker. Two logical processors remain available for Minecraft, matching the inspected scheduling policy. Actual free-heap admission, cancellation, and bounded GPU uploads remain active. The global memory budget still limits combined builders across dimensions.
+VSS already used a priority queue with distance bands, progressive stages and a telescope focus. Its separate limits were unnecessarily restrictive: half the logical processors overall and half of those for detail while previews were pending. The machine has 16 logical processors; the limits were 8 total / 4 detail. They are now 14 total / 13 detail while previews are pending, then up to all 14 for detail. One worker remains available to advance previews so long full-grid jobs cannot occupy every worker. Two logical processors remain available for Minecraft. Actual free-heap admission, cancellation, and bounded GPU uploads remain active. The global memory budget still limits combined builders across dimensions.
 
 ## Confirmed reasons for rebuilding
 

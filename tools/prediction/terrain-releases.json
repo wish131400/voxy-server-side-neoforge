@@ -1,0 +1,162 @@
+[
+  {
+    "project": "tectonic",
+    "version": "3.0.26-neoforge-21.1",
+    "published": "2026-07-02T23:51:56.569062Z",
+    "filename": "tectonic-3.0.26-neoforge-21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/vNrkxC3z/tectonic-3.0.26-neoforge-21.1.jar",
+    "sha256": "36aa9b4a8c399c9943460a7a58d91402b6d671c10ab11b099c2ee1d75af232ea"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.22-neoforge-21.1",
+    "published": "2026-04-10T04:58:58.985404Z",
+    "filename": "tectonic-3.0.22-neoforge-21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/iCGkqnnx/tectonic-3.0.22-neoforge-21.1.jar",
+    "sha256": "bf5cf7e351586865905eceb2a63e06769f8cd0f9c826864b6a30541e20cffc56"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.21",
+    "published": "2026-03-27T23:54:48.628031Z",
+    "filename": "tectonic-3.0.21-neoforge-21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/qrX9Y1PI/tectonic-3.0.21-neoforge-21.1.jar",
+    "sha256": "472d59f427afa2d025e54fd723c104ec929597ba865f5740d28bbadbf9d0f8cc"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.20",
+    "published": "2026-03-27T22:29:26.758177Z",
+    "filename": "tectonic-3.0.20-neoforge-21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/GRVjo9i3/tectonic-3.0.20-neoforge-21.1.jar",
+    "sha256": "9d0d1284a3052a92a002177f85fc72d90f888b3421d189957630bc98ae0ace52"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.19",
+    "published": "2025-12-23T00:39:41.063016Z",
+    "filename": "tectonic-3.0.19-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/yVMzCWaH/tectonic-3.0.19-neoforge-1.21.1.jar",
+    "sha256": "3d590c2c9c88a7f59639aca1ac213edcd6c780f9cbe4f13d95d6069fd540e7a1"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.17",
+    "published": "2025-11-08T05:23:42.568538Z",
+    "filename": "tectonic-3.0.17-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/fTPmbv20/tectonic-3.0.17-neoforge-1.21.1.jar",
+    "sha256": "75fc27bf3ffcc447b126569a1ffcda410ccdebd61af542738432d3a6419503db"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.16",
+    "published": "2025-10-20T03:58:11.191823Z",
+    "filename": "tectonic-3.0.16-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/rGKMDRAC/tectonic-3.0.16-neoforge-1.21.1.jar",
+    "sha256": "86acb28e4ac0418248c1513557fa525fa748f53364991d435997d0ae859d7924"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.15",
+    "published": "2025-10-14T03:37:30.189756Z",
+    "filename": "tectonic-3.0.15-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/iAncpRZA/tectonic-3.0.15-neoforge-1.21.1.jar",
+    "sha256": "62d994142f15aec9a301d2833f9726588c35233e1bef7d3fa55a5a15f29fa789"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.14",
+    "published": "2025-10-12T22:28:16.371326Z",
+    "filename": "tectonic-3.0.14-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/3eRSTOtX/tectonic-3.0.14-neoforge-1.21.1.jar",
+    "sha256": "f14036dadc5d6bb9262fe3766368fea1dd631d97902c6e197fc651f840e4ae92"
+  },
+  {
+    "project": "tectonic",
+    "version": "3.0.13",
+    "published": "2025-09-24T00:49:09.586953Z",
+    "filename": "tectonic-3.0.13-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/lWDHr9jE/versions/EsSVi0B6/tectonic-3.0.13-neoforge-1.21.1.jar",
+    "sha256": "5348143d17115b6441ad759629bcdb6d1c91189b91220ae79ac379e93a884743"
+  },
+  {
+    "project": "lithostitched",
+    "version": "1.8.0+beta6-neoforge-21.1",
+    "published": "2026-09-06T06:19:10.109145Z",
+    "filename": "lithostitched-1.8.0+beta6-neoforge-21.1.jar",
+    "url": "https://cdn.modrinth.com/data/XaDC71GB/versions/xDAotknu/lithostitched-1.8.0%2Bbeta6-neoforge-21.1.jar",
+    "sha256": "df6ad6f061435fd1795bfe3af627e4cebb25b977b7cbbc088bbad0174109d571"
+  },
+  {
+    "project": "lithostitched",
+    "version": "1.6.0-neoforge-1.21.1",
+    "published": "2026-03-06T02:33:37.643024Z",
+    "filename": "lithostitched-1.6.0-neoforge-1.21.1.jar",
+    "url": "https://cdn.modrinth.com/data/XaDC71GB/versions/u0UUKAE1/lithostitched-1.6.0-neoforge-1.21.1.jar",
+    "sha256": "14827b86cfba6d8bf34dcae7e60c1c8e5080441659f517c045d3e388b827277c"
+  },
+  {
+    "project": "lithostitched",
+    "version": "1.4.11-neoforge-1.21",
+    "published": "2025-07-08T06:52:29.516555Z",
+    "filename": "lithostitched-neoforge-1.21.1-1.4.11.jar",
+    "url": "https://cdn.modrinth.com/data/XaDC71GB/versions/r3TO8PWe/lithostitched-neoforge-1.21.1-1.4.11.jar",
+    "sha256": "a62dd374c4daa3eda2358ef810ff7dc9223c373c687e34733c233610dad16961"
+  },
+  {
+    "project": "epicterrain",
+    "version": "0.1.4+mod",
+    "published": "2025-03-01T17:38:04.234586Z",
+    "filename": "epicterrain-0.1.4.jar",
+    "url": "https://cdn.modrinth.com/data/7qSJGSHp/versions/fR0foOLP/epicterrain-0.1.4.jar",
+    "sha256": "1811eab550c590fc8c1b421243c031cbadf5703d8c8db2752e6fb637ef4bda45"
+  },
+  {
+    "project": "epic-terrain_compatible",
+    "version": "1.0.3+mod",
+    "published": "2025-08-20T18:19:00.79588Z",
+    "filename": "epic-terrain_compatible-1.0.3.jar",
+    "url": "https://cdn.modrinth.com/data/sc69VpnK/versions/6WRQyW1o/epic-terrain_compatible-1.0.3.jar",
+    "sha256": "6408cbd414df381001576eaf847e9fc8dbf9f3e8e1062f2379e6219fa821b1c3"
+  },
+  {
+    "project": "freeterraforged",
+    "version": "1.21.1_V0.0.6005",
+    "published": "2026-07-15T23:51:16Z",
+    "filename": "reterraforged-0.0.6005-neoforge-1.21.1.jar",
+    "url": "https://github.com/ETcodehome/FreeTerraForged/releases/download/1.21.1_V0.0.6005/reterraforged-0.0.6005-neoforge-1.21.1.jar",
+    "sha256": "8be58e7ff7361722576e903195a19fff4c177b7d81d97de23331ebc30456bf28"
+  },
+  {
+    "project": "freeterraforged",
+    "version": "1.21.1_v0.0.6004R1",
+    "published": "2026-06-23T14:45:42Z",
+    "filename": "reterraforged-0.0.6004R1-neoforge-1.21.1.jar",
+    "url": "https://github.com/ETcodehome/FreeTerraForged/releases/download/1.21.1_v0.0.6004R1/reterraforged-0.0.6004R1-neoforge-1.21.1.jar",
+    "sha256": "6acec51b4f6fdefd21b72856c50568fa89845eaf448dd3206a0fe86d91ffae25"
+  },
+  {
+    "project": "freeterraforged",
+    "version": "1.21.1_v0.0.6003R2",
+    "published": "2026-06-09T13:35:36Z",
+    "filename": "reterraforged-0.0.6003R2-neoforge-1.21.1.jar",
+    "url": "https://github.com/ETcodehome/FreeTerraForged/releases/download/1.21.1_v0.0.6003R2/reterraforged-0.0.6003R2-neoforge-1.21.1.jar",
+    "sha256": "5e15c2a86136f41e8f6d5f7fe4f2abcecc6bcb5f6972fe90e68aa19ae795baae"
+  },
+  {
+    "project": "freeterraforged",
+    "version": "NF_1.21.1_v0.0.6002",
+    "published": "2026-05-13T23:10:48Z",
+    "filename": "reterraforged-0.0.6002.jar",
+    "url": "https://github.com/ETcodehome/FreeTerraForged/releases/download/NF_1.21.1_v0.0.6002/reterraforged-0.0.6002.jar",
+    "sha256": "2fa8609e3b4619a9170ce3fa3664afeecee4ee2616e57d80031b38e84a9565bc"
+  },
+  {
+    "project": "freeterraforged",
+    "version": "NF_1.21.1_v0.0.6001",
+    "published": "2026-04-30T11:59:58Z",
+    "filename": "reterraforged-0.0.6001.jar",
+    "url": "https://github.com/ETcodehome/FreeTerraForged/releases/download/NF_1.21.1_v0.0.6001/reterraforged-0.0.6001.jar",
+    "sha256": "0c0e5278315a500a57a18691da3945f01b0f23f0a12243f7e09771017e67218e"
+  }
+]
