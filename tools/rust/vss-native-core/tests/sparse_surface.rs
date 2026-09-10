@@ -1,6 +1,76 @@
 use serde_json::{json, Value};
 use std::{fs, path::Path};
 use vss_native_core::backend::World;
+
+#[test]
+fn stateful_surface_batches_preserve_full_depth_materials_and_neighbours() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
+    let read = |name: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(root.join(name)).unwrap()).unwrap()
+    };
+    let mut base = read("overworld.json");
+    for (key, file) in [
+        ("block_definitions", "blocks.json"),
+        ("biomes", "biomes.json"),
+        ("grass_colormap", "grass.json"),
+        ("foliage_colormap", "foliage.json"),
+    ] {
+        base[key] = read(file);
+    }
+    // A vertical cache_2d dependency selects the same order-sensitive kernel
+    // used by terrain packs, including its full-array cache_once semantics.
+    base["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:interpolated", "argument":{
+        "type":"minecraft:add", "argument1":{"type":"minecraft:y_clamped_gradient",
+            "from_y":-64,"to_y":320,"from_value":1.,"to_value":-1.},
+        "argument2":{"type":"minecraft:cache_once","argument":{"type":"minecraft:mul",
+            "argument1":0.04,"argument2":{"type":"minecraft:cache_2d","argument":{
+                "type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":1.,"to_value":-1.}}}}}});
+    for biome in ["plains", "snowy_plains", "frozen_ocean", "eroded_badlands"] {
+        for remove_surface in [false, true] {
+            let mut doc = base.clone();
+            doc["biome_source"] =
+                json!({"type":"minecraft:fixed","biome":format!("minecraft:{biome}")});
+            if remove_surface {
+                // The first output stone moves below the retained shell. This
+                // must regenerate full depth without damaging later batch points.
+                doc["settings"]["surface_rule"] = json!({"type":"minecraft:condition",
+                    "if_true":{"type":"minecraft:y_above","anchor":{"absolute":80},
+                        "surface_depth_multiplier":0,"add_stone_depth":false},
+                    "then_run":{"type":"minecraft:block","result_state":{"Name":"minecraft:air"}}});
+            }
+            for seed in [0, -917] {
+                let world = World::new(seed, 0, doc.clone()).unwrap();
+                let oracle = World::new(seed, 0, doc.clone()).unwrap();
+                assert!(world.terrain.graph.requires_complete_column_order());
+                let points = [
+                    (15, 15),
+                    (0, 0),
+                    (4, 3),
+                    (3, 4),
+                    (15, 0),
+                    (-1, -1),
+                    (-16, -16),
+                    (0, 0),
+                ];
+                let actual = world.surface_points(&points).unwrap();
+                for ((x, z), actual) in points.into_iter().zip(actual) {
+                    let expected = oracle.surface_columns(x >> 4, z >> 4).unwrap()
+                        [((x & 15) * 16 + (z & 15)) as usize];
+                    assert_eq!(
+                        actual.values, expected.values,
+                        "{biome} seed={seed} remove={remove_surface} {x},{z}"
+                    );
+                }
+                let mut job = world.terrain.job(0, 0, false).unwrap();
+                job.prepare_surface_columns_with_depth(&[(4, 4)], |_, _, _| Some(4));
+                assert!(
+                    job.surface_bottom(4, 4).is_some(),
+                    "stateful exterior must actually truncate"
+                );
+            }
+        }
+    }
+}
 #[test]
 fn exterior_nether_end_and_void_match_complete_columns() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");

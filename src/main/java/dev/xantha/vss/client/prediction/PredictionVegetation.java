@@ -121,6 +121,9 @@ final class PredictionVegetation {
 
     static Tile boundedTile(Map<BlockPos, BlockState> blocks, int baseX, int baseZ,
                             int span, int spacing, int initialSize) {
+        // Fine surface jobs must not silently turn a dense jungle into 8-block cubes.
+        // Their exposed vertical faces are merged by the mesh builder without changing occupancy.
+        if (spacing <= 2) return Tile.of(blocks, baseX, baseZ, span, spacing, 1);
         int size = initialSize;
         Map<BlockPos, BlockState> reduced = reduceBlocks(blocks, size);
         // Leave room for terrain and cliff walls within the mesh's hard cap.

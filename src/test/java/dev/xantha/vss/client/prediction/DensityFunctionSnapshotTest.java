@@ -94,7 +94,12 @@ class DensityFunctionSnapshotTest {
     void installedLithostitchedAppliedGraphRoundTrips() throws Exception {
         var url = java.nio.file.Path.of(System.getProperty("vss.lithostitchedJar")).toUri().toURL();
         try (var loader = new java.net.URLClassLoader(new java.net.URL[]{url}, getClass().getClassLoader())) {
-            var type = loader.loadClass("dev.worldgen.lithostitched.impl.worldgen.densityfunction.marker.MergedDensityFunction");
+            Class<?> type;
+            try {
+                type = loader.loadClass("dev.worldgen.lithostitched.impl.worldgen.densityfunction.marker.MergedDensityFunction");
+            } catch (ClassNotFoundException legacyRelease) {
+                type = loader.loadClass("dev.worldgen.lithostitched.worldgen.densityfunction.MergedDensityFunction");
+            }
             var original = DensityFunctions.constant(-0.5);
             DensityFunction nested = new DensityFunctions.HolderHolder(Holder.direct(
                     new DensityFunctions.HolderHolder(Holder.direct(original))));
@@ -111,21 +116,58 @@ class DensityFunctionSnapshotTest {
         var url = java.nio.file.Path.of(System.getProperty("vss.tectonicJar")).toUri().toURL();
         try (var loader = new java.net.URLClassLoader(new java.net.URL[]{url}, getClass().getClassLoader())) {
             String prefix = "dev.worldgen.tectonic.worldgen.densityfunction.";
-            var constant = (DensityFunction) loader.loadClass(prefix + "ConfigConstant")
-                    .getConstructor(double.class).newInstance(0.375);
+            Class<?> constantType = loader.loadClass(prefix + "ConfigConstant");
+            DensityFunction constant;
+            try {
+                constant = (DensityFunction) constantType.getConstructor(double.class).newInstance(0.375);
+            } catch (NoSuchMethodException legacyRelease) {
+                constant = (DensityFunction) constantType.getConstructor(double.class, double.class, double.class)
+                        .newInstance(0.375, 0.375, 0.375);
+            }
             assertRoundTrip(constant);
-            var clamp = (DensityFunction) loader.loadClass(prefix + "ConfigClamp")
-                    .getConstructor(DensityFunction.class, DensityFunction.class, DensityFunction.class)
-                    .newInstance(DensityFunctions.yClampedGradient(-64, 320, 2, -2),
-                            DensityFunctions.constant(-0.5), constant);
-            assertRoundTrip(clamp);
+            try {
+                var clamp = (DensityFunction) loader.loadClass(prefix + "ConfigClamp")
+                        .getConstructor(DensityFunction.class, DensityFunction.class, DensityFunction.class)
+                        .newInstance(DensityFunctions.yClampedGradient(-64, 320, 2, -2),
+                                DensityFunctions.constant(-0.5), constant);
+                assertRoundTrip(clamp);
+            } catch (ClassNotFoundException legacyRelease) {
+                assertRoundTrip(DensityFunctions.add(constant, DensityFunctions.yClampedGradient(-64, 320, 2, -2)));
+            }
             var noise = new DensityFunction.NoiseHolder(Holder.direct(
                     new net.minecraft.world.level.levelgen.synth.NormalNoise.NoiseParameters(-3, 1.0)));
-            var configured = (DensityFunction) loader.loadClass(prefix + "ConfigNoise")
-                    .getConstructor(DensityFunction.NoiseHolder.class, DensityFunction.class,
-                            DensityFunction.class, double.class, double.class, double.class, boolean.class)
-                    .newInstance(noise, constant, DensityFunctions.zero(), 0.13, 1.25, -0.8, false);
+            Class<?> noiseType = loader.loadClass(prefix + "ConfigNoise");
+            DensityFunction configured;
+            try {
+                configured = (DensityFunction) noiseType
+                        .getConstructor(DensityFunction.NoiseHolder.class, DensityFunction.class,
+                                DensityFunction.class, double.class, double.class, double.class, boolean.class)
+                        .newInstance(noise, constant, DensityFunctions.zero(), 0.13, 1.25, -0.8, false);
+            } catch (NoSuchMethodException legacyRelease) {
+                configured = (DensityFunction) noiseType
+                        .getConstructor(DensityFunction.NoiseHolder.class, DensityFunction.class,
+                                DensityFunction.class, double.class, double.class, double.class)
+                        .newInstance(noise, constant, DensityFunctions.zero(), 0.13, 1.25, -0.8);
+            }
             assertRoundTrip(configured);
+            var seedNoise = new DensityFunction.Visitor() {
+                public DensityFunction apply(DensityFunction value) { return value; }
+                public DensityFunction.NoiseHolder visitNoise(DensityFunction.NoiseHolder value) {
+                    return new DensityFunction.NoiseHolder(value.noiseData(),
+                            net.minecraft.world.level.levelgen.synth.NormalNoise.create(
+                                    new net.minecraft.world.level.levelgen.XoroshiroRandomSource(78123L), value.noiseData().value()));
+                }
+            };
+            var seeded = configured.mapAll(seedNoise);
+            var applied = DensityFunctionSnapshot.applied(seeded);
+            var encoded = DensityFunction.DIRECT_CODEC.encodeStart(JsonOps.INSTANCE,
+                    DensityFunctionSnapshot.applied(configured)).getOrThrow();
+            var restored = DensityFunction.DIRECT_CODEC.parse(JsonOps.INSTANCE, encoded).getOrThrow().mapAll(seedNoise);
+            for (int i = -16; i <= 16; i++) {
+                var point = new DensityFunction.SinglePointContext(i * 137, i * 11, -i * 79);
+                assertEquals(seeded.compute(point), applied.compute(point), 0.0, "retain initialized noise");
+                assertEquals(seeded.compute(point), restored.compute(point), 0.0, "restore noise after snapshot decoding");
+            }
         }
     }
 

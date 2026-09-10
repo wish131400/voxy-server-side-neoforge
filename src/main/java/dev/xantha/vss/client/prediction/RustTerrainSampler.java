@@ -63,14 +63,26 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     }
 
     static ClientTerrainSampler open(DimensionProfile profile, JsonObject generator, JsonObject registries, ClientTerrainSampler context) {
+        return open(profile, generator, registries, context, new RustWorldgenDocument.SharedInputs());
+    }
+
+    static ClientTerrainSampler open(DimensionProfile profile, JsonObject generator, JsonObject registries,
+            ClientTerrainSampler context, RustWorldgenDocument.SharedInputs shared) {
         if (!available() || context == null) return null;
+        var timing = new PredictionInitializationTiming(profile.dimension() + " native");
         long handle = 0;
         try {
-            JsonObject document = RustWorldgenDocument.create(generator, registries, context);
-            handle = RustWorldgenBackend.create(profile.seed(), BiomeManager.obfuscateSeed(profile.seed()), document.toString());
-            RustTerrainSampler sampler = new RustTerrainSampler(handle, profile, context);
+            JsonObject document = RustWorldgenDocument.create(generator, registries, context, shared);
+            timing.mark("sharedInputsAndDocument");
+            String serialized = document.toString();
+            timing.mark("serialize");
+            handle = RustWorldgenBackend.create(profile.seed(), BiomeManager.obfuscateSeed(profile.seed()), serialized);
+            timing.mark("nativeCreate");
+            RustTerrainSampler sampler = new RustTerrainSampler(handle, profile, context, shared.stateLookup());
+            timing.mark("stateMapping");
             sampler.colorFingerprint = colormapFingerprint(document);
             handle = 0;
+            timing.finish();
             if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction backend=" + ALGORITHM + ", dimension=" + profile.dimension());
             return sampler;
         } catch (Exception | LinkageError failure) {
@@ -82,12 +94,20 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     }
 
     RustTerrainSampler(long world, DimensionProfile profile, ClientTerrainSampler context) {
+        this(world, profile, context, Map.of());
+    }
+
+    RustTerrainSampler(long world, DimensionProfile profile, ClientTerrainSampler context,
+            Map<JsonElement, BlockState> stateLookup) {
         super(profile.seed(), profile);
         this.world = world; this.context = context;
         var table = JsonParser.parseString(RustWorldgenBackend.describe(world)).getAsJsonObject().getAsJsonArray("states");
         states = new BlockState[table.size()]; blocks = new int[states.length];
         for (int i = 0; i < states.length; i++) {
-            states[i] = BlockState.CODEC.parse(JsonOps.INSTANCE, table.get(i)).getOrThrow();
+            // Match the returned state content, not an assumed palette index. Unknown states
+            // still pass through the vanilla codec for validation and compatibility.
+            states[i] = stateLookup.get(table.get(i));
+            if (states[i] == null) states[i] = BlockState.CODEC.parse(JsonOps.INSTANCE, table.get(i)).getOrThrow();
             blocks[i] = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(states[i].getBlock());
             stateIds.put(states[i],i);
         }
@@ -186,6 +206,9 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         return sampleGrid(x,z,spacing,width,height,new ClientColumnSample[width*height]);
     }
     ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained) {
+        return sampleGrid(x,z,spacing,width,height,retained,false);
+    }
+    ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained,boolean preview) {
         if(width<1||width>8||height<1||height>8||spacing<1) throw new IllegalArgumentException("Native grid dimensions");
         if(retained.length!=width*height) throw new IllegalArgumentException("Retained grid dimensions");
         handle(); // Cached requests must still honor world cancellation.
@@ -193,8 +216,9 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         ByteBuffer input=positions.get(),output=scratch.get();input.clear();
         int[] missing=new int[result.length];
         int count=0;
-        Map<Long,Integer> nearMisses=spacing<4 ? new HashMap<>() : null;
+        Map<Long,Integer> nearMisses=!preview && spacing<4 ? new HashMap<>() : null;
         for(int i=0;i<result.length;i++) {
+            if(result[i]!=null && !result[i].reusableFor(preview)) result[i]=null;
             if(result[i]!=null) continue;
             int xx=x+i%width*spacing,zz=z+i/width*spacing;
             long key=(long)xx<<32|zz&0xffffffffL;
@@ -229,12 +253,15 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         }
         count=sparse;
         if(count==0) return result;
-        if(RustWorldgenBackend.surfacePoints(handle(),input,output,count)!=count) throw new IllegalStateException("Incomplete native grid");
+        int written=preview ? RustWorldgenBackend.previewPoints(handle(),input,output,count)
+                : RustWorldgenBackend.surfacePoints(handle(),input,output,count);
+        if(written!=count) throw new IllegalStateException("Incomplete native grid");
         gridComputedPoints.add(count);
         for(int n=0;n<count;n++) {
             int i=missing[n];
             int[] data=new int[10];for(int j=0;j<10;j++) data[j]=output.getInt((n*10+j)*4);
-            int xx=x+i%width*spacing,zz=z+i/width*spacing;rememberPoint((long)xx<<32|zz&0xffffffffL,data);
+            int xx=x+i%width*spacing,zz=z+i/width*spacing;
+            if(!preview) rememberPoint((long)xx<<32|zz&0xffffffffL,data);
             result[i]=sampleRecord(data,0);
         }
         return result;

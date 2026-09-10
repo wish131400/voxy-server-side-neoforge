@@ -21,6 +21,45 @@ use std::sync::{
 #[cfg(test)]
 mod exterior_tests {
     use super::*;
+    #[test]
+    fn preview_does_not_contaminate_exact_columns() {
+        let doc = document();
+        let world = World::new(42, 0, doc.clone()).unwrap();
+        let oracle = World::new(42, 0, doc).unwrap();
+        let points = [(-16, -16), (0, 0), (15, 15), (512, -512)];
+        let preview = world.preview_points(&points).unwrap();
+        for record in &preview {
+            assert_ne!(record.values[3] & (1 << 27), 0);
+            assert!((-64..=320).contains(&record.values[0]));
+        }
+        for (&(x, z), record) in points.iter().zip(world.surface_points(&points).unwrap()) {
+            assert_eq!(record.values[3] & (1 << 27), 0);
+            assert_eq!(record.values, oracle.surface_point(x, z).unwrap().values);
+        }
+        // Exact-cache warmth must not change approximation quality or order.
+        assert_eq!(preview.iter().map(|r| r.values).collect::<Vec<_>>(),
+            world.preview_points(&points).unwrap().iter().map(|r| r.values).collect::<Vec<_>>());
+        assert!(world.preview_points(&[(i32::MIN, 0)]).is_err());
+        assert!(world.preview_points(&[(0, 0); 65]).is_err());
+    }
+
+    #[test]
+    fn preview_preserves_world_material_rules_and_empty_columns() {
+        let mut doc = document();
+        doc["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:y_clamped_gradient",
+            "from_y":0,"to_y":128,"from_value":1.,"to_value":-1.});
+        doc["settings"]["surface_rule"] = json!({"type":"minecraft:block",
+            "result_state":{"Name":"minecraft:orange_terracotta"}});
+        let world = World::new(42, 0, doc.clone()).unwrap();
+        let row = world.preview_points(&[(0, 0)]).unwrap()[0];
+        assert!((60..=64).contains(&row.values[0]));
+        assert_eq!(world.palette.state(row.values[4] as StateId).name, "minecraft:orange_terracotta");
+        doc["settings"]["noise_router"]["final_density"] = json!(-1.);
+        let empty = World::new(42, 0, doc).unwrap().preview_points(&[(0, 0)]).unwrap()[0];
+        assert_ne!(empty.values[3] & (1 << 29), 0);
+        assert_eq!(empty.values[2], 0);
+    }
+
     fn document() -> Value {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
         let read = |name: &str| {
@@ -596,7 +635,7 @@ impl World {
         }
         let mut job = self.terrain.job(x & !15, z & !15, false)?;
         job.beard = self.adjustments.get(&(x >> 4, z >> 4));
-        job.prepare_surface_columns(&[(x, z)]);
+        self.prepare_exterior_columns(&mut job, &[(x, z)]);
         self.generate_surface_point(x, z, &mut job)
     }
     /// Reuse density corners, aquifer locations and preliminary heights for
@@ -619,7 +658,7 @@ impl World {
             let mut job = self.terrain.job(cx * 16, cz * 16, false)?;
             job.beard = self.adjustments.get(&(cx, cz));
             let missing: Vec<_> = indices.iter().map(|&i| points[i]).collect();
-            job.prepare_surface_columns(&missing);
+            self.prepare_exterior_columns(&mut job, &missing);
             for i in indices {
                 let (x, z) = points[i];
                 result[i] = match self.cached_surface_point(x, z)? {
@@ -629,6 +668,70 @@ impl World {
             }
         }
         Ok(result)
+    }
+    /// Approximate exterior records have their own API and never enter the
+    /// exact point/chunk caches used by terrain and vegetation generation.
+    pub fn preview_points(&self, points: &[(i32, i32)]) -> Result<Vec<SurfaceColumn>> {
+        self.check_active()?;
+        if points.len() > 64 || points.iter().any(|&(x, z)| x.abs_diff(0) > 29999990 || z.abs_diff(0) > 29999990) {
+            return Err("preview batch outside range".into());
+        }
+        let t = &self.terrain;
+        let mut result = Vec::with_capacity(points.len());
+        for &(x, z) in points {
+            self.check_active()?;
+            // Per-point scratch bounds caches and prevents order-sensitive
+            // biome samplers from leaking state across unrelated chunks.
+            let mut scratch = t.graph.scratch(x & !15, z & !15, t.cell_width, t.cell_height)?;
+            let floor = t.preview_height(x, z, &mut scratch);
+            let (fluid_y, fluid) = t.preview_fluid(floor);
+            let p = [x, if fluid != 0 { fluid_y - 1 } else { floor }, z];
+            let mut q = zoom_quart(self.zoom_seed, p);
+            q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
+            let name = self.source.sample(&t.graph, q, &mut scratch, &mut None);
+            let b = self.biomes.get(name).ok_or("missing preview biome")?;
+            let cold = self.colors.temperature(b, p) < 0.15;
+            let rain = self.document["biomes"][name]["has_precipitation"].as_bool().unwrap_or(false);
+            let materials = if floor == t.min_y { [self.base_ids[0]; 3] } else {
+                self.surface.preview_materials(t, x, z, floor,
+                    if fluid != 0 { fluid_y } else { i32::MIN }, name, b, &self.colors)
+            };
+            let flags = (1 << 27) | (1 << 28)
+                | if floor == t.min_y { 1 << 29 } else { 0 }
+                | if cold && rain { 1 } else { 0 }
+                | if cold && fluid == 1 { 2 } else { 0 };
+            result.push(SurfaceColumn { values: [floor, fluid_y, fluid, flags,
+                materials[0] as i32, materials[1] as i32, materials[2] as i32,
+                self.colors.grass(b, x as f64, z as f64) as i32,
+                self.colors.foliage(b) as i32, b.water as i32] });
+        }
+        Ok(result)
+    }
+
+    fn prepare_exterior_columns(&self, job: &mut Job<'_>, points: &[(i32, i32)]) {
+        let t = &self.terrain;
+        if !t.graph.supports_surface_slices() {
+            job.prepare_surface_columns(points);
+            return;
+        }
+        job.prepare_surface_columns_with_depth(points, |x, y, z| {
+            let mut scratch = t
+                .graph
+                .scratch(x & !15, z & !15, t.cell_width, t.cell_height)
+                .ok()?;
+            let mut q = zoom_quart(self.zoom_seed, [x, if t.graph.legacy { 0 } else { y }, z]);
+            q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
+            let name = self.source.sample(&t.graph, q, &mut scratch, &mut None);
+            if matches!(
+                name,
+                "minecraft:eroded_badlands"
+                    | "minecraft:frozen_ocean"
+                    | "minecraft:deep_frozen_ocean"
+            ) {
+                return None;
+            }
+            self.surface.exterior_padding(&t.graph, x, z)
+        });
     }
     fn cached_surface_point(&self, x: i32, z: i32) -> Result<Option<SurfaceColumn>> {
         self.check_active()?;
@@ -695,7 +798,11 @@ impl World {
         } else {
             None
         };
-        let mut truncated = None;
+        let mut truncated = if exterior {
+            job.surface_bottom(x, z)
+        } else {
+            None
+        };
         for &(xx, zz) in &positions {
             if (xx, zz) != (x, z) {
                 let top = job.surface_top(xx, zz);
@@ -792,7 +899,10 @@ impl World {
                 // A surface rule can remove solid blocks or turn them into
                 // water. Never publish an output whose material crosses the
                 // proven retained range; rebuild its complete column instead.
-                return self.generate_surface_point_depth(x, z, job, false);
+                let mut full = t.job(x0, z0, false)?;
+                full.beard = job.beard;
+                full.prepare_surface_columns(&[(x, z)]);
+                return self.generate_surface_point_depth(x, z, &mut full, false);
             }
         }
         self.work[1].fetch_add(1, Ordering::Relaxed);

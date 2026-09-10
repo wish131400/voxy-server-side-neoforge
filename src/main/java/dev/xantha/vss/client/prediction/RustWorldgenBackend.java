@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 /**
- * Independent ABI 2 for the source-built Rust backend. All numerical work runs
+ * Independent ABI 3 for the source-built Rust backend. All numerical work runs
  * in Rust; Java supplies effective registries, colormaps and immutable inputs.
  *
  * <p>A surface region is before carvers/structures/decoration and
@@ -16,11 +16,16 @@ import java.nio.file.Path;
  * World/result handles must be closed; a result retains its parent world.
  */
 public final class RustWorldgenBackend {
-    public static final int ABI = 2;
+    public static final int ABI = 3;
+    private static boolean loaded;
     private RustWorldgenBackend() { }
-    public static void load(Path library) {
+    public static synchronized void load(Path library) {
+        // Two copies have separate handle tables; JNI can bind methods from
+        // either copy. All world/result methods must share one native instance.
+        if (loaded) return;
         System.load(library.toAbsolutePath().toString());
         if (abi() != ABI) throw new IllegalStateException("VSS worldgen ABI mismatch");
+        loaded = true;
     }
     public static native int abi();
     /** In-place 36-byte compact FTF cells; validates before committing ordered tile filters. */
@@ -56,6 +61,7 @@ public final class RustWorldgenBackend {
     public static native int surfaceColumns(long world, int chunkX, int chunkZ, ByteBuffer output);
     /** Sparse XZ int32 input, at most 64 records, same ten-int32 output as surfaceColumns. */
     public static native int surfacePoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+    public static native int previewPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
     /** Existing prediction surface context, 5x5 chunks, assembled in Rust. */
     public static native long surfaceProxy(long world, int centerChunkX, int centerChunkZ);
     /** External Java Random entropy for vanilla Collections.shuffle; not the terrain seed. */

@@ -108,50 +108,68 @@ public final class ClientPredictionState {
         PredictionCacheStorage storage = PredictionCacheStorage.current();
         acceptedProfile = payload;
         long generation = DECODE_GENERATION.get();
-        CompletableFuture
-                .supplyAsync(() -> {
+        ResourceKey<Level> preferred = minecraft.level == null ? Level.OVERWORLD : minecraft.level.dimension();
+        long receivedNanos = System.nanoTime();
+        VSSLogger.info("VSS prediction profile accepted: dimensions=" + payload.dimensions().size()
+                + ", revision=" + payload.revision() + ", first=" + preferred.location());
+        CompletableFuture.runAsync(() -> {
+            if (generation != DECODE_GENERATION.get()) return;
+            var timing = new PredictionInitializationTiming("profile");
+            if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction init queueMs="
+                    + (System.nanoTime() - receivedNanos) / 1_000_000L);
+            try {
+                ClientWorldgenProfileDecoder.decode(payload, clientRegistries, preferred,
+                        () -> generation == DECODE_GENERATION.get(), (key, sampler) -> {
+                    var installTiming = new PredictionInitializationTiming(key.location() + " install");
+                    PredictionDiskCache cache = storage == null ? null : storage.open(sampler);
+                    PredictionTileManager manager;
                     try {
-                        var samplers = ClientWorldgenProfileDecoder.decode(payload, clientRegistries);
-                        Map<ResourceKey<Level>, PredictionTileManager> managers = new java.util.LinkedHashMap<>();
-                        try {
-                            for (var entry : samplers.entrySet()) {
-                                managers.put(entry.getKey(), new PredictionTileManager(entry.getKey(), entry.getValue(),
-                                        PredictionMemoryBudget.SHARED, storage == null ? null : storage.open(entry.getValue())));
-                            }
-                            return managers;
-                        } catch (Throwable failure) {
-                            managers.values().forEach(PredictionTileManager::close);
-                            samplers.forEach((key, sampler) -> {
-                                if (!managers.containsKey(key)) PredictionResources.releaseSampler(sampler);
-                            });
-                            throw failure;
+                        manager = new PredictionTileManager(key, sampler, PredictionMemoryBudget.SHARED, cache);
+                    } catch (RuntimeException | Error failure) {
+                        if (cache != null) cache.close();
+                        throw failure; // The decoder still owns the sampler on failure.
+                    }
+                    installTiming.mark("cacheAndManager");
+                    long queuedNanos = System.nanoTime();
+                    minecraft.execute(() -> {
+                        if (generation != DECODE_GENERATION.get()) {
+                            manager.close();
+                            return;
                         }
-                    } catch (Exception exception) {
-                        throw new IllegalStateException("Unable to decode VSS worldgen profile", exception);
-                    }
-                }, PROFILE_DECODER)
-                .whenComplete((samplers, failure) -> minecraft.execute(() -> {
-                    if (generation != DECODE_GENERATION.get()) {
-                        if (samplers != null) samplers.values().forEach(PredictionTileManager::close);
-                        return;
-                    }
-                    if (failure != null) {
-                        VSSLogger.error("VSS worldgen profile decode failed", failure);
-                        clear();
-                        return;
-                    }
-                    MANAGERS.putAll(samplers);
-                    MANAGERS.values().forEach(manager -> manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction));
-                    profileReady = !MANAGERS.isEmpty();
-                    profileInstalledNanos = profileReady ? System.nanoTime() : 0L;
-                    long exact = MANAGERS.values().stream()
-                            .filter(PredictionTileManager::exactWorldgen).count();
-                    long nativeCount = MANAGERS.values().stream()
-                            .filter(manager -> manager.sampler() instanceof RustTerrainSampler).count();
-                    VSSLogger.info("VSS prediction samplers ready: dimensions=" + MANAGERS.size()
-                            + ", rust=" + nativeCount + ", javaOrCustom=" + (MANAGERS.size() - nativeCount)
-                            + ", exact=" + exact + ", fallback=" + (MANAGERS.size() - exact));
-                }));
+                        PredictionTileManager previous = MANAGERS.put(key, manager);
+                        if (previous != null) previous.close();
+                        manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction);
+                        if (!profileReady) profileInstalledNanos = System.nanoTime();
+                        profileReady = true;
+                        VSSLogger.info("VSS prediction dimension ready: dimension=" + key.location()
+                                + ", rust=" + (sampler instanceof RustTerrainSampler)
+                                + ", receivedToReadyMs=" + (System.nanoTime() - receivedNanos) / 1_000_000L);
+                        if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction init installQueueMs="
+                                + (System.nanoTime() - queuedNanos) / 1_000_000L + ", dimension=" + key.location());
+                    });
+                    installTiming.finish();
+                });
+                timing.finish();
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                // A new profile/disconnect invalidated this work; published managers are cleared separately.
+            } catch (Exception failure) {
+                throw new IllegalStateException("Unable to decode VSS worldgen profile", failure);
+            }
+        }, PROFILE_DECODER).whenComplete((ignored, failure) -> minecraft.execute(() -> {
+            if (generation != DECODE_GENERATION.get()) return;
+            if (failure != null) {
+                // A later dimension must not remove the current dimension which is already usable.
+                VSSLogger.error("VSS worldgen profile decode failed", failure);
+                if (MANAGERS.isEmpty()) clear();
+                return;
+            }
+            long exact = MANAGERS.values().stream().filter(PredictionTileManager::exactWorldgen).count();
+            long nativeCount = MANAGERS.values().stream()
+                    .filter(manager -> manager.sampler() instanceof RustTerrainSampler).count();
+            VSSLogger.info("VSS prediction samplers ready: dimensions=" + MANAGERS.size()
+                    + ", rust=" + nativeCount + ", javaOrCustom=" + (MANAGERS.size() - nativeCount)
+                    + ", exact=" + exact + ", fallback=" + (MANAGERS.size() - exact));
+        }));
     }
 
     /** Extra detail is scoped; ordinary selection covers the whole camera neighbourhood. */
@@ -314,6 +332,7 @@ public final class ClientPredictionState {
                 .getAtlas(net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS);
         if (VssLodSpriteTable.refresh(blockAtlas.getSprite(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("block/stone")))) {
+            RustWorldgenDocument.invalidateSharedInputs();
             MANAGERS.values().forEach(PredictionTileManager::invalidateAppearance);
             for (var manager : List.copyOf(MANAGERS.values())) {
                 if (manager.sampler() instanceof RustTerrainSampler rust) PROFILE_DECODER.execute(() -> {
@@ -769,6 +788,7 @@ public final class ClientPredictionState {
     }
 
     public static void clear() {
+        RustWorldgenDocument.invalidateSharedInputs();
         acceptedProfile = null;
         focusGeneration.incrementAndGet();
         focusScoping = false;

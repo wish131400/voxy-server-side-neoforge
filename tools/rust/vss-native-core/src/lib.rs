@@ -3,7 +3,7 @@
 //! The public ABI deliberately contains no Minecraft types. Java remains the
 //! owner of registries, resource-pack models and worldgen objects; this crate
 //! provides the source-built terrain, density, aquifer, surface, biome and
-//! vegetation pipeline through JNI ABI 2, alongside the noise-only ABI 1 probe
+//! vegetation pipeline through JNI ABI 3, alongside the noise-only ABI 1 probe
 //! for validation. World state is leased across calls and results
 //! use bounded native volumes or caller-owned direct buffers.
 

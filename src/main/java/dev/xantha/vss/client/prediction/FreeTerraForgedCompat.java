@@ -6,7 +6,7 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.levelgen.RandomState;
 
-/** Optional FreeTerraForged 0.0.6005 context bridge; prediction tile filters run in Rust. */
+/** Optional FreeTerraForged context bridge; prediction tile filters run in Rust. */
 final class FreeTerraForgedCompat {
     private static final String PREFIX = "raccoonman.reterraforged.world.worldgen.";
 
@@ -39,7 +39,7 @@ final class FreeTerraForgedCompat {
                 return state;
             });
         } catch (ReflectiveOperationException failure) {
-            throw new IllegalStateException("FreeTerraForged prediction API unavailable (expected 0.0.6005)", failure);
+            throw new IllegalStateException("FreeTerraForged prediction API unavailable", failure);
         }
     }
 
@@ -84,8 +84,15 @@ final class FreeTerraForgedCompat {
 
         @SuppressWarnings("unchecked")
         Api(ClassLoader loader) throws ReflectiveOperationException {
-            overworld = (ThreadLocal<Boolean>) loader.loadClass(PREFIX + "RTFWorldGenContext")
-                    .getField("IS_VANILLA_OVERWORLD").get(null);
+            ThreadLocal<Boolean> dimensionContext;
+            try {
+                dimensionContext = (ThreadLocal<Boolean>) loader.loadClass(PREFIX + "RTFWorldGenContext")
+                        .getField("IS_VANILLA_OVERWORLD").get(null);
+            } catch (ClassNotFoundException legacyRelease) {
+                // Earlier releases discover their context from CellSampler markers.
+                dimensionContext = ThreadLocal.withInitial(() -> false);
+            }
+            overworld = dimensionContext;
             stateType = loader.loadClass(PREFIX + "RTFRandomState");
             initialize = stateType.getMethod("initialize", RegistryAccess.class);
             context = stateType.getMethod("generatorContext");
@@ -110,7 +117,8 @@ final class FreeTerraForgedCompat {
     static <T> T withSurfaceChunk(RandomState state, ChunkAccess chunk, Supplier<T> action) {
         if (!isState(state)) return action.get();
         try {
-            Class<?> active = Class.forName(PREFIX + "ActiveChunk");
+            Class<?> active = activeChunk(state.getClass().getClassLoader());
+            if (active == null) return action.get();
             Method get = active.getMethod("get");
             Method set = active.getMethod("set", ChunkAccess.class);
             Object previous = get.invoke(null);
@@ -119,6 +127,14 @@ final class FreeTerraForgedCompat {
             finally { set.invoke(null, previous); }
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("FreeTerraForged surface chunk context unavailable", failure);
+        }
+    }
+
+    static Class<?> activeChunk(ClassLoader loader) {
+        try {
+            return Class.forName(PREFIX + "ActiveChunk", false, loader);
+        } catch (ClassNotFoundException legacyRelease) {
+            return null;
         }
     }
 }

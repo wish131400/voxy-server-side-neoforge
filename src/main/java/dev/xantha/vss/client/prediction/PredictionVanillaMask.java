@@ -43,6 +43,9 @@ final class PredictionVanillaMask {
     private int lastCameraChunkZ = Integer.MIN_VALUE;
     private int lastRadius = -1;
     private boolean dirty = true;
+    private java.util.List<PredictionRealBoundarySeams.Edge> groundEdges = java.util.List.of();
+
+    java.util.List<PredictionRealBoundarySeams.Edge> groundEdges() { return groundEdges; }
 
     /** Refreshes section state at most eight times per second unless reanchored. */
     void update(Minecraft minecraft, Vec3 camera) {
@@ -73,6 +76,7 @@ final class PredictionVanillaMask {
         reanchor(radius * 2 + 1, nextSizeY, nextOriginX, nextOriginZ, nextOriginY);
         LevelRenderer renderer = minecraft.levelRenderer;
         BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+        LevelChunk[] compiledGround = new LevelChunk[sizeXZ * sizeXZ];
         for (int z = 0; z < sizeXZ; z++) {
             for (int x = 0; x < sizeXZ; x++) {
                 int chunkX = originChunkX + x;
@@ -81,6 +85,7 @@ final class PredictionVanillaMask {
                         chunkX, chunkZ, ChunkStatus.FULL, false);
                 boolean surfaceCompiled = chunk != null
                         && surfaceCompiled(renderer, chunk, chunkX, chunkZ, position);
+                if (surfaceCompiled) compiledGround[z * sizeXZ + x] = chunk;
                 for (int y = 0; y < sizeY; y++) {
                     boolean compiled = surfaceCompiled;
                     if (!compiled && chunk != null) {
@@ -93,6 +98,7 @@ final class PredictionVanillaMask {
                 }
             }
         }
+        refreshGroundEdges(compiledGround, position);
         lastCameraChunkX = cameraChunkX;
         lastCameraChunkZ = cameraChunkZ;
         lastRadius = radius;
@@ -100,11 +106,61 @@ final class PredictionVanillaMask {
         dirty = true;
     }
 
+    private void refreshGroundEdges(LevelChunk[] compiled, BlockPos.MutableBlockPos position) {
+        var edges = new java.util.ArrayList<PredictionRealBoundarySeams.Edge>();
+        for (int z = 0; z < sizeXZ; z++) for (int x = 0; x < sizeXZ; x++) {
+            LevelChunk chunk = compiled[z * sizeXZ + x];
+            if (chunk == null) continue;
+            for (int direction = 0; direction < 4; direction++) {
+                int nx = direction == 0 ? -1 : direction == 1 ? 1 : 0;
+                int nz = direction == 2 ? -1 : direction == 3 ? 1 : 0;
+                int ax = x + nx, az = z + nz;
+                if (ax >= 0 && az >= 0 && ax < sizeXZ && az < sizeXZ
+                        && compiled[az * sizeXZ + ax] != null) continue;
+                for (int along = 0; along < 16; along++) {
+                    int wx = (originChunkX + x) * 16 + (nx == 0 ? along : nx > 0 ? 15 : 0);
+                    int wz = (originChunkZ + z) * 16 + (nz == 0 ? along : nz > 0 ? 15 : 0);
+                    var ground = boundaryGround(chunk, wx, wz, position);
+                    if (ground != null) edges.add(new PredictionRealBoundarySeams.Edge(wx, wz, nx, nz, ground));
+                }
+            }
+        }
+        if (!groundEdges.equals(edges)) groundEdges = java.util.List.copyOf(edges);
+    }
+
+    private static ClientColumnSample boundaryGround(LevelChunk chunk, int x, int z, BlockPos.MutableBlockPos pos) {
+        int top = chunk.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x & 15, z & 15);
+        int water = top + 1, fluid = 0;
+        // Read only perimeter blocks. No noise sampling, chunk generation or cave scan.
+        for (int y = top; y >= Math.max(chunk.getMinBuildHeight(), top - 31); y--) {
+            var state = chunk.getBlockState(pos.set(x, y, z));
+            if (!state.getFluidState().isEmpty()) {
+                if (fluid == 0) fluid = state.getFluidState().is(net.minecraft.tags.FluidTags.LAVA) ? 2 : 1;
+                continue;
+            }
+            if (ClientCaptureExtractor.isGround(state)) {
+                var registry = net.minecraft.core.registries.BuiltInRegistries.BLOCK;
+                int block = registry.getId(state.getBlock());
+                var below = chunk.getBlockState(pos.set(x, y - 1, z));
+                int under = ClientCaptureExtractor.isGround(below) ? registry.getId(below.getBlock()) : block;
+                var deep = chunk.getBlockState(pos.set(x, y - 7, z));
+                int deepId = ClientCaptureExtractor.isGround(deep) ? registry.getId(deep.getBlock()) : under;
+                return new ClientColumnSample(y + 1, fluid == 0 ? y + 1 : water, 0, block,
+                        0, 0, 0, 0, fluid, ClientColumnSample.FLAG_CAPTURED, 0, under, deepId,
+                        ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
+                        ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
+            }
+            if (state.canOcclude()) return null;
+        }
+        return null;
+    }
+
     /** Clears CPU state after a world change without issuing GL calls off-thread. */
     void invalidate() {
         sizeXZ = 0;
         sizeY = 0;
         states = new byte[0];
+        groundEdges = java.util.List.of();
         lastCameraChunkX = Integer.MIN_VALUE;
         lastCameraChunkZ = Integer.MIN_VALUE;
         lastRadius = -1;

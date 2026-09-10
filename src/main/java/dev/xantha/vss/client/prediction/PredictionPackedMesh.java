@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *                  | uvYPos | bank/down | positive face | LOD texture scale
  * i7: corner 0 rgb (24) | skylight loss (bits 28-31)
  * i8: source cell index
- * i9: corner 1 rgb (24) | source-cell coverage (bit 24) | skylight loss (bits 28-31)
+ * i9: corner 1 rgb (24) | source-cell coverage (bit 24) | real boundary/lower (25/26) | skylight loss (bits 28-31)
  * i10: corner 2 rgb (24) + skylight loss     i11: corner 3 rgb (24) + skylight loss
  * </pre>
  *

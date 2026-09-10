@@ -31,13 +31,29 @@ final class ClientWorldgenProfileDecoder {
     static Map<ResourceKey<Level>, ClientTerrainSampler> decode(
             WorldgenProfileS2CPayload payload,
             RegistryAccess clientRegistries) throws IOException {
+        Map<ResourceKey<Level>, ClientTerrainSampler> samplers = new LinkedHashMap<>();
+        try {
+            decode(payload, clientRegistries, null, () -> true, samplers::put);
+            return samplers;
+        } catch (IOException | RuntimeException | Error failure) {
+            samplers.values().forEach(PredictionResources::releaseSampler);
+            throw failure;
+        }
+    }
+
+    /** Each successful callback takes ownership immediately; later dimensions cannot delay it. */
+    static void decode(WorldgenProfileS2CPayload payload, RegistryAccess clientRegistries,
+            ResourceKey<Level> preferred, java.util.function.BooleanSupplier active,
+            java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> ready) throws IOException {
+        checkActive(active);
+        var timing = new PredictionInitializationTiming("registries");
         byte[] registryJson = LodByteCompression.decompress(
                 payload.registries(),
                 payload.registriesCompression(),
                 payload.registriesRawSize(),
                 WorldgenProfileS2CPayload.MAX_REGISTRIES_RAW_BYTES);
         JsonObject registryRoot = parse(registryJson);
-        Map<ResourceKey<Level>, ClientTerrainSampler> samplers = new LinkedHashMap<>();
+        timing.mark("decompressAndParse");
         ClientWorldgenRegistries registries;
         try {
             registries = ClientWorldgenRegistries.decode(registryRoot, clientRegistries);
@@ -47,16 +63,23 @@ final class ClientWorldgenProfileDecoder {
         } catch (RuntimeException exception) {
             VSSLogger.warn("VSS worldgen registry snapshot could not be reconstructed; "
                     + "prediction disabled; real Voxy LOD remains available", exception);
-            return samplers;
+            return;
         }
+        timing.mark("decodeAndBind");
+        timing.finish();
+        checkActive(active);
         // Templates belong to the Java surface stage. Avoid parsing/copying
         // several MiB of Base64 building data into every native terrain graph.
         registryRoot.remove("structure_templates");
-        for (DimensionProfile profile : payload.dimensions()) {
+        var shared = new RustWorldgenDocument.SharedInputs();
+        for (DimensionProfile profile : orderedDimensions(payload.dimensions(), preferred)) {
+            checkActive(active);
+            var dimensionTiming = new PredictionInitializationTiming(profile.dimension().toString());
             java.util.Optional<ClientTerrainSampler> custom = PredictionTerrainBackends.open(
                     profile, profile.seed(), clientRegistries);
             if (custom.isPresent()) {
-                samplers.put(profile.levelKey(), custom.get());
+                publish(profile, custom.get(), active, ready);
+                dimensionTiming.finish();
                 continue;
             }
             if (profile.generatorData().length == 0) {
@@ -78,10 +101,17 @@ final class ClientWorldgenProfileDecoder {
                 }
                 ClientTerrainSampler javaSampler = null;
                 try {
-                    javaSampler = decodeJavaSampler(profile, generatorJson, registries, clientRegistries);
+                    javaSampler = decodeJavaSampler(profile, generatorRoot, registries, clientRegistries);
                 } catch (RuntimeException exception) {
                     VSSLogger.warn("VSS Java biome/feature context unavailable for "
                             + profile.dimension(), exception);
+                }
+                dimensionTiming.mark("javaContext");
+                try {
+                    checkActive(active);
+                } catch (java.util.concurrent.CancellationException cancelled) {
+                    if (javaSampler != null) PredictionResources.releaseSampler(javaSampler);
+                    throw cancelled;
                 }
                 // BetterEnd-New-Dawn keeps the vanilla NoiseBasedChunkGenerator
                 // codec but replaces NoiseChunk.fillSlice with its PAULEVS
@@ -92,20 +122,24 @@ final class ClientWorldgenProfileDecoder {
                 ClientTerrainSampler betterEndSampler = javaSampler == null ? null
                         : BetterEndCompat.wrap(profile, javaSampler);
                 if (betterEndSampler != null) {
-                    samplers.put(profile.levelKey(), betterEndSampler);
+                    publish(profile, betterEndSampler, active, ready);
+                    dimensionTiming.finish();
                     continue;
                 }
                 // Keep Java registry/structure context for codecs which a
                 // terrain or feature extension implements outside vanilla.
                 String nativeRejection = PredictionWorldgenCapabilities.nativeTerrainRejection(generatorRoot, registryRoot);
                 ClientTerrainSampler rustSampler = javaSampler != null && nativeRejection == null
-                        ? RustTerrainSampler.open(profile, generatorRoot, registryRoot, javaSampler) : null;
+                        ? RustTerrainSampler.open(profile, generatorRoot, registryRoot, javaSampler, shared) : null;
                 if (rustSampler != null) {
-                    samplers.put(profile.levelKey(), rustSampler);
+                    publish(profile, rustSampler, active, ready);
+                    dimensionTiming.mark("nativeAndPublish");
+                    dimensionTiming.finish();
                     continue;
                 }
                 if (javaSampler != null) {
-                    samplers.put(profile.levelKey(), javaSampler);
+                    publish(profile, javaSampler, active, ready);
+                    dimensionTiming.finish();
                     if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging) {
                         VSSLogger.debug("VSS prediction backend: dimension=" + profile.dimension()
                                 + ", terrain=java, decoration=java, reason="
@@ -113,17 +147,46 @@ final class ClientWorldgenProfileDecoder {
                     }
                 }
                 else VSSLogger.warn("VSS prediction unavailable for " + profile.dimension() + ": missing client codecs");
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                throw cancelled;
             } catch (RuntimeException exception) {
                 VSSLogger.warn("VSS could not reconstruct worldgen for "
                         + profile.dimension() + "; prediction disabled for this dimension", exception);
             }
         }
-        return samplers;
+    }
+
+    static java.util.List<DimensionProfile> orderedDimensions(java.util.List<DimensionProfile> dimensions,
+            ResourceKey<Level> preferred) {
+        var ordered = new java.util.ArrayList<>(dimensions);
+        ordered.sort(java.util.Comparator.comparingInt(p -> p.levelKey().equals(preferred) ? 0 : 1));
+        return ordered;
+    }
+
+    private static void checkActive(java.util.function.BooleanSupplier active) {
+        if (!active.getAsBoolean() || Thread.currentThread().isInterrupted())
+            throw new java.util.concurrent.CancellationException("Prediction profile superseded");
+    }
+
+    private static void publish(DimensionProfile profile, ClientTerrainSampler sampler,
+            java.util.function.BooleanSupplier active,
+            java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> ready) {
+        try {
+            checkActive(active);
+            ready.accept(profile.levelKey(), sampler);
+        } catch (RuntimeException | Error failure) {
+            PredictionResources.releaseSampler(sampler);
+            throw failure;
+        }
     }
 
     static ClientTerrainSampler decodeJavaSampler(DimensionProfile profile,
             byte[] generatorJson, ClientWorldgenRegistries registries, RegistryAccess clientRegistries) {
-        JsonObject generatorRoot = parse(generatorJson);
+        return decodeJavaSampler(profile, parse(generatorJson), registries, clientRegistries);
+    }
+
+    private static ClientTerrainSampler decodeJavaSampler(DimensionProfile profile,
+            JsonObject generatorRoot, ClientWorldgenRegistries registries, RegistryAccess clientRegistries) {
         NoiseGeneratorSettings settings = NoiseGeneratorSettings.DIRECT_CODEC
                 .parse(registries.ops(), generatorRoot.get("settings"))
                 .getOrThrow();

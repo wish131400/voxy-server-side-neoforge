@@ -174,6 +174,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
         org.joml.Vector4f denominator = frame.inverseMvp().getRow(3, new org.joml.Vector4f());
         GL20.glUniform4f(program.uniform("VoxyDistanceNumerator"), numerator.x, numerator.y, numerator.z, numerator.w);
         GL20.glUniform4f(program.uniform("VoxyDistanceDenominator"), denominator.x, denominator.y, denominator.z, denominator.w);
+
     }
 
     void setFrame(float[] fogColor, float start, float end, float density,
@@ -236,6 +237,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             flat out uint vCoverageAxis;
             flat out vec3 vFaceNormal;
             flat out float vSurfaceVisible;
+            flat out uint vRealBoundary;
 
             // One packed quad spans three RGBA32UI texels: texel A holds the
             // x/z words, texel B the y words, attributes and tint, and texel C
@@ -264,6 +266,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 uvec4 texelC = texelFetch(QuadPayload, quad * 3 + 2);
                 uint attr = texelB.z;
                 vCell = texelC.x;
+                vRealBoundary = (texelC.y >> 25u) & 3u;
                 vCellLocal = (texelC.y & 0x01000000u) == 0u ? 1.0 : 0.0;
                 bool fineCoordinates = (attr & (1u << 20)) != 0u;
                 uint fluid = (attr >> 22) & 3u;
@@ -385,6 +388,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             flat in uint vCoverageAxis;
             flat in vec3 vFaceNormal;
             flat in float vSurfaceVisible;
+            flat in uint vRealBoundary;
              in vec2 tileUv;
              in vec2 localXZ;
              in vec3 relative;
@@ -503,7 +507,19 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // In particular, flying above loaded chunks must reveal the
                 // prediction fallback. Use camera-relative 3D distance, which
                 // stays independent of pitch, FOV and walking view bobbing.
-                if (dot(relative, relative) < VanillaRenderDistance * VanillaRenderDistance
+                bool withinVanilla = dot(relative, relative) < VanillaRenderDistance * VanillaRenderDistance;
+                if ((vRealBoundary & 1u) != 0u) {
+                    // A height connector owns the prediction side even when
+                    // its higher surface is in the compiled real column.
+                    vec3 outward = (vRealBoundary & 2u) != 0u ? -vFaceNormal : vFaceNormal;
+                    ivec3 inside = ivec3(floor((relative - outward * 0.01 - VanillaMaskOrigin) / 16.0));
+                    ivec3 outside = ivec3(floor((relative + outward * 0.01 - VanillaMaskOrigin) / 16.0));
+                    bool realInside = all(greaterThanEqual(inside, ivec3(0))) && all(lessThan(inside, VanillaMaskSize))
+                            && texelFetch(VanillaMask, inside, 0).r > 0.5;
+                    bool realOutside = all(greaterThanEqual(outside, ivec3(0))) && all(lessThan(outside, VanillaMaskSize))
+                            && texelFetch(VanillaMask, outside, 0).r > 0.5;
+                    if (!withinVanilla || !realInside || realOutside) discard;
+                } else if (withinVanilla
                         && all(greaterThanEqual(section, ivec3(0)))
                         && all(lessThan(section, VanillaMaskSize))
                         && texelFetch(VanillaMask, section, 0).r > 0.5) {

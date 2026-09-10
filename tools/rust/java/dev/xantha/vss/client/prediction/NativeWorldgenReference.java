@@ -4,7 +4,7 @@ import java.nio.*;
 import java.nio.file.*;
 import java.util.*;
 
-/** Executes ABI 2 against the fixtures made by the actual Minecraft oracle. */
+/** Executes ABI 3 against the fixtures made by the actual Minecraft oracle. */
 public final class NativeWorldgenReference {
     static final Path ROOT=Path.of("tools/rust/vss-native-core/tests/fixtures/worldgen");
     static final Gson JSON=new Gson();
@@ -59,6 +59,6 @@ public final class NativeWorldgenReference {
             long volume=RustWorldgenBackend.surfaceRegion(world,0,0,1);RustWorldgenBackend.close(world);
             try{var descriptor=JsonParser.parseString(RustWorldgenBackend.describe(volume)).getAsJsonObject();require(descriptor.getAsJsonArray("size").get(1).getAsInt()==384,"surface region height");require(RustWorldgenBackend.readVolume(volume,direct(16*16*384*4))==16*16*384,"parent close broke result lease");}finally{RustWorldgenBackend.close(volume);}
         }finally{RustWorldgenBackend.close(world);}
-        System.out.println("JNI ABI 2: density="+densityValues+", base blocks="+columnValues+", vegetation cases="+cases+", invalid inputs/closed handles/result ownership passed");
+        System.out.println("JNI ABI 3: density="+densityValues+", base blocks="+columnValues+", vegetation cases="+cases+", invalid inputs/closed handles/result ownership passed");
     }
 }

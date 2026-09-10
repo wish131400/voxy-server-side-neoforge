@@ -10,10 +10,24 @@ captures are supplementary regression data; they do not define the algorithm.
 
 `ClientWorldgenProfileDecoder` selects `RustTerrainSampler` for supported noise
 generators when the independently named `vss_native_core` library is available.
-The worldgen interface is JNI ABI **2** (`RustWorldgenBackend`); the noise-only
+The worldgen interface is JNI ABI **3** (`RustWorldgenBackend`); the noise-only
 probe keeps ABI 1 for validation. The release packages the same core for
 **Windows x86_64, Linux x86_64/aarch64, macOS x86_64/aarch64**.
 Unknown targets use the Java sampler. The only production native backend is this core.
+
+ABI 3 adds `previewPoints`: grids below the full terrain axis use raw density
+at 16-block vertical intervals and refine the detected crossing to 4 blocks.
+Preview material selection runs the world surface rules with approximate depth
+and no neighbour geometry. Aquifers, ores, structure blending and vegetation
+are deferred to exact refinement. Flag bit 27 survives disk serialization;
+exact grids reject these retained columns and resample them. Preview results
+never enter exact native or Java point/chunk caches. Existing exact terrain
+cache identity remains valid. The Java fallback uses the same explicit preview
+stage and persisted approximation flag. It retains Java density/surface rules,
+uses one stable preliminary-height anchor per surface cell, and omits preview
+steepness scans. NoiseChunk-backed exact columns stop at the exterior through
+Minecraft's original iterator. FreeTerraForged selects erosion by stage rather
+than spacing and isolates approximate biome/material caches from exact work.
 
 Cross compilation from Windows uses Rust target standard libraries and pinned
 Zig 0.13.0 / cargo-zigbuild 0.23.4, through `build-cross-platform.ps1 -Package`.

@@ -13,21 +13,27 @@ final class PredictionLodSeams {
     private Map<PredictionTileKey, Surface> previous = Map.of();
     private List<Patch> patches = List.of();
     private final Map<PredictionTileKey, Cached> cache = new HashMap<>();
+    private final WallCache wallCache = new WallCache();
     private record Cached(Surface source, int[] edges, Surface[] neighbors, PredictionPackedMesh mesh) { }
 
     List<Patch> update(List<Surface> surfaces) {
         boolean unchanged = surfaces.size() == previous.size();
-        for (Surface surface : surfaces) {
-            Surface old = previous.get(surface.tile().key());
-            unchanged &= old != null && old.tile() == surface.tile()
-                    && Arrays.equals(old.allowed(), surface.allowed());
-        }
-        if (unchanged) return patches;
-        var index = new Index(surfaces);
-        var next = new ArrayList<Patch>();
         var inputs = new HashMap<PredictionTileKey, Surface>();
         for (Surface surface : surfaces) {
-            inputs.put(surface.tile().key(), surface);
+            Surface old = previous.get(surface.tile().key());
+            boolean same = old != null && old.tile() == surface.tile()
+                    && Arrays.equals(old.allowed(), surface.allowed());
+            unchanged &= same;
+            // Canonicalize once per tile. Hundreds of boundary edges can
+            // reference this same coverage array during neighbor validation.
+            inputs.put(surface.tile().key(), same ? old : surface);
+        }
+        if (unchanged) return patches;
+        wallCache.retain(inputs);
+        var index = new Index(inputs.values(), wallCache);
+        var next = new ArrayList<Patch>();
+        for (Surface requested : surfaces) {
+            Surface surface = inputs.get(requested.tile().key());
             Cached item = stitch(surface, index, cache.get(surface.tile().key()));
             cache.put(surface.tile().key(), item);
             PredictionPackedMesh mesh = item.mesh();
@@ -39,13 +45,12 @@ final class PredictionLodSeams {
         return patches;
     }
 
-    void clear() { previous = Map.of(); patches = List.of(); cache.clear(); }
+    void clear() { previous = Map.of(); patches = List.of(); cache.clear(); wallCache.clear(); }
 
     private static Cached stitch(Surface surface, Index index, Cached old) {
-        boolean sameSource = old != null && old.source().tile() == surface.tile()
-                && Arrays.equals(old.source().allowed(), surface.allowed());
+        boolean sameSource = old != null && old.source() == surface;
         int[] edges = sameSource ? old.edges() : boundaryEdges(surface);
-        Surface[] neighbors = new Surface[edges.length];
+        Surface[] neighbors = sameSource ? old.neighbors() : new Surface[edges.length];
         boolean sameNeighbors = sameSource;
         int axis = surface.tile().cellAxis(), step = surface.tile().spacingBlocks();
         for (int i = 0; i < edges.length; i++) {
@@ -56,8 +61,11 @@ final class PredictionLodSeams {
             int wz = surface.tile().baseBlockZ() + (cell / axis) * step;
             Surface neighbor = index.at(wx + (nx < 0 ? -1 : nx > 0 ? step : step / 2),
                     wz + (nz < 0 ? -1 : nz > 0 ? step : step / 2));
-            neighbors[i] = neighbor;
-            if (sameSource && !sameSurface(neighbor, old.neighbors()[i])) sameNeighbors = false;
+            if (sameSource && neighbor != old.neighbors()[i]) {
+                if (sameNeighbors) neighbors = neighbors.clone();
+                sameNeighbors = false;
+            }
+            if (!sameNeighbors) neighbors[i] = neighbor;
         }
         if (sameNeighbors) return old;
         var words = new IntArrayList();
@@ -114,14 +122,9 @@ final class PredictionLodSeams {
         ClientColumnSample sample = higher.samples()[PredictionGpuTile.sampleIndexForCell(higherCell, higher.cellAxis())];
         int normalX = ownHigher ? nx : -nx, normalZ = ownHigher ? nz : -nz;
         int face = normalX > 0 ? 4 : normalX < 0 ? 3 : normalZ > 0 ? 2 : 1;
-        int topBlock = PredictionMeshBuilder.surfaceSpriteBlock(sample);
-        boolean grass = topBlock == PredictionMaterialPalette.grassBlockIndex();
-        int under = sample.underBlockIndex() == ClientColumnSample.NO_BLOCK
-                ? (grass || topBlock == ClientColumnSample.NO_BLOCK ? PredictionMaterialPalette.dirtIndex() : topBlock)
-                : sample.underBlockIndex();
-        int deep = sample.deepBlockIndex() == ClientColumnSample.NO_BLOCK
-                ? (grass || topBlock == ClientColumnSample.NO_BLOCK ? PredictionMaterialPalette.stoneIndex() : under)
-                : sample.deepBlockIndex();
+        int topBlock = PredictionMaterialPalette.groundBlock(sample);
+        int under = PredictionMaterialPalette.wallUnderBlock(sample);
+        int deep = PredictionMaterialPalette.wallDeepBlock(sample);
         int top = Math.max(ownY, otherY), bottom = Math.min(ownY, otherY);
         int ax = (x + (nx > 0 ? 1 : 0)) * step, az = (z + (nz > 0 ? 1 : 0)) * step;
         int bx = ax + (nz != 0 ? step : 0), bz = az + (nx != 0 ? step : 0);
@@ -141,7 +144,7 @@ final class PredictionLodSeams {
         }
     }
 
-    private static void band(IntArrayList out, PredictionTile tile, int cell, int ax, int az, int bx, int bz,
+    static void band(IntArrayList out, PredictionTile tile, int cell, int ax, int az, int bx, int bz,
                              int top, int bottom, int nx, int nz, int block, int face, int tint, ClientColumnSample sample) {
         if (bottom >= top) return;
         int shift = 0;
@@ -164,16 +167,11 @@ final class PredictionLodSeams {
         out.add(upperColor | 1 << 24); out.add(lowerColor); out.add(lowerColor);
     }
 
-    private record HeightSpan(int bottom, int top) { }
-
-    private static boolean sameSurface(Surface a, Surface b) {
-        return a == b || a != null && b != null && a.tile() == b.tile()
-                && Arrays.equals(a.allowed(), b.allowed());
-    }
+    record HeightSpan(int bottom, int top) { }
 
     /** Index integer terrain walls once per consulted tile/update. */
     private static final class WallIndex {
-        private final Map<Long, IntArrayList> planes = new HashMap<>();
+        private final Long2ObjectOpenHashMap<IntArrayList> planes = new Long2ObjectOpenHashMap<>();
         private final PredictionQuadMesh mesh;
         WallIndex(PredictionTile tile) {
             mesh = tile.mesh().packed();
@@ -227,31 +225,73 @@ final class PredictionLodSeams {
         }
     }
 
+    /** Immutable geometry indices survive coverage changes, with bounded retention. */
+    static final class WallCache {
+        private record Entry(PredictionTile tile, WallIndex index, int weight) { }
+        private final LinkedHashMap<PredictionTileKey, Entry> entries = new LinkedHashMap<>(16, .75F, true);
+        private int weight;
+        WallIndex get(PredictionTile tile) {
+            Entry old = entries.get(tile.key());
+            if (old != null && old.tile() == tile) return old.index();
+            if (old != null) { entries.remove(tile.key()); weight -= old.weight(); }
+            var index = new WallIndex(tile);
+            int cost = tile.mesh().packed().quadCount();
+            if (cost <= 262144) {
+                while (!entries.isEmpty() && (weight + cost > 262144 || entries.size() >= 64)) {
+                    weight -= entries.pollFirstEntry().getValue().weight();
+                }
+                entries.put(tile.key(), new Entry(tile, index, cost));
+                weight += cost;
+            }
+            return index;
+        }
+        void retain(Map<PredictionTileKey, Surface> surfaces) {
+            var iterator = entries.values().iterator();
+            while (iterator.hasNext()) {
+                var entry = iterator.next();
+                var surface = surfaces.get(entry.tile().key());
+                if (surface == null || surface.tile() != entry.tile()) {
+                    weight -= entry.weight(); iterator.remove();
+                }
+            }
+        }
+        void clear() { entries.clear(); weight = 0; }
+    }
+
     private static int pair(int a, int b) { return (a & 65535) | (b & 65535) << 16; }
     private static long key(int x, int z) { return (long) x << 32 | z & 0xFFFFFFFFL; }
-    private static int cellAt(PredictionTile tile, int x, int z) {
+    static int cellAt(PredictionTile tile, int x, int z) {
         return Math.floorDiv(z - tile.baseBlockZ(), tile.spacingBlocks()) * tile.cellAxis()
                 + Math.floorDiv(x - tile.baseBlockX(), tile.spacingBlocks());
     }
 
-    private static final class Index {
+    static final class Index {
         private final SortedMap<Integer, Long2ObjectOpenHashMap<Surface>> levels = new TreeMap<>();
         private final Map<PredictionTile, WallIndex> walls = new IdentityHashMap<>();
+        private final WallCache wallCache;
+        private final int[] spans;
+        private final Long2ObjectOpenHashMap<Surface>[] levelTables;
         void subtractWalls(List<HeightSpan> gaps, Surface surface, int x, int z, int length, int nx, int nz) {
             if (surface == null || gaps.isEmpty()) return;
-            walls.computeIfAbsent(surface.tile(), WallIndex::new).subtract(gaps, surface, x, z, length, nx, nz);
+            walls.computeIfAbsent(surface.tile(), tile -> wallCache == null ? new WallIndex(tile) : wallCache.get(tile))
+                    .subtract(gaps, surface, x, z, length, nx, nz);
         }
-        Index(List<Surface> surfaces) {
+        Index(Collection<Surface> surfaces) { this(surfaces, null); }
+        @SuppressWarnings("unchecked")
+        Index(Collection<Surface> surfaces, WallCache wallCache) {
+            this.wallCache = wallCache;
             for (Surface surface : surfaces) {
                 PredictionTile tile = surface.tile();
                 levels.computeIfAbsent(tile.spanBlocks(), ignored -> new Long2ObjectOpenHashMap<>())
                         .put(key(tile.key().tileX(), tile.key().tileZ()), surface);
             }
+            spans = levels.keySet().stream().mapToInt(Integer::intValue).toArray();
+            levelTables = levels.values().toArray(new Long2ObjectOpenHashMap[0]);
         }
         Surface at(int x, int z) {
-            for (var level : levels.entrySet()) {
-                int span = level.getKey();
-                Surface surface = level.getValue().get(key(Math.floorDiv(x, span), Math.floorDiv(z, span)));
+            for (int i = 0; i < spans.length; i++) {
+                int span = spans[i];
+                Surface surface = levelTables[i].get(key(Math.floorDiv(x, span), Math.floorDiv(z, span)));
                 if (surface != null && surface.allowed()[cellAt(surface.tile(), x, z)]) return surface;
             }
             return null;

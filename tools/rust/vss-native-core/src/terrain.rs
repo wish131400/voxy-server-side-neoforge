@@ -98,10 +98,46 @@ pub struct Job<'a> {
     locations: HashMap<[i32; 3], [i32; 3]>,
     fluids: HashMap<[i32; 3], Fluid>,
     surface_columns: HashMap<(i32, i32), Column>,
+    surface_bottoms: HashMap<(i32, i32), (i32, i32)>,
     surface_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
 }
 const WAY_BELOW_MIN_Y: i32 = -32512;
 impl Terrain {
+    /// Preview-only exterior search. Raw density bypasses interpolation arrays,
+    /// aquifers, ores and structure blending; exact columns never call this.
+    pub fn preview_height(&self, x: i32, z: i32, scratch: &mut Scratch) -> i32 {
+        let top = self.min_y + self.height - 1;
+        let mut air = top + 1;
+        let mut y = top;
+        loop {
+            if self.graph.compute(self.final_density, [x, y, z], Mode::Raw, scratch) > 0. {
+                let mut solid = y;
+                while air - solid > 4 {
+                    let middle = solid + (air - solid) / 2;
+                    if self.graph.compute(self.final_density, [x, middle, z], Mode::Raw, scratch) > 0. {
+                        solid = middle;
+                    } else {
+                        air = middle;
+                    }
+                }
+                return solid + 1;
+            }
+            if y == self.min_y { return self.min_y; }
+            air = y;
+            y = (y - 16).max(self.min_y);
+        }
+    }
+
+    pub fn preview_fluid(&self, floor: i32) -> (i32, i32) {
+        // Empty End columns must stay empty. This deliberately omits aquifers.
+        if floor == self.min_y || floor >= self.sea_level { return (floor, 0); }
+        match self.fluid {
+            Substance::Water => (self.sea_level, 1),
+            Substance::Lava => (self.sea_level, 2),
+            _ => (floor, 0),
+        }
+    }
+
     pub fn from_document(seed: i64, doc: &Value) -> Result<Self> {
         let graph = Graph::from_document(seed, doc)?;
         let s = &doc["settings"];
@@ -179,6 +215,7 @@ impl Terrain {
             locations: HashMap::new(),
             fluids: HashMap::new(),
             surface_columns: HashMap::new(),
+            surface_bottoms: HashMap::new(),
             surface_tops: HashMap::new(),
         })
     }
@@ -202,52 +239,129 @@ impl Terrain {
 impl Job<'_> {
     /// Sparse surface requests share NoiseChunk cells too. Visit each needed
     /// cell once, retaining complete centre columns and only the first block
-    /// of steepness neighbours. The cache lives for this chunk batch only.
+    /// of steepness neighbours. This is also the full-depth fallback.
     pub fn prepare_surface_columns(&mut self, centres: &[(i32, i32)]) {
+        self.prepare_surface_columns_inner(centres, |_, _, _| None, false);
+    }
+
+    pub fn surface_bottom(&self, x: i32, z: i32) -> Option<(i32, i32)> {
+        self.surface_bottoms.get(&(x, z)).copied()
+    }
+
+    pub fn prepare_surface_columns_with_depth(
+        &mut self,
+        centres: &[(i32, i32)],
+        padding: impl FnMut(i32, i32, i32) -> Option<i32>,
+    ) {
+        self.prepare_surface_columns_inner(centres, padding, true);
+    }
+
+    fn prepare_surface_columns_inner(
+        &mut self,
+        centres: &[(i32, i32)],
+        mut padding: impl FnMut(i32, i32, i32) -> Option<i32>,
+        exterior: bool,
+    ) {
         let t = self.terrain;
         if !t.graph.requires_complete_column_order() || centres.is_empty() {
             return;
         }
         self.surface_columns.clear();
+        self.surface_bottoms.clear();
         self.surface_tops.clear();
         let mut needed = std::collections::BTreeMap::new();
         for &(x, z) in centres {
             let x0 = x & !15;
             let z0 = z & !15;
-            for p in [(x, z), (x, (z - 1).max(z0)), (x, (z + 1).min(z0 + 15)),
-                ((x - 1).max(x0), z), ((x + 1).min(x0 + 15), z)] {
+            for p in [
+                (x, z),
+                (x, (z - 1).max(z0)),
+                (x, (z + 1).min(z0 + 15)),
+                ((x - 1).max(x0), z),
+                ((x + 1).min(x0 + 15), z),
+            ] {
                 needed.entry(p).or_insert(false);
             }
             needed.insert((x, z), true);
         }
+        if exterior {
+            t.graph.plan_surface_slices(
+                &mut self.scratch,
+                &needed.keys().copied().collect::<Vec<_>>(),
+            );
+        } else {
+            self.scratch.clear_surface_slices();
+        }
         let mut cells = std::collections::BTreeMap::<_, Vec<_>>::new();
         for ((x, z), full) in needed {
-            cells.entry((x.div_euclid(t.cell_width), z.div_euclid(t.cell_width)))
-                .or_default().push((x, z, full));
+            cells
+                .entry((x.div_euclid(t.cell_width), z.div_euclid(t.cell_width)))
+                .or_default()
+                .push((x, z, full));
             self.surface_tops.insert((x, z), None);
             if full {
-                self.surface_columns.insert((x, z), Column { min_y: t.min_y,
-                    blocks: vec![Substance::Air; t.height as usize],
-                    surface_height: t.min_y, ocean_floor: t.min_y, fluid_height: None });
+                self.surface_columns.insert(
+                    (x, z),
+                    Column {
+                        min_y: t.min_y,
+                        blocks: vec![Substance::Air; t.height as usize],
+                        surface_height: t.min_y,
+                        ocean_floor: t.min_y,
+                        fluid_height: None,
+                    },
+                );
             }
         }
         for columns in cells.values() {
-            for cy in (t.min_y..t.min_y + t.height).step_by(t.cell_height as usize).rev() {
-                if columns.iter().all(|&(x, z, full)| !full && self.surface_tops[&(x, z)].is_some()) {
+            for cy in (t.min_y..t.min_y + t.height)
+                .step_by(t.cell_height as usize)
+                .rev()
+            {
+                if columns.iter().all(|&(x, z, full)| {
+                    (!full && self.surface_tops[&(x, z)].is_some())
+                        || self
+                            .surface_bottoms
+                            .get(&(x, z))
+                            .is_some_and(|&(bottom, _)| cy + t.cell_height <= bottom)
+                }) {
                     break;
                 }
                 for y in (cy..cy + t.cell_height).rev() {
                     for &(x, z, full) in columns {
-                        if !full && self.surface_tops[&(x, z)].is_some() { continue; }
+                        if !full && self.surface_tops[&(x, z)].is_some() {
+                            continue;
+                        }
+                        if self
+                            .surface_bottoms
+                            .get(&(x, z))
+                            .is_some_and(|&(bottom, _)| y < bottom)
+                        {
+                            continue;
+                        }
                         let block = self.block([x, y, z]);
                         if block != Substance::Air && self.surface_tops[&(x, z)].is_none() {
                             self.surface_tops.insert((x, z), Some((y, block)));
                         }
                         if let Some(column) = self.surface_columns.get_mut(&(x, z)) {
+                            if block.solid() && column.ocean_floor == t.min_y {
+                                let top = self.surface_tops[&(x, z)].map_or(y + 1, |(y, _)| y + 1);
+                                if let Some(extra) = padding(x, top, z) {
+                                    let bottom = (y - 7 - extra).max(t.min_y);
+                                    if bottom > t.min_y {
+                                        self.surface_bottoms.insert((x, z), (bottom, extra));
+                                    }
+                                }
+                            }
                             column.blocks[(y - t.min_y) as usize] = block;
-                            if block != Substance::Air { column.surface_height = column.surface_height.max(y + 1); }
-                            if block.solid() { column.ocean_floor = column.ocean_floor.max(y + 1); }
-                            if block.fluid() && column.fluid_height.is_none() { column.fluid_height = Some(y + 1); }
+                            if block != Substance::Air {
+                                column.surface_height = column.surface_height.max(y + 1);
+                            }
+                            if block.solid() {
+                                column.ocean_floor = column.ocean_floor.max(y + 1);
+                            }
+                            if block.fluid() && column.fluid_height.is_none() {
+                                column.fluid_height = Some(y + 1);
+                            }
                         }
                     }
                 }
@@ -257,14 +371,22 @@ impl Job<'_> {
 
     /// Visit a chunk in NoiseChunk's cell order. A column-at-a-time reader
     /// revisits each 4x4 horizontal cell sixteen times on stateful graphs.
-    pub fn fill_chunk(&mut self, x0: i32, z0: i32, mut write: impl FnMut(i32, i32, i32, Substance)) {
+    pub fn fill_chunk(
+        &mut self,
+        x0: i32,
+        z0: i32,
+        mut write: impl FnMut(i32, i32, i32, Substance),
+    ) {
         let t = self.terrain;
         if t.graph.requires_complete_column_order() {
             let first_x = x0.div_euclid(t.cell_width) * t.cell_width;
             let first_z = z0.div_euclid(t.cell_width) * t.cell_width;
             for cx in (first_x..x0 + 16).step_by(t.cell_width as usize) {
                 for cz in (first_z..z0 + 16).step_by(t.cell_width as usize) {
-                    for cy in (t.min_y..t.min_y + t.height).step_by(t.cell_height as usize).rev() {
+                    for cy in (t.min_y..t.min_y + t.height)
+                        .step_by(t.cell_height as usize)
+                        .rev()
+                    {
                         for y in (cy..cy + t.cell_height).rev() {
                             for x in cx.max(x0)..(cx + t.cell_width).min(x0 + 16) {
                                 for z in cz.max(z0)..(cz + t.cell_width).min(z0 + 16) {

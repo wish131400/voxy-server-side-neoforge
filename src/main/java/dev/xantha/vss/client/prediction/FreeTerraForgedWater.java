@@ -18,25 +18,46 @@ final class FreeTerraForgedWater {
         ocean = levels.getClass().getField("water").getFloat(levels);
         Class<?> cell = loader.loadClass(prefix + "Cell");
         terrain = cell.getField("terrain");
-        riverLevel = cell.getField("riverWaterLevel");
+        Field waterLevel;
+        try {
+            waterLevel = cell.getField("riverWaterLevel");
+        } catch (NoSuchFieldException legacyRelease) {
+            // 6001/6002 use the generator's ordinary sea-level fluid picker.
+            waterLevel = null;
+        }
+        riverLevel = waterLevel;
+        if (riverLevel == null) {
+            waterTable = continentScale = continentModifier = null;
+            river = lake = wetland = hydrology = null;
+            return;
+        }
         waterTable = cell.getField("waterTable");
-        continentScale = cell.getField("globalContinentScale");
-        continentModifier = cell.getField("continentSizeModifier");
         river = terrain.getType().getMethod("isRiver");
         lake = terrain.getType().getMethod("isLake");
         wetland = terrain.getType().getMethod("isWetland");
-        hydrology = loader.loadClass(prefix + "rivermap.ContinentalHydrology")
-                .getMethod("getComplexWaterHeight", float.class, float.class, float.class);
+        Class<?> hydrologyType = loader.loadClass(prefix + "rivermap.ContinentalHydrology");
+        Method waterHeight;
+        try {
+            waterHeight = hydrologyType.getMethod("getComplexWaterHeight", float.class, float.class, float.class);
+        } catch (NoSuchMethodException legacyRelease) {
+            waterHeight = hydrologyType.getMethod("getWeightedWaterHeight", float.class);
+        }
+        hydrology = waterHeight;
+        continentScale = hydrology.getParameterCount() == 3 ? cell.getField("globalContinentScale") : null;
+        continentModifier = hydrology.getParameterCount() == 3 ? cell.getField("continentSizeModifier") : null;
     }
 
     int surfaceY(Object cell) throws ReflectiveOperationException {
+        if (riverLevel == null) return Integer.MIN_VALUE;
         Object kind = terrain.get(cell);
         if (kind == null || riverLevel.getFloat(cell) <= 0
                 || !((boolean) river.invoke(kind) || (boolean) lake.invoke(kind) || (boolean) wetland.invoke(kind))) {
             return Integer.MIN_VALUE;
         }
-        float uplift = (float) hydrology.invoke(null, waterTable.getFloat(cell),
-                continentScale.getFloat(cell), continentModifier.getFloat(cell));
+        float uplift = hydrology.getParameterCount() == 1
+                ? (float) hydrology.invoke(null, waterTable.getFloat(cell))
+                : (float) hydrology.invoke(null, waterTable.getFloat(cell),
+                        continentScale.getFloat(cell), continentModifier.getFloat(cell));
         // The mod places a water block at waterY inclusively; VSS stores its top face.
         return 1 + Math.max((int) scale.invoke(levels, ocean), (int) scale.invoke(levels, ocean + uplift));
     }

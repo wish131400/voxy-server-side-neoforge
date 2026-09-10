@@ -48,6 +48,10 @@ public class ClientTerrainSampler {
     private final int ceilingY;
     private final TerrainFunction customSurface;
     private final ClientSurfaceResolver surfaceMaterials;
+    // Preview-only cache: never used by surfaceY, exact materials or decoration.
+    private final ThreadLocal<java.util.LinkedHashMap<Long, Integer>> previewHeights =
+            ThreadLocal.withInitial(() -> new java.util.LinkedHashMap<>(256, .75f, true));
+    private volatile PredictionBiomeCache previewBiomes;
 
     @FunctionalInterface
     public interface TerrainFunction {
@@ -337,6 +341,86 @@ public class ClientTerrainSampler {
         return sampleSurface(blockX, blockZ);
     }
 
+    /** Coarse/medium stage only; spacing alone must never select approximation. */
+    public ClientColumnSample samplePreview(int x, int z, int stepBlocks) {
+        if (generator == null || biomeSource == null || climate == null) {
+            // Opaque integrations retain their existing LOD hook and deferral
+            // semantics; a noise preview cannot replace an unknown generator.
+            return stepBlocks >= 16 ? sampleForLod(x,z,stepBlocks) : sampleSurface(x,z);
+        }
+        return samplePreview(x,z);
+    }
+
+    public ClientColumnSample samplePreview(int x, int z) {
+        if (generator == null || biomeSource == null || climate == null) return sampleSurface(x, z);
+        int floor = previewSurfaceY(x, z);
+        boolean empty = floor == floorY;
+        var fluidState = generator.generatorSettings().value().defaultFluid();
+        int fluid = !empty && floor < seaLevel && !fluidState.getFluidState().isEmpty()
+                ? (lavaOcean ? 2 : 1) : 0;
+        int fluidY = fluid == 0 ? floor : seaLevel;
+        var biome = previewBiome(x, floor - 1, z);
+        boolean snow = biome.value().coldEnoughToSnow(new net.minecraft.core.BlockPos(x,
+                fluid == 0 ? floor : fluidY - 1, z));
+        int flags = ClientColumnSample.FLAG_APPROXIMATE | (empty ? ClientColumnSample.FLAG_NO_SURFACE : 0)
+                | (snow ? (fluid == 1 ? ClientColumnSample.FLAG_SNOW | ClientColumnSample.FLAG_ICE
+                : ClientColumnSample.FLAG_SNOW) : 0);
+        String path = biome.unwrapKey().map(k -> k.location().getPath()).orElse("");
+        var sample = basicSample(floor, biomeIndices.getOrDefault(biome, ClientColumnSample.NO_BLOCK),
+                fluidY, fluid, PredictionMaterialPalette.representativeBlock(path, snow, lavaOcean, false), flags);
+        // Bypass overrides that request exact columns/erosion/river correction.
+        return empty || surfaceMaterials == null ? sample
+                : surfaceMaterials.resolvePreview(sample, x, z, this::previewSurfaceY);
+    }
+
+    int previewSurfaceY(int x, int z) {
+        if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+        // Opaque custom terrain must retain its own generator, never the base router.
+        if (customSurface != null || finalDensity == null) return surfaceY(x, z);
+        long key = (long)x << 32 | z & 0xffffffffL;
+        var cache = previewHeights.get();
+        Integer cached = cache.get(key);
+        if (cached != null) return cached;
+        int air = ceilingY + 1, y = ceilingY, floor = floorY;
+        while (true) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            if (solid(x, y, z)) {
+                int solid = y;
+                while (air - solid > 4) {
+                    int middle = solid + (air - solid) / 2;
+                    if (solid(x, middle, z)) solid = middle; else air = middle;
+                }
+                floor = solid + 1;
+                break;
+            }
+            if (y == floorY) break;
+            air = y;
+            y = Math.max(floorY, y - 16);
+        }
+        cache.put(key, floor);
+        while (cache.size() > 4096) cache.remove(cache.keySet().iterator().next());
+        return floor;
+    }
+
+    private Holder<Biome> previewBiome(int x,int y,int z) {
+        var cache = previewBiomes;
+        if (cache == null) synchronized (this) {
+            if (previewBiomes == null) previewBiomes = new PredictionBiomeCache(biomeSource,climate);
+            cache = previewBiomes;
+        }
+        return cache.get(x >> 2,y >> 2,z >> 2);
+    }
+
+    int surfaceColorForLod(int x, int y, int z, boolean preview) {
+        return preview && biomeSource != null ? previewBiome(x,y,z).value().getGrassColor(x,z) : surfaceColor(x,y,z);
+    }
+    int foliageColorForLod(int x, int y, int z, boolean preview) {
+        return preview && biomeSource != null ? 0xff000000 | previewBiome(x,y,z).value().getFoliageColor() : foliageColor(x,y,z);
+    }
+    int waterTintForLod(int x, int y, int z, boolean preview) {
+        return preview && biomeSource != null ? 0xb2000000 | previewBiome(x,y,z).value().getWaterColor() : waterTint(x,y,z);
+    }
+
     /** Real surface rules and fluid/weather data, without underground or placement-hint scans. */
     public ClientColumnSample sampleSurface(int blockX, int blockZ) {
         // Native/custom samplers override sample and must keep that backend.
@@ -472,7 +556,7 @@ public class ClientTerrainSampler {
         int low = floorY;
         int high = ceilingY + 1;
         while (high - low > 1) {
-            int mid = (low + high) >>> 1;
+            int mid = low + (high - low) / 2;
             if (initialDensity.compute(new DensityFunction.SinglePointContext(blockX, mid, blockZ)) > 0.0D) {
                 low = mid;
             } else {
@@ -511,7 +595,7 @@ public class ClientTerrainSampler {
 
     private int refine(int blockX, int low, int high, int blockZ) {
         while (high - low > 1) {
-            int mid = (low + high) >>> 1;
+            int mid = low + (high - low) / 2;
             if (solid(blockX, mid, blockZ)) {
                 low = mid;
             } else {

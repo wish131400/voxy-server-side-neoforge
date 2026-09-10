@@ -82,15 +82,31 @@ class TerrainParityTest {
     void tectonicPackMatchesMinecraftColumns() throws Exception {
         var doc = LithostitchedNativeTest.document();
         try (var zip = new java.util.zip.ZipFile(System.getProperty("vss.tectonicJar"))) {
-            Path apollib = Path.of("build/dev-comparison/apollib.jar");
-            Files.createDirectories(apollib.getParent());
-            try (var input = zip.getInputStream(zip.getEntry("META-INF/jarjar/apollib-1.1.5-neoforge-21.1.jar"))) {
-                Files.copy(input, apollib, StandardCopyOption.REPLACE_EXISTING);
+            var urls = new java.util.ArrayList<java.net.URL>();
+            urls.add(Path.of(System.getProperty("vss.tectonicJar")).toUri().toURL());
+            for (var entry : java.util.Collections.list(zip.entries())) {
+                if (!entry.getName().startsWith("META-INF/jarjar/") || !entry.getName().endsWith(".jar")) continue;
+                Path nested = Path.of("build/dev-comparison/tectonic-dependencies", Path.of(entry.getName()).getFileName().toString());
+                Files.createDirectories(nested.getParent());
+                try (var input = zip.getInputStream(entry)) {
+                    Files.copy(input, nested, StandardCopyOption.REPLACE_EXISTING);
+                }
+                urls.add(nested.toUri().toURL());
             }
-            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{Path.of(System.getProperty("vss.tectonicJar")).toUri().toURL(), apollib.toUri().toURL()}, TerrainParityTest.class.getClassLoader())) {
-            Object config = loader.loadClass("dev.worldgen.tectonic.config.ConfigState").getField("DEFAULT_STATE").get(null);
+            try (var loader = new java.net.URLClassLoader(urls.toArray(java.net.URL[]::new), TerrainParityTest.class.getClassLoader())) {
+            Object config;
+            try {
+                config = loader.loadClass("dev.worldgen.tectonic.config.ConfigState").getField("DEFAULT_STATE").get(null);
+            } catch (ClassNotFoundException legacyRelease) {
+                config = loader.loadClass("dev.worldgen.tectonic.config.ConfigHandler").getMethod("getState").invoke(null);
+            }
             registerCodec(loader,"Invert","invert");
-            registerCodec(loader,"ConfigClamp","config_clamp");
+            try {
+                loader.loadClass("dev.worldgen.tectonic.worldgen.densityfunction.ConfigClamp");
+                registerCodec(loader,"ConfigClamp","config_clamp");
+            } catch (ClassNotFoundException legacyRelease) {
+                // Earlier datapacks do not use configurable clamps.
+            }
             for (String prefix : new String[]{"resourcepacks/tectonic/data/", "resourcepacks/tectonic/overlay.mod/data/"}) {
             for (var entry : java.util.Collections.list(zip.entries())) {
                 String path = entry.getName();
@@ -139,7 +155,11 @@ class TerrainParityTest {
                 .getMethod("getValue",String.class).invoke(config,object.get("key").getAsString()));
         if (type.equals("tectonic:config_noise")) {
             Object state = config.getClass().getMethod("getNoiseState",String.class).invoke(config,object.get("key").getAsString());
-            assertFalse(state.getClass().getField("smootherScaling").getBoolean(state));
+            try {
+                assertFalse(state.getClass().getField("smootherScaling").getBoolean(state));
+            } catch (NoSuchFieldException legacyRelease) {
+                // Older releases only implement ordinary shifted noise scaling.
+            }
             var noise = new JsonObject(); noise.addProperty("type","minecraft:shifted_noise");
             noise.add("noise",object.get("noise")); noise.add("shift_x",object.get("shift_x")); noise.add("shift_z",object.get("shift_z"));
             noise.addProperty("shift_y",0); noise.addProperty("y_scale",0); noise.addProperty("xz_scale",state.getClass().getField("scale").getDouble(state));

@@ -4,6 +4,56 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class RustGridReuseTest {
+    @Test void diskRestoredApproximationIsResampledForFineTerrain(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), -64, 384,
+                "noise", "minecraft:overworld", 1L);
+        var doc = LithostitchedNativeTest.document();
+        doc.add("possible_biomes", new com.google.gson.JsonArray());
+        var key = PredictionDiskCache.Key.terrain(0,0,0);
+        try (var sampler = new RustTerrainSampler(RustWorldgenBackend.create(1,0,doc.toString()),profile,
+                new ClientTerrainSampler(1,profile))) {
+            var preview = sampler.sampleGrid(-16,-16,8,4,4,new ClientColumnSample[16],true);
+            assertTrue(java.util.Arrays.stream(preview).allMatch(ClientColumnSample::approximate));
+            assertEquals(0,sampler.fullChunkLoads.sum());
+            var medium = sampler.sampleGrid(-16,-16,8,4,4,preview,true);
+            assertArrayEquals(preview,medium);
+            assertEquals(16,sampler.gridComputedPoints.sum(),"preview refinement may reuse approximations");
+            var direct = java.nio.ByteBuffer.allocateDirect(40).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            var input = java.nio.ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            direct.putInt(0,12345);
+            input.putInt(0,Integer.MIN_VALUE);
+            long invalidWorld = RustWorldgenBackend.create(1,0,doc.toString());
+            try {
+                assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.previewPoints(invalidWorld,input,direct,1));
+                assertEquals(12345,direct.getInt(0),"invalid input must not partly publish output");
+                assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.previewPoints(invalidWorld,input,direct,65));
+            } finally { RustWorldgenBackend.close(invalidWorld); }
+            try(var cache = new PredictionDiskCache(directory,77); var lease = cache.lease(key)) {
+                assertTrue(cache.writeTerrain(lease,preview));
+            }
+            ClientColumnSample[] restored;
+            try(var cache = new PredictionDiskCache(directory,77); var lease = cache.lease(key)) {
+                restored = cache.readTerrain(lease,16);
+            }
+            assertArrayEquals(preview,restored,"disk must preserve approximation metadata");
+            var exact = sampler.sampleGrid(-16,-16,8,4,4,restored,false);
+            assertEquals(32,sampler.gridComputedPoints.sum(),"all approximate columns must be replaced");
+            assertTrue(java.util.Arrays.stream(exact).noneMatch(ClientColumnSample::approximate));
+            var s = preview[0];
+            var captured = new ClientColumnSample(s.surfaceY(),s.fluidY(),s.biomeIndex(),s.topBlockIndex(),
+                    s.structureIndex(),s.treeKind(),s.treeDensity(),s.treeHeight(),s.fluid(),
+                    s.flags() | ClientColumnSample.FLAG_CAPTURED,s.groundFeatureKind(),s.underBlockIndex(),
+                    s.deepBlockIndex(),s.surfaceBottom(),s.lowerTop(),s.lowerBottom(),s.spanFloor());
+            assertSame(captured,sampler.sampleGrid(-16,-16,8,1,1,new ClientColumnSample[]{captured},false)[0]);
+            assertArrayEquals(exact,sampler.sampleGrid(-16,-16,8,4,4));
+            for(int z=0;z<4;z++) for(int x=0;x<4;x++)
+                assertEquals(sampler.sample(-16+x*8,-16+z*8),exact[z*4+x]);
+        }
+    }
+
     @Test void retainedSamplesAvoidNativeWorkEvenAfterSamplerCachesAreGone() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(

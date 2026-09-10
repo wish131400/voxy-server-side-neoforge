@@ -31,7 +31,9 @@ final class ClientSurfaceResolver {
     private final LevelHeightAccessor heights;
     private final Registry<Biome> biomes;
     private final PredictionBiomeCache biomeCache;
+    private final PredictionBiomeCache previewBiomeCache;
     private final ThreadLocal<Worker> workers = new ThreadLocal<>();
+    private final ThreadLocal<Worker> previewWorkers = new ThreadLocal<>();
 
     ClientSurfaceResolver(NoiseBasedChunkGenerator generator, RandomState randomState,
                           LevelHeightAccessor heights, Registry<Biome> biomes) {
@@ -46,17 +48,29 @@ final class ClientSurfaceResolver {
         this.heights = heights;
         this.biomes = biomes;
         this.biomeCache = biomeCache;
+        this.previewBiomeCache = new PredictionBiomeCache(generator.getBiomeSource(), randomState.sampler());
     }
 
     ClientColumnSample resolve(ClientColumnSample sample, int x, int z,
                                 ClientTerrainSampler.TerrainFunction terrain) {
+        return resolve(sample, x, z, terrain, false);
+    }
+
+    ClientColumnSample resolvePreview(ClientColumnSample sample, int x, int z,
+                                      ClientTerrainSampler.TerrainFunction terrain) {
+        return resolve(sample, x, z, terrain, true);
+    }
+
+    private ClientColumnSample resolve(ClientColumnSample sample, int x, int z,
+                                ClientTerrainSampler.TerrainFunction terrain, boolean preview) {
         try {
-            Worker worker = workers.get();
+            var local = preview ? previewWorkers : workers;
+            Worker worker = local.get();
             // NoiseChunk caches preliminary heights. Bound its lifetime even when
             // a worker travels indefinitely through coarse tiles.
             if (worker == null || worker.columns >= 4096) {
-                worker = new Worker();
-                workers.set(worker);
+                worker = new Worker(preview);
+                local.set(worker);
             }
             worker.columns++;
             worker.x = x;
@@ -97,19 +111,33 @@ final class ClientSurfaceResolver {
         private int x;
         private int z;
         private int columns;
+        private final boolean preview;
 
         @SuppressWarnings("unchecked")
-        private Worker() throws ReflectiveOperationException {
+        private Worker(boolean preview) throws ReflectiveOperationException {
+            this.preview = preview;
             NoiseGeneratorSettings settings = generator.generatorSettings().value();
             ProtoChunk chunk = new ProtoChunk(new ChunkPos(0, 0), UpgradeData.EMPTY, heights, biomes, null) {
                 @Override public int getHeight(Heightmap.Types type, int localX, int localZ) {
-                    return terrain.surfaceY((x & ~15) + (localX & 15), (z & ~15) + (localZ & 15)) - 1;
+                    return preview ? terrain.surfaceY(x,z) - 1
+                            : terrain.surfaceY((x & ~15) + (localX & 15), (z & ~15) + (localZ & 15)) - 1;
                 }
             };
             Aquifer.FluidStatus fluid = new Aquifer.FluidStatus(settings.seaLevel(), settings.defaultFluid());
-            NoiseChunk noise = FreeTerraForgedCompat.withSurfaceChunk(randomState, chunk,
-                    () -> NoiseChunk.forChunk(chunk, randomState, NO_STRUCTURES,
-                            settings, (bx, by, bz) -> fluid, Blender.empty()));
+            NoiseChunk noise = preview
+                    ? new NoiseChunk(1, randomState, 0, 0, settings.noiseSettings(), NO_STRUCTURES,
+                            settings, (bx,by,bz) -> fluid, Blender.empty()) {
+                        @Override public int preliminarySurfaceLevel(int bx, int bz) {
+                            // One stable anchor per surface cell replaces four
+                            // preliminary columns. Context caches these four values
+                            // by 16x16 cell, so the anchor must not depend on point
+                            // order within that cell. Exact workers remain unchanged.
+                            return terrain.surfaceY(x & ~15,z & ~15);
+                        }
+                    }
+                    : FreeTerraForgedCompat.withSurfaceChunk(randomState, chunk,
+                        () -> NoiseChunk.forChunk(chunk, randomState, NO_STRUCTURES,
+                                settings, (bx, by, bz) -> fluid, Blender.empty()));
             context = Access.CONSTRUCTOR.newInstance(randomState.surfaceSystem(), randomState, chunk, noise,
                     (Function<BlockPos, Holder<Biome>>) this::biomeAt, biomes,
                     new WorldGenerationContext(generator, heights));
@@ -117,7 +145,7 @@ final class ClientSurfaceResolver {
         }
 
         private Holder<Biome> biomeAt(BlockPos pos) {
-            return biomeCache.get(pos.getX() >> 2, pos.getY() >> 2, pos.getZ() >> 2);
+            return (preview ? previewBiomeCache : biomeCache).get(pos.getX() >> 2, pos.getY() >> 2, pos.getZ() >> 2);
         }
 
         private int material(ClientColumnSample sample, int depth) throws Throwable {

@@ -83,6 +83,8 @@ public final class PredictionRenderer {
     private static PredictionTileManager.RenderSnapshot prunedSnapshot;
     private static final PredictionLodSeams lodSeams = new PredictionLodSeams();
     private static final Map<PredictionTileManager.PredictionTileKey, PredictionGpuTile> seamTiles = new java.util.HashMap<>();
+    private static final PredictionRealBoundarySeams realSeams = new PredictionRealBoundarySeams();
+    private static final Map<PredictionTileManager.PredictionTileKey, PredictionGpuTile> realSeamTiles = new java.util.HashMap<>();
     private static final PredictionUploadBudget uploadBudget = new PredictionUploadBudget();
     /**
      * Budget for periodic coverage probes. Changes to tile ownership or the
@@ -369,17 +371,22 @@ public final class PredictionRenderer {
 
     private static void appendSeams(List<Draw> draws) {
         var surfaces = draws.stream().map(draw -> new PredictionLodSeams.Surface(draw.tile(), draw.allowed())).toList();
-        var patches = lodSeams.update(surfaces);
+        appendSeamPatches(draws, lodSeams.update(surfaces), seamTiles);
+        appendSeamPatches(draws, realSeams.update(surfaces, vanillaMask.groundEdges()), realSeamTiles);
+    }
+
+    private static void appendSeamPatches(List<Draw> draws, List<PredictionLodSeams.Patch> patches,
+                                          Map<PredictionTileManager.PredictionTileKey, PredictionGpuTile> tiles) {
         var active = new HashSet<PredictionTileManager.PredictionTileKey>();
         for (var patch : patches) {
             var tile = patch.surface().tile();
             active.add(tile.key());
-            var gpu = seamTiles.computeIfAbsent(tile.key(), PredictionGpuTile::new);
+            var gpu = tiles.computeIfAbsent(tile.key(), PredictionGpuTile::new);
             gpu.ensureSeams(patch.mesh());
             gpu.updateCoverage(patch.surface().allowed());
             draws.add(new Draw(tile, gpu, patch.surface().allowed(), true));
         }
-        seamTiles.entrySet().removeIf(entry -> {
+        tiles.entrySet().removeIf(entry -> {
             if (active.contains(entry.getKey())) return false;
             retiredTiles.add(entry.getValue());
             return true;
@@ -863,6 +870,9 @@ public final class PredictionRenderer {
         lodSeams.clear();
         retiredTiles.addAll(seamTiles.values());
         seamTiles.clear();
+        realSeams.clear();
+        retiredTiles.addAll(realSeamTiles.values());
+        realSeamTiles.clear();
         uploadBudget.reset();
         vanillaMask.invalidate();
         coverageCache.clear();

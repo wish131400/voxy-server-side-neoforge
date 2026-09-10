@@ -72,6 +72,36 @@ class PredictionLodSeamsTest {
         assertNotSame(initial, cache.update(inputs).getFirst().mesh());
     }
 
+    @Test void copiedCoverageCanonicalizesNeighborsButChangedCoverageInvalidatesThem() {
+        var fine = surface(tile(-1, -1, 2, 64));
+        var coarse = surface(tile(0, -1, 4, 96));
+        var seams = new PredictionLodSeams();
+        var initial = seams.update(List.of(fine, coarse)).getFirst().mesh();
+        var copy = new PredictionLodSeams.Surface(coarse.tile(), coarse.allowed().clone());
+        var distant = surface(tile(100, 100, 16, 80));
+        assertSame(initial, seams.update(List.of(fine, copy, distant)).getFirst().mesh());
+        boolean[] changed = coarse.allowed().clone();
+        Arrays.fill(changed, false);
+        assertTrue(seams.update(List.of(fine, new PredictionLodSeams.Surface(coarse.tile(), changed), distant)).isEmpty());
+        assertEquals(area(initial), area(seams.update(List.of(fine, coarse, distant)).getFirst().mesh()));
+    }
+
+    @Test void wallIndexSurvivesCoverageUpdatesAndReleasesReplacedGeometry() {
+        var original = tile(0, 0, 2, 64);
+        var replacement = tile(0, 0, 2, 80);
+        var cache = new PredictionLodSeams.WallCache();
+        Object first = cache.get(original);
+        assertSame(first, cache.get(original));
+        cache.retain(Map.of(original.key(), surface(original)));
+        assertSame(first, cache.get(original));
+        assertNotSame(first, cache.get(replacement));
+        cache.retain(Map.of());
+        assertNotSame(first, cache.get(original));
+        Object second = cache.get(original);
+        cache.clear();
+        assertNotSame(second, cache.get(original));
+    }
+
     @Test void underwaterSeamsUseTheSameWaterDepthLightingAsOrdinaryWalls() {
         var fine = wetTile(-1, -1, 2, 50, 55, 50);
         var coarse = wetTile(0, -1, 4, 32, 55, 32);

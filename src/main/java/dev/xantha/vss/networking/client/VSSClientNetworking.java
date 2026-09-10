@@ -322,8 +322,6 @@ public final class VSSClientNetworking {
             return;
         }
         ClientPredictionState.accept(payload);
-        VSSLogger.info("VSS prediction profile received; decoding: dimensions=" + payload.dimensions().size()
-                + ", revision=" + payload.revision());
     }
 
     public static void onColumnTransferFailed(

@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 
 class PredictionMediumCoverageTest {
     @org.junit.jupiter.api.BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
-    @Test void groundAndHighAltitudeWaitForBroadMediumThenResumeLocalDetail() throws Exception {
+    @Test void groundAndHighAltitudeRefineCompletedRegionsWhileDistantMediumIsPending() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         for (int altitude : new int[]{80, 5000}) verifyPass(altitude);
     }
@@ -22,12 +22,26 @@ class PredictionMediumCoverageTest {
         var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
                 42L, -64, 384, "noise", "minecraft:overworld", 123L);
         var calls = new AtomicInteger();
+        var distantEntered = new CountDownLatch(1);
+        var releaseDistant = new CountDownLatch(1);
         var sample = new ClientColumnSample(64,64,0,ClientColumnSample.NO_BLOCK,0,0,0,0,0,
                 ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
                 ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
         var sampler = new ClientTerrainSampler(42, profile) {
             @Override int initialTerrainCellAxis(int lod) { return 8; }
-            @Override public ClientColumnSample sampleForLod(int x,int z,int step) { calls.incrementAndGet(); return sample; }
+            @Override public ClientColumnSample sampleForLod(int x,int z,int step) {
+                calls.incrementAndGet();
+                if (x < -128) {
+                    distantEntered.countDown();
+                    try {
+                        if (!releaseDistant.await(10,TimeUnit.SECONDS)) throw new AssertionError("local detail waited for distant sampling");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new CancellationException();
+                    }
+                }
+                return sample;
+            }
         };
         try (var manager = new PredictionTileManager(profile.levelKey(),sampler,
                 new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2),null)) {
@@ -51,20 +65,31 @@ class PredictionMediumCoverageTest {
             }
             refresh(manager,leaves);
             assertEquals(true,get(manager,"mediumCoveragePending"));
-            // Even a fully refined tiny leaf cannot receive ordinary plants yet.
             var allowed = PredictionTileManager.class.getDeclaredMethod("mediumWorkAllowed",PredictionTileKey.class,boolean.class);
             allowed.setAccessible(true);
+            var localCoverage = ready.remove(localFront);
+            assertEquals(false,allowed.invoke(manager,near,false),"initial local coverage still precedes detail");
             assertEquals(false,allowed.invoke(manager,near,true));
-            for (int axis : new int[]{16,32}) {
-                enqueue(manager,near); idle(manager);
-                assertEquals(32,ready.get(near).cellAxis(),"near detail must wait at altitude "+altitude);
-                enqueue(manager,far); idle(manager);
-                assertEquals(axis,ready.get(far).cellAxis(),"distant displayed fallback must improve first");
-                refresh(manager,leaves);
-            }
+            ready.put(localFront,localCoverage);
+            assertEquals(true,allowed.invoke(manager,near,true),"local surface admission must not wait for a distant region");
+            try {
+                enqueue(manager,far);
+                assertTrue(distantEntered.await(3,TimeUnit.SECONDS));
+                enqueue(manager,near);
+                long deadline = System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+                while (ready.get(near).cellAxis()<64 && System.nanoTime()<deadline) Thread.sleep(5);
+                assertEquals(64,ready.get(near).cellAxis(),"local detail must advance while distant medium is unfinished at altitude "+altitude);
+                assertEquals(8,ready.get(far).cellAxis());
+                assertEquals(true,get(manager,"mediumCoveragePending"));
+            } finally { releaseDistant.countDown(); }
+            idle(manager);
+            assertEquals(16,ready.get(far).cellAxis());
+            enqueue(manager,far); idle(manager);
+            assertEquals(32,ready.get(far).cellAxis(),"distant coverage must still progress");
+            refresh(manager,leaves);
             assertEquals(false,get(manager,"mediumCoveragePending"));
             enqueue(manager,near); idle(manager);
-            assertEquals(64,ready.get(near).cellAxis(),"near detail resumes after the medium pass");
+            assertEquals(64,ready.get(near).cellAxis());
             int completed = calls.get();
             enqueue(manager,near); enqueue(manager,far); idle(manager);
             assertEquals(completed,calls.get(),"completed coverage must not resample");

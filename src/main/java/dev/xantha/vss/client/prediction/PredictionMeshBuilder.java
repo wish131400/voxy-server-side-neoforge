@@ -613,14 +613,8 @@ public final class PredictionMeshBuilder {
         // vanilla tinted rim with a gradient into its dirt side.
         int topBlock = PredictionMaterialPalette.groundBlock(sample);
         boolean grass = topBlock == PredictionMaterialPalette.grassBlockIndex();
-        int underBlock = sample.underBlockIndex() == ClientColumnSample.NO_BLOCK
-                ? (grass || topBlock == ClientColumnSample.NO_BLOCK
-                    ? PredictionMaterialPalette.dirtIndex() : topBlock)
-                : sample.underBlockIndex();
-        int deepBlock = sample.deepBlockIndex() == ClientColumnSample.NO_BLOCK
-                ? (grass || topBlock == ClientColumnSample.NO_BLOCK
-                    ? PredictionMaterialPalette.stoneIndex() : underBlock)
-                : sample.deepBlockIndex();
+        int underBlock = PredictionMaterialPalette.wallUnderBlock(sample);
+        int deepBlock = PredictionMaterialPalette.wallDeepBlock(sample);
         int face = wallFace(nx, nz);
         int topColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
                 topBlock, surfaceColor, face), topBlock, face);
@@ -788,9 +782,30 @@ public final class PredictionMeshBuilder {
 
     private static void addPlacedVegetation(VertexAccumulator out, PredictionVegetation.Tile tile,
                                             int cell, int surfaceY, int foliageTint, PredictionSurfaceEdits edits) {
+        if (tile.voxelSize() == 1) {
+            for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> edits.floor(x, z, surfaceY))) {
+                int direction = face.direction();
+                int color = PredictionMaterialPalette.colorForState(face.state(),
+                        direction == 0 ? 0xFF65934A : 0xFF888888, foliageTint, direction);
+                int material = packSprite(color, spriteOf(face.state(), direction));
+                if (direction == 0) {
+                    addFeatureTop(out, face.x(), face.z(), face.top(), 1, 1,
+                            material, material, material, material);
+                } else if (direction <= 2) {
+                    addFeatureZ(out, face.x(), face.z() + (direction == 2 ? 1 : 0), face.bottom(),
+                            1, face.top() - face.bottom(), material, material, material, material,
+                            direction == 1 ? -1 : 1);
+                } else {
+                    addFeatureX(out, face.x() + (direction == 4 ? 1 : 0), face.z(), face.bottom(),
+                            1, face.top() - face.bottom(), material, material, material, material,
+                            direction == 3 ? -1 : 1);
+                }
+            }
+        }
         for (var voxel : tile.cell(cell)) {
             int x = voxel.x(), z = voxel.z(), size = voxel.size();
             if (!PredictionVegetation.renderable(voxel.state())) continue;
+            if (tile.voxelSize() == 1 && PredictionVegetation.woody(voxel.state())) continue;
             int floor = edits.floor(x, z, surfaceY);
             int bottom = Math.max(floor, voxel.y());
             int top = voxel.y() + size;

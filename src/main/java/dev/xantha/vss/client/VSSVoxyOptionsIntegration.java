@@ -162,6 +162,7 @@ public final class VSSVoxyOptionsIntegration {
     private static void addSodium08Config(Object configBuilder) {
         try {
             Object modOptions = invokeByName(configBuilder, "registerModOptions", VSSConstants.MOD_ID, "Voxy Server Side", modVersion());
+            invokeByName(modOptions, "setNonTintedIcon", id("textures/gui/icon.png"));
             Object page = invokeByName(configBuilder, "createOptionPage");
             invokeByName(page, "setName", Component.translatable("vss.voxy_options.title"));
 

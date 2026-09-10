@@ -403,6 +403,7 @@ class PredictionRenderTargetGpuTest {
             }
             verifyClosedCliffDuringTransition(terrain, target, main, buffers, textures, iris);
             verifyMixedLodSeams(terrain, target, main, buffers, textures, iris);
+            verifyRealBoundarySeams(terrain, target, main, buffers, textures, iris);
             verifyWideTerrainEdge(terrain, target, main, buffers, iris);
             verifyWaterAndBakedUvs(terrain, target, main, buffers, textures, iris);
             if (iris) verifyIrisDepthConventions(terrain, target, main, buffers);
@@ -763,13 +764,70 @@ class PredictionRenderTargetGpuTest {
         System.out.println("PASS: mixed 2/4-block LOD seam reproduces sky leak before stitching and closes it at FOV=70/7 (Iris=" + iris + ")");
     }
 
+    private static void verifyRealBoundarySeams(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, int[] textures, boolean iris) {
+        int program = glGetInteger(GL_CURRENT_PROGRAM);
+        for (boolean realHigher : new boolean[]{false, true}) {
+        int eyeX = realHigher ? 40 : -40;
+        var surface = PredictionLodSeamsTest.surface(PredictionLodSeamsTest.tile(0, -1, 4, realHigher ? 64 : 67));
+        var edges = new java.util.ArrayList<PredictionRealBoundarySeams.Edge>();
+        for (int z = -128; z < 0; z++) edges.add(new PredictionRealBoundarySeams.Edge(-1, z, 1, 0,
+                PredictionRealBoundarySeamsTest.ground(realHigher ? 67 : 64)));
+        var patches = new PredictionRealBoundarySeams().update(java.util.List.of(surface), edges);
+        assertEquals(1, patches.size());
+        RenderSystem.activeTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_3D, textures[6]);
+        float[] compiled = new float[2 * 8 * 8]; java.util.Arrays.fill(compiled, 1);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, 2, 8, 8, 0, GL_RED, GL_FLOAT, compiled);
+        glUniform3i(glGetUniformLocation(program, "VanillaMaskSize"), 2, 8, 8);
+        glUniform3f(glGetUniformLocation(program, "VanillaMaskOrigin"), -32 - eyeX, -104, -64);
+        glUniform1f(glGetUniformLocation(program, "VanillaRenderDistance"), 128);
+        for (float fov : new float[]{70, 7}) {
+            var projection = VssLodProjection.of(new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, 65536));
+            terrain.setCamera(new Matrix4f().lookAlong(-eyeX, -38.5F, 0, 0, 1, 0), projection.matrix());
+            if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+            main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+            target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+            RenderSystem.enableDepthTest(); RenderSystem.depthFunc(GL_GEQUAL); RenderSystem.depthMask(true);
+            glClearColor(1, 0, 0, 1); glClearDepth(0); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            drawSeamFixture(terrain, surface, surface.tile().mesh().gpuPayload(), buffers[2], eyeX);
+            var pixel = BufferUtils.createByteBuffer(4);
+            glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            assertEquals(0, pixel.get(1) & 255, "missing real/prediction wall must reproduce the sky gap");
+            saveSeamPixels("real-before-higher-" + realHigher, iris, fov);
+            drawSeamFixture(terrain, surface, patches.getFirst().mesh(), buffers[2], eyeX);
+            glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            assertTrue((pixel.get(1) & 255) > 20, "real boundary closes the gap; Iris=" + iris + ", FOV=" + fov);
+            saveSeamPixels("real-after-higher-" + realHigher, iris, fov);
+            // A compiled boundary is not a replacement for foreground Voxy depth.
+            main.bindWrite(true);
+            glClearDepth(iris ? 1.0 / 16 : VssLodProjection.distanceToVanillaDepth(16, projection));
+            glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            drawSeamFixture(terrain, surface, patches.getFirst().mesh(), buffers[2], eyeX);
+            glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            assertEquals(0, pixel.get(1) & 255, "real foreground still occludes boundary connector");
+        }
+        }
+        RenderSystem.disableDepthTest();
+        glUniform3i(glGetUniformLocation(program, "VanillaMaskSize"), 0, 0, 0);
+        RenderSystem.activeTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_BUFFER, textures[4]);
+        RenderSystem.activeTexture(GL_TEXTURE3); RenderSystem.bindTexture(textures[3]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 1, 1, 0, GL_RED, GL_FLOAT, new float[]{1});
+        System.out.println("PASS: real/prediction boundary sky gap closes at FOV=70/7 and respects foreground depth (Iris=" + iris + ")");
+    }
+
     private static void drawSeamFixture(PredictionTerrainProgram terrain, PredictionLodSeams.Surface surface,
             PredictionPackedMesh mesh, int elementBuffer) {
+        drawSeamFixture(terrain, surface, mesh, elementBuffer, -40);
+    }
+
+    private static void drawSeamFixture(PredictionTerrainProgram terrain, PredictionLodSeams.Surface surface,
+            PredictionPackedMesh mesh, int elementBuffer, int eyeX) {
         var tile = surface.tile();
         try (var gpu = new PredictionGpuTile(tile.key())) {
             RenderSystem.activeTexture(GL_TEXTURE3);
             gpu.ensureSeams(mesh); gpu.updateCoverage(surface.allowed()); gpu.bindQuad(4); gpu.bindYield(3);
-            terrain.setTile(tile.baseBlockX() + 40, -104, tile.baseBlockZ() + 64, tile.spacingBlocks(), 64, true);
+            terrain.setTile(tile.baseBlockX() - eyeX, -104, tile.baseBlockZ() + 64, tile.spacingBlocks(), 64, true);
             int[] elements = new int[mesh.quadCount() * 6];
             int[] corners = {0, 1, 2, 0, 2, 3};
             for (int q = 0; q < mesh.quadCount(); q++) for (int c = 0; c < 6; c++) elements[q * 6 + c] = q * 4 + corners[c];

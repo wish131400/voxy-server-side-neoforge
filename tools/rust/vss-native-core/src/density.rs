@@ -109,6 +109,28 @@ impl Graph {
     pub fn requires_complete_column_order(&self) -> bool {
         self.stateful_columns
     }
+    pub fn supports_surface_slices(&self) -> bool {
+        !self
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Node::CoordinateShift(..)))
+    }
+    pub fn plan_surface_slices(&self, s: &mut Scratch, columns: &[(i32, i32)]) {
+        // Coordinate transforms can read outside the requested noise cells.
+        // Keep their complete slice traversal until those dependencies are known.
+        s.surface_slices = if !self.supports_surface_slices() {
+            None
+        } else {
+            let mut slices = std::collections::BTreeSet::new();
+            for &(_, z) in columns {
+                let z = z.div_euclid(s.width) * s.width;
+                slices.extend([z, z + s.width]);
+            }
+            Some(slices.into_iter().collect())
+        };
+        s.prepared_x = None;
+        s.prepared_cell = None;
+    }
     fn fill_array(&self, id: Id, points: &[[i32; 3]], mode: Mode, s: &mut Scratch) -> Vec<f64> {
         match &self.nodes[id] {
             Node::Marker(Marker::Cache2d, child) => self.fill_array(*child, points, mode, s),
@@ -232,7 +254,12 @@ impl Graph {
             s.corners.clear();
             s.cells.fill(None);
             for x in [base[0], base[0] + s.width] {
-                for z in (s.origin_z..=s.origin_z + s.span).step_by(s.width as usize) {
+                let slices = s.surface_slices.clone().unwrap_or_else(|| {
+                    (s.origin_z..=s.origin_z + s.span)
+                        .step_by(s.width as usize)
+                        .collect()
+                });
+                for z in slices {
                     s.arrays.clear();
                     let points: Vec<_> = (min_y..=min_y + height)
                         .step_by(s.height as usize)
@@ -549,6 +576,7 @@ impl Graph {
             counter: 0,
             array_index: 0,
             prepared_x: None,
+            surface_slices: None,
             prepared_cell: None,
             cell_values: HashMap::new(),
             final_values: vec![],
@@ -922,12 +950,18 @@ pub struct Scratch {
     counter: u64,
     array_index: usize,
     prepared_x: Option<i32>,
+    surface_slices: Option<Vec<i32>>,
     prepared_cell: Option<[i32; 3]>,
     cell_values: HashMap<Id, Vec<f64>>,
     final_values: Vec<f64>,
     pub beard: f64,
 }
 impl Scratch {
+    pub fn clear_surface_slices(&mut self) {
+        self.surface_slices = None;
+        self.prepared_x = None;
+        self.prepared_cell = None;
+    }
     fn cell_index(&self, p: [i32; 3]) -> Option<usize> {
         let base = self.prepared_cell?;
         let [x, y, z] = std::array::from_fn(|i| p[i] as i64 - base[i] as i64);
@@ -1281,13 +1315,9 @@ fn unary(op: Unary, v: f64) -> f64 {
         Unary::Sin => v.sin(),
         Unary::Cos => v.cos(),
         Unary::Sqrt => {
-            if v == 0. {
-                0.
-            } else if v > 0. {
-                v.sqrt()
-            } else {
-                -(-v).sqrt()
-            }
+            // Lithostitched's released sqrt transformer clamps all non-positive
+            // inputs to zero (including negative values).
+            if v > 0. { v.sqrt() } else { 0. }
         }
         Unary::Floor => v.floor(),
         Unary::Ceil => v.ceil(),

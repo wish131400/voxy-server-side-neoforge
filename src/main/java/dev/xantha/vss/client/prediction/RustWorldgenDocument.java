@@ -1,7 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
 import com.google.gson.*;
-import com.mojang.serialization.JsonOps;
 import java.io.IOException;
 import java.util.*;
 import net.minecraft.client.Minecraft;
@@ -21,6 +20,63 @@ final class RustWorldgenDocument {
         colormaps().entrySet().forEach(entry->result.add(entry.getKey(),entry.getValue()));
         return result;
     }
+    private static final java.util.concurrent.atomic.AtomicLong INPUT_GENERATION = new java.util.concurrent.atomic.AtomicLong();
+
+    static void invalidateSharedInputs() { INPUT_GENERATION.incrementAndGet(); }
+
+    /** Owned by one profile decode, never retained across worlds or registry snapshots. */
+    static final class SharedInputs {
+        private long generation = Long.MIN_VALUE;
+        private JsonObject definitions;
+        private JsonArray states;
+        private Map<JsonElement, BlockState> stateLookup;
+        private JsonObject colors;
+
+        void prepare() {
+            long current = INPUT_GENERATION.get();
+            if (generation == current && definitions != null) return;
+            definitions = blockDefinitions();
+            states = new JsonArray();
+            stateLookup = new HashMap<>();
+            for (Block block : BuiltInRegistries.BLOCK) {
+                for (BlockState state : block.getStateDefinition().getPossibleStates()) {
+                    JsonObject encoded = encodeState(state);
+                    states.add(encoded);
+                    stateLookup.put(encoded, state);
+                }
+            }
+            colors = null;
+            generation = current;
+        }
+
+        Map<JsonElement, BlockState> stateLookup() { return stateLookup; }
+
+        JsonObject colors() throws IOException {
+            if (colors == null) colors = colormaps();
+            return colors;
+        }
+    }
+
+    static JsonObject create(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
+            SharedInputs shared) throws IOException {
+        JsonObject result = snapshot(generator, registries, context, shared);
+        shared.colors().entrySet().forEach(entry -> result.add(entry.getKey(), entry.getValue()));
+        return result;
+    }
+
+    /** Vanilla state schema, using the registry's canonical property names and values. */
+    static JsonObject encodeState(BlockState state) {
+        JsonObject encoded = new JsonObject();
+        encoded.addProperty("Name", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+        if (!state.getProperties().isEmpty()) {
+            JsonObject properties = new JsonObject();
+            for (Property<?> property : state.getProperties())
+                properties.addProperty(property.getName(), value(state, property));
+            encoded.add("Properties", properties);
+        }
+        return encoded;
+    }
+
     static JsonObject colormaps() throws IOException {
         JsonObject result=new JsonObject();
         for (String name : List.of("grass", "foliage")) {
@@ -38,7 +94,16 @@ final class RustWorldgenDocument {
     }
 
     static JsonObject snapshot(JsonObject generator,JsonObject registries,ClientTerrainSampler context) {
-        JsonObject result = generator.deepCopy();
+        return snapshot(generator, registries, context, new SharedInputs());
+    }
+
+    static JsonObject snapshot(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
+            SharedInputs shared) {
+        shared.prepare();
+        // Fields below are read-only inputs. Copy the top-level object only; nested generator
+        // and registry trees are neither mutated here nor by JNI (which receives a string).
+        JsonObject result = new JsonObject();
+        generator.entrySet().forEach(entry -> result.add(entry.getKey(), entry.getValue()));
         if (registries.has("custom_registries")) result.add("custom_registries", registries.get("custom_registries"));
         for (String name : List.of("density_functions", "noises", "biomes", "configured_features", "placed_features")) {
             if (!registries.has(name)) throw new IllegalArgumentException("Missing native registry " + name);
@@ -48,15 +113,8 @@ final class RustWorldgenDocument {
         context.generatorContext().getBiomeSource().possibleBiomes().forEach(b -> possible.add(
                 b.unwrapKey().orElseThrow(() -> new IllegalArgumentException("Inline biome needs a native identity")).location().toString()));
         result.add("possible_biomes", possible);
-        result.add("block_definitions", blockDefinitions());
-        JsonArray states = new JsonArray();
-        for (Block block : BuiltInRegistries.BLOCK) {
-            for (BlockState state : block.getStateDefinition().getPossibleStates()) {
-                var encoded=BlockState.CODEC.encodeStart(JsonOps.INSTANCE, state).getOrThrow().getAsJsonObject();
-                states.add(encoded);
-            }
-        }
-        result.add("input_states", states);
+        result.add("block_definitions", shared.definitions);
+        result.add("input_states", shared.states);
         return result;
     }
 

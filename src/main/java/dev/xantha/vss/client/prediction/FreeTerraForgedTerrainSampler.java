@@ -65,9 +65,21 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
     }
 
     @Override public ClientColumnSample sampleForLod(int x, int z, int stepBlocks) {
-        // Broad coverage uses the mod's own point estimator. Detailed tiles
-        // request its full erosion pass through the existing near-first queue.
-        return FreeTerraForgedDensity.coarse(stepBlocks >= 32, () -> super.sampleForLod(x, z, stepBlocks));
+        return FreeTerraForgedDensity.coarse(false, () -> super.sampleForLod(x, z, stepBlocks));
+    }
+
+    @Override public ClientColumnSample samplePreview(int x, int z) {
+        return FreeTerraForgedDensity.coarse(true, () -> super.samplePreview(x,z));
+    }
+
+    @Override int surfaceColorForLod(int x,int y,int z,boolean preview) {
+        return FreeTerraForgedDensity.coarse(preview, () -> super.surfaceColorForLod(x,y,z,preview));
+    }
+    @Override int foliageColorForLod(int x,int y,int z,boolean preview) {
+        return FreeTerraForgedDensity.coarse(preview, () -> super.foliageColorForLod(x,y,z,preview));
+    }
+    @Override int waterTintForLod(int x,int y,int z,boolean preview) {
+        return FreeTerraForgedDensity.coarse(preview, () -> super.waterTintForLod(x,y,z,preview));
     }
 
     @Override ClientColumnSample resolveSurface(ClientColumnSample sample, int x, int z, TerrainFunction terrain) {

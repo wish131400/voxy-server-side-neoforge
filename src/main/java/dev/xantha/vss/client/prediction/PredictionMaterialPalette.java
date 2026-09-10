@@ -253,6 +253,39 @@ public final class PredictionMaterialPalette {
         return block;
     }
 
+    static int wallUnderBlock(ClientColumnSample sample) {
+        int under = sample.underBlockIndex();
+        if (surfaceSoil(under)) return dirtIndex();
+        if (solidWallMaterial(under)) return under;
+        int top = groundBlock(sample);
+        return surfaceSoil(top) || !solidWallMaterial(top) ? dirtIndex() : top;
+    }
+
+    static int wallDeepBlock(ClientColumnSample sample) {
+        int deep = sample.deepBlockIndex();
+        // A sample seven blocks below the top can hit a cave or a second
+        // exposed grass surface. Neither describes the entire cliff below it.
+        if (surfaceSoil(deep)) return stoneIndex();
+        if (solidWallMaterial(deep)) return deep;
+        int top = groundBlock(sample);
+        return surfaceSoil(top) || !solidWallMaterial(top) ? stoneIndex() : wallUnderBlock(sample);
+    }
+
+    private static boolean surfaceSoil(int block) {
+        if (block < 0 || block == ClientColumnSample.NO_BLOCK) return false;
+        Block value = BuiltInRegistries.BLOCK.byId(block);
+        return value == Blocks.GRASS_BLOCK || value == Blocks.MYCELIUM || value == Blocks.PODZOL
+                || value == Blocks.DIRT_PATH;
+    }
+
+    private static boolean solidWallMaterial(int block) {
+        if (block < 0 || block == ClientColumnSample.NO_BLOCK) return false;
+        Block value = BuiltInRegistries.BLOCK.byId(block);
+        if (value == null) return false;
+        BlockState state = value.defaultBlockState();
+        return !state.isAir() && state.getFluidState().isEmpty() && state.canOcclude();
+    }
+
     static boolean supportsSnow(int blockId) {
         if (blockId < 0 || blockId == ClientColumnSample.NO_BLOCK) return false;
         Block block = BuiltInRegistries.BLOCK.byId(blockId);

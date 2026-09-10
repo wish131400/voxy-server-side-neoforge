@@ -158,7 +158,7 @@ final class ClientCaptureExtractor {
         return !isGround(below) || below.is(Blocks.OBSIDIAN);
     }
 
-    private static boolean isGround(BlockState state) {
+    static boolean isGround(BlockState state) {
         return state != null && !state.isAir()
                 && state.getFluidState().isEmpty()
                 && (state.is(BlockTags.DIRT) || state.is(BlockTags.SAND)

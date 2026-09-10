@@ -33,6 +33,8 @@ public record ClientColumnSample(
     public static final int FLAG_NO_SURFACE = 1 << 29;
     /** Underground occupancy was deliberately not sampled; never infer a filled volume from it. */
     public static final int FLAG_SURFACE_ONLY = 1 << 28;
+    /** Preview geometry must be resampled before exact terrain or decoration. */
+    public static final int FLAG_APPROXIMATE = 1 << 27;
     public static final int PREFILLED = 0xFF;
 
     public boolean hasFluid() {
@@ -44,6 +46,8 @@ public record ClientColumnSample(
     public boolean hasSurface() { return (flags & FLAG_NO_SURFACE) == 0; }
 
     public boolean surfaceOnly() { return (flags & FLAG_SURFACE_ONLY) != 0; }
+    public boolean approximate() { return (flags & FLAG_APPROXIMATE) != 0; }
+    boolean reusableFor(boolean preview) { return preview || !approximate() || captured(); }
 
     ClientColumnSample withoutVegetationHints() {
         return new ClientColumnSample(surfaceY, fluidY, biomeIndex, topBlockIndex,

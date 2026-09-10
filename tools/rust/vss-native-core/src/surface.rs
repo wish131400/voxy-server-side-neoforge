@@ -374,6 +374,22 @@ impl Surface {
             Ok(())
         }
     }
+    /// Run the world's real material rules against a cheap exterior context.
+    /// Neighbour steepness, pillars and iceberg geometry await exact refinement.
+    pub fn preview_materials(&self, t: &Terrain, x: i32, z: i32, floor: i32,
+        water: i32, name: &str, biome: &Biome, colors: &ClimateColors) -> [StateId; 3] {
+        let depth = self.depth(&t.graph, x, z);
+        let secondary = t.graph.noise(self.secondary, x as f64, 0., z as f64);
+        [1, 2, 7].map(|offset| {
+            let p = [x, floor - offset, z];
+            let c = Context { p, biome: name, cold: colors.temperature(biome, p) < 0.15,
+                steep: false, depth, secondary, above: offset,
+                below: (floor - offset - t.min_y + 1).max(1), water,
+                min_surface: floor - depth - 8 };
+            self.rule(&self.rule, &t.graph, &c).unwrap_or(self.default)
+        })
+    }
+
     fn rule(&self, rule: &Rule, graph: &Graph, c: &Context<'_>) -> Option<StateId> {
         match rule {
             Rule::Block(id) => Some(*id),

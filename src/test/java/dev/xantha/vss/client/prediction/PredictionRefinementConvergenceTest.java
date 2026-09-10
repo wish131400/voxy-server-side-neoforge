@@ -25,6 +25,13 @@ class PredictionRefinementConvergenceTest {
             @Override int initialTerrainCellAxis(int lod) { return PredictionWorkOrder.initialCellAxis(lod); }
             @Override public ClientColumnSample sample(int x,int z) { sampledColumns.incrementAndGet(); return sample; }
             @Override public ClientColumnSample sampleForLod(int x,int z,int spacing) { sampledColumns.incrementAndGet(); return sample; }
+            @Override public ClientColumnSample samplePreview(int x,int z,int step) {
+                sampledColumns.incrementAndGet();
+                return new ClientColumnSample(60,60,0,ClientColumnSample.NO_BLOCK,0,0,0,0,0,
+                        ClientColumnSample.FLAG_SURFACE_ONLY | ClientColumnSample.FLAG_APPROXIMATE,0,
+                        ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
+                        ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
+            }
         };
         try(var manager=new PredictionTileManager(profile.levelKey(),sampler,
                 new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2),null)) {
@@ -48,6 +55,10 @@ class PredictionRefinementConvergenceTest {
                 assertEquals(target,ready.get(child).cellAxis(),"Selected terrain must advance without waiting for the adjacent preview");
                 assertEquals(8,ready.get(neighbor).cellAxis(),"fixture keeps the slow neighbor unfinished");
                 assertTrue(ready.containsKey(parent),"parent fallback remains resident during refinement");
+                for(var s : ready.get(child).samples()) {
+                    assertEquals(target < 64, s.approximate(),"Java stage must change sampling quality");
+                    assertEquals(target < 64 ? 60 : 64,s.surfaceY(),"exact upgrade must replace aligned preview heights");
+                }
                 while(((Set<?>)get(manager,"pending")).contains(child) && System.nanoTime()<deadline) Thread.sleep(1);
                 assertFalse(((Set<?>)get(manager,"pending")).contains(child));
             }

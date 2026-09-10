@@ -105,7 +105,8 @@ public final class NativeWorldgenIntegration {
                         level.setBlock(new BlockPos(5,127,5),Blocks.WATER.defaultBlockState(),19,0);
                         level.endFeature(true);
                     }
-                    try(var nativeStage=new RustVegetationStage(sampler,actual,features,0,0,step)) {
+                    try(var nativeStage=new RustVegetationStage(sampler,actual,0,0)) {
+                        nativeStage.selectStep(features,step);
                         for(String target:switch(name) {
                             case "plains" -> List.of("patch_tall_grass_2","flower_plains","patch_grass_plain");
                             case "savanna" -> List.of("trees_savanna");

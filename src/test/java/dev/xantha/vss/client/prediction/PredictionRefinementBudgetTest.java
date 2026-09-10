@@ -11,6 +11,38 @@ import net.minecraft.world.level.Level;
 import org.junit.jupiter.api.Test;
 
 class PredictionRefinementBudgetTest {
+    @Test void automaticBudgetUsesHalfTheProcessorsAndHonorsSmallerOverrides() {
+        assertEquals(1,PredictionWorkOrder.refinementWorkers(1,0));
+        assertEquals(2,PredictionWorkOrder.refinementWorkers(4,0));
+        assertEquals(8,PredictionWorkOrder.refinementWorkers(16,0));
+        assertEquals(16,PredictionWorkOrder.refinementWorkers(32,0));
+        assertEquals(4,PredictionWorkOrder.refinementWorkers(16,4));
+        assertEquals(8,PredictionWorkOrder.refinementWorkers(16,32));
+    }
+
+    @Test void completedMediumPassFinishesNearbyFineTerrainBeforeDistantChildPreviews() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        var profile=new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),42,-64,384,"noise","minecraft:overworld",123);
+        try(var manager=new PredictionTileManager(profile.levelKey(),new ClientTerrainSampler(42,profile),
+                new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,8),null)) {
+            var priority=manager.getClass().getDeclaredMethod("workPriority",PredictionTileKey.class,boolean.class);
+            priority.setAccessible(true);
+            var near=new PredictionTileKey(profile.levelKey(),8,0,0);
+            var far=new PredictionTileKey(profile.levelKey(),80,0,0);
+            @SuppressWarnings("unchecked") var ready=(Map<PredictionTileKey,PredictionTile>)field(manager,"ready");
+            ready.put(near,new PredictionTile(near,new int[0],new int[0],new ClientColumnSample[0],null,
+                    new PredictionDepthBound(64,64),0,1,32,2));
+            assertTrue((int)priority.invoke(manager,near,false)<(int)priority.invoke(manager,far,false),
+                    "fine work beyond the old256-block exception must precede distant child previews");
+            assertTrue((int)priority.invoke(manager,near,true)<(int)priority.invoke(manager,far,false),
+                    "nearby plants need not wait for a second horizon preview wave");
+            var focus=manager.getClass().getDeclaredField("buildFocus");focus.setAccessible(true);
+            focus.set(manager,new VssLodFocus(5152,32,1024,9000));
+            assertTrue((int)priority.invoke(manager,far,false)<(int)priority.invoke(manager,near,false),
+                    "explicit telescope target retains priority");
+        }
+    }
+
     @Test @SuppressWarnings("unchecked")
     void ordinaryForegroundHasBoundedAdmissionAndScopeBypassesIt() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();

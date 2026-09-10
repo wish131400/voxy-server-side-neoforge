@@ -191,7 +191,7 @@ public final class PredictionTileManager implements AutoCloseable {
     void setWorkView(PredictionWorkView view) { this.workView = view; }
 
     private boolean backgroundWork(PredictionTileKey key) {
-        if (mediumCoveragePending && mediumCoverage.paths().contains(key)) return false;
+        if (mediumCoverageWork(key)) return false;
         if (key.lod() < 0 || key.lod() >= layout.levelCount()) return false;
         PredictionWorkView view = workView;
         return view != null && !view.foreground(key, layout, buildFocus,
@@ -204,13 +204,20 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private int refinementLimit() {
-        return Math.min(executor.getCorePoolSize(), Math.max(1, Math.min(6,
-                VSSClientConfig.CONFIG.predictionRefinementWorkers)));
+        return Math.min(executor.getCorePoolSize(), PredictionWorkOrder.refinementWorkers(
+                Runtime.getRuntime().availableProcessors(), VSSClientConfig.CONFIG.predictionRefinementWorkers));
     }
 
     private boolean ordinaryRefinement(PredictionTileKey key) {
-        return !(mediumCoveragePending && mediumCoverage.paths().contains(key))
+        return !mediumCoverageWork(key)
                 && !PredictionWorkOrder.scoped(key, layout, buildFocus) && !dirtyTiles.contains(key);
+    }
+
+    private boolean mediumCoverageWork(PredictionTileKey key) {
+        if (!mediumCoveragePending || !mediumCoverage.paths().contains(key)) return false;
+        PredictionTile tile = ready.get(key);
+        return tile == null || tile.cellAxis() < (mediumCoverage.frontier().contains(key)
+                ? PredictionWorkOrder.PREVIEW_CELL_AXIS : sampler.initialTerrainCellAxis(key.lod()));
     }
 
     public void tick(int centerChunkX, int centerChunkZ) {
@@ -300,8 +307,7 @@ public final class PredictionTileManager implements AutoCloseable {
         for (PredictionTileKey key : plan) {
             work.add(buildRequest(key, false));
         }
-        // Final detail follows the spatial medium pass; explicit telescope
-        // work can bypass that pass.
+        // Completed regions can refine while other coverage jobs are still running.
         surfaceDesired.stream().filter(this::surfaceBuildReady)
                 .forEach(key -> work.add(buildRequest(key, true)));
         work.sort(Comparator.comparingInt(BuildRequest::priority)
@@ -319,18 +325,17 @@ public final class PredictionTileManager implements AutoCloseable {
 
     private int workPriority(PredictionTileKey key, boolean surface) {
         PredictionTile tile = ready.get(key);
-        if (mediumCoveragePending && !surface && mediumCoverage.paths().contains(key)
+        if (!surface && mediumCoverageWork(key)
                 && !PredictionWorkOrder.scoped(key, layout, buildFocus)) {
             // Breadth first across the horizon, before descending locally.
             return 10_000 + (tile == null ? 0 : 10_000)
                     + (layout.levelCount() - 1 - key.lod()) * 100;
         }
         double nearby = PredictionWorkOrder.distanceSquared(key, layout, cameraBlockX, cameraBlockZ);
-        if (!mediumCoveragePending && nearby < 256D * 256) {
-            // Local work regains its budget only AFTER the spatial medium pass.
-            // Include plants so a constrained heap can finish useful local tiles.
-            int band = (int) (Math.sqrt(nearby) / 64);
-            return band * 3 + (surface ? 2 : tile == null || tile.cellAxis() < 32 ? 0 : 1);
+        if (!PredictionWorkOrder.scoped(key, layout, buildFocus)) {
+            // Within admitted regions, finish nearby grids and surfaces first.
+            return (backgroundWork(key) ? PredictionWorkOrder.BACKGROUND_PRIORITY : 0)
+                    + PredictionWorkOrder.localRefinementPriority(nearby, tile == null ? 0 : tile.cellAxis(), surface);
         }
         if (surface && surfaceTurnReady(key)) {
             return (backgroundWork(key) ? PredictionWorkOrder.BACKGROUND_PRIORITY : 0) + 90_000;
@@ -1065,8 +1070,19 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private boolean mediumWorkAllowed(PredictionTileKey key, boolean surface) {
-        return !mediumCoveragePending || PredictionWorkOrder.scoped(key, layout, buildFocus)
-                || dirtyTiles.contains(key) || !surface && mediumCoverage.paths().contains(key);
+        if (!mediumCoveragePending || PredictionWorkOrder.scoped(key, layout, buildFocus)
+                || dirtyTiles.contains(key) || !surface && mediumCoverage.paths().contains(key)) return true;
+        // Wait only for this region's medium grid, never the slowest grid in
+        // the entire horizon. Parent residency still protects initial coverage.
+        PredictionMediumCoverage coverage = mediumCoverage;
+        for (var ancestor = key; ancestor.lod() < layout.levelCount(); ancestor =
+                new PredictionTileKey(key.dimension(), ancestor.tileX() >> 1,
+                        ancestor.tileZ() >> 1, ancestor.lod() + 1)) {
+            if (!coverage.frontier().contains(ancestor)) continue;
+            PredictionTile tile = ready.get(ancestor);
+            return tile != null && tile.cellAxis() >= PredictionWorkOrder.PREVIEW_CELL_AXIS;
+        }
+        return false;
     }
 
     private int targetCellAxis(PredictionTileKey key) {
@@ -1074,7 +1090,8 @@ public final class PredictionTileManager implements AutoCloseable {
                 : sampler.initialTerrainCellAxis(key.lod());
         if (mediumCoverage.frontier().contains(key)) target = Math.max(32, target);
         if (mediumCoveragePending && !PredictionWorkOrder.scoped(key, layout, buildFocus)
-                && mediumCoverage.paths().contains(key)) {
+                && mediumCoverage.paths().contains(key) && (!mediumCoverage.frontier().contains(key)
+                || mediumCoverageWork(key))) {
             return mediumCoverage.frontier().contains(key) ? 32 : sampler.initialTerrainCellAxis(key.lod());
         }
         return Math.max(target, transitionTargets.getOrDefault(key, target));
@@ -1203,9 +1220,9 @@ public final class PredictionTileManager implements AutoCloseable {
                         int blockZ = baseBlockZ + (z - VssLodLayout.SAMPLE_MARGIN) * stepBlocks;
                         ClientColumnSample captured = cachedSample(blockX, blockZ);
                         samples[z * gridSize + x] = captured != null ? captured
-                                : retainedSample(reusable, x, z, stepBlocks);
+                                : retainedSample(reusable, x, z, stepBlocks, preview && !surface);
                     }
-                    batch = sampleGridFast(baseBlockX, baseBlockZ, stepBlocks, gridSize, samples);
+                    batch = sampleGridFast(baseBlockX, baseBlockZ, stepBlocks, gridSize, samples, preview && !surface);
                 }
                 for (int dz = 0; dz < gridSize; dz++) {
                     if (closed || paused || revision != meshRevision.get()
@@ -1235,7 +1252,7 @@ public final class PredictionTileManager implements AutoCloseable {
                         groundHeights[sampleIndex] = sample.surfaceY();
                         boolean reuseColors = cachedColors && sample.equals(batch[sampleIndex]);
                         surfaceTints[sampleIndex] = reuseColors ? cached.surfaceTints()[sampleIndex]
-                                : sampler.surfaceColor(blockX, sample.surfaceY(), blockZ);
+                                : sampler.surfaceColorForLod(blockX, sample.surfaceY(), blockZ, sample.approximate());
                         int baseColor = PredictionMaterialPalette.colorFor(sample, surfaceTints[sampleIndex]);
                         materialColors[sampleIndex] = PredictionLighting.shade(
                                 baseColor,
@@ -1244,10 +1261,10 @@ public final class PredictionTileManager implements AutoCloseable {
                         // Feature stamps tint their leaves with the column's
                         // own biome instead of the registry's spawn tint.
                         foliageColors[sampleIndex] = reuseColors ? cached.foliageTints()[sampleIndex]
-                                : sampler.foliageColor(blockX, sample.surfaceY(), blockZ);
+                                : sampler.foliageColorForLod(blockX, sample.surfaceY(), blockZ, sample.approximate());
                         if (sample.fluid() == 1 && !sample.ice()) {
                             waterTints[sampleIndex] = reuseColors ? cached.waterTints()[sampleIndex]
-                                    : sampler.waterTint(blockX, sample.fluidY(), blockZ);
+                                    : sampler.waterTintForLod(blockX, sample.fluidY(), blockZ, sample.approximate());
                             waterColors[sampleIndex] = PredictionMaterialPalette.waterColor(waterTints[sampleIndex]);
                         }
                     }
@@ -1438,6 +1455,10 @@ public final class PredictionTileManager implements AutoCloseable {
      * native sampler is active so the caller keeps the per-column path.
      */
     static ClientColumnSample retainedSample(PredictionTile resident, int x, int z, int step) {
+        return retainedSample(resident,x,z,step,false);
+    }
+
+    static ClientColumnSample retainedSample(PredictionTile resident, int x, int z, int step, boolean preview) {
         if (resident == null || resident.spacingBlocks() <= 0 || resident.samples() == null) return null;
         int localX = (x - VssLodLayout.SAMPLE_MARGIN) * step;
         int localZ = (z - VssLodLayout.SAMPLE_MARGIN) * step;
@@ -1445,13 +1466,26 @@ public final class PredictionTileManager implements AutoCloseable {
         if (localX < 0 || localZ < 0 || localX % oldStep != 0 || localZ % oldStep != 0
                 || localX / oldStep >= axis || localZ / oldStep >= axis
                 || resident.samples().length != axis * axis) return null;
-        return resident.samples()[localZ / oldStep * axis + localX / oldStep];
+        ClientColumnSample sample = resident.samples()[localZ / oldStep * axis + localX / oldStep];
+        return sample != null && sample.reusableFor(preview) ? sample : null;
     }
 
     private ClientColumnSample[] sampleGridFast(int baseBlockX, int baseBlockZ,
-                                                int stepBlocks, int gridSize, ClientColumnSample[] samples) {
+                                                int stepBlocks, int gridSize, ClientColumnSample[] samples, boolean preview) {
         if (!(sampler instanceof RustTerrainSampler rust)) {
-            return null;
+            if (!preview) return samples;
+            long revision = meshRevision.get();
+            for (int z = 0; z < gridSize; z++) for (int x = 0; x < gridSize; x++) {
+                if (closed || paused || revision != meshRevision.get() || Thread.currentThread().isInterrupted()) {
+                    throw new java.util.concurrent.CancellationException();
+                }
+                if (samples[z * gridSize + x] == null) {
+                    samples[z * gridSize + x] = sampler.samplePreview(
+                            baseBlockX + (x - VssLodLayout.SAMPLE_MARGIN) * stepBlocks,
+                            baseBlockZ + (z - VssLodLayout.SAMPLE_MARGIN) * stepBlocks, stepBlocks);
+                }
+            }
+            return samples;
         }
         long revision = meshRevision.get();
         for (int z = 0; z < gridSize; z += 8) {
@@ -1466,7 +1500,7 @@ public final class PredictionTileManager implements AutoCloseable {
                 for (int row = 0; row < height; row++) {
                     System.arraycopy(samples, (z + row) * gridSize + x, retained, row * width, width);
                 }
-                ClientColumnSample[] batch = rust.sampleGrid(originX, originZ, stepBlocks, width, height, retained);
+                ClientColumnSample[] batch = rust.sampleGrid(originX, originZ, stepBlocks, width, height, retained, preview);
                 if (batch == null) return null;
                 for (int row = 0; row < height; row++) {
                     System.arraycopy(batch, row * width, samples, (z + row) * gridSize + x, width);

@@ -11,6 +11,16 @@ final class PredictionWorkOrder {
     static final int BACKGROUND_PRIORITY = 1_000_000;
     private PredictionWorkOrder() { }
 
+    static int refinementWorkers(int processors, int configured) {
+        int half = Math.max(1, processors / 2);
+        return configured <= 0 ? half : Math.min(half, Math.max(1, Math.min(32, configured)));
+    }
+
+    static int localRefinementPriority(double distanceSquared, int residentAxis, boolean surface) {
+        int band = Math.min(65535, (int) (Math.sqrt(distanceSquared) / WORK_BAND_BLOCKS));
+        return 100_000 + band * 3 + (surface ? 2 : residentAxis < PREVIEW_CELL_AXIS ? 0 : 1);
+    }
+
     static int initialCellAxis(int lod) {
         // Large ancestors only establish coverage. Keep the denser first
         // preview for local tiles without charging it to the entire horizon.

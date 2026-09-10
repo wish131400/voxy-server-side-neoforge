@@ -6,7 +6,7 @@ Regenerate with `gradle --offline -I tools/rust/reference.gradle captureVanillaK
 
 The oracle invokes Minecraft's `LegacyRandomSource`, `XoroshiroRandomSource`,
 `WorldgenRandom`, `ImprovedNoise`, `SimplexNoise`, `PerlinNoise`, and `NormalNoise`.
-It does not call Meridian, the new Rust library, or a hand-translated Java algorithm.
+It does not call the new Rust library or a hand-translated Java algorithm.
 Raw long values are decimal strings; expected double values are unsigned raw
 64-bit hexadecimal strings. Input decimal coordinates require correctly rounded
 JSON parsing (`serde_json` feature `float_roundtrip`).

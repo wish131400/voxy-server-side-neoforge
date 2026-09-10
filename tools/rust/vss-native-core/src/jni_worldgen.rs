@@ -1,4 +1,4 @@
-//! ABI 2: separate declaration and handle namespace from
+//! ABI 3: separate declaration and handle namespace from
 //! the noise probe. No raw Java pointer can become a world/volume handle.
 use crate::{
     backend::World,
@@ -190,7 +190,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     _e: JNIEnv,
     _c: JClass,
 ) -> jint {
-    2
+    3
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_create(
@@ -257,7 +257,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     let result = guarded(|| {
         if let Ok(w) = world(id) {
             Ok(
-                json!({"kind":"world","abi":2,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset"],"complete_worldgen":false}),
+                json!({"kind":"world","abi":3,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset","approximate_preview"],"complete_worldgen":false}),
             )
         } else {
             let v = volume(id)?;
@@ -655,13 +655,28 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_surfacePoints(
-    mut e: JNIEnv,
+    e: JNIEnv,
     _c: JClass,
     id: jlong,
     input: JByteBuffer,
     out: JByteBuffer,
     count: jint,
 ) -> jint {
+    surface_points_jni(e, id, input, out, count, false)
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_previewPoints(
+    e: JNIEnv,
+    _c: JClass,
+    id: jlong,
+    input: JByteBuffer,
+    out: JByteBuffer,
+    count: jint,
+) -> jint {
+    surface_points_jni(e, id, input, out, count, true)
+}
+fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBuffer,
+    count: jint, preview: bool) -> jint {
     let result = guarded(|| {
         if !(0..=64).contains(&count) {
             return Err("surface batch count".into());
@@ -680,7 +695,8 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
         }
         let w = world(id)?;
         let mut result = Vec::with_capacity(count as usize * 40);
-        for column in w.surface_points(&points)? {
+        let columns = if preview { w.preview_points(&points)? } else { w.surface_points(&points)? };
+        for column in columns {
             for n in column.values {
                 result.extend(n.to_le_bytes());
             }

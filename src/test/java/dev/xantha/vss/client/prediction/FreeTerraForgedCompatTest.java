@@ -83,9 +83,11 @@ class FreeTerraForgedCompatTest {
             Class<?> context = loader.loadClass(prefix + "world.worldgen.GeneratorContext");
             Class<?> cache = context.getField("cache").getType();
             assertNotNull(cache.getMethod("provideAtChunk", int.class, int.class));
-            Class<?> active = loader.loadClass(prefix + "world.worldgen.ActiveChunk");
-            assertNotNull(active.getMethod("get"));
-            assertNotNull(active.getMethod("set", net.minecraft.world.level.chunk.ChunkAccess.class));
+            Class<?> active = FreeTerraForgedCompat.activeChunk(loader);
+            if (active != null) {
+                assertNotNull(active.getMethod("get"));
+                assertNotNull(active.getMethod("set", net.minecraft.world.level.chunk.ChunkAccess.class));
+            }
 
             assertNoiseSnapshotSamples(loader, preset, codec, key, registry);
         }
@@ -241,6 +243,13 @@ class FreeTerraForgedCompatTest {
             var cellClass = cell.getClass();
             var water = new FreeTerraForgedWater(contexts.getFirst());
             assertEquals(Integer.MIN_VALUE, water.surfaceY(cell), "dry cells must not acquire river water");
+            boolean elevatedWater = java.util.Arrays.stream(cellClass.getFields())
+                    .anyMatch(field -> field.getName().equals("riverWaterLevel"));
+            if (!elevatedWater) {
+                cellClass.getField("terrain").set(cell, loader.loadClass(prefix + "cell.terrain.TerrainType").getField("RIVER").get(null));
+                assertEquals(Integer.MIN_VALUE, water.surfaceY(cell), "legacy rivers retain the generator fluid picker");
+                return;
+            }
             cellClass.getField("terrain").set(cell, loader.loadClass(prefix + "cell.terrain.TerrainType").getField("RIVER").get(null));
             cellClass.getField("riverWaterLevel").setFloat(cell, 1);
             Object levels = contexts.getFirst().getClass().getField("levels").get(contexts.getFirst());
@@ -248,8 +257,21 @@ class FreeTerraForgedCompatTest {
                     levels.getClass().getField("water").getFloat(levels));
             assertEquals(oceanTop, water.surfaceY(cell), "water block Y must become its upper face, with sea floor clamp");
             cellClass.getField("waterTable").setFloat(cell, 0.8f);
-            cellClass.getField("globalContinentScale").setFloat(cell, 4000f);
-            cellClass.getField("continentSizeModifier").setFloat(cell, 1f);
+            Class<?> hydrology = loader.loadClass(prefix + "cell.rivermap.ContinentalHydrology");
+            boolean complexWater = java.util.Arrays.stream(hydrology.getMethods())
+                    .anyMatch(method -> method.getName().equals("getComplexWaterHeight"));
+            float uplift;
+            if (complexWater) {
+                cellClass.getField("globalContinentScale").setFloat(cell, 4000f);
+                cellClass.getField("continentSizeModifier").setFloat(cell, 1f);
+                uplift = (float) hydrology.getMethod("getComplexWaterHeight", float.class, float.class, float.class)
+                        .invoke(null, 0.8f, 4000f, 1f);
+            } else {
+                uplift = (float) hydrology.getMethod("getWeightedWaterHeight", float.class).invoke(null, 0.8f);
+            }
+            int expectedWater = 1 + Math.max(oceanTop - 1, (int) levels.getClass().getMethod("scale", float.class)
+                    .invoke(levels, levels.getClass().getField("water").getFloat(levels) + uplift));
+            assertEquals(expectedWater, water.surfaceY(cell), "match this release's own surface hydrology");
             assertTrue(water.surfaceY(cell) > oceanTop, "uplift rivers must not be flattened to sea level");
         } finally {
             var registryField = loader.loadClass("raccoonman.reterraforged.concurrent.cache.CacheManager").getDeclaredField("CACHES");
