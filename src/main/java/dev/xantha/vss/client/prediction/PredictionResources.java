@@ -9,6 +9,7 @@ final class PredictionResources {
     private static final ExecutorService DISPOSER = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "vss-prediction-dispose");
         thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
         return thread;
     });
 
@@ -26,6 +27,11 @@ final class PredictionResources {
                 if (workers.isTerminated()) releaseSampler(sampler);
             }
         });
+    }
+
+    /** Profile worker only: retired worlds must release their native slots before another is created. */
+    static void awaitRetired() throws InterruptedException, java.util.concurrent.ExecutionException {
+        DISPOSER.submit(() -> { }).get();
     }
 
     static void releaseSampler(ClientTerrainSampler sampler) {

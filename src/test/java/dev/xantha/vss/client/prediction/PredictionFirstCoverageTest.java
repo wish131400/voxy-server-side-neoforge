@@ -20,6 +20,74 @@ class PredictionFirstCoverageTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @Test void backgroundBuildersDoNotInheritRenderThreadPriority() throws Exception {
+        int previous=Thread.currentThread().getPriority();
+        try {
+            Thread.currentThread().setPriority(Thread.MAX_PRIORITY);
+            try(var manager=manager(sampler(new AtomicInteger(),null,null),null)) {
+                var field=PredictionTileManager.class.getDeclaredField("executor"); field.setAccessible(true);
+                var pool=(java.util.concurrent.ThreadPoolExecutor)field.get(manager);
+                var worker=pool.getThreadFactory().newThread(()->{});
+                assertEquals(Thread.NORM_PRIORITY-1,worker.getPriority());
+                assertTrue(worker.isDaemon());
+            }
+        } finally {Thread.currentThread().setPriority(previous);}
+    }
+
+    @Test @SuppressWarnings("unchecked")
+    void spareWorkersFinishMultipleSurfacesWhileNewPreviewStillRuns() throws Exception {
+        var blocking = new java.util.concurrent.atomic.AtomicBoolean();
+        var firstEntered = new CountDownLatch(1);
+        var bothEntered = new CountDownLatch(2);
+        var release = new CountDownLatch(1);
+        var base = sampler(new AtomicInteger(), null, null);
+        var source = new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
+            @Override int initialTerrainCellAxis(int lod) { return blocking.get() ? 8 : 64; }
+            @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return base.sample(x,z); }
+            @Override public int surfaceColor(int x, int y, int z) {
+                if (blocking.get() && (x < -8192 || z < -8192)) {
+                    firstEntered.countDown(); bothEntered.countDown();
+                    try { if (!release.await(10, TimeUnit.SECONDS)) throw new AssertionError("surface worker stalled"); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.util.concurrent.CancellationException(); }
+                }
+                return 0x70aa30;
+            }
+        };
+        try (var manager = new PredictionTileManager(PROFILE.levelKey(), source,
+                new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,4),null)) {
+            int lod = manager.layout().levelCount()-1;
+            assertEquals(8192, manager.layout().tileBlocks(lod));
+            var first = new PredictionTileKey(PROFILE.levelKey(), -1, 0, lod);
+            var second = new PredictionTileKey(PROFILE.levelKey(), 0, -1, lod);
+            var preview = new PredictionTileKey(PROFILE.levelKey(), 0, 0, lod);
+            desire(manager, first, true); desire(manager, second, true);
+            enqueue(manager, first); awaitIdle(manager); enqueue(manager, second); awaitIdle(manager);
+            assertTrue(manager.readyTiles().stream().allMatch(t -> t.cellAxis() == 64));
+            var desired = PredictionTileManager.class.getDeclaredField("surfaceDesired"); desired.setAccessible(true);
+            ((Set<PredictionTileKey>)desired.get(manager)).addAll(Set.of(first,second));
+            var waiting = PredictionTileManager.class.getDeclaredField("previewWorkPending"); waiting.setAccessible(true);
+            waiting.setBoolean(manager,true);
+            var submit = PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileKey.class,int.class,int.class,boolean.class);
+            submit.setAccessible(true);
+            blocking.set(true);
+            try {
+                submit.invoke(manager,first,0,0,true); assertTrue(firstEntered.await(5,TimeUnit.SECONDS));
+                long frameNow = System.nanoTime();
+                for (int i=50;i>=0;i--) PredictionFramePace.recordFrame(frameNow-i*10_000_000L);
+                submit.invoke(manager,second,0,0,true);
+                assertTrue(bothEntered.await(5,TimeUnit.SECONDS), "spare worker must be allowed to start the second surface");
+                desire(manager,preview,true);
+                enqueue(manager,preview);
+                long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                while(manager.readyTiles().stream().noneMatch(t->t.key().equals(preview)) && System.nanoTime()<until) Thread.sleep(5);
+                assertTrue(manager.readyTiles().stream().anyMatch(t->t.key().equals(preview)), "borrowed surfaces must leave capacity for preview");
+            } finally { blocking.set(false); release.countDown(); PredictionFramePace.resetForTesting(); }
+            awaitIdle(manager);
+            assertEquals(0,manager.failedTileCount());
+            assertTrue(manager.surfaceDiagnostics().contains("borrowedSurfaceBuilds=1"));
+        }
+    }
+
     @Test void denserPreviewPublishesInStagesAndOuterBandKeepsItsCheapFallback() throws Exception {
         var calls = new AtomicInteger();
         try (var manager = manager(sampler(calls, null, null, PredictionWorkOrder.INITIAL_CELL_AXIS), null)) {
@@ -277,6 +345,52 @@ class PredictionFirstCoverageTest {
             enqueue(manager, root); awaitIdle(manager);
             assertEquals(16, manager.readyTiles().iterator().next().cellAxis(),
                     "A captured sample must rebuild current resolution before advancing");
+        } finally { release.countDown(); }
+    }
+
+    @Test void obsoleteCaptureStopsRefinementBeforeColorAndMeshWork() throws Exception {
+        var calls = new AtomicInteger();
+        var refining = new CountDownLatch(1); var release = new CountDownLatch(1);
+        try (var manager = manager(sampler(calls, refining, release), null)) {
+            var root = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount()-1);
+            desire(manager,root,true); enqueue(manager,root); awaitIdle(manager);
+            long built = manager.builtTileCount();
+            enqueue(manager,root); assertTrue(refining.await(10,TimeUnit.SECONDS));
+            int before=calls.get();
+            int chunk = -manager.layout().tileBlocks(root.lod())/16;
+            manager.capturedTerrainChanged(chunk,chunk);
+            release.countDown(); awaitIdle(manager);
+            assertEquals(built,manager.builtTileCount(),"obsolete refinement must not replace retained coverage");
+            assertEquals(before,calls.get(),"stop after the in-flight sample, not after the entire obsolete grid");
+            enqueue(manager,root); awaitIdle(manager);
+            assertTrue(manager.builtTileCount()>built,"current capture epoch can rebuild without failure backoff");
+        } finally { release.countDown(); }
+    }
+
+    @Test void obsoleteQueuedCaptureDoesNoSamplingBeforeRetry() throws Exception {
+        var calls = new AtomicInteger();
+        var release = new CountDownLatch(1);
+        try (var manager = manager(sampler(calls, null, null), null)) {
+            var root = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount()-1);
+            desire(manager, root, true); enqueue(manager, root); awaitIdle(manager);
+            var field = PredictionTileManager.class.getDeclaredField("executor"); field.setAccessible(true);
+            var executor = (java.util.concurrent.ThreadPoolExecutor) field.get(manager);
+            int workers = executor.getCorePoolSize();
+            var entered = new CountDownLatch(workers);
+            for (int i = 0; i < workers; i++) executor.execute(new PredictionTileManager.PredictionTask(root, Integer.MIN_VALUE, 0, () -> {
+                entered.countDown();
+                try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }));
+            assertTrue(entered.await(10, TimeUnit.SECONDS));
+            int before = calls.get(); long built = manager.builtTileCount();
+            enqueue(manager, root);
+            int chunk = -manager.layout().tileBlocks(root.lod()) / 16;
+            manager.capturedTerrainChanged(chunk, chunk);
+            release.countDown(); awaitIdle(manager);
+            assertEquals(before, calls.get(), "stale queued jobs must exit before their first terrain query");
+            assertEquals(built, manager.builtTileCount());
+            enqueue(manager, root); awaitIdle(manager);
+            assertTrue(manager.builtTileCount() > built, "latest capture remains eligible for rebuilding");
         } finally { release.countDown(); }
     }
 

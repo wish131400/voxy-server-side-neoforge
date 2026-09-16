@@ -25,41 +25,93 @@ final class RustWorldgenDocument {
     static void invalidateSharedInputs() { INPUT_GENERATION.incrementAndGet(); }
 
     /** Owned by one profile decode, never retained across worlds or registry snapshots. */
-    static final class SharedInputs {
+    static final class SharedInputs implements AutoCloseable {
         private long generation = Long.MIN_VALUE;
         private JsonObject definitions;
-        private JsonArray states;
+        private BlockState[] canonicalStates;
         private Map<JsonElement, BlockState> stateLookup;
         private JsonObject colors;
+        private long palette;
 
         void prepare() {
             long current = INPUT_GENERATION.get();
             if (generation == current && definitions != null) return;
+            close();
             definitions = blockDefinitions();
-            states = new JsonArray();
-            stateLookup = new HashMap<>();
-            for (Block block : BuiltInRegistries.BLOCK) {
-                for (BlockState state : block.getStateDefinition().getPossibleStates()) {
-                    JsonObject encoded = encodeState(state);
-                    states.add(encoded);
-                    stateLookup.put(encoded, state);
-                }
-            }
+            var list = new ArrayList<BlockState>();
+            for (Block block : BuiltInRegistries.BLOCK) list.addAll(block.getStateDefinition().getPossibleStates());
+            canonicalStates = list.toArray(BlockState[]::new);
+            stateLookup = null;
             colors = null;
             generation = current;
         }
-
-        Map<JsonElement, BlockState> stateLookup() { return stateLookup; }
-
+        Map<JsonElement, BlockState> stateLookup() {
+            if (stateLookup == null) {
+                stateLookup = new HashMap<>();
+                for (BlockState state : canonicalStates) stateLookup.put(encodeState(state), state);
+            }
+            return stateLookup;
+        }
+        BlockState[] canonicalStates() { return canonicalStates; }
+        JsonObject compactPalette() {
+            prepare();
+            JsonArray groups = new JsonArray();
+            for (Block block : BuiltInRegistries.BLOCK) {
+                var properties = new ArrayList<Property<?>>(block.getStateDefinition().getProperties());
+                var choices = new ArrayList<List<String>>();
+                JsonArray keys = new JsonArray(), values = new JsonArray(), codes = new JsonArray();
+                for (Property<?> property : properties) {
+                    keys.add(property.getName());
+                    List<String> names = values(property);
+                    choices.add(names); values.add(JSON.toJsonTree(names));
+                }
+                for (BlockState state : block.getStateDefinition().getPossibleStates()) {
+                    long code = 0, factor = 1;
+                    for (int i = 0; i < properties.size(); i++) {
+                        int index = choices.get(i).indexOf(value(state, properties.get(i)));
+                        if (index < 0) throw new IllegalArgumentException("Missing canonical state value");
+                        code = Math.addExact(code, Math.multiplyExact(factor, index));
+                        factor = Math.multiplyExact(factor, choices.get(i).size());
+                    }
+                    codes.add(code);
+                }
+                JsonObject group = new JsonObject();
+                group.addProperty("name", BuiltInRegistries.BLOCK.getKey(block).toString());
+                group.add("properties", keys); group.add("values", values); group.add("codes", codes);
+                groups.add(group);
+            }
+            JsonObject doc = new JsonObject();
+            doc.add("block_definitions", definitions); doc.add("groups", groups);
+            return doc;
+        }
+        long palette() {
+            prepare();
+            if (palette == 0) {
+                var timing = new PredictionInitializationTiming("sharedPalette");
+                JsonObject compact = compactPalette(); timing.mark("encode");
+                String serialized = compact.toString(); timing.mark("serialize");
+                palette = RustWorldgenBackend.openPalette(serialized); timing.mark("nativeCreate");
+                if (palette == 0) throw new IllegalStateException("Missing native palette");
+                if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
+                    dev.xantha.vss.common.VSSLogger.debug("VSS shared palette states=" + canonicalStates.length
+                            + ", chars=" + serialized.length());
+                timing.finish();
+            }
+            return palette;
+        }
         JsonObject colors() throws IOException {
             if (colors == null) colors = colormaps();
             return colors;
+        }
+        @Override public void close() {
+            if (palette != 0) { RustWorldgenBackend.closePalette(palette); palette = 0; }
+            definitions = null; canonicalStates = null; stateLookup = null; colors = null;
         }
     }
 
     static JsonObject create(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
             SharedInputs shared) throws IOException {
-        JsonObject result = snapshot(generator, registries, context, shared);
+        JsonObject result = snapshot(generator, registries, context, shared, true);
         shared.colors().entrySet().forEach(entry -> result.add(entry.getKey(), entry.getValue()));
         return result;
     }
@@ -99,6 +151,10 @@ final class RustWorldgenDocument {
 
     static JsonObject snapshot(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
             SharedInputs shared) {
+        return snapshot(generator, registries, context, shared, false);
+    }
+    private static JsonObject snapshot(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
+            SharedInputs shared, boolean compact) {
         shared.prepare();
         // Fields below are read-only inputs. Copy the top-level object only; nested generator
         // and registry trees are neither mutated here nor by JNI (which receives a string).
@@ -113,8 +169,14 @@ final class RustWorldgenDocument {
         context.generatorContext().getBiomeSource().possibleBiomes().forEach(b -> possible.add(
                 b.unwrapKey().orElseThrow(() -> new IllegalArgumentException("Inline biome needs a native identity")).location().toString()));
         result.add("possible_biomes", possible);
+        if (compact) {
+            result.addProperty("vss_shared_palette", shared.palette());
+            return result;
+        }
         result.add("block_definitions", shared.definitions);
-        result.add("input_states", shared.states);
+        JsonArray states = new JsonArray();
+        for (BlockState state : shared.canonicalStates()) states.add(encodeState(state));
+        result.add("input_states", states);
         return result;
     }
 

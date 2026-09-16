@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
+import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.common.worldgen.DensityFunctionSnapshot;
 import dev.xantha.vss.common.worldgen.DensityFunctionReferences;
@@ -35,6 +36,15 @@ import net.minecraft.world.level.levelgen.structure.StructureSet;
 
 /** Codec snapshot equivalent to the worldgen dump, owned by VSS. */
 final class WorldgenCodecSnapshot {
+    /**
+     * Stays clear of the hard caps in {@code WorldgenProfileS2CPayload} so that
+     * one optional section cannot push the whole generator payload over them.
+     * Exceeding those caps throws while the profile is built, which costs the
+     * dimension's entire prediction rather than a single backend.
+     */
+    private static final int GENERATOR_BYTES_HEADROOM = 1_500_000;
+    private static final int GENERATOR_RAW_BYTES_HEADROOM = 7_500_000;
+
     private WorldgenCodecSnapshot() {
     }
 
@@ -102,6 +112,11 @@ final class WorldgenCodecSnapshot {
 
     static Encoded encodeGenerator(ChunkGenerator generator, RegistryAccess access, DensityFunctionReferences references,
                                    WorldgenRegistryDependencies dependencies) {
+        return encodeGenerator(generator, access, references, dependencies, null);
+    }
+
+    static Encoded encodeGenerator(ChunkGenerator generator, RegistryAccess access, DensityFunctionReferences references,
+                                   WorldgenRegistryDependencies dependencies, String terrablenderRegionType) {
         if (!(generator instanceof NoiseBasedChunkGenerator noise)) {
             return Encoded.empty();
         }
@@ -135,12 +150,57 @@ final class WorldgenCodecSnapshot {
             dependencies.require(ResourceLocation.parse("reterraforged:worldgen/noise"));
             root.addProperty("vss_freeterraforged", true);
         }
-        if (mods != null && mods.isLoaded("terrablender")
+        if (mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
                 && noise.getBiomeSource() instanceof MultiNoiseBiomeSource) {
-            root.addProperty("vss_unsupported_reason",
-                    "TerraBlender positional regions require a registered prediction backend");
+            // TerraBlender's positional region grid and per-region climate
+            // points live outside the vanilla codecs. Snapshot them so the
+            // client backend can replay the routing; untagged dimensions are
+            // never initialized by TerraBlender and keep vanilla behavior.
+            JsonObject regions = TerraBlenderRegionSnapshot.capture(terrablenderRegionType, access);
+            if (regions != null && generator.getClass() == NoiseBasedChunkGenerator.class) {
+                root.add("vss_terrablender", regions);
+            } else if (regions == null) {
+                root.addProperty("vss_unsupported_reason",
+                        "TerraBlender positional regions require a registered prediction backend");
+            }
         }
-        return compress(root);
+        if (mods != null && mods.isLoaded("blueprint")) {
+            // Blueprint's ModdedBiomeSource codec carries only the wrapped
+            // source: the slice array, its size and both positional seeds are
+            // constructor state and never reach the vanilla codecs. Snapshot
+            // them so the client backend can replay getSlice instead of
+            // behaving as a plain forwarder for a source that routes most of
+            // the world through slices.
+            JsonObject blueprint = BlueprintBiomeSnapshot.capture(noise.getBiomeSource(), access, ops,
+                    mods.isLoaded("terrablender") ? terrablenderRegionType : null);
+            if (blueprint != null) {
+                if (generator.getClass() == NoiseBasedChunkGenerator.class) {
+                    root.add("vss_blueprint", blueprint);
+                } else {
+                    root.addProperty("vss_unsupported_reason",
+                            "Blueprint biome slices require a registered prediction backend");
+                }
+            }
+        }
+        Encoded encoded = compress(root);
+        // The generator payload has hard caps (see WorldgenProfileS2CPayload):
+        // exceeding them throws while the profile is built, which would cost
+        // the whole dimension's prediction rather than just this backend. A
+        // Blueprint slice table can be megabytes on its own, so if the payload
+        // no longer fits with headroom, give up the optional section and keep
+        // the core snapshot intact, but reject prediction: the wrapper codec
+        // alone silently discards Blueprint and nested TerraBlender routing.
+        if (root.has("vss_blueprint")
+                && (encoded.bytes().length > GENERATOR_BYTES_HEADROOM
+                || encoded.rawSize() > GENERATOR_RAW_BYTES_HEADROOM)) {
+            root.remove("vss_blueprint");
+            root.addProperty("vss_unsupported_reason", "Blueprint biome slice snapshot exceeds payload budget");
+            VSSLogger.warn("VSS dropped the Blueprint slice snapshot to stay inside the generator"
+                    + " payload budget (" + encoded.bytes().length + " B compressed, "
+                    + encoded.rawSize() + " B raw); prediction unavailable for this dimension");
+            encoded = compress(root);
+        }
+        return encoded;
     }
 
     // Tectonic's NoisesMixin changes only the positional RNG name. The
@@ -188,8 +248,8 @@ final class WorldgenCodecSnapshot {
      * codec fail and silently selects VSS's deterministic fallback sampler.
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
-    private static JsonElement encodeBiomeSource(BiomeSource source, RegistryAccess access,
-                                                 RegistryOps<JsonElement> ops) {
+    static JsonElement encodeBiomeSource(BiomeSource source, RegistryAccess access,
+                                         RegistryOps<JsonElement> ops) {
         JsonObject encoded = BiomeSource.CODEC.encodeStart(ops, source)
                 .getOrThrow().getAsJsonObject();
         if (encoded.has("preset")) {

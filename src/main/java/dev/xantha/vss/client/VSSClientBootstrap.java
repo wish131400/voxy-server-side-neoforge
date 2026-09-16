@@ -1,6 +1,8 @@
 package dev.xantha.vss.client;
 
 import dev.xantha.vss.compat.ModCompat;
+import dev.xantha.vss.client.prediction.PredictionTerrainBackends;
+import dev.xantha.vss.client.prediction.TerraBlenderBackend;
 import dev.xantha.vss.networking.client.FarPlayerClientRenderer;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import dev.xantha.vss.networking.client.VSSClientCommands;
@@ -18,6 +20,7 @@ public final class VSSClientBootstrap {
         VSSSodiumOptionsEventBridge.register();
         VSSEmbeddiumOptionsEventBridge.register();
         ModCompat.init();
+        PredictionTerrainBackends.register(new TerraBlenderBackend());
         NeoForge.EVENT_BUS.register(VSSClientNetworking.class);
         NeoForge.EVENT_BUS.register(VSSClientCommands.class);
         NeoForge.EVENT_BUS.register(FarPlayerClientRenderer.class);

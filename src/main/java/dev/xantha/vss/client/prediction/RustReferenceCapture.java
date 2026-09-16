@@ -34,6 +34,12 @@ public final class RustReferenceCapture {
         }
         write(directory.resolve("generator.json"), generator);
         write(directory.resolve("registries.json"), registries);
+        // The native backend builds its block table from this exact document,
+        // so a reference capture is only replayable if it ships the same one.
+        // Without it the exported generator.json cannot be loaded by World::new
+        // and no point-by-point comparison is possible.
+        write(directory.resolve("block-definitions.json"),
+                RustWorldgenDocument.blockDefinitions().toString().getBytes(StandardCharsets.UTF_8));
         JsonObject manifest = new JsonObject();
         manifest.addProperty("format", "vss-rust-reference-2");
         manifest.addProperty("minecraft", "1.21.1");

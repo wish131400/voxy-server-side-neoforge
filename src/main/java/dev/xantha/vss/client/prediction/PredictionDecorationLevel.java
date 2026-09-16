@@ -21,8 +21,19 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     private final int originX;
     private final int originZ;
     private final BiomeManager biomes;
+    private record Quart(int x, int y, int z) { }
+    // A job keeps its own exact answers even when concurrent regions churn the shared cache.
+    private final Map<Quart, Holder<Biome>> jobBiomes = new HashMap<>();
     private final VssLodSampleCache sharedColumns;
     private final Map<Long, ClientColumnSample> columns = new HashMap<>();
+    // State IDs are richer than ClientColumnSample's block IDs. Retain the
+    // original immutable record for this bounded job instead of looking it up
+    // in the shared sampler for every ground/heightmap/tree-space query.
+    private final Map<Long, int[]> nativeColumns = new HashMap<>();
+    private final Map<Long, int[]> displayColumns = new HashMap<>();
+    private final java.util.Set<Long> exactEdits = new java.util.HashSet<>();
+    private final java.util.Set<Long> displayEdits = new java.util.HashSet<>();
+    private boolean displayTerrain;
     private final Map<Long, Integer> changedTops = new HashMap<>();
     private final Map<BlockPos, BlockState> undo = new HashMap<>();
     private final java.util.Set<BlockPos> structureBlocks = new java.util.HashSet<>();
@@ -47,11 +58,55 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     }
 
     ClientColumnSample column(int x, int z) {
+        checkColumnBounds(x, z);
+        if (displayTerrain && terrain instanceof RustTerrainSampler rust)
+            return rust.surfaceSample(nativeColumn(rust,x,z));
+        return columns.computeIfAbsent(key(x, z), packed -> {
+            if (terrain instanceof RustTerrainSampler rust) {
+                return rust.surfaceSample(nativeColumn(rust, x, z));
+            }
+            return sharedColumns == null ? terrain.sampleSurface(x, z)
+                    : sharedColumns.getOrCompute(packed, ignored -> terrain.sampleSurface(x, z));
+        });
+    }
+
+    private int[] nativeColumn(RustTerrainSampler rust, int x, int z) {
+        checkColumnBounds(x, z);
+        rust.handle(); // Retained data must not keep a cancelled world usable.
+        long key = key(x, z);
+        if (displayTerrain) {
+            int[] record = displayColumns.get(key);
+            if (record == null) {
+                int ox = Math.floorDiv(x,4)*4, oz = Math.floorDiv(z,4)*4;
+                int[][] rows = rust.decorationDisplayPage(ox,oz);
+                for (int i=0;i<16;i++) displayColumns.put(key(ox+i/4,oz+i%4),rows[i]);
+                record = displayColumns.get(key);
+            }
+            return record;
+        }
+        int[] record = nativeColumns.get(key);
+        if (record == null) {
+            record = rust.surfaceRecord(x, z);
+            nativeColumns.put(key, record);
+        }
+        return record;
+    }
+
+    void useDisplayTerrain(boolean display) { displayTerrain = display; }
+    boolean usesDisplayTerrain() { return displayTerrain; }
+
+    /** Structures/custom feature cuts retain their original extraction floor.
+     * Pure visual plant columns use the same ground as their placement. */
+    ClientColumnSample exteriorColumn(int x, int z) {
+        boolean previous = displayTerrain;
+        displayTerrain = !exactEdits.contains(key(x,z)) && displayEdits.contains(key(x,z));
+        try { return column(x,z); } finally { displayTerrain = previous; }
+    }
+
+    private void checkColumnBounds(int x, int z) {
         if (x < originX - 32 || x >= originX + 48 || z < originZ - 32 || z >= originZ + 48) {
             throw new UnsupportedOperationException("decoration read outside its bounded region");
         }
-        return columns.computeIfAbsent(key(x, z), packed -> sharedColumns == null
-                ? terrain.sampleSurface(x, z) : sharedColumns.getOrCompute(packed, ignored -> terrain.sampleSurface(x, z)));
     }
 
     void beginFeature() {
@@ -65,8 +120,10 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     void endFeature(boolean success) {
         if (!success) undo.forEach((pos, state) -> {
-            if (state == null) placed().remove(pos);
-            else placed().put(pos, state);
+            // Routed through `noteWrite` so the rollback is registered as a
+            // write: an unregistered one would let the next round trip claim
+            // the two sides agree.
+            noteWrite(pos, state);
         });
         if (!success) {
             changedTops.clear();
@@ -89,9 +146,9 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
             return Blocks.AIR.defaultBlockState();
         }
         if (terrain instanceof RustTerrainSampler rust) {
-            // Enforce the same read boundary before accessing native columns.
-            column(pos.getX(),pos.getZ());
-            return rust.proxyBlock(pos.getX(),pos.getY(),pos.getZ());
+            // Bounds and cancellation are checked by nativeColumn. A block
+            // query needs the original record, not a second metadata lookup.
+            return rust.proxyBlock(nativeColumn(rust, pos.getX(), pos.getZ()), pos.getY());
         }
         ClientColumnSample sample = column(pos.getX(), pos.getZ());
         if (pos.getY() >= sample.surfaceY()) {
@@ -132,6 +189,8 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
             throw new UnsupportedOperationException("decoration exceeded its work budget");
         }
         changedTops.merge(key(pos.getX(), pos.getZ()), pos.getY() + 1, Math::max);
+        if (!displayTerrain) exactEdits.add(key(pos.getX(),pos.getZ()));
+        else displayEdits.add(key(pos.getX(),pos.getZ()));
         if (transaction && !undo.containsKey(pos)) undo.put(pos.immutable(), placed().get(pos));
         return super.setBlock(pos, state, flags, recursion);
     }
@@ -167,7 +226,12 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         return Math.max(sky, getBlockState(pos).getLightEmission());
     }
     @Override public Holder<Biome> getNoiseBiome(int x, int y, int z) {
-        return context.noiseBiome(x, y, z);
+        Quart key = new Quart(x, y, z);
+        Holder<Biome> cached = jobBiomes.get(key);
+        if (cached != null) return cached;
+        Holder<Biome> biome = context.noiseBiome(x, y, z);
+        if (jobBiomes.size() < 16384) jobBiomes.put(key, biome);
+        return biome;
     }
     @Override public Holder<Biome> getUncachedNoiseBiome(int x, int y, int z) {
         return getNoiseBiome(x, y, z);

@@ -11,12 +11,31 @@ import org.junit.jupiter.api.Test;
 
 class PredictionMemoryBudgetTest {
     @Test
-    void workersLeaveTwoLogicalProcessorsForTheGame() {
-        assertEquals(1, PredictionMemoryBudget.workerCount(1));
-        assertEquals(1, PredictionMemoryBudget.workerCount(2));
-        assertEquals(5, PredictionMemoryBudget.workerCount(7));
-        assertEquals(14, PredictionMemoryBudget.workerCount(16));
-        assertEquals(30, PredictionMemoryBudget.workerCount(32));
+    void workerCountFollowsThePerformanceTier() {
+        var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
+        String tier = config.performanceTier;
+        try {
+            config.performanceTier = "low";
+            assertEquals(1, PredictionMemoryBudget.workerCount(1));
+            assertEquals(1, PredictionMemoryBudget.workerCount(2));
+            assertEquals(1, PredictionMemoryBudget.workerCount(7));
+            assertEquals(4, PredictionMemoryBudget.workerCount(16));
+            assertEquals(4, PredictionMemoryBudget.workerCount(32));
+            config.performanceTier = "medium";
+            assertEquals(1, PredictionMemoryBudget.workerCount(1));
+            assertEquals(1, PredictionMemoryBudget.workerCount(2));
+            assertEquals(3, PredictionMemoryBudget.workerCount(7));
+            assertEquals(8, PredictionMemoryBudget.workerCount(16));
+            assertEquals(8, PredictionMemoryBudget.workerCount(32));
+            config.performanceTier = "high";
+            assertEquals(1, PredictionMemoryBudget.workerCount(1));
+            assertEquals(1, PredictionMemoryBudget.workerCount(2));
+            assertEquals(5, PredictionMemoryBudget.workerCount(7));
+            assertEquals(14, PredictionMemoryBudget.workerCount(16));
+            assertEquals(30, PredictionMemoryBudget.workerCount(32));
+        } finally {
+            config.performanceTier = tier;
+        }
     }
 
     @Test
@@ -26,6 +45,7 @@ class PredictionMemoryBudgetTest {
         PredictionMemoryBudget budget = PredictionMemoryBudget.adaptive(heap, free::get, () -> 1,
                 PredictionMemoryBudget.workerCount(16), () -> 0);
         var reservations = new ArrayList<PredictionMemoryBudget.Reservation>();
+        int expectedWorkers = budget.buildLimit();
         try {
             long cacheBytes = 2560L * PredictionMemoryBudget.MIB;
             var resident = budget.tryReserve(cacheBytes);
@@ -38,7 +58,7 @@ class PredictionMemoryBudgetTest {
                 assertNotNull(task, "working allowance must accommodate worker " + worker);
                 reservations.add(task);
             }
-            assertEquals(14, budget.activeBuildCount());
+            assertEquals(expectedWorkers, budget.activeBuildCount());
             assertNull(budget.tryReserveBuild());
             assertEquals(0, budget.availableBuildSlots());
             assertTrue(budget.usedBytes() > 1792L * PredictionMemoryBudget.MIB,

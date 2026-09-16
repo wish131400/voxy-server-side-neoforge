@@ -51,6 +51,10 @@ public class ClientTerrainSampler {
     // Preview-only cache: never used by surfaceY, exact materials or decoration.
     private final ThreadLocal<java.util.LinkedHashMap<Long, Integer>> previewHeights =
             ThreadLocal.withInitial(() -> new java.util.LinkedHashMap<>(256, .75f, true));
+    // Vanilla allocates one SinglePointContext per density sample. The density
+    // march issues dozens of them per column, so reuse one per thread, exactly
+    // as NoiseChunk itself is a reusable FunctionContext.
+    private final ThreadLocal<MutablePoint> points = ThreadLocal.withInitial(MutablePoint::new);
     private volatile PredictionBiomeCache previewBiomes;
 
     @FunctionalInterface
@@ -174,8 +178,13 @@ public class ClientTerrainSampler {
         this.heights = heights;
         this.seaLevel = seaLevel;
         NoiseRouter router = FreeTerraForgedCompat.predictionRouter(randomState);
-        this.finalDensity = router.finalDensity();
-        this.initialDensity = router.initialDensityWithoutJaggedness();
+        // Both router roots share one memo. Minecraft's density graph is a DAG,
+        // so a subexpression common to the initial and final density is reached
+        // again from a sibling parent and a single-slot memo catches it.
+        DensityFunction[] roots = DensityMemo.wrapRoots(
+                router.finalDensity(), router.initialDensityWithoutJaggedness());
+        this.finalDensity = roots[0];
+        this.initialDensity = roots[1];
         this.initialDensityIsConstant = initialDensity.minValue() == initialDensity.maxValue();
         this.lavaOcean = generator.generatorSettings().value().defaultFluid().is(Blocks.LAVA);
         this.biomeSource = generator.getBiomeSource();
@@ -265,6 +274,10 @@ public class ClientTerrainSampler {
     }
 
     ClientTerrainSampler decorationContext() { return this; }
+
+    String biomeCacheDiagnostics() {
+        return biomeCache == null ? "unavailable" : biomeCache.diagnostics();
+    }
 
     com.google.gson.JsonObject structureTemplates() { return structureTemplates; }
 
@@ -530,7 +543,7 @@ public class ClientTerrainSampler {
     /** Two-stage density march: a coarse estimate followed by an 8-block
      * march and binary boundary refinement. This avoids constructing a chunk
      * for every LOD sample while evaluating Minecraft's real final density. */
-    private int densitySurfaceY(int blockX, int blockZ) {
+    int densitySurfaceY(int blockX, int blockZ) {
         if (initialDensityIsConstant) {
             return fullMarch(blockX, blockZ);
         }
@@ -557,7 +570,7 @@ public class ClientTerrainSampler {
         int high = ceilingY + 1;
         while (high - low > 1) {
             int mid = low + (high - low) / 2;
-            if (initialDensity.compute(new DensityFunction.SinglePointContext(blockX, mid, blockZ)) > 0.0D) {
+            if (initialDensity.compute(context(blockX, mid, blockZ)) > 0.0D) {
                 low = mid;
             } else {
                 high = mid;
@@ -567,7 +580,15 @@ public class ClientTerrainSampler {
     }
 
     private boolean solid(int blockX, int y, int blockZ) {
-        return finalDensity.compute(new DensityFunction.SinglePointContext(blockX, y, blockZ)) > 0.0D;
+        return finalDensity.compute(context(blockX, y, blockZ)) > 0.0D;
+    }
+
+    private DensityFunction.FunctionContext context(int blockX, int y, int blockZ) {
+        MutablePoint point = points.get();
+        point.x = blockX;
+        point.y = y;
+        point.z = blockZ;
+        return point;
     }
 
     private int scanUp(int blockX, int blockZ, int startY) {
@@ -732,5 +753,18 @@ public class ClientTerrainSampler {
 
     private static double lerp(double a, double b, double t) {
         return a + (b - a) * t;
+    }
+
+    /**
+     * Reusable single-point context. The vanilla record allocates a new one per
+     * density sample; NoiseChunk itself is a reusable mutable FunctionContext,
+     * so callers are already required not to retain the context.
+     */
+    private static final class MutablePoint implements DensityFunction.FunctionContext {
+        private int x, y, z;
+
+        @Override public int blockX() { return x; }
+        @Override public int blockY() { return y; }
+        @Override public int blockZ() { return z; }
     }
 }

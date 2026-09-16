@@ -5,6 +5,15 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PredictionWorldgenCapabilitiesTest {
+    @Test void blueprintCodecCannotSilentlyDiscardMissingRoutingSnapshot() {
+        var generator = JsonParser.parseString("""
+                {"settings":{},"biome_source":{"type":"blueprint:modded","original_biome_source":{}}}
+                """).getAsJsonObject();
+        assertEquals("missing Blueprint biome slice snapshot", PredictionWorldgenCapabilities.rejection(generator));
+        generator.add("vss_blueprint", new com.google.gson.JsonObject());
+        assertNull(PredictionWorldgenCapabilities.rejection(generator));
+    }
+
     @Test void customDecorationDoesNotDisableNativeTerrainOrMutateJavaSnapshot() {
         var generator = JsonParser.parseString("""
                 {"settings":{"noise_router":{"final_density":"example:height"}},"biome_source":{"type":"minecraft:multi_noise"}}
@@ -69,5 +78,60 @@ class PredictionWorldgenCapabilitiesTest {
         assertEquals("region context", PredictionWorldgenCapabilities.rejection(JsonParser.parseString("""
                 {"settings":{},"biome_source":{},"vss_unsupported_reason":"region context"}
                 """).getAsJsonObject()));
+    }
+
+    @Test void biomeSpawnersDoNotDisableNativeTerrainButSurfaceRulesStillDo() {
+        // Regression: a biome's spawn list names entities (for example
+        // alexscaves:tripodfish). Entities never participate in the terrain
+        // density graph, but they sit inside the same `type`-bearing JSON the
+        // capability scan walks, so an unfiltered scan rejected every
+        // dimension whose biomes listed a modded creature.
+        var generator = JsonParser.parseString("""
+                {"settings":{"noise_router":{"final_density":"example:height"}},
+                 "biome_source":{"type":"minecraft:multi_noise"}}
+                """).getAsJsonObject();
+        var registries = JsonParser.parseString("""
+                {"density_functions":{"example:height":{"type":"minecraft:constant","argument":0}},
+                 "biomes":{"example:plain":{
+                     "spawners":{"example:creatures":[{"type":"alexscaves:tripodfish"}]},
+                     "features":[[{"type":"example:placement"}]],
+                     "carvers":{}}}}
+                """).getAsJsonObject();
+        assertNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator, registries),
+                "spawners carry entity ids and must not disable native terrain");
+
+        // A surface rule does shape the surface, so an unknown codec there must
+        // still force the Java sampler. `alexscaves:ac_simplex` used to serve as
+        // this probe until the native backend implemented it, so this uses a
+        // name deliberately absent from the whitelist.
+        generator.getAsJsonObject("settings").add("surface_rule", JsonParser.parseString("""
+                {"type":"minecraft:sequence",
+                 "sequence":[{"type":"example:unknown_rule"}]}
+                """));
+        assertTrue(PredictionWorldgenCapabilities.nativeTerrainRejection(generator, registries)
+                .contains("example:unknown_rule"));
+    }
+
+    @Test void blueprintPayloadSectionIsNotReadAsCodecTypes() {
+        // The vss_blueprint snapshot carries provider dispatch entries whose
+        // `type` names Blueprint's own providers. Those are replayed by the
+        // native backend rather than decoded as worldgen codecs, so scanning
+        // them would reject every Blueprint-wrapped dimension. Regression for
+        // exactly that: the section used to be walked like any other object.
+        var generator = JsonParser.parseString("""
+                {"settings":{"noise_router":{"final_density":"example:height"}},
+                 "biome_source":{"type":"blueprint:modded",
+                     "original_biome_source":{"type":"minecraft:multi_noise","biomes":[]}},
+                 "vss_blueprint":{
+                     "original_biome_source":{"type":"minecraft:multi_noise","biomes":[]},
+                     "slices":[{"name":"test:slice","slice":{"weight":100,
+                         "provider":{"type":"blueprint:overlay","overlays":[]}}}],
+                     "size":8,"slices_seed":1,"slices_zoom_seed":2}}
+                """).getAsJsonObject();
+        var registries = JsonParser.parseString("""
+                {"density_functions":{"example:height":{"type":"minecraft:constant","argument":0}}}
+                """).getAsJsonObject();
+        assertNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator, registries),
+                "vss_ payload sections must not be scanned for codec types");
     }
 }

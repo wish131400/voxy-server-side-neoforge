@@ -35,6 +35,7 @@ public final class VSSVoxyOptionsIntegration {
     private static final String OLD_SLIDER_CONTROL = "net.caffeinemc.mods.sodium.client.gui.options.control.SliderControl";
     private static final String OLD_TICK_BOX_CONTROL = "net.caffeinemc.mods.sodium.client.gui.options.control.TickBoxControl";
     private static final String OLD_VALUE_FORMATTER = "net.caffeinemc.mods.sodium.client.gui.options.control.ControlValueFormatter";
+    private static final String OLD_CYCLING_CONTROL = "net.caffeinemc.mods.sodium.client.gui.options.control.CyclingControl";
 
     private static final String SODIUM_OPTIONS_API = "toni.sodiumoptionsapi.api.OptionGUIConstruction";
     private static final String SODIUM08_CONFIG_ENTRY_POINT = "net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint";
@@ -137,23 +138,25 @@ public final class VSSVoxyOptionsIntegration {
         }
 
         try {
-            Object page = oldPage();
-            if (page == null) {
-                return;
+            boolean added = false;
+            for (Object page : new Object[]{oldSyncPage(), oldPredictionPage()}) {
+                if (page == null) {
+                    continue;
+                }
+                String name = pageName(page);
+                if (containsPageNamed(pages, name)) {
+                    continue;
+                }
+                int insertAt = findVoxyPageIndex(pages) + 1;
+                if (insertAt <= 0) {
+                    insertAt = pages.size();
+                }
+                ((List) pages).add(insertAt, page);
+                added = true;
             }
-
-            String name = pageName(page);
-            if (containsPageNamed(pages, name)) {
-                return;
+            if (added) {
+                VSSLogger.info("Added Voxy Server Side options pages to Sodium options");
             }
-
-            int insertAt = findVoxyPageIndex(pages) + 1;
-            if (insertAt <= 0) {
-                insertAt = pages.size();
-            }
-
-            ((List) pages).add(insertAt, page);
-            VSSLogger.info("Added Voxy Server Side options page to Sodium options");
         } catch (Throwable e) {
             VSSLogger.warn("Failed to build VSS options page; leaving video settings unchanged", e);
         }
@@ -164,7 +167,9 @@ public final class VSSVoxyOptionsIntegration {
             Object modOptions = invokeByName(configBuilder, "registerModOptions", VSSConstants.MOD_ID, "Voxy Server Side", modVersion());
             invokeByName(modOptions, "setNonTintedIcon", id("textures/gui/icon.png"));
             Object page = invokeByName(configBuilder, "createOptionPage");
-            invokeByName(page, "setName", Component.translatable("vss.voxy_options.title"));
+            invokeByName(page, "setName", Component.translatable("vss.voxy_options.sync_title"));
+            Object predictionPage = invokeByName(configBuilder, "createOptionPage");
+            invokeByName(predictionPage, "setName", Component.translatable("vss.voxy_options.prediction_title"));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
@@ -198,7 +203,11 @@ public final class VSSVoxyOptionsIntegration {
                             true,
                             value -> VSSClientConfig.CONFIG.offThreadSectionProcessing = value,
                             () -> VSSClientConfig.CONFIG.offThreadSectionProcessing,
-                            VSSVoxyOptionsIntegration::saveClientConfig),
+                            VSSVoxyOptionsIntegration::saveClientConfig)));
+
+            invokeByName(predictionPage, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.prediction",
                     sodium08BooleanOption(
                             configBuilder,
                             "prediction",
@@ -209,6 +218,15 @@ public final class VSSVoxyOptionsIntegration {
                             value -> VSSClientConfig.CONFIG.enablePrediction = value,
                             () -> VSSClientConfig.CONFIG.enablePrediction,
                             VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08TierOption(configBuilder, "performance_tier",
+                            "vss.voxy_options.performance_tier",
+                            "vss.voxy_options.performance_tier.tooltip",
+                            "HIGH",
+                            VSSVoxyOptionsIntegration::saveClientConfig)));
+
+            invokeByName(predictionPage, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.prediction_detail",
                     sodium08BooleanOption(configBuilder, "prediction_trees", "vss.voxy_options.prediction_trees",
                             "vss.voxy_options.prediction_trees.tooltip", "HIGH", true,
                             value -> VSSClientConfig.CONFIG.predictionTrees = value,
@@ -218,14 +236,25 @@ public final class VSSVoxyOptionsIntegration {
                             value -> VSSClientConfig.CONFIG.predictionStructures = value,
                             () -> VSSClientConfig.CONFIG.predictionStructures, VSSVoxyOptionsIntegration::saveClientConfig)));
 
-            invokeByName(page, "addOptionGroup", sodium08Group(
+            invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
-                    "vss.voxy_options.group.client_limits",
+                    "vss.voxy_options.group.prediction_limits",
+                     sodium08IntOption(configBuilder, "prediction_distance_blocks", "vss.voxy_options.prediction_distance_blocks",
+                             "vss.voxy_options.prediction_distance_blocks.tooltip", "HIGH", 8_192,
+                             VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
+                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS, 1_024,
+                             value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,
+                             () -> VSSClientConfig.CONFIG.predictionDistanceBlocks,
+                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig),
                      sodium08IntOption(configBuilder, "prediction_surface_distance", "vss.voxy_options.prediction_surface_distance",
                              "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 768, 128, 2048, 128,
                              value -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks = value,
                              () -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks,
-                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig),
+                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig)));
+
+            invokeByName(page, "addOptionGroup", sodium08Group(
+                    configBuilder,
+                    "vss.voxy_options.group.client_limits",
                      sodium08IntOption(
                              configBuilder,
                              "client_lod_distance",
@@ -239,20 +268,6 @@ public final class VSSVoxyOptionsIntegration {
                             value -> VSSClientConfig.CONFIG.lodDistanceChunks = value,
                              () -> VSSClientConfig.CONFIG.lodDistanceChunks,
                              VSSVoxyOptionsIntegration::formatChunksAuto,
-                             VSSVoxyOptionsIntegration::saveClientConfig),
-                     sodium08IntOption(
-                             configBuilder,
-                             "prediction_distance_blocks",
-                             "vss.voxy_options.prediction_distance_blocks",
-                             "vss.voxy_options.prediction_distance_blocks.tooltip",
-                             "HIGH",
-                             8_192,
-                             VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
-                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
-                             1_024,
-                             value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,
-                             () -> VSSClientConfig.CONFIG.predictionDistanceBlocks,
-                             VSSVoxyOptionsIntegration::formatBlocks,
                              VSSVoxyOptionsIntegration::saveClientConfig),
                      sodium08IntOption(
                             configBuilder,
@@ -513,10 +528,45 @@ public final class VSSVoxyOptionsIntegration {
             }
 
             invokeByName(modOptions, "addPage", page);
+            invokeByName(modOptions, "addPage", predictionPage);
             VSSLogger.info("Registered VSS options page with Sodium 0.8 config API");
         } catch (Throwable t) {
             VSSLogger.warn("Failed to add VSS options to Sodium 0.8 config API", t);
         }
+    }
+
+    private static Object sodium08TierOption(
+            Object configBuilder,
+            String path,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            Runnable save) throws ReflectiveOperationException {
+        Object builder = invokeByName(configBuilder, "createIntegerOption", id(path));
+        invokeByName(builder, "setName", Component.translatable(nameKey));
+        invokeByName(builder, "setTooltip", Component.translatable(tooltipKey));
+        invokeByName(builder, "setImpact", enumConstant(SODIUM08_OPTION_IMPACT, impact));
+        invokeByName(builder, "setDefaultValue", 1);
+        invokeByName(builder, "setRange", 0, 2, 1);
+        invokeByName(builder, "setValueFormatter", sodium08Formatter(VSSVoxyOptionsIntegration::formatTierIndex));
+        invokeByName(builder, "setStorageHandler", sodium08StorageHandler(save));
+        invokeByName(builder, "setBinding",
+                (java.util.function.Consumer<Integer>) value -> VSSClientConfig.CONFIG.performanceTier =
+                        value <= 0 ? "low" : value == 1 ? "medium" : "high",
+                (java.util.function.Supplier<Integer>) () -> {
+                    int ordinal = dev.xantha.vss.client.prediction.PredictionPerformanceProfile
+                            .fromName(VSSClientConfig.CONFIG.performanceTier).ordinal();
+                    return Math.max(0, Math.min(2, ordinal));
+                });
+        return builder;
+    }
+
+    private static Component formatTierIndex(int index) {
+        return Component.translatable(switch (index) {
+            case 0 -> "vss.voxy_options.tier_low";
+            case 2 -> "vss.voxy_options.tier_high";
+            default -> "vss.voxy_options.tier_medium";
+        });
     }
 
     private static Object sodium08Group(Object configBuilder, String nameKey, Object... options) throws ReflectiveOperationException {
@@ -574,7 +624,7 @@ public final class VSSVoxyOptionsIntegration {
         return builder;
     }
 
-    private static Object oldPage() {
+    private static Object oldSyncPage() {
         try {
             List<Object> groups = new ArrayList<>();
             Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
@@ -601,27 +651,9 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.off_thread_processing.tooltip",
                             "LOW",
                             (VSSClientConfig config, Boolean value) -> config.offThreadSectionProcessing = value,
-                            config -> config.offThreadSectionProcessing),
-                    oldBooleanOption(
-                            clientStorage,
-                            "vss.voxy_options.prediction",
-                            "vss.voxy_options.prediction.tooltip",
-                            "HIGH",
-                            (VSSClientConfig config, Boolean value) -> config.enablePrediction = value,
-                            config -> config.enablePrediction),
-                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",
-                            "vss.voxy_options.prediction_trees.tooltip", "HIGH",
-                            (VSSClientConfig config, Boolean value) -> config.predictionTrees = value, config -> config.predictionTrees),
-                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_structures",
-                            "vss.voxy_options.prediction_structures.tooltip", "HIGH",
-                            (VSSClientConfig config, Boolean value) -> config.predictionStructures = value, config -> config.predictionStructures)));
+                            config -> config.offThreadSectionProcessing)));
 
             groups.add(oldGroup(
-                     oldIntOption(clientStorage, "vss.voxy_options.prediction_surface_distance",
-                             "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 128, 2048, 128,
-                             VSSVoxyOptionsIntegration::formatBlocks,
-                             (VSSClientConfig config, Integer value) -> config.predictionSurfaceDistanceBlocks = value,
-                             config -> config.predictionSurfaceDistanceBlocks),
                      oldIntOption(
                              clientStorage,
                              "vss.voxy_options.client_lod_distance",
@@ -633,17 +665,6 @@ public final class VSSVoxyOptionsIntegration {
                              VSSVoxyOptionsIntegration::formatChunksAuto,
                              (VSSClientConfig config, Integer value) -> config.lodDistanceChunks = value,
                              config -> config.lodDistanceChunks),
-                     oldIntOption(
-                             clientStorage,
-                             "vss.voxy_options.prediction_distance_blocks",
-                              "vss.voxy_options.prediction_distance_blocks.tooltip",
-                              "HIGH",
-                              VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
-                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
-                             1_024,
-                             VSSVoxyOptionsIntegration::formatBlocks,
-                             (VSSClientConfig config, Integer value) -> config.predictionDistanceBlocks = value,
-                             config -> config.predictionDistanceBlocks),
                      oldIntOption(
                             clientStorage,
                             "vss.voxy_options.desired_bandwidth",
@@ -841,10 +862,108 @@ public final class VSSVoxyOptionsIntegration {
             }
 
             Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
-            return pageConstructor.newInstance(Component.translatable("vss.voxy_options.title"), ImmutableList.copyOf(groups));
+            return pageConstructor.newInstance(Component.translatable("vss.voxy_options.sync_title"), ImmutableList.copyOf(groups));
         } catch (Throwable t) {
             VSSLogger.warn("Failed to build VSS Sodium options page", t);
             return null;
+        }
+    }
+
+    private static Object oldPredictionPage() {
+        try {
+            List<Object> groups = new ArrayList<>();
+            Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
+
+            groups.add(oldGroup(
+                    oldBooleanOption(
+                            clientStorage,
+                            "vss.voxy_options.prediction",
+                            "vss.voxy_options.prediction.tooltip",
+                            "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.enablePrediction = value,
+                            config -> config.enablePrediction),
+                    oldEnumOption(
+                            clientStorage,
+                            "vss.voxy_options.performance_tier",
+                            "vss.voxy_options.performance_tier.tooltip",
+                            "HIGH",
+                            (VSSClientConfig config, dev.xantha.vss.client.prediction.PredictionPerformanceProfile value) ->
+                                    config.performanceTier = value.configName(),
+                            config -> dev.xantha.vss.client.prediction.PredictionPerformanceProfile.fromName(config.performanceTier))));
+
+            groups.add(oldGroup(
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",
+                            "vss.voxy_options.prediction_trees.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionTrees = value, config -> config.predictionTrees),
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_structures",
+                            "vss.voxy_options.prediction_structures.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionStructures = value, config -> config.predictionStructures)));
+
+            groups.add(oldGroup(
+                    oldIntOption(
+                            clientStorage,
+                            "vss.voxy_options.prediction_distance_blocks",
+                            "vss.voxy_options.prediction_distance_blocks.tooltip",
+                            "HIGH",
+                            VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
+                            VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
+                            1_024,
+                            VSSVoxyOptionsIntegration::formatBlocks,
+                            (VSSClientConfig config, Integer value) -> config.predictionDistanceBlocks = value,
+                            config -> config.predictionDistanceBlocks),
+                    oldIntOption(clientStorage, "vss.voxy_options.prediction_surface_distance",
+                            "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 128, 2048, 128,
+                            VSSVoxyOptionsIntegration::formatBlocks,
+                            (VSSClientConfig config, Integer value) -> config.predictionSurfaceDistanceBlocks = value,
+                            config -> config.predictionSurfaceDistanceBlocks)));
+
+            Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
+            return pageConstructor.newInstance(Component.translatable("vss.voxy_options.prediction_title"), ImmutableList.copyOf(groups));
+        } catch (Throwable t) {
+            VSSLogger.warn("Failed to build VSS Sodium prediction options page", t);
+            return null;
+        }
+    }
+
+    private static <S> Object oldEnumOption(
+            Object storage,
+            String nameKey,
+            String tooltipKey,
+            String impact,
+            java.util.function.BiConsumer<S, dev.xantha.vss.client.prediction.PredictionPerformanceProfile> setter,
+            java.util.function.Function<S, dev.xantha.vss.client.prediction.PredictionPerformanceProfile> getter) throws ReflectiveOperationException {
+        return oldOption(
+                dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class,
+                storage,
+                nameKey,
+                tooltipKey,
+                impact,
+                VSSVoxyOptionsIntegration::oldCyclingControl,
+                setter,
+                getter);
+    }
+
+    private static Object oldCyclingControl(Object option) {
+        try {
+            Class<?> optionClass = Class.forName(OLD_OPTION);
+            Component[] names = new Component[]{
+                    Component.translatable("vss.voxy_options.tier_low"),
+                    Component.translatable("vss.voxy_options.tier_medium"),
+                    Component.translatable("vss.voxy_options.tier_high")};
+            try {
+                Constructor<?> constructor = Class.forName(OLD_CYCLING_CONTROL).getConstructor(
+                        optionClass, Class.class, Component[].class);
+                return constructor.newInstance(option,
+                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class, names);
+            } catch (NoSuchMethodException ignored) {
+                Constructor<?> constructor = Class.forName(OLD_CYCLING_CONTROL).getConstructor(
+                        optionClass, Class.class, dev.xantha.vss.client.prediction.PredictionPerformanceProfile[].class);
+                return constructor.newInstance(option,
+                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class,
+                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.values());
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to create Sodium cycling control", e);
         }
     }
 
@@ -1072,13 +1191,31 @@ public final class VSSVoxyOptionsIntegration {
 
     private static Screen createOldSodiumConfigScreen(Screen parent) {
         try {
-            Object page = oldPage();
-            if (page == null) {
+            Object syncPage = oldSyncPage();
+            Object predictionPage = oldPredictionPage();
+            if (syncPage == null) {
                 return null;
             }
 
             Class<?> videoSettingsScreen = Class.forName("net.caffeinemc.mods.sodium.client.gui.SodiumOptionsGUI");
-            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent, page);
+            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent, syncPage);
+            if (screen == null) {
+                return null;
+            }
+            // Make sure both pages exist on the screen's tab strip.
+            Field pagesField = findPagesField(screen.getClass());
+            if (pagesField != null && predictionPage != null) {
+                pagesField.setAccessible(true);
+                Object value = pagesField.get(screen);
+                if (value instanceof List<?> existing) {
+                    List<Object> pages = (List<Object>) existing;
+                    for (Object page : new Object[]{syncPage, predictionPage}) {
+                        if (page != null && !containsPageNamed(pages, pageName(page))) {
+                            pages.add(page);
+                        }
+                    }
+                }
+            }
             return screen instanceof Screen sodiumScreen ? sodiumScreen : null;
         } catch (Throwable ignored) {
             return null;

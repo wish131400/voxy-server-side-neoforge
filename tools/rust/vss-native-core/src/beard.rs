@@ -92,7 +92,16 @@ impl Beard {
     }
 }
 fn bury(x: f64, y: f64, z: f64) -> f64 {
-    let t = ((x * x + y * y + z * z).sqrt() / 6.).clamp(0., 1.);
+    let d2 = x * x + y * y + z * z;
+    // Past this radius `clamp` saturates at one, so the contribution is exactly
+    // zero. Every other adjustment is bounded by a coordinate test or a table
+    // index that already rejects distant points; `bury` has neither, and it is
+    // reached once per piece per `Job::block` call, so without this it pays a
+    // square root for structures nowhere near the column.
+    if d2 >= 36. {
+        return 0.;
+    }
+    let t = (d2.sqrt() / 6.).clamp(0., 1.);
     1. + t * (-1.)
 }
 fn beard(x: i32, y: i32, z: i32, delta: i32) -> f64 {

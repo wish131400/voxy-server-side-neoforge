@@ -183,7 +183,7 @@ fn vanilla_climate_and_zoom() {
                 .unwrap();
         let seed = row["seed"].as_str().unwrap().parse().unwrap();
         let graph = Graph::from_document(seed, &doc).unwrap();
-        let source = vss_native_core::climate::BiomeSource::from_document(&doc, &graph).unwrap();
+        let source = vss_native_core::climate::BiomeSource::from_document(&doc, &graph, seed).unwrap();
         let mut scratch = graph.scratch(0, 0, 4, 8).unwrap();
         let mut last = None;
         for (i, p) in row["points"].as_array().unwrap().iter().enumerate() {

@@ -135,3 +135,14 @@ tasks.named('test', Test).configure {
         events 'passed', 'skipped', 'failed'
     }
 }
+
+// Forwards the optional compatibility inputs (native library, terrain mod jars,
+// live snapshot) to the test JVM. Without this the scripts under
+// tools/prediction never ran, so every test gated on `vss.testNativeLibrary`,
+// `vss.tectonicJar`, `vss.lithostitchedJar` or `vss.freeTerraForgedJar` was
+// silently skipped - reported as "not failed" rather than as "not run".
+//
+// Each property is guarded by `isPresent()` inside the script, so a build that
+// supplies none of them behaves exactly as before. `gpu-tests.gradle` is
+// deliberately not applied: it sets `vss.gpuTests=true` unconditionally.
+apply from: 'tools/prediction/compat-tests.gradle'

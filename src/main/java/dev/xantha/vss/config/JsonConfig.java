@@ -44,8 +44,18 @@ public abstract class JsonConfig {
         return result;
     }
 
+    private static Path configDirectory() {
+        try {
+            return FMLPaths.CONFIGDIR.get();
+        } catch (Throwable unavailable) {
+            // Unit tests and CLI tooling run without FML; keep their configs
+            // out of the repository working tree.
+            return Path.of(System.getProperty("java.io.tmpdir"), "vss-config");
+        }
+    }
+
     private Path resolvePath() {
-        return FMLPaths.CONFIGDIR.get().resolve(getFileName());
+        return configDirectory().resolve(getFileName());
     }
 
     protected static <T extends JsonConfig> T load(Class<T> type, String fileName) {

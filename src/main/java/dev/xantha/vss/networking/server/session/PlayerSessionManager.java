@@ -148,9 +148,16 @@ public final class PlayerSessionManager {
         return capabilities;
     }
 
+    public void dimensionChanged(ServerPlayer player) {
+        PlayerRequestState state = playerRegistry.get(player.getUUID());
+        if (!VSSServerNetworking.isServerStopping() && state != null && state.supportsPredictiveWorldgen()
+                && VSSServerConfig.CONFIG.enabled && VSSServerConfig.CONFIG.enablePredictionSync)
+            sendWorldgenProfile(player.server, player);
+    }
+
     private void sendWorldgenProfile(MinecraftServer server, ServerPlayer player) {
         try {
-            WorldgenProfileS2CPayload payload = WorldgenProfileHolder.payloadFor(server, configRevision.get());
+            WorldgenProfileS2CPayload payload = WorldgenProfileHolder.payloadFor(server, configRevision.get(), player.level().dimension());
             VSSNetworking.sendToPlayer(player, payload);
         } catch (RuntimeException exception) {
             // A third-party generator may expose a density codec unavailable

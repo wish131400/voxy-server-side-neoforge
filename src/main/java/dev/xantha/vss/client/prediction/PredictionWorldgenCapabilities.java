@@ -6,6 +6,20 @@ import com.google.gson.JsonObject;
 /** A successful codec decode is required; approximate noise is never a compatibility adapter. */
 final class PredictionWorldgenCapabilities {
     private static final java.util.Set<String> NATIVE_MOD_CODECS = java.util.Set.of(
+            // Blueprint's biome source wrapper. The native backend only accepts
+            // it when the server also shipped a `vss_blueprint` snapshot, so a
+            // client that sees the wrapper without one still fails closed.
+            "blueprint:modded",
+            // Alex's Caves' simplex-noise surface condition. The native backend
+            // ports the exact table and f32 arithmetic; without it every
+            // dimension whose surface rules use it (including the overworld)
+            // stays on the Java sampler.
+            "alexscaves:ac_simplex",
+            // TerraBlender's namespace-dispatching surface rule and
+            // Youkaishomecoming's four-corner noise condition. A live capture of
+            // the overworld reported exactly these two as the last blockers.
+            "terrablender:merged",
+            "youkaishomecoming:noise",
             "tectonic:invert",
             "lithostitched:axis", "lithostitched:ceil", "lithostitched:floor", "lithostitched:sin",
             "lithostitched:cos", "lithostitched:sqrt", "lithostitched:mix", "lithostitched:select",
@@ -21,6 +35,10 @@ final class PredictionWorldgenCapabilities {
     static String rejection(JsonObject generator) {
         if (generator.has("vss_unsupported_reason")) return generator.get("vss_unsupported_reason").getAsString();
         if (!generator.has("settings") || !generator.has("biome_source")) return "missing noise settings/biome source";
+        if (generator.get("biome_source").isJsonObject()
+                && generator.getAsJsonObject("biome_source").has("type")
+                && "blueprint:modded".equals(generator.getAsJsonObject("biome_source").get("type").getAsString())
+                && !generator.has("vss_blueprint")) return "missing Blueprint biome slice snapshot";
         return null;
     }
 
@@ -53,8 +71,19 @@ final class PredictionWorldgenCapabilities {
         root.add("density_functions", densities);
         if (root.has("biomes")) for (JsonElement value : root.getAsJsonObject("biomes").asMap().values()) {
             if (!value.isJsonObject()) continue;
+            // Entities, features and carvers are decoration. They carry `type`
+            // fields naming other mods' content (for example
+            // alexscaves:tripodfish under spawners) and never participate in
+            // the terrain density graph, so leaving them in makes the native
+            // sampler reject dimensions whose terrain is entirely vanilla.
             value.getAsJsonObject().remove("features");
             value.getAsJsonObject().remove("carvers");
+            value.getAsJsonObject().remove("spawners");
+            // Biome `effects` carry particle/sound/sky identifiers; a live run
+            // showed `alexscaves:sugar_flake` under effects.particle rejecting
+            // twelve dimensions. They are pure client presentation and never
+            // reach the terrain graph.
+            value.getAsJsonObject().remove("effects");
         }
         return root;
     }
@@ -87,6 +116,13 @@ final class PredictionWorldgenCapabilities {
             if (element.getAsJsonObject().has("vss_force_java")
                     && element.getAsJsonObject().get("vss_force_java").getAsBoolean()) return path + ".vss_force_java";
             for (var entry : element.getAsJsonObject().entrySet()) {
+                // VSS's own payload sections (vss_terrablender, vss_blueprint,
+                // ...) are replayed by the native backends rather than by
+                // worldgen codecs, so their bookkeeping fields must not be read
+                // as codec type names. TerraBlender's section happens to carry
+                // no `type` key, but Blueprint's provider dispatch does, and
+                // scanning it would reject every wrapped dimension.
+                if (entry.getKey().startsWith("vss_")) continue;
                 if (entry.getKey().equals("type") && entry.getValue().isJsonPrimitive()) {
                     String type = entry.getValue().getAsString();
                     if (type.contains(":") && !type.startsWith("minecraft:") && !NATIVE_MOD_CODECS.contains(type)) return path + ".type=" + type;

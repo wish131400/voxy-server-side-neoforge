@@ -108,6 +108,46 @@ class PredictionSamplingWorkTest {
         } finally { executor.shutdownNow(); }
     }
 
+    @Test void exactBiomesSurviveWorkerHandoffsAndLocalSlotCollisions() throws Exception {
+        var source = new CountingSource();
+        var cache = new PredictionBiomeCache(source, null);
+        var first = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var second = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            first.submit(() -> {
+                for (int i = 0; i < 4096; i++) cache.get(i - 2048, 16 + (i & 1), -i);
+            }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            int cold = source.calls.get();
+            second.submit(() -> {
+                for (int i = 0; i < 4096; i++) assertSame((i & 1) == 0 ? source.warm : source.cold,
+                        cache.get(i - 2048, 16 + (i & 1), -i));
+            }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            int repeated = source.calls.get() - cold;
+            assertTrue(repeated < 32, "cross-worker reuse should avoid almost all " + cold + " repeated lookups, actual=" + repeated);
+            assertSame(source.cold, cache.get(-1, 4112, -2));
+            assertSame(source.warm, cache.get(-1, 16, -2));
+            var other = new PredictionBiomeCache(source, null);
+            int before = source.calls.get(); other.get(-1,16,-2);
+            assertEquals(before + 1, source.calls.get(), "profile/seed contexts must remain separate");
+            System.out.println("Biome handoff cold=" + cold + ", repeated=" + repeated + ", " + cache.diagnostics());
+        } finally { first.shutdownNow(); second.shutdownNow(); }
+    }
+
+    @Test void decorationJobRetainsExactBiomesDespiteOtherRegionsEvictingSharedEntries() {
+        var source = new CountingSource();
+        var sampler = sampler(source, false);
+        var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, -1, -1);
+        for (int i = 0; i < 4096; i++) level.getNoiseBiome(i % 16 - 8, i / 256 + 16, i / 16 % 16 - 8);
+        for (int i = 0; i < 200_000; i++) sampler.noiseBiome(i + 100_000, 32, -i);
+        int before = source.calls.get();
+        for (int i = 0; i < 4096; i++) assertSame(i / 256 + 16 == 16 ? source.warm : source.cold,
+                level.getNoiseBiome(i % 16 - 8, i / 256 + 16, i / 16 % 16 - 8));
+        assertEquals(before, source.calls.get(), "an active decoration job must not repeat evicted noise queries");
+        assertSame(source.cold, level.getNoiseBiome(-1, 4112, -2), "full quart Y remains distinct");
+        assertSame(source.warm, level.getNoiseBiome(-1, 16, -2));
+        System.out.println("Decoration working set: 4096 repeated queries, additional biome loads=" + (source.calls.get()-before-1));
+    }
+
     @Test void surfaceRulesShareBiomeLookupWithTintsWithoutChangingMaterialOrWeather() {
         var source = new CountingSource();
         var sampler = sampler(source, true);

@@ -11,13 +11,30 @@ import net.minecraft.world.level.Level;
 import org.junit.jupiter.api.Test;
 
 class PredictionRefinementBudgetTest {
-    @Test void automaticBudgetUsesHalfTheProcessorsAndHonorsSmallerOverrides() {
-        assertEquals(1,PredictionWorkOrder.refinementWorkers(1,0));
-        assertEquals(2,PredictionWorkOrder.refinementWorkers(4,0));
-        assertEquals(8,PredictionWorkOrder.refinementWorkers(16,0));
-        assertEquals(16,PredictionWorkOrder.refinementWorkers(32,0));
-        assertEquals(4,PredictionWorkOrder.refinementWorkers(16,4));
-        assertEquals(8,PredictionWorkOrder.refinementWorkers(16,32));
+    @Test void automaticBudgetFollowsThePerformanceTierAndHonorsSmallerOverrides() {
+        var config = VSSClientConfig.CONFIG;
+        String tier = config.performanceTier;
+        try {
+            config.performanceTier = "low";
+            assertEquals(1,PredictionWorkOrder.refinementWorkers(1,0));
+            assertEquals(1,PredictionWorkOrder.refinementWorkers(4,0));
+            assertEquals(3,PredictionWorkOrder.refinementWorkers(16,0));
+            assertEquals(3,PredictionWorkOrder.refinementWorkers(32,0));
+            config.performanceTier = "medium";
+            assertEquals(1,PredictionWorkOrder.refinementWorkers(1,0));
+            assertEquals(2,PredictionWorkOrder.refinementWorkers(4,0));
+            assertEquals(6,PredictionWorkOrder.refinementWorkers(16,0));
+            assertEquals(6,PredictionWorkOrder.refinementWorkers(32,0));
+            config.performanceTier = "high";
+            assertEquals(1,PredictionWorkOrder.refinementWorkers(1,0));
+            assertEquals(2,PredictionWorkOrder.refinementWorkers(4,0));
+            assertEquals(8,PredictionWorkOrder.refinementWorkers(16,0));
+            assertEquals(16,PredictionWorkOrder.refinementWorkers(32,0));
+            assertEquals(4,PredictionWorkOrder.refinementWorkers(16,4));
+            assertEquals(8,PredictionWorkOrder.refinementWorkers(16,32));
+        } finally {
+            config.performanceTier = tier;
+        }
     }
 
     @Test void completedMediumPassFinishesNearbyFineTerrainBeforeDistantChildPreviews() throws Exception {

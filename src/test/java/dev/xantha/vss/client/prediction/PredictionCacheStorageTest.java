@@ -21,6 +21,33 @@ class PredictionCacheStorageTest {
     @BeforeEach void enable() { remember = VSSClientConfig.CONFIG.rememberTerrain; VSSClientConfig.CONFIG.rememberTerrain = true; }
     @AfterEach void restore() { VSSClientConfig.CONFIG.rememberTerrain = remember; }
 
+    @Test void changedSqrtSemanticsInvalidateOnlyAffectedNativeCaches() throws Exception {
+        assertTrue(RustTerrainSampler.available());
+        var original = LithostitchedNativeTest.document();
+        original.add("possible_biomes", new com.google.gson.JsonArray());
+        var changed = original.deepCopy();
+        changed.getAsJsonObject("settings").getAsJsonObject("noise_router").add("final_density",
+                com.google.gson.JsonParser.parseString("{\"type\":\"lithostitched:sqrt\",\"argument\":-3.3}"));
+        var storage = PredictionCacheStorage.forWorld(game, game.resolve("saves/test"), null, null);
+        try (var plain = new RustTerrainSampler(RustWorldgenBackend.create(0,0,original.toString()),PROFILE,sampler());
+             var sqrt = new RustTerrainSampler(RustWorldgenBackend.create(0,0,changed.toString()),PROFILE,sampler())) {
+            assertEquals("vanilla-rust-abi2-r3",plain.cacheAlgorithm(),
+                    "display-only refinement must retain existing exact terrain and vegetation caches");
+            assertNotEquals(plain.cacheAlgorithm(),sqrt.cacheAlgorithm());
+            var key = PredictionDiskCache.Key.surface(0,0,1);
+            var states = Map.of(new BlockPos(1,72,2),Blocks.DIRT.defaultBlockState());
+            try (var cache = storage.open(plain); var lease = cache.lease(key)) {
+                assertTrue(cache.writeSurface(lease,states));
+            }
+            try (var cache = storage.open(sqrt); var lease = cache.lease(key)) {
+                assertNull(cache.readSurface(lease),"old operator output must not bypass corrected generation");
+            }
+            try (var cache = storage.open(plain); var lease = cache.lease(key)) {
+                assertEquals(states,cache.readSurface(lease),"unchanged vanilla caches remain readable");
+            }
+        }
+    }
+
     @Test void localCacheFollowsRenamedSaveAndIgnoresServerIdentity() throws Exception {
         Path save = game.resolve("saves/世界 A");
         var storage = PredictionCacheStorage.forWorld(game, save, "vss:7k4m9pxa", "localhost:12345");

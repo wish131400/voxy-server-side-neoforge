@@ -62,7 +62,7 @@ final class PredictionMemoryBudget {
     }
 
     static int workerCount(int logicalProcessors) {
-        return Math.max(1, logicalProcessors - 2);
+        return PredictionPerformanceProfile.current().poolSize(logicalProcessors);
     }
 
     synchronized Reservation tryReserveBuild() {

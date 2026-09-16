@@ -6,6 +6,9 @@ allprojects {
         if (providers.gradleProperty('vssTestNativeLibrary').isPresent()) {
             systemProperty 'vss.testNativeLibrary', providers.gradleProperty('vssTestNativeLibrary').get()
         }
+        if (providers.gradleProperty('vssC2meDfcJar').isPresent()) {
+            systemProperty 'vss.c2meDfcJar', providers.gradleProperty('vssC2meDfcJar').get()
+        }
         if (providers.gradleProperty('vssEpicTerrainJars').isPresent()) {
             systemProperty 'vss.epicTerrainJars', providers.gradleProperty('vssEpicTerrainJars').get()
         }

@@ -31,6 +31,8 @@ final class PredictionGpuTile implements AutoCloseable {
     private long meshRevision = Long.MIN_VALUE;
     private PredictionPackedMesh packed;
     private boolean[] coverage;
+    private long uploadedAt;
+    float morphAmount(long now) { return packed == null || packed.morph() == null ? 0 : PredictionMorph.amount(now-uploadedAt); }
 
     private int quadBuffer = -1;
     private int quadTexture = -1;
@@ -60,10 +62,11 @@ final class PredictionGpuTile implements AutoCloseable {
         // The upload helper retires the previous GPU resources itself;
         // deleting after creation would free the freshly uploaded payload.
         if (next.quadCount() > 0) {
-            ensureQuadBuffer(next.quads());
+            ensureQuadBuffer(next.quads(), next.morph());
         }
         packed = next;
         meshRevision = tile.revision();
+        uploadedAt = System.nanoTime();
         // The mesh changed shape; force the coverage mask to re-upload even
         // if the boolean array happens to be equal to the previous one.
         coverage = null;
@@ -72,7 +75,7 @@ final class PredictionGpuTile implements AutoCloseable {
 
     void ensureSeams(PredictionPackedMesh next) {
         if (packed == next) return;
-        if (packed == null || !Arrays.equals(packed.quads(), next.quads())) ensureQuadBuffer(next.quads());
+        if (packed == null || !Arrays.equals(packed.quads(), next.quads())) ensureQuadBuffer(next.quads(), next.morph());
         packed = next;
     }
 
@@ -108,7 +111,7 @@ final class PredictionGpuTile implements AutoCloseable {
         coverage = allowed.clone();
     }
 
-    private void ensureQuadBuffer(int[] quads) {
+    private void ensureQuadBuffer(int[] quads, float[] morph) {
         closeQuads();
         quadBuffer = GL15.glGenBuffers();
         GL15.glBindBuffer(TEXTURE_BUFFER, quadBuffer);
@@ -116,9 +119,14 @@ final class PredictionGpuTile implements AutoCloseable {
         // default ByteBuffer order is BIG_ENDIAN even on Windows, which
         // reverses every packed x/z/y word and turns normal quads into the
         // long green streaks seen in-world.
-        ByteBuffer data = MemoryUtil.memAlloc(quads.length * 4)
+        int extra = morph == null ? 0 : (morph.length + 3) / 4 * 4;
+        ByteBuffer data = MemoryUtil.memAlloc((quads.length + extra) * 4)
                 .order(ByteOrder.nativeOrder());
         writeQuadPayload(data, quads);
+        if (morph != null) {
+            for (float value : morph) data.putInt(Math.round(value * 256));
+            for (int i=morph.length;i<extra;i++) data.putInt(0);
+        }
         data.flip();
         GL31.glBufferData(TEXTURE_BUFFER, data, GL31.GL_STATIC_DRAW);
         MemoryUtil.memFree(data);

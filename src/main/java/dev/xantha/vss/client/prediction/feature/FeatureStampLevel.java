@@ -1,6 +1,7 @@
 package dev.xantha.vss.client.prediction.feature;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -63,6 +64,16 @@ public class FeatureStampLevel implements WorldGenLevel {
     private static final int HEIGHT = 384;
 
     private final Map<BlockPos, BlockState> placed = new HashMap<>();
+    /**
+     * Positions written through this level since the last successful upload.
+     *
+     * <p>This exists so a feature round trip can skip transferring the whole
+     * `placed` map when nothing was written since the previous one. Every write
+     * path must register here - including rollbacks - because the check is
+     * "strictly nothing happened", and a missed registration would silently
+     * drop an edit. A non-empty set never claims more than was written.
+     */
+    private final Map<BlockPos, BlockState> pendingUploads = new LinkedHashMap<>();
     private final Set<Predicate<BlockState>> groundPredicates = new LinkedHashSet<>();
     private final RandomSource random;
     private final long seed;
@@ -79,6 +90,35 @@ public class FeatureStampLevel implements WorldGenLevel {
 
     public Map<BlockPos, BlockState> placed() {
         return placed;
+    }
+
+    /** Positions written since the last upload; see {@link #noteWrite}. */
+    public Map<BlockPos, BlockState> pendingUploads() {
+        return pendingUploads;
+    }
+
+    /** Called once an upload has transferred the current state. */
+    public void clearPendingUploads() {
+        pendingUploads.clear();
+    }
+
+    /**
+     * Records a write against {@code placed} so the next upload knows something
+     * changed. Subclasses that modify {@link #placed()} directly must route
+     * through here instead.
+     */
+    protected void noteWrite(BlockPos pos, BlockState state) {
+        BlockPos key = pos.immutable();
+        if (state == null) {
+            placed.remove(key);
+            // Keep the position in the pending set: the native volume may still
+            // hold an older edit for it, and dropping it here would claim the
+            // two sides agree when they do not.
+            pendingUploads.put(key, Blocks.AIR.defaultBlockState());
+        } else {
+            placed.put(key, state);
+            pendingUploads.put(key, state);
+        }
     }
 
     public Set<Predicate<BlockState>> groundPredicates() {
@@ -112,13 +152,13 @@ public class FeatureStampLevel implements WorldGenLevel {
 
     @Override
     public boolean setBlock(BlockPos pos, BlockState state, int flags, int recursion) {
-        placed.put(pos.immutable(), state);
+        noteWrite(pos, state);
         return true;
     }
 
     @Override
     public boolean removeBlock(BlockPos pos, boolean moving) {
-        placed.put(pos.immutable(), Blocks.AIR.defaultBlockState());
+        noteWrite(pos, Blocks.AIR.defaultBlockState());
         return true;
     }
 

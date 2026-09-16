@@ -1,8 +1,8 @@
-//! ABI 3: separate declaration and handle namespace from
+//! ABI 5: separate declaration and handle namespace from
 //! the noise probe. No raw Java pointer can become a world/volume handle.
 use crate::{
     backend::World,
-    blocks::Volume,
+    blocks::{Palette, Volume},
     density::{Mode, Result},
 };
 use jni::{
@@ -18,6 +18,7 @@ use std::{
         Arc, Mutex, OnceLock,
     },
 };
+static PALETTES: OnceLock<Mutex<HashMap<i64, Palette>>> = OnceLock::new();
 static WORLDS: OnceLock<Mutex<HashMap<i64, Arc<World>>>> = OnceLock::new();
 static VOLUMES: OnceLock<Mutex<HashMap<i64, Arc<Mutex<NativeVolume>>>>> = OnceLock::new();
 static IDS: AtomicI64 = AtomicI64::new(1);
@@ -190,7 +191,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     _e: JNIEnv,
     _c: JClass,
 ) -> jint {
-    3
+    5
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_create(
@@ -204,9 +205,16 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
         if worlds().lock().map_err(|_| "world lock")?.len() >= 4 {
             return Err("world handle budget exceeded".into());
         }
-        let document = serde_json::from_str(&text(&mut e, doc, 64 * 1024 * 1024)?)
+        let document: Value = serde_json::from_str(&text(&mut e, doc, 64 * 1024 * 1024)?)
             .map_err(|e| format!("world document: {e}"))?;
-        let world = Arc::new(World::new(seed, zoom, document)?);
+        let palette = match document.get("vss_shared_palette") {
+            Some(id) => Some(PALETTES.get_or_init(|| Mutex::new(HashMap::new()))
+                .lock().map_err(|_| "palette lock")?
+                .get(&id.as_i64().ok_or("invalid palette handle")?)
+                .cloned().ok_or("closed/invalid palette handle")?),
+            None => None,
+        };
+        let world = Arc::new(World::new_with_palette(seed, zoom, document, palette)?);
         let mut map = worlds().lock().map_err(|_| "world lock")?;
         if map.len() >= 4 {
             return Err("world handle budget exceeded".into());
@@ -257,7 +265,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     let result = guarded(|| {
         if let Ok(w) = world(id) {
             Ok(
-                json!({"kind":"world","abi":3,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset","approximate_preview"],"complete_worldgen":false}),
+                json!({"kind":"world","abi":5,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset","approximate_preview"],"complete_worldgen":false,"terrablender_routing":w.uses_terrablender_routing(),"signed_sqrt":w.terrain.graph.uses_signed_sqrt()}),
             )
         } else {
             let v = volume(id)?;
@@ -448,7 +456,11 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
 ) -> jint {
     let result = guarded(|| {
         let v = volume(id)?;
-        let v = v.lock().map_err(|_| "volume lock")?;
+        let mut v = v.lock().map_err(|_| "volume lock")?;
+        // This entry point exports the raw block array, so a sparse proxy
+        // volume must be expanded first. Everything else reads through `get`,
+        // which computes proxy cells on demand.
+        v.volume.materialize()?;
         let bytes = v.volume.blocks.len() * 4;
         let ptr = buffer(&mut e, &out, bytes, true)?;
         for (i, id) in v.volume.blocks.iter().enumerate() {
@@ -662,7 +674,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     out: JByteBuffer,
     count: jint,
 ) -> jint {
-    surface_points_jni(e, id, input, out, count, false)
+    surface_points_jni(e, id, input, out, count, 0)
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_previewPoints(
@@ -673,10 +685,14 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     out: JByteBuffer,
     count: jint,
 ) -> jint {
-    surface_points_jni(e, id, input, out, count, true)
+    surface_points_jni(e, id, input, out, count, 1)
 }
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_displayPoints(
+    e: JNIEnv, _c: JClass, id: jlong, input: JByteBuffer, out: JByteBuffer, count: jint,
+) -> jint { surface_points_jni(e,id,input,out,count,2) }
 fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBuffer,
-    count: jint, preview: bool) -> jint {
+    count: jint, mode: u8) -> jint {
     let result = guarded(|| {
         if !(0..=64).contains(&count) {
             return Err("surface batch count".into());
@@ -695,7 +711,8 @@ fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBu
         }
         let w = world(id)?;
         let mut result = Vec::with_capacity(count as usize * 40);
-        let columns = if preview { w.preview_points(&points)? } else { w.surface_points(&points)? };
+        let columns = match mode {1=>w.preview_points(&points)?,2=>w.display_points(&points)?,
+            3=>w.decoration_points(&points,true)?,_=>w.surface_points(&points)?};
         for column in columns {
             for n in column.values {
                 result.extend(n.to_le_bytes());
@@ -713,6 +730,23 @@ fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBu
     }
 }
 #[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_decorationPoints(
+    e: JNIEnv, _c: JClass, id: jlong, input: JByteBuffer, out: JByteBuffer, count: jint,
+) -> jint { surface_points_jni(e,id,input,out,count,3) }
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_decorationQueryStats(
+    mut e: JNIEnv, _c: JClass, id: jlong,
+) -> jstring {
+    let result = guarded(|| {
+        let w = world(id)?;
+        let s=w.decoration_query_stats();
+        let d = w.display_query_stats();
+        Ok(json!({"pages":s[0],"columns":s[1],"cached":s[2],"queryMs":s[3]/1_000_000,
+            "displayRequested":d[0],"displayCached":d[1],"adaptiveGrids":d[2],"displayFallback":d[3],"displayEvictions":d[4],"displayDensityColumns":d[5]}))
+    });
+    output(&mut e,result)
+}
+#[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_surfaceProxy(
     mut e: JNIEnv,
     _c: JClass,
@@ -723,7 +757,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     let result = guarded(|| {
         let slot = Slot::acquire()?;
         let owner = world(id)?;
-        let volume = owner.surface_proxy(x, z)?;
+        let volume = owner.lazy_surface_proxy(x, z)?;
         let handle = IDS.fetch_add(1, Ordering::Relaxed);
         if handle <= 0 {
             return Err("handle space exhausted".into());
@@ -745,6 +779,23 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
             0
         }
     }
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_decorationProxy(
+    mut e: JNIEnv, _c: JClass, id: jlong, x: jint, z: jint, display: jint,
+) -> jlong {
+    let result = guarded(|| {
+        if !(0..=1).contains(&display) { return Err("invalid decoration policy".into()); }
+        let slot = Slot::acquire()?;
+        let owner = world(id)?;
+        let volume = owner.decoration_proxy(x, z, display == 1)?;
+        let handle = IDS.fetch_add(1, Ordering::Relaxed);
+        if handle <= 0 { return Err("handle space exhausted".into()); }
+        volumes().lock().map_err(|_| "volume lock")?.insert(handle,
+            Arc::new(Mutex::new(NativeVolume { owner, volume, _slot: slot })));
+        Ok(handle)
+    });
+    match result { Ok(id) => id, Err(err) => { fail(&mut e, err); 0 } }
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_applyEdits(
@@ -889,4 +940,40 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
             -1
         }
     }
+}
+
+/// Session-owned immutable palette. Worlds retain an Arc snapshot after this handle is closed.
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_openPalette(
+    mut e: JNIEnv, _c: JClass, doc: JString,
+) -> jlong {
+    let result = guarded(|| {
+        let document: Value = serde_json::from_str(&text(&mut e, doc, 128 * 1024 * 1024)?).map_err(|e| e.to_string())?;
+        let palette = Palette::from_compact(&document)?;
+        let mut map = PALETTES.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "palette lock")?;
+        if map.len() >= 4 { return Err("palette handle budget exceeded".into()); }
+        let id = IDS.fetch_add(1, Ordering::Relaxed);
+        if id <= 0 { return Err("handle space exhausted".into()); }
+        map.insert(id, palette);
+        Ok(id)
+    });
+    match result { Ok(id) => id, Err(err) => { fail(&mut e, err); 0 } }
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_closePalette(
+    _e: JNIEnv, _c: JClass, id: jlong,
+) {
+    if let Ok(mut map) = PALETTES.get_or_init(|| Mutex::new(HashMap::new())).lock() { map.remove(&id); }
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_describeCompact(
+    mut e: JNIEnv, _c: JClass, id: jlong,
+) -> jstring {
+    output(&mut e, guarded(|| {
+        let w = world(id)?;
+        let mut description = w.palette.compact_mapping();
+        description["terrablender_routing"] = json!(w.uses_terrablender_routing());
+        description["signed_sqrt"] = json!(w.terrain.graph.uses_signed_sqrt());
+        Ok(description)
+    }))
 }

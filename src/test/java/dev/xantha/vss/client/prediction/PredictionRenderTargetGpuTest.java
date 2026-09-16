@@ -675,6 +675,7 @@ class PredictionRenderTargetGpuTest {
         var packed = PredictionPackedMesh.pack(tile);
         try (var gpu = new PredictionGpuTile(tile.key())) {
             assertFalse(gpu.ensureMesh(tile), "render upload cannot pack an unprepared mesh");
+            mesh.morph(new float[]{0,0,0,0,1,0,0,0,0});
             java.util.concurrent.CompletableFuture.runAsync(() -> mesh.prepareGpuPayload(tile)).join();
             assertArrayEquals(packed.quads(), mesh.gpuPayload().quads());
             assertTrue(gpu.ensureMesh(tile));
@@ -688,6 +689,10 @@ class PredictionRenderTargetGpuTest {
             int[] actual = new int[packed.quads().length];
             glGetBufferSubData(GL_TEXTURE_BUFFER, 0, actual);
             assertArrayEquals(packed.quads(), actual, "worker payload survives actual GPU upload in native byte order");
+            int[] field = new int[12];
+            glGetBufferSubData(GL_TEXTURE_BUFFER, (long)actual.length * 4, field);
+            assertEquals(256, field[4], "GPU field uses signed 1/256-block fixed point");
+            assertEquals(0, field[0]); assertEquals(0, field[11]);
             glBindTexture(GL_TEXTURE_BUFFER, textures[4]);
         }
         glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]);
@@ -714,8 +719,15 @@ class PredictionRenderTargetGpuTest {
         terrain.bindMainDepth(main.getDepthTextureId(), projection);
         terrain.setTile(24, -78, -16, 16, 2, true);
         ByteBuffer stable = terrainPixels(packed.quadCount());
+        // Append the same fixed-point field layout used by the production uploader.
+        var words = java.util.Arrays.copyOf(packed.quads(), packed.quads().length + 12);
+        words[packed.quads().length + 4] = 256; // only the interior vertex moves by one block
+        packed.morph(new float[]{0,0,0,0,1,0,0,0,0},64,66);
+        glBindBuffer(GL_TEXTURE_BUFFER,buffers[0]);
+        glBufferData(GL_TEXTURE_BUFFER,words,GL_STATIC_DRAW);
+        int changedPixels=0;
         for (float morph : new float[]{.5F, 1}) {
-            glUniform1f(glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "MorphAmount"), morph);
+            terrain.setMorph(packed,morph);
             ByteBuffer transition = terrainPixels(packed.quadCount());
             int exposed = 0, solid = 0;
             for (int y = 12; y < 52; y++) for (int x = 12; x < 52; x++) {
@@ -725,9 +737,17 @@ class PredictionRenderTargetGpuTest {
                     if ((transition.get(p + 1) & 255) == 0) exposed++;
                 }
             }
+            for(int p=0;p<64*64*4;p++) if(stable.get(p)!=transition.get(p)) changedPixels++;
             assertTrue(solid > 300, "fixture must cover the interior of the stepped terrain");
-            assertEquals(0, exposed, "neighbor columns and their connecting cliff must not separate during LOD transition; Iris=" + iris + ", morph=" + morph);
+            assertEquals(0, exposed, "shared displacement must not tear cliff edges; Iris=" + iris + ", morph=" + morph);
+            assertEquals(GL_NO_ERROR,glGetError());
         }
+        assertTrue(changedPixels>0, "test must actually exercise vertex movement, not a missing uniform");
+        terrain.setMorph(packed,0);
+        ByteBuffer settled=terrainPixels(packed.quadCount());
+        assertEquals(stable,settled,"settled geometry exactly matches the original shader output");
+        System.out.println("MORPH_GPU Iris="+iris+" changedColorBytes="+changedPixels+" closedCliff=true");
+
     }
 
     private static void verifyMixedLodSeams(PredictionTerrainProgram terrain, TextureTarget target,

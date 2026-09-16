@@ -52,7 +52,7 @@ final class FreeTerraForgedDensity {
 
     private record ExactCell(DensityFunction source, Object heightmap, MethodHandle provide,
                              MethodHandle cell, MethodHandle read, ThreadLocal<Column> columns)
-            implements DensityFunction.SimpleFunction {
+            implements DensityFunction.SimpleFunction, DensityMemo.NonMemoizable {
         ExactCell(DensityFunction source, Object heightmap, MethodHandle provide, MethodHandle cell, MethodHandle read) {
             this(source, heightmap, provide, cell, read, ThreadLocal.withInitial(Column::new));
         }

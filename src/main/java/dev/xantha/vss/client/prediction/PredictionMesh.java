@@ -28,10 +28,13 @@ public final class PredictionMesh {
     /** Lazily materialised Packed top-face quad buffer. */
     private volatile PredictionQuadMesh packed;
     private volatile PredictionPackedMesh gpuPayload;
+    private float[] morph;
+    void morph(float[] field) { morph = field; }
 
     /** Worker-only packing, completed before this mesh enters render residency. */
     void prepareGpuPayload(PredictionTileManager.PredictionTile tile) {
         gpuPayload = PredictionPackedMesh.pack(tile);
+        gpuPayload.morph(morph, tile.depthBound().minY(), tile.depthBound().maxY());
     }
 
     PredictionPackedMesh gpuPayload() { return gpuPayload; }
@@ -141,7 +144,7 @@ public final class PredictionMesh {
                 + (cellCounts == null ? 0 : cellCounts.length)
                 + (waterOffsets == null ? 0 : waterOffsets.length)
                 + (waterCounts == null ? 0 : waterCounts.length);
-        return 512L + (floats + ints) * 4L + waterCells.length
+        return 512L + (morph == null ? 0L : morph.length * 4L) + (floats + ints) * 4L + waterCells.length
                 + (packed == null ? 0L : packed.retainedHeapBytes());
     }
 

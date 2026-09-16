@@ -50,13 +50,14 @@ class PredictionCoverageIndexTest {
                     int cz = Math.floorDiv(tile.baseBlockZ() + z * tile.spacingBlocks() + tile.spacingBlocks() / 2, 16);
                     double distance = Math.max(64, Math.hypot(cx + 1, cz - 2) * 16);
                     int desired = PredictionRenderer.lodForBlocks(distance, scale, PredictionRenderer.pixelsPerQuad());
+                    if (distance < PredictionDetailBands.fineRadius(layout.maxDistanceBlocks())) desired = 0;
                     if (focus != null) {
                         if (focus.contains(cx * 16 + 8, cz * 16 + 8)) desired = Math.min(desired,
                                 PredictionRenderer.lodForBlocks(distance, focus.selectionScale(scale), PredictionRenderer.pixelsPerQuad()));
                         if (PredictionWorkOrder.surfaceFocus(focus).intersects(cx * 16D, cz * 16D, (cx + 1D) * 16, (cz + 1D) * 16)) desired = 0;
                     }
-                    var key = PredictionTileManager.findCoveringKey(tiles.keySet(), Level.OVERWORLD, layout, cx, cz, desired);
-                    expected[z * 64 + x] = tile.key().equals(key) || key == null && desired >= tile.key().lod();
+                    var cover = snapshot.coveringTileAtDetail(cx, cz, desired);
+                    expected[z * 64 + x] = tile == cover || cover == null && desired >= tile.key().lod();
                 }
                 assertArrayEquals(expected, actual.allowed(), tile.key().toString());
             }

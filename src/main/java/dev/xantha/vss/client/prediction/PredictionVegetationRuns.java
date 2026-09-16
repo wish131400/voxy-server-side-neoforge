@@ -19,15 +19,15 @@ final class PredictionVegetationRuns {
         Map<Key, Integer> last = new HashMap<>();
         // Tile cells are sorted by Y, so a run can only grow into its immediate next block.
         for (var voxel : tile.cell(cell)) {
-            if (voxel.size() != 1 || !PredictionVegetation.woody(voxel.state())) continue;
+            if (!PredictionVegetation.mergeable(voxel.state(), voxel.size())) continue;
             int x = voxel.x(), z = voxel.z(), y = voxel.y();
             if (y < floor.applyAsInt(x, z)) continue;
-            if (!tile.occupied(x, y + 1, z))
+            if (tile.exteriorFaceVisible(voxel, 0) && !tile.occupied(x, y + 1, z))
                 faces.add(new Face(x, z, y, y + 1, 0, voxel.state()));
             for (int direction = 1; direction <= 4; direction++) {
                 int dx = direction == 3 ? -1 : direction == 4 ? 1 : 0;
                 int dz = direction == 1 ? -1 : direction == 2 ? 1 : 0;
-                if (tile.occupied(x + dx, y, z + dz)) continue;
+                if (!tile.exteriorFaceVisible(voxel, direction) || tile.occupied(x + dx, y, z + dz)) continue;
                 var key = new Key(x, z, direction, voxel.state());
                 Integer index = last.get(key);
                 if (index != null && faces.get(index).top() == y) {

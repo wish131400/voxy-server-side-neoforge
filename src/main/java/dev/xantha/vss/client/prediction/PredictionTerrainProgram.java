@@ -45,6 +45,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private final int lodColorScale;
     private final int lightEnabled;
     private final int useAverage;
+    private final int morph;
+    private final int morphBounds;
     private final int opaqueAlpha;
     private final int directionalTint;
     private final int sharedFog;
@@ -84,6 +86,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
         this.lodColorScale = program.uniform("LodColorScale");
         this.lightEnabled = program.uniform("LodLightmap");
         this.useAverage = program.uniform("UseAverage");
+        this.morph = program.uniform("TerrainMorph");
+        this.morphBounds = program.uniform("MorphBounds");
         this.opaqueAlpha = program.uniform("OpaqueAlpha");
         this.directionalTint = program.uniform("DirectionalTint[0]");
         this.sharedFog = program.uniform("VssPredictionFog");
@@ -130,10 +134,16 @@ final class PredictionTerrainProgram implements AutoCloseable {
 
     void setTile(float offsetX, float offsetY, float offsetZ, float spacing, int cellAxis,
                  boolean useAverage) {
+        GL20.glUniform2f(morph, 0, 0);
         GL20.glUniform3f(tileOffset, offsetX, offsetY, offsetZ);
         GL20.glUniform1f(this.spacing, spacing);
         GL20.glUniform1i(this.cellAxis, cellAxis);
         GL20.glUniform1i(this.useAverage, useAverage ? 1 : 0);
+    }
+
+    void setMorph(PredictionPackedMesh mesh, float amount) {
+        GL20.glUniform2f(morph, mesh.quadCount() * 3, amount);
+        GL20.glUniform2f(morphBounds, mesh.morphMinY(), mesh.morphMaxY());
     }
 
     void setSamplers(int atlasUnit, int lightmapUnit, int spriteRectUnit, int yieldUnit,
@@ -215,6 +225,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private static final String TERRAIN_VERTEX = """
             #version 150
             uniform usamplerBuffer QuadPayload;
+            uniform vec2 TerrainMorph;
+            uniform vec2 MorphBounds;
             uniform sampler2D SpriteTable;
             uniform mat4 ModelViewMat;
             uniform mat4 ProjMat;
@@ -258,6 +270,20 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 return float((corner & 1) == 0 ? (word & 0xFFFFu) : (word >> 16u));
             }
 
+            float morphAt(ivec2 p) {
+                int axis = CellAxis + 1;
+                p = clamp(p, ivec2(0), ivec2(CellAxis));
+                int i = p.y * axis + p.x;
+                uvec4 value = texelFetch(QuadPayload, int(TerrainMorph.x) + i / 4);
+                return float(int(value[i % 4])) / 256.0;
+            }
+            float terrainDelta(vec2 xz) {
+                vec2 grid = clamp(xz / Spacing, vec2(0), vec2(CellAxis));
+                ivec2 p = ivec2(floor(grid));
+                vec2 t = fract(grid);
+                return mix(mix(morphAt(p), morphAt(p + ivec2(1,0)), t.x),
+                           mix(morphAt(p + ivec2(0,1)), morphAt(p + ivec2(1,1)), t.x), t.y);
+            }
             void main() {
                 int quad = gl_VertexID >> 2;
                 int corner = gl_VertexID & 3;
@@ -287,9 +313,12 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 int face = unshaded ? 6 : axis == 0u ? (down ? 0 : 1)
                         : axis == 1u ? (positive ? 5 : 4) : (positive ? 3 : 2);
                 vec3 materialPosition = local;
-                // Keep voxel tops and their connecting walls at sampled heights.
-                // Independent face deltas tear these shared edges apart, even
-                // with a one-block clamp. Coverage masks perform LOD handover.
+                // One continuous displacement field for every shared vertex.
+                // Boundary rows are fixed by the worker; water/plant tiles do
+                // not carry a field. No second overlapping terrain layer.
+                if (TerrainMorph.y > 0.0 && fluid == 0u)
+                    local.y = clamp(local.y + terrainDelta(local.xz) * TerrainMorph.y,
+                                    min(local.y, MorphBounds.x), max(local.y, MorphBounds.y));
                 bool uvYPos = (attr & (1u << 28)) != 0u;
                 // Regular X-facing walls use Z as U and regular Z-facing
                 // walls use X as U. Grass/flower crosses are diagonal, so

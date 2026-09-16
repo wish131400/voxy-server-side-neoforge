@@ -8,6 +8,22 @@ description = "Minecraft 1.21.1 terrain, surface, biome and vegetation computati
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+# Offline section timing for the surface pipeline. Production builds leave it
+# off, which compiles the scopes down to nothing.
+profiling = []
+# Measurement only, never for shipping: return from `Job::substance` before the
+# aquifer solve so a differential run can size its real cost. This changes
+# terrain output; it exists to answer "how much is this worth optimising".
+skip-aquifer = []
+# Measurement only, never for shipping: report every neighbour column as having
+# no surface, removing the four `surface_top` scans. Sizes the neighbour pass
+# against the centre march. Changes terrain output.
+skip-neighbour-top = []
+# Measurement only: detach the cross-column `surface_top` cache so a
+# differential run can size what sharing it is worth. Output is unchanged.
+no-shared-tops = []
+
 [dependencies]
 fastnoise-lite = { version = "=1.1.1", features = ["f64"] }
 md-5 = "0.10.6"

@@ -24,10 +24,15 @@ final class PredictionDetailBands {
         if (Math.hypot(horizontal, vertical) < fineRadius(layout.maxDistanceBlocks())) return 64;
         double distance = Math.sqrt(PredictionWorkOrder.distanceSquared(key, layout, x, z) + vertical * vertical);
         double projected = VssLodProjection.projectedSize(span, Math.max(1, distance), pixelsPerBlock);
-        // The planner limits projected tile size. Outside the local fine
-        // sphere, tiny tiles need 16 cells and larger tiles need 32 cells.
-        double pixelsPerCell = layout.pixelThreshold() / VssLodLayout.TILE_QUADS * 2;
-        return projected <= 16 * pixelsPerCell ? 16 : 32;
+        return projectedCellAxis(projected, layout.pixelThreshold() / VssLodLayout.TILE_QUADS);
+    }
+
+    static int projectedCellAxis(double projected, double pixelsPerCell) {
+        // Choose the smallest grid that meets the actual cell error. A 32-cell
+        // grid cannot borrow the screen budget of a 64-cell grid.
+        if (projected <= 16 * pixelsPerCell) return 16;
+        if (projected <= 32 * pixelsPerCell) return 32;
+        return 64;
     }
 
     static int cellAxis(PredictionTileKey key, VssLodLayout layout, double x, double z, VssLodFocus focus) {

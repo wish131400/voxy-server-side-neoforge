@@ -94,12 +94,72 @@ class PredictionLodSeamsTest {
         assertSame(first, cache.get(original));
         cache.retain(Map.of(original.key(), surface(original)));
         assertSame(first, cache.get(original));
-        assertNotSame(first, cache.get(replacement));
         cache.retain(Map.of());
-        assertNotSame(first, cache.get(original));
+        assertSame(first, cache.get(original), "camera culling must not discard immutable wall indices");
+        assertNotSame(first, cache.get(replacement));
+        assertNotSame(first, cache.get(original), "a new revision invalidates the old index");
         Object second = cache.get(original);
         cache.clear();
         assertNotSame(second, cache.get(original));
+    }
+
+    @Test void turningAcrossLargeVisibleSetsReusesIndicesAndPreservesExactSeams() {
+        var all = new ArrayList<PredictionLodSeams.Surface>();
+        for (int z = 0; z < 12; z++) for (int x = 0; x < 14; x++) {
+            int height = ((x + z) & 1) == 0 ? 96 : 64;
+            all.add(surface(wetTile(x, z, 2, height, 0, height - 16)));
+        }
+        var seams = new PredictionLodSeams();
+        seams.update(all);
+        long builds = seams.wallIndexBuilds();
+        assertTrue(builds > 64, "exercise the old cache's working-set overflow");
+        long warmNanos = 0, coldNanos = 0;
+        for (int turn = 0; turn < 12; turn++) {
+            var visible = new ArrayList<PredictionLodSeams.Surface>();
+            for (var surface : all) {
+                int x = surface.tile().key().tileX();
+                if ((turn & 1) == 0 ? x < 11 : x >= 3) visible.add(surface);
+            }
+            long start = System.nanoTime();
+            var actual = seams.update(visible);
+            warmNanos += System.nanoTime() - start;
+            start = System.nanoTime();
+            var expected = new PredictionLodSeams().update(visible);
+            coldNanos += System.nanoTime() - start;
+            assertEquals(expected.size(), actual.size());
+            for (int i = 0; i < actual.size(); i++) {
+                assertSame(expected.get(i).surface().tile(), actual.get(i).surface().tile());
+                assertArrayEquals(expected.get(i).mesh().quads(), actual.get(i).mesh().quads(),
+                        "visibility changes must preserve every seam vertex, material and coverage owner");
+            }
+        }
+        assertEquals(builds, seams.wallIndexBuilds(), "turning must not rescan unchanged geometry");
+        System.out.println("SEAM_TURN_REPLAY tiles=" + all.size() + ",turns=12,initialBuilds=" + builds
+                + ",repeatBuilds=" + (seams.wallIndexBuilds() - builds)
+                + ",warmMs=" + warmNanos / 1e6 + ",coldMs=" + coldNanos / 1e6);
+    }
+
+    @Test void wallCacheEvictsLeastRecentlyUsedWithinEntryAndByteBudgets() {
+        var a = tile(0, 0, 2, 64);
+        var b = tile(1, 0, 2, 80);
+        var c = tile(2, 0, 2, 96);
+        var cache = new PredictionLodSeams.WallCache(1024 * 1024, 2);
+        Object first = cache.get(a), second = cache.get(b);
+        assertSame(first, cache.get(a));
+        cache.get(c);
+        assertEquals(2, cache.size());
+        assertSame(first, cache.get(a));
+        assertNotSame(second, cache.get(b));
+        var probe = new PredictionLodSeams.WallCache();
+        probe.get(a);
+        long oneIndexBytes = probe.retainedBytes();
+        var bounded = new PredictionLodSeams.WallCache(oneIndexBytes, 1024);
+        bounded.get(a); bounded.get(b);
+        assertEquals(1, bounded.size());
+        assertTrue(bounded.retainedBytes() <= oneIndexBytes);
+        var tooSmall = new PredictionLodSeams.WallCache(oneIndexBytes - 1, 1024);
+        tooSmall.get(a);
+        assertEquals(0, tooSmall.size(), "oversized indices are usable without unbounded retention");
     }
 
     @Test void underwaterSeamsUseTheSameWaterDepthLightingAsOrdinaryWalls() {

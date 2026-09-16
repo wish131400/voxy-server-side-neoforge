@@ -258,7 +258,11 @@ public final class PredictionMaterialPalette {
         if (surfaceSoil(under)) return dirtIndex();
         if (solidWallMaterial(under)) return under;
         int top = groundBlock(sample);
-        return surfaceSoil(top) || !solidWallMaterial(top) ? dirtIndex() : top;
+        // Known translucent tops (ice, glass) keep their own material on the
+        // wall instead of inventing a dirt stratum that was never sampled.
+        // A wholly unknown top keeps the classic synthetic strata bands.
+        if (top != ClientColumnSample.NO_BLOCK && !surfaceSoil(top)) return top;
+        return dirtIndex();
     }
 
     static int wallDeepBlock(ClientColumnSample sample) {
@@ -268,7 +272,8 @@ public final class PredictionMaterialPalette {
         if (surfaceSoil(deep)) return stoneIndex();
         if (solidWallMaterial(deep)) return deep;
         int top = groundBlock(sample);
-        return surfaceSoil(top) || !solidWallMaterial(top) ? stoneIndex() : wallUnderBlock(sample);
+        if (top != ClientColumnSample.NO_BLOCK && !surfaceSoil(top)) return wallUnderBlock(sample);
+        return stoneIndex();
     }
 
     private static boolean surfaceSoil(int block) {

@@ -7,7 +7,7 @@ import java.util.Map;
 
 public class VSSClientConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-client-config.json";
-    public static final String CURRENT_CONFIG_VERSION = "v0.2.15";
+    public static final String CURRENT_CONFIG_VERSION = "v0.2.16";
     public static final int MAX_LOD_DISTANCE_CHUNKS = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
     public static final int MIN_PREDICTION_DISTANCE_BLOCKS = 1_024;
     public static final int MAX_PREDICTION_DISTANCE_BLOCKS = 65_536;
@@ -23,6 +23,8 @@ public class VSSClientConfig extends JsonConfig {
     private Integer desiredBandwidthMiB;
     public boolean offThreadSectionProcessing = true;
     public boolean enableXaeroMapBridge = true;
+    /** Prediction resource preset: low, medium or high; medium by default. */
+    public String performanceTier = "medium";
     /** Generate deterministic far terrain predictions from the server worldgen profile. */
     @SerializedName("enablePrediction")
     public boolean enablePrediction = true;
@@ -66,6 +68,7 @@ public class VSSClientConfig extends JsonConfig {
                 + MAX_DESIRED_BANDWIDTH_KBPS + "（最高 100 Mbps），0 表示不额外限速，仍受服务端上限控制。");
         help.put("offThreadSectionProcessing", "是否在后台线程处理收到的 LOD 区块以减少主线程卡顿；默认 true。");
         help.put("enableXaeroMapBridge", "是否将服务端远景写入 Xaero 世界地图；默认 true。可用 /vssclient xaero disable 临时关闭。");
+        help.put("performanceTier", "预测性能档位 low/medium/high；默认 medium。low 使用四分之一核心并保留 45 FPS 保险丝，medium 使用一半核心并保留 30 FPS 保险丝，high 沿用旧版全核心配置且不自动降载。距离、细节等画质参数与档位无关。");
         help.put("enablePrediction", "是否根据服务端同步的种子和世界生成元数据在远处生成预测地形；默认 true。");
         help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 8192；范围 "
                 + MIN_PREDICTION_DISTANCE_BLOCKS + "-" + MAX_PREDICTION_DISTANCE_BLOCKS
@@ -73,7 +76,7 @@ public class VSSClientConfig extends JsonConfig {
         help.put("predictionDetail", "预测地形细节等级 low/normal/high/extreme；影响屏幕像素阈值。");
         help.put("predictionFineDistanceBlocks", "普通精细地形距离，单位方块；默认 1536，范围 256-4096，独立于预测远景距离；高空按实际距离降低精度，望远镜可突破此距离。");
         help.put("predictionBackgroundWorkers", "视野外地形的后台任务槽；默认 2，范围 1-4。近处和当前视野优先，已加载的远景仍保留。");
-        help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修任务槽，包含视野内地形和植被；默认 0 自动使用一半逻辑线程，也可指定 1-32，实际不超过一半逻辑线程。缺失覆盖、望远镜目标和脏列修复优先处理。");
+        help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修任务槽，包含视野内地形和植被；默认 0 表示跟随性能档位（low 3 / medium 6 / high 为一半逻辑线程），也可指定 1-32 手动覆盖。缺失覆盖、望远镜目标和脏列修复优先处理。");
         help.put("predictionTrees", "是否生成近处及望远镜目标区域的原版树木、草等地表植被；默认 true。");
         help.put("predictionStructures", "是否生成近处及望远镜区域的原版地表结构；默认 true。");
         help.put("predictionSurfaceDistanceBlocks", "在已知近处地形外额外细化地表的范围，单位方块；默认 768，范围 128-2048；随真实地形覆盖边界向外延伸，远处只由望远镜触发。");
@@ -103,6 +106,11 @@ public class VSSClientConfig extends JsonConfig {
         predictionSurfaceDistanceBlocks = clamp(predictionSurfaceDistanceBlocks, 128, 2048);
         predictionFineDistanceBlocks = clamp(predictionFineDistanceBlocks, 256, 4096);
         predictionBackgroundWorkers = clamp(predictionBackgroundWorkers, 1, 4);
+        if (performanceTier == null) performanceTier = "medium";
+        performanceTier = performanceTier.toLowerCase(java.util.Locale.ROOT);
+        if (!"low".equals(performanceTier) && !"high".equals(performanceTier)) {
+            performanceTier = "medium";
+        }
         predictionRefinementWorkers = clamp(predictionRefinementWorkers, 0, 32);
         if (predictionDetail == null) predictionDetail = "normal";
         predictionDetail = switch (predictionDetail.toLowerCase(java.util.Locale.ROOT)) {

@@ -1,18 +1,32 @@
 package dev.xantha.vss.client.prediction;
 
-import java.util.LinkedHashMap;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongFunction;
 
 /**
  * Bounded JVM-side sample cache. Parent and child tiles share samples at their
  * borders, which avoids re-running the expensive density march on every LOD
  * rebuild while retaining deterministic results.
+ *
+ * <p>Reads are lock-free: a dozen prediction workers poll this cache between
+ * noise evaluations, and a single monitor here once serialized them into a
+ * lock convoy. Insertion keeps the strongest sample for a key and sheds
+ * arbitrary overflow under one short eviction lock; every entry is
+ * re-computable, so losing LRU ordering is acceptable.</p>
  */
 public final class VssLodSampleCache {
     private static final int DEFAULT_CAPACITY = 131_072;
+    /** Evict down to this fraction of the capacity so the lock is taken rarely. */
+    private static final float EVICT_TARGET_FRACTION = 0.875F;
+
     private final int capacity;
-    private final Map<Long, ClientColumnSample> entries;
+    private final int evictTarget;
+    private final Map<Long, ClientColumnSample> entries = new ConcurrentHashMap<>();
+    private final Object evictionLock = new Object();
+    private final AtomicLong evictions = new AtomicLong();
 
     public VssLodSampleCache() {
         this(DEFAULT_CAPACITY);
@@ -23,60 +37,70 @@ public final class VssLodSampleCache {
             throw new IllegalArgumentException("sample cache capacity too small");
         }
         this.capacity = capacity;
-        this.entries = new LinkedHashMap<>(capacity, 0.75F, true);
+        this.evictTarget = (int) Math.max(256L, (long) (capacity * EVICT_TARGET_FRACTION));
     }
 
-    public synchronized ClientColumnSample get(long key) {
+    public ClientColumnSample get(long key) {
         return entries.get(key);
     }
 
     public ClientColumnSample getOrCompute(long key,
                                            LongFunction<ClientColumnSample> factory) {
-        ClientColumnSample existing;
-        synchronized (this) {
-            existing = entries.get(key);
-        }
+        ClientColumnSample existing = entries.get(key);
         if (existing != null) {
             return existing;
         }
-        // Density sampling is the expensive part; do not hold the cache lock
-        // while a worker evaluates the NoiseRouter.
+        // Density sampling is the expensive part; no lock is held while a
+        // worker evaluates the NoiseRouter.
         ClientColumnSample created = factory.apply(key);
         if (created == null) {
             throw new IllegalArgumentException("sample factory returned null");
         }
-        synchronized (this) {
-            ClientColumnSample raced = entries.get(key);
-            if (raced != null) {
-                return raced;
-            }
-            entries.put(key, created);
-            while (entries.size() > capacity) {
-                entries.remove(entries.keySet().iterator().next());
-            }
-            return created;
-        }
+        return retain(key, created);
     }
 
-    public synchronized void put(long key, ClientColumnSample sample) {
+    public void put(long key, ClientColumnSample sample) {
         if (sample == null) return;
-        ClientColumnSample previous = entries.get(key);
-        if (previous != null && previous.captured() && !sample.captured()) return;
-        entries.put(key, sample);
-        while (entries.size() > capacity) {
-            entries.remove(entries.keySet().iterator().next());
+        retain(key, sample);
+    }
+
+    private ClientColumnSample retain(long key, ClientColumnSample sample) {
+        ClientColumnSample selected = entries.compute(key, (ignored, previous) ->
+                previous != null && previous.captured() && !sample.captured() ? previous : sample);
+        if (entries.size() > capacity) {
+            evictOverflow();
+        }
+        // Overflow eviction or another worker may remove this key immediately.
+        // The caller still owns the selected immutable sample; rereading the
+        // cache here can return null and discard an otherwise completed tile.
+        return selected;
+    }
+
+    private void evictOverflow() {
+        synchronized (evictionLock) {
+            int oversize = entries.size() - evictTarget;
+            if (oversize <= 0) {
+                return;
+            }
+            Iterator<Map.Entry<Long, ClientColumnSample>> iterator =
+                    entries.entrySet().iterator();
+            while (oversize-- > 0 && iterator.hasNext()) {
+                iterator.next();
+                iterator.remove();
+                evictions.incrementAndGet();
+            }
         }
     }
 
-    public synchronized void remove(long key) {
+    public void remove(long key) {
         entries.remove(key);
     }
 
-    public synchronized void clear() {
+    public void clear() {
         entries.clear();
     }
 
-    public synchronized int size() {
+    public int size() {
         return entries.size();
     }
 }

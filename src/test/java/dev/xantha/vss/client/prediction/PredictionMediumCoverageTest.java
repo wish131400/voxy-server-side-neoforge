@@ -118,6 +118,101 @@ class PredictionMediumCoverageTest {
         }
     }
 
+    @Test @SuppressWarnings("unchecked")
+    void completedNonLeafMediumFrontierPromotesLocalCompletionAheadOfRemainingWave() throws Exception {
+        var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
+                42L, -64, 384, "noise", "minecraft:overworld", 123L);
+        var sample = new ClientColumnSample(64,64,0,ClientColumnSample.NO_BLOCK,0,0,0,0,0,
+                ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
+                ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
+        var sampler = new ClientTerrainSampler(42,profile) {
+            @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample; }
+        };
+        try (var manager = new PredictionTileManager(profile.levelKey(),sampler,
+                new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2),null)) {
+            var near = new PredictionTileKey(profile.levelKey(),0,0,0);
+            var frontier = new PredictionTileKey(profile.levelKey(),0,0,2);
+            var far = new PredictionTileKey(profile.levelKey(),4,0,2);
+            ((Set<PredictionTileKey>)get(manager,"desiredKeys")).addAll(List.of(near,frontier,far));
+            ((Set<PredictionTileKey>)get(manager,"terrainLeaves")).add(near);
+            ((Set<PredictionTileKey>)get(manager,"surfaceDesired")).add(near);
+            set(manager,"terrainTargets",Map.of(near,64));
+            set(manager,"mediumCoverage",new PredictionMediumCoverage(Set.of(frontier,far),Set.of(frontier,far)));
+            set(manager,"mediumCoveragePending",true);
+            set(manager,"previewWorkPending",true);
+            var ready = (Map<PredictionTileKey,PredictionTile>)get(manager,"ready");
+            for (var key : List.of(near,frontier,far)) ready.put(key,new PredictionTile(key,new int[0],new int[0],
+                    new ClientColumnSample[0],null,new PredictionDepthBound(64,64),0,1,
+                    key.equals(near)?32:16,manager.layout().tileBlocks(key.lod())/(key.equals(near)?32:16)));
+            var counter = (AtomicInteger)get(manager,"mediumSinceSurface");
+            counter.set(15);
+            var priority = manager.getClass().getDeclaredMethod("workPriority",PredictionTileKey.class,boolean.class);
+            priority.setAccessible(true);
+            assertTrue((int)priority.invoke(manager,far,false)<(int)priority.invoke(manager,near,false));
+            enqueue(manager,frontier); idle(manager);
+            assertEquals(32,ready.get(frontier).cellAxis());
+            assertEquals(16,counter.get(),"frontier tiles must count even when not final terrain leaves");
+            int promoted = (int)priority.invoke(manager,near,false);
+            assertTrue(promoted<(int)priority.invoke(manager,far,false),"local completion must interrupt the remaining wave");
+            assertTrue((int)priority.invoke(manager,near,true)<promoted,"finish ready plants before another same-band ground task");
+            set(manager,"buildFocus",new VssLodFocus(32,32,1024,9000));
+            assertTrue((int)priority.invoke(manager,near,false)<promoted,"explicit telescope remains ahead of periodic local turns");
+            set(manager,"buildFocus",null);
+            counter.set(0);
+            assertTrue((int)priority.invoke(manager,far,false)<(int)priority.invoke(manager,near,false),"consuming a turn restores coverage priority");
+        }
+    }
+
+    @Test @SuppressWarnings("unchecked")
+    void oversizedOuterCoverageAdvancesThroughWorkerAfterBootstrapCompletes() throws Exception {
+        var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
+                42L, -64, 384, "noise", "minecraft:overworld", 123L);
+        var sample = new ClientColumnSample(64,64,0,ClientColumnSample.NO_BLOCK,0,0,0,0,0,
+                ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
+                ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
+        var sampler = new ClientTerrainSampler(42, profile) {
+            @Override int initialTerrainCellAxis(int lod) { return 8; }
+            @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return sample; }
+        };
+        var layout = VssLodLayout.of(65536, 6, true, false);
+        var leaves = PredictionLodPlanner.plan(profile.levelKey(), 114.5, 4998, 125.5, layout, null, 1300);
+        var target = leaves.stream().filter(key -> {
+            int span = layout.tileBlocks(key.lod());
+            return Math.floorDiv(9000, span) == key.tileX() && Math.floorDiv(125, span) == key.tileZ();
+        }).findFirst().orElseThrow();
+        assertTrue(target.lod() < layout.levelCount() - 4,
+                "outer terrain must request detail below the horizon-dependent bootstrap level");
+        var pass = PredictionMediumCoverage.plan(leaves, layout);
+        System.out.println("OUTER_MEDIUM_WORK leaves=" + leaves.size() + " bootstrap=" + pass.frontier().size()
+                + " targetSpacing=" + layout.tileBlocks(target.lod()) / 32);
+        try (var manager = new PredictionTileManager(profile.levelKey(), sampler,
+                new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2),null)) {
+            set(manager, "layout", layout);
+            var desired = (Set<PredictionTileKey>) get(manager, "desiredKeys");
+            desired.addAll(PredictionTileManager.withCoarseCoverage(leaves, layout));
+            ((Set<PredictionTileKey>) get(manager, "terrainLeaves")).addAll(leaves);
+            set(manager, "terrainTargets", Map.of(target, 32));
+            var ready = (Map<PredictionTileKey,PredictionTile>) get(manager, "ready");
+            for (var key = target; key.lod() < layout.levelCount(); key =
+                    new PredictionTileKey(key.dimension(),key.tileX()>>1,key.tileZ()>>1,key.lod()+1)) {
+                int axis = key.equals(target) ? 8 : 32;
+                ready.put(key, new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],null,
+                        new PredictionDepthBound(64,64),0,1,axis,layout.tileBlocks(key.lod())/axis));
+            }
+            refresh(manager, leaves);
+            assertEquals(true, get(manager, "mediumCoveragePending"), "other regions are still unfinished");
+            enqueue(manager, target); idle(manager);
+            assertEquals(16, ready.get(target).cellAxis(), "first useful intermediate grid publishes");
+            enqueue(manager, target); idle(manager);
+            assertEquals(32, ready.get(target).cellAxis(), "ordinary outer medium finishes without a telescope");
+            assertSame(ready.get(target), manager.renderSnapshot().coveringTileAtDetail(9000>>4, 125>>4, 6),
+                    "finished refinement becomes the visible owner instead of the bootstrap ancestor");
+            var revision = ready.get(target).revision();
+            enqueue(manager, target); idle(manager);
+            assertEquals(revision, ready.get(target).revision(), "completed target must not rebuild in a loop");
+        }
+    }
+
     private static Object get(Object o,String name)throws Exception { var f=o.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(o); }
     private static void set(Object o,String name,Object value)throws Exception { var f=o.getClass().getDeclaredField(name);f.setAccessible(true);f.set(o,value); }
     private static void refresh(PredictionTileManager m,List<PredictionTileKey> leaves)throws Exception { var f=m.getClass().getDeclaredMethod("refreshMediumCoverage",List.class);f.setAccessible(true);f.invoke(m,leaves); }

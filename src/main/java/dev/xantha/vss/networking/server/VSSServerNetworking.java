@@ -352,6 +352,11 @@ public final class VSSServerNetworking {
     }
 
     @SubscribeEvent
+    public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) SESSION_MANAGER.dimensionChanged(player);
+    }
+
+    @SubscribeEvent
     public static void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             SERVER_RUNTIME.onPlayerLogout(player);

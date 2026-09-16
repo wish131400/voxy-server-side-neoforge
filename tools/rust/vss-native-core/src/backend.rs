@@ -177,6 +177,9 @@ mod exterior_tests {
 pub struct SurfaceColumn {
     pub values: [i32; 10],
 }
+mod exterior;
+mod display;
+mod tint;
 struct ColumnCache {
     values: HashMap<(i32, i32), Arc<Vec<SurfaceColumn>>>,
     order: std::collections::VecDeque<(i32, i32)>,
@@ -196,17 +199,45 @@ pub struct World {
     pub schedule: Option<Schedule>,
     adjustments: HashMap<(i32, i32), crate::beard::Beard>,
     columns: Mutex<ColumnCache>,
+    /// Chunks served by assembling already-cached exact points instead of
+    /// running `surface_region`. Diagnostic only.
+    reused_chunk_builds: std::sync::atomic::AtomicU64,
+    /// Cross-column `surface_top` cache. A `Job` is built per column and the
+    /// four neighbour positions within a column are all distinct, so the map on
+    /// `Job` never sees a repeat; this one survives across calls so adjacent
+    /// grid samples reuse each other's column scans. A top is a pure function
+    /// of `(x, z)` under the world's fixed adjustments.
+    neighbour_tops: Mutex<HashMap<(i32, i32), Option<(i32, Substance)>>>,
+    surface_work: Mutex<std::collections::VecDeque<((i32, i32), crate::terrain::SurfaceWork)>>,
+    display_columns: Mutex<display::DisplayColumns>,
+    display_queries: [std::sync::atomic::AtomicU64; 5],
+    // Decoration page calls, requested columns, warm columns, elapsed nanos.
+    decoration_queries: [std::sync::atomic::AtomicU64; 4],
+    display_liquids: std::sync::OnceLock<bool>,
+    display_biomes: std::collections::HashSet<String>,
+    display_work: Mutex<std::collections::VecDeque<((i32,i32),crate::terrain::SurfaceWork)>>,
     cancelled: AtomicBool,
-    color_biomes: Mutex<HashMap<Pos, Biome>>,
+    color_biomes: [Mutex<tint::BiomeCache>; 16],
+    color_work: Mutex<tint::WorkPool>,
     column_locks: [Mutex<()>; 64],
     placed_cache: Mutex<HashMap<String, Arc<Placed>>>,
     color_generation: std::sync::atomic::AtomicU64,
     work: [std::sync::atomic::AtomicU64; 2],
 }
 impl World {
+    /// Whether biome selection replays TerraBlender positional regions. The
+    /// JNI describe() reports this so the Java side only trusts native
+    /// surface materials when the routing was actually compiled in.
+    pub fn uses_terrablender_routing(&self) -> bool {
+        self.source.uses_terrablender_routing()
+    }
+
     pub fn new(seed: i64, zoom_seed: i64, document: Value) -> Result<Self> {
+        Self::new_with_palette(seed, zoom_seed, document, None)
+    }
+    pub fn new_with_palette(seed: i64, zoom_seed: i64, document: Value, shared: Option<Palette>) -> Result<Self> {
         let mut terrain = Terrain::from_document(seed, &document)?;
-        let mut palette = Palette::from_json(&document["block_definitions"])?;
+        let mut palette = match shared { Some(p) => p, None => Palette::from_json(&document["block_definitions"])? };
         if let Some(states) = document.get("input_states") {
             for state in states.as_array().ok_or("invalid input state table")? {
                 palette.intern(state)?;
@@ -223,7 +254,7 @@ impl World {
         for (name, definition) in document["biomes"].as_object().ok_or("missing biomes")? {
             biomes.insert(name.clone(), Biome::from_json(definition)?);
         }
-        let source = BiomeSource::from_document(&document, &terrain.graph)?;
+        let source = BiomeSource::from_document(&document, &terrain.graph, seed)?;
         let schedule = document
             .get("possible_biomes")
             .map(|v| -> Result<_> {
@@ -271,6 +302,9 @@ impl World {
                 palette.named(kind.block_name(&terrain.default_block))?
             };
         }
+        let display_biomes=biomes.keys().filter(|name|
+            !matches!(name.as_str(),"minecraft:eroded_badlands"|"minecraft:frozen_ocean"|"minecraft:deep_frozen_ocean")
+                && surface.display_safe_for_biome(&palette,Some(name))).cloned().collect();
         Ok(Self {
             terrain,
             palette,
@@ -284,7 +318,8 @@ impl World {
             schedule,
             adjustments,
             cancelled: AtomicBool::new(false),
-            color_biomes: Mutex::new(HashMap::new()),
+            color_biomes: std::array::from_fn(|_| Mutex::new(tint::BiomeCache::default())),
+            color_work: Mutex::new(tint::WorkPool::default()),
             column_locks: std::array::from_fn(|_| Mutex::new(())),
             placed_cache: Mutex::new(HashMap::new()),
             color_generation: std::sync::atomic::AtomicU64::new(0),
@@ -295,7 +330,32 @@ impl World {
                 points: HashMap::new(),
                 point_order: std::collections::VecDeque::new(),
             }),
+            reused_chunk_builds: std::sync::atomic::AtomicU64::new(0),
+            neighbour_tops: Mutex::new(HashMap::new()),
+            surface_work: Mutex::new(std::collections::VecDeque::new()),
+            display_columns: Mutex::new(display::DisplayColumns::new(65536)),
+            display_queries: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            decoration_queries: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            display_liquids: std::sync::OnceLock::new(),
+            display_biomes,
+            display_work: Mutex::new(std::collections::VecDeque::new()),
         })
+    }
+    /// Attaches the world-owned cross-column `surface_top` cache to a job.
+    ///
+    /// Kept behind a helper so the `no-shared-tops` measurement feature can
+    /// detach it in one place. Leaving `shared_tops` as `None` is exactly the
+    /// pre-existing behaviour: only the per-job map is consulted, which a
+    /// single-column job never gets a hit from.
+    fn attach_tops<'a>(&'a self, job: &mut Job<'a>) {
+        #[cfg(not(feature = "no-shared-tops"))]
+        {
+            job.shared_tops = Some(&self.neighbour_tops);
+        }
+        #[cfg(feature = "no-shared-tops")]
+        {
+            let _ = job;
+        }
     }
     pub fn surface_region(&self, chunk_x: i32, chunk_z: i32, side: i32) -> Result<Volume> {
         self.check_active()?;
@@ -362,41 +422,10 @@ impl World {
         let t = &self.terrain;
         let mut q = zoom_quart(self.zoom_seed, p);
         q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
-        {
-            let cache = self
-                .color_biomes
-                .lock()
-                .map_err(|_| "biome color cache lock")?;
-            if let Some(b) = cache.get(&q) {
-                return Ok([
-                    self.colors.grass(b, p[0] as f64, p[2] as f64),
-                    self.colors.foliage(b),
-                    b.water,
-                ]);
-            }
-        }
-        let mut scratch = t
-            .graph
-            .scratch(p[0] & !15, p[2] & !15, t.cell_width, t.cell_height)?;
-        let mut last = None;
-        let name = self.source.sample(&t.graph, q, &mut scratch, &mut last);
-        let b = self
-            .biomes
-            .get(name)
-            .ok_or_else(|| format!("missing biome {name}"))?;
-        {
-            let mut cache = self
-                .color_biomes
-                .lock()
-                .map_err(|_| "biome color cache lock")?;
-            if cache.len() >= 65536 {
-                cache.clear();
-            }
-            cache.insert(q, b.clone());
-        }
+        let b = self.color_biome(q)?;
         Ok([
-            self.colors.grass(b, p[0] as f64, p[2] as f64),
-            self.colors.foliage(b),
+            self.colors.grass(&b, p[0] as f64, p[2] as f64),
+            self.colors.foliage(&b),
             b.water,
         ])
     }
@@ -533,6 +562,32 @@ impl World {
         {
             return Ok(value);
         }
+        // Refinement samples exact points before decoration asks for the whole
+        // chunk. When the density graph has no ordering dependency, those points
+        // are the same values `surface_region` would produce, so a chunk whose
+        // 256 columns are all already cached can be assembled instead of
+        // re-running the region. Graphs that need a complete column order
+        // (Epic Terrain and similar) keep the full path.
+        if !self.terrain.graph.requires_complete_column_order() {
+            if let Some(assembled) = self.assemble_columns_from_points(cx, cz)? {
+                self.reused_chunk_builds.fetch_add(1, Ordering::Relaxed);
+                let mut cache = self.columns.lock().map_err(|_| "surface cache lock")?;
+                if self.color_generation.load(Ordering::Acquire) != generation {
+                    return Ok(assembled);
+                }
+                if let Some(old) = cache.values.get(&key) {
+                    return Ok(old.clone());
+                }
+                while cache.values.len() >= 1024 {
+                    if let Some(old) = cache.order.pop_front() {
+                        cache.values.remove(&old);
+                    }
+                }
+                cache.order.push_back(key);
+                cache.values.insert(key, assembled.clone());
+                return Ok(assembled);
+            }
+        }
         let mut v = self.surface_region(cx, cz, 1)?;
         self.work[0].fetch_add(1, Ordering::Relaxed);
         let mut result = Vec::with_capacity(256);
@@ -562,6 +617,34 @@ impl World {
         cache.order.push_back(key);
         cache.values.insert(key, result.clone());
         Ok(result)
+    }
+    /// Assembles a chunk from exact points already present in the column cache.
+    ///
+    /// Returns `None` unless all 256 columns are cached: a partially refined
+    /// chunk must still take the full region path rather than mix sources.
+    /// Callers are responsible for checking that the graph does not require a
+    /// complete column order.
+    fn assemble_columns_from_points(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Result<Option<Arc<Vec<SurfaceColumn>>>> {
+        let cache = self.columns.lock().map_err(|_| "surface cache lock")?;
+        let mut result = Vec::with_capacity(256);
+        for x in cx * 16..cx * 16 + 16 {
+            for z in cz * 16..cz * 16 + 16 {
+                match cache.points.get(&(x, z)) {
+                    Some(column) => result.push(*column),
+                    None => return Ok(None),
+                }
+            }
+        }
+        Ok(Some(Arc::new(result)))
+    }
+    /// Chunks served by assembling already-cached exact points instead of
+    /// running `surface_region`. Diagnostic only.
+    pub fn reused_chunk_builds(&self) -> u64 {
+        self.reused_chunk_builds.load(Ordering::Relaxed)
     }
     fn column_record(
         &self,
@@ -601,6 +684,12 @@ impl World {
         let top = v.get([x, floor - 1, z]);
         let under = v.get([x, floor - 2, z]);
         let deep = v.get([x, floor - 7, z]);
+        self.record_surface(x,z,floor,fluid_y,fluid,[top,under,deep],scratch,last)
+    }
+    fn record_surface(&self,x:i32,z:i32,floor:i32,fluid_y:i32,fluid:i32,
+        materials:[StateId;3],scratch:&mut crate::density::Scratch,last:&mut Option<usize>) -> Result<SurfaceColumn> {
+        let t=&self.terrain;
+        let [top,under,deep]=materials;
         let p = [x, if fluid != 0 { fluid_y - 1 } else { floor }, z];
         let mut q = zoom_quart(self.zoom_seed, p);
         q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
@@ -633,10 +722,132 @@ impl World {
         if let Some(v) = self.cached_surface_point(x, z)? {
             return Ok(v);
         }
-        let mut job = self.terrain.job(x & !15, z & !15, false)?;
-        job.beard = self.adjustments.get(&(x >> 4, z >> 4));
-        self.prepare_exterior_columns(&mut job, &[(x, z)]);
-        self.generate_surface_point(x, z, &mut job)
+        crate::prof::hit(&crate::prof::SURFACE.columns);
+        let cx = x >> 4;
+        let cz = z >> 4;
+        // Reuse the same chunk-level job pool `surface_points` uses, so points
+        // queried one at a time in one chunk share density corners, preliminary
+        // heights, aquifer locations and neighbour tops instead of rebuilding
+        // them for every column. A sparse walk still misses the pool, which is
+        // why the pool is bounded rather than world sized.
+        let reusable = !self.terrain.graph.requires_complete_column_order();
+        let parked = if reusable {
+            let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
+            pool.iter()
+                .position(|(key, _)| *key == (cx, cz))
+                .and_then(|i| pool.remove(i))
+                .map(|(_, work)| work)
+        } else {
+            None
+        };
+        let mut job = {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.column_setup);
+            let mut job = match parked {
+                Some(work) => Job::resume(&self.terrain, work),
+                None => self.terrain.job(cx * 16, cz * 16, false)?,
+            };
+            job.beard = self.adjustments.get(&(cx, cz));
+            self.attach_tops(&mut job);
+            self.prepare_exterior_columns(&mut job, &[(x, z)]);
+            job
+        };
+        let t = &self.terrain;
+        let mut scratch = t
+            .graph
+            .scratch(x & !15, z & !15, t.cell_width, t.cell_height)?;
+        let result = self.generate_surface_point(x, z, &mut job, &mut scratch);
+        if reusable {
+            // Park even after a failed generation: the caches are still warm,
+            // and `generate_surface_point` already released the job.
+            let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
+            let work = job.park();
+            let bytes = work.retained_bytes();
+            if bytes <= 2 * 1024 * 1024 {
+                let mut used: usize = pool.iter().map(|(_, w)| w.retained_bytes()).sum();
+                while pool.len() >= 8 || used + bytes > 16 * 1024 * 1024 {
+                    let Some((_, old)) = pool.pop_front() else { break };
+                    used = used.saturating_sub(old.retained_bytes());
+                }
+                pool.push_back(((cx, cz), work));
+            }
+        }
+        result
+    }
+    /// Diagnostic only, never called by generation. Pairs the preliminary
+    /// height with the exact `floor` that `surface_point` produces, so an
+    /// offline probe can decide whether `preliminary` is a safe upper bound for
+    /// skipping the air part of a column.
+    ///
+    /// `Job::preliminary` is evaluated on a 4x4 lattice (`x & !3`, `z & !3`),
+    /// so a whole block shares one value and it is only usable as an upper
+    /// bound if it clears every column in that block. It also ignores the
+    /// beardifier, which the exact floor does not.
+    ///
+    /// Returns `[x, z, preliminary, floor]` per requested point, in order.
+    #[doc(hidden)]
+    pub fn probe_preliminary(&self, points: &[(i32, i32)]) -> Result<Vec<[i32; 4]>> {
+        let mut out = Vec::with_capacity(points.len());
+        for &(x, z) in points {
+            let mut job = self.terrain.job(x & !15, z & !15, false)?;
+            job.beard = self.adjustments.get(&(x >> 4, z >> 4));
+            self.attach_tops(&mut job);
+            let preliminary = job.preliminary(x, z);
+            let floor = self.surface_point(x, z)?.values[0];
+            out.push([x, z, preliminary, floor]);
+        }
+        Ok(out)
+    }
+    /// Diagnostic only, never called by generation. Compares the cheap raw
+    /// pre-scan against the exact path's first non-air block.
+    ///
+    /// `Terrain::preview_height` walks down in 16-block steps evaluating
+    /// `final_density` with `Mode::Raw`, then bisects to within 4 blocks. That
+    /// is the same function the exact path evaluates, so unlike
+    /// `Job::preliminary` it tracks the real surface - but it skips
+    /// interpolation, the beardifier and the aquifer, so it can disagree in
+    /// either direction.
+    ///
+    /// A pre-scan can only shorten the exact march if it never lands *below*
+    /// the exact answer, and is only worth doing if the gap stays short. Both
+    /// values use floor semantics: one past the highest non-air block.
+    ///
+    /// Returns `[x, z, raw_floor, exact_floor, block_floor, linear_floor]` per
+    /// point, in order.
+    ///
+    /// * `raw_floor` - `Terrain::preview_height` (`Mode::Raw`, no beardifier)
+    /// * `block_floor` - `Job::probe_height_by_block` (coarse stride + stride scan)
+    /// * `linear_floor` - the same top-down single-block scan `surface_top`
+    ///   performs, repeated here independently
+    /// * `exact_floor` - `Job::surface_top`
+    ///
+    /// `block_floor` and `linear_floor` should agree if the stride scan is
+    /// correct; `linear_floor` and `exact_floor` should agree if `Job::block`
+    /// is a pure function of position. Comparing all four separates "the coarse
+    /// stride missed something" from "block disagrees with itself".
+    #[doc(hidden)]
+    pub fn probe_raw_vs_exact(&self, points: &[(i32, i32)]) -> Result<Vec<[i32; 6]>> {
+        let t = &self.terrain;
+        let mut out = Vec::with_capacity(points.len());
+        for &(x, z) in points {
+            let mut job = self.terrain.job(x & !15, z & !15, false)?;
+            job.beard = self.adjustments.get(&(x >> 4, z >> 4));
+            self.attach_tops(&mut job);
+            let mut scratch = t
+                .graph
+                .scratch(x & !15, z & !15, t.cell_width, t.cell_height)?;
+            let raw = t.preview_height(x, z, &mut scratch);
+            let by_block = job.probe_height_by_block(x, z);
+            let mut linear = t.min_y;
+            for py in (t.min_y..t.min_y + t.height).rev() {
+                if job.block([x, py, z]) != Substance::Air {
+                    linear = py + 1;
+                    break;
+                }
+            }
+            let exact = job.surface_top(x, z).map_or(t.min_y, |(y, _)| y + 1);
+            out.push([x, z, raw, exact, by_block, linear]);
+        }
+        Ok(out)
     }
     /// Reuse density corners, aquifer locations and preliminary heights for
     /// points in the same chunk, while preserving the caller's output order.
@@ -655,16 +866,49 @@ impl World {
             }
         }
         for ((cx, cz), indices) in groups {
-            let mut job = self.terrain.job(cx * 16, cz * 16, false)?;
+            let reusable = !self.terrain.graph.requires_complete_column_order();
+            let cached = if reusable {
+                let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
+                pool.iter().position(|(key, _)| *key == (cx, cz)).and_then(|i| pool.remove(i)).map(|(_, work)| work)
+            } else { None };
+            let mut job = match cached {
+                Some(work) => Job::resume(&self.terrain, work),
+                None => self.terrain.job(cx * 16, cz * 16, false)?,
+            };
             job.beard = self.adjustments.get(&(cx, cz));
+            self.attach_tops(&mut job);
             let missing: Vec<_> = indices.iter().map(|&i| points[i]).collect();
             self.prepare_exterior_columns(&mut job, &missing);
+            // One scratch per chunk: its origin is the chunk origin, which is
+            // what every column in this group samples from.
+            let t = &self.terrain;
+            let mut scratch = t
+                .graph
+                .scratch(cx * 16, cz * 16, t.cell_width, t.cell_height)?;
             for i in indices {
                 let (x, z) = points[i];
                 result[i] = match self.cached_surface_point(x, z)? {
                     Some(v) => v,
-                    None => self.generate_surface_point(x, z, &mut job)?,
+                    None => {
+                        crate::prof::hit(&crate::prof::SURFACE.columns);
+                        self.generate_surface_point(x, z, &mut job, &mut scratch)?
+                    }
                 };
+            }
+            if reusable {
+                let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
+                // A small working set across JNI batches, never a world-sized
+                // cache of vertical volumes. Active jobs hold no pool lock.
+                let work=job.park();
+                let bytes=work.retained_bytes();
+                if bytes<=2*1024*1024 {
+                    let mut used:usize=pool.iter().map(|(_,w)|w.retained_bytes()).sum();
+                    while pool.len()>=8 || used+bytes>16*1024*1024 {
+                        let Some((_,old))=pool.pop_front() else {break;};
+                        used=used.saturating_sub(old.retained_bytes());
+                    }
+                    pool.push_back(((cx, cz), work));
+                }
             }
         }
         Ok(result)
@@ -749,7 +993,17 @@ impl World {
         }
         Ok(None)
     }
-    fn generate_surface_point(&self, x: i32, z: i32, job: &mut Job<'_>) -> Result<SurfaceColumn> {
+    fn generate_surface_point(
+        &self,
+        x: i32,
+        z: i32,
+        job: &mut Job<'_>,
+        scratch: &mut crate::density::Scratch,
+    ) -> Result<SurfaceColumn> {
+        let generation=self.color_generation.load(Ordering::Acquire);
+        if let Some(result)=self.exterior_record(x,z,job,scratch)? {
+            return self.store_surface_result(x,z,result,generation);
+        }
         self.generate_surface_point_depth(x, z, job, true)
     }
     fn generate_surface_point_depth(
@@ -763,11 +1017,14 @@ impl World {
         let t = &self.terrain;
         let x0 = x & !15;
         let z0 = z & !15;
-        let mut v = Volume::new(
-            [x - 1, t.min_y, z - 1],
-            [3, t.height as usize, 3],
-            self.palette.clone(),
-        )?;
+        let mut v = {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.volume_new);
+            Volume::new(
+                [x - 1, t.min_y, z - 1],
+                [3, t.height as usize, 3],
+                self.palette.clone(),
+            )?
+        };
         let positions: BTreeSet<_> = [
             (x, z),
             (x, (z - 1).max(z0)),
@@ -777,7 +1034,10 @@ impl World {
         ]
         .into_iter()
         .collect();
-        let mut scratch = t.graph.scratch(x0, z0, t.cell_width, t.cell_height)?;
+        let mut scratch = {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.scratch);
+            t.graph.scratch(x0, z0, t.cell_width, t.cell_height)?
+        };
         let mut last = None;
         let mut cache = HashMap::new();
         let mut biome = |p| {
@@ -793,109 +1053,164 @@ impl World {
                     .ok_or("missing sparse surface biome")?,
             ))
         };
-        let padding = if exterior && !t.graph.requires_complete_column_order() {
-            self.surface.exterior_padding(&t.graph, x, z)
-        } else {
-            None
+        let padding = {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.exterior_padding);
+            if exterior && !t.graph.requires_complete_column_order() {
+                self.surface.exterior_padding(&t.graph, x, z)
+            } else {
+                None
+            }
         };
         let mut truncated = if exterior {
             job.surface_bottom(x, z)
         } else {
             None
         };
-        for &(xx, zz) in &positions {
-            if (xx, zz) != (x, z) {
-                let top = job.surface_top(xx, zz);
-                let y = top.map_or(t.min_y, |(y, _)| y + 1);
-                // Later neighbours have not had any surface geometry applied.
-                // Earlier badlands/icebergs need their actual column contents;
-                // all other neighbours are observed solely through height().
-                let needs_geometry = if (xx, zz) < (x, z) {
-                    let (name, _) = biome([xx, if t.graph.legacy { 0 } else { y }, zz])?;
-                    matches!(
-                        name,
-                        "minecraft:eroded_badlands"
-                            | "minecraft:frozen_ocean"
-                            | "minecraft:deep_frozen_ocean"
-                    )
-                } else {
-                    false
+        {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.neighbour_fill);
+            for &(xx, zz) in &positions {
+                if (xx, zz) != (x, z) {
+                    let top: Option<(i32, Substance)> = {
+                        let _prof =
+                            crate::prof::Scope::new(&crate::prof::SURFACE.neighbour_top);
+                        // Measurement build only; see the `skip-neighbour-top`
+                        // feature. Reporting "no surface found" removes the four
+                        // neighbour column scans so a differential run can size
+                        // them against `centre_march`.
+                        #[cfg(feature = "skip-neighbour-top")]
+                        {
+                            None
+                        }
+                        #[cfg(not(feature = "skip-neighbour-top"))]
+                        {
+                            job.surface_top(xx, zz)
+                        }
+                    };
+                    let y = top.map_or(t.min_y, |(y, _)| y + 1);
+                    // Later neighbours have not had any surface geometry applied.
+                    // Earlier badlands/icebergs need their actual column contents;
+                    // all other neighbours are observed solely through height().
+                    let needs_geometry = if (xx, zz) < (x, z) {
+                        let (name, _) = biome([xx, if t.graph.legacy { 0 } else { y }, zz])?;
+                        matches!(
+                            name,
+                            "minecraft:eroded_badlands"
+                                | "minecraft:frozen_ocean"
+                                | "minecraft:deep_frozen_ocean"
+                        )
+                    } else {
+                        false
+                    };
+                    if !needs_geometry {
+                        if let Some((y, b)) = top {
+                            v.set([xx, y, zz], self.base_ids[b as usize]);
+                        }
+                        continue;
+                    }
+                }
+                if (xx, zz) == (x, z) {
+                    if let Some(padding) = padding {
+                        let _prof_march =
+                            crate::prof::Scope::new(&crate::prof::SURFACE.centre_march);
+                        let mut stop = t.min_y;
+                        let mut found = false;
+                        let mut first_non_air = true;
+                        let mut truncate_allowed = true;
+                        let mut y = t.min_y + t.height - 1;
+                        while y >= t.min_y {
+                            if !found {
+                                if let Some(bottom) = job.proven_air_bottom([x, y, z]) {
+                                    y = bottom - 1;
+                                    continue;
+                                }
+                            }
+                            let block = {
+                                let _prof =
+                                    crate::prof::Scope::new(&crate::prof::SURFACE.centre_block);
+                                job.block([x, y, z])
+                            };
+                            {
+                                let _prof =
+                                    crate::prof::Scope::new(&crate::prof::SURFACE.centre_set);
+                                v.set([x, y, z], self.base_ids[block as usize]);
+                            }
+                            crate::prof::hit(&crate::prof::SURFACE.centre_steps);
+                            if first_non_air && block != Substance::Air {
+                                first_non_air = false;
+                                let (name, _) =
+                                    biome([x, if t.graph.legacy { 0 } else { y + 1 }, z])?;
+                                truncate_allowed = !matches!(
+                                    name,
+                                    "minecraft:eroded_badlands"
+                                        | "minecraft:frozen_ocean"
+                                        | "minecraft:deep_frozen_ocean"
+                                );
+                            }
+                            if !found && block.solid() {
+                                found = true;
+                                if truncate_allowed {
+                                    stop = (y - 7 - padding).max(t.min_y);
+                                }
+                            }
+                            if found && y == stop {
+                                if stop > t.min_y {
+                                    truncated = Some((stop, padding));
+                                }
+                                break;
+                            }
+                            y -= 1;
+                        }
+                        continue;
+                    }
+                }
+                let col = {
+                    let _prof =
+                        crate::prof::Scope::new(&crate::prof::SURFACE.neighbour_column);
+                    job.column(xx, zz)?
                 };
-                if !needs_geometry {
-                    if let Some((y, b)) = top {
-                        v.set([xx, y, zz], self.base_ids[b as usize]);
-                    }
-                    continue;
+                for (i, b) in col.blocks.into_iter().enumerate() {
+                    v.set([xx, t.min_y + i as i32, zz], self.base_ids[b as usize]);
                 }
-            }
-            if (xx, zz) == (x, z) {
-                if let Some(padding) = padding {
-                    let mut stop = t.min_y;
-                    let mut found = false;
-                    let mut first_non_air = true;
-                    let mut truncate_allowed = true;
-                    for y in (t.min_y..t.min_y + t.height).rev() {
-                        let block = job.block([x, y, z]);
-                        v.set([x, y, z], self.base_ids[block as usize]);
-                        if first_non_air && block != Substance::Air {
-                            first_non_air = false;
-                            let (name, _) = biome([x, if t.graph.legacy { 0 } else { y + 1 }, z])?;
-                            truncate_allowed = !matches!(
-                                name,
-                                "minecraft:eroded_badlands"
-                                    | "minecraft:frozen_ocean"
-                                    | "minecraft:deep_frozen_ocean"
-                            );
-                        }
-                        if !found && block.solid() {
-                            found = true;
-                            if truncate_allowed {
-                                stop = (y - 7 - padding).max(t.min_y);
-                            }
-                        }
-                        if found && y == stop {
-                            if stop > t.min_y {
-                                truncated = Some((stop, padding));
-                            }
-                            break;
-                        }
-                    }
-                    continue;
-                }
-            }
-            let col = job.column(xx, zz)?;
-            for (i, b) in col.blocks.into_iter().enumerate() {
-                v.set([xx, t.min_y + i as i32, zz], self.base_ids[b as usize]);
             }
         }
         // SurfaceSystem traverses X then Z. Only earlier neighbours have had
         // badlands/iceberg geometry applied when steepness is evaluated.
-        for &(xx, zz) in &positions {
-            if (xx, zz) < (x, z) {
-                let top = v.height(xx, zz, false);
-                let (name, _) = biome([xx, if t.graph.legacy { 0 } else { top }, zz])?;
-                if !self.surface.sparse_safe_for_biome(&v.palette, Some(name)) {
-                    return Ok(
-                        self.surface_columns(x >> 4, z >> 4)?[((x & 15) * 16 + (z & 15)) as usize]
-                    );
-                }
-                self.surface
-                    .geometry_column(job, &mut v, xx, zz, &self.colors, &mut biome)?;
-                let top = v.height(xx, zz, false);
-                if top > t.min_y {
-                    let (name, _) = biome([xx, top - 1, zz])?;
-                    if !self.surface.sparse_safe_for_biome(&v.palette, Some(name)) {
-                        return Ok(self.surface_columns(x >> 4, z >> 4)?
-                            [((x & 15) * 16 + (z & 15)) as usize]);
+        {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.neighbour_geometry);
+            for &(xx, zz) in &positions {
+                if (xx, zz) < (x, z) {
+                    let top = v.height(xx, zz, false);
+                    let (name, _) = biome([xx, if t.graph.legacy { 0 } else { top }, zz])?;
+                    if !self.surface.sparse_safe_at(&v.palette, name, &t.graph, xx, zz) {
+                        return Ok(
+                            self.surface_columns(x >> 4, z >> 4)?[((x & 15) * 16 + (z & 15)) as usize]
+                        );
+                    }
+                    self.surface
+                        .geometry_column(job, &mut v, xx, zz, &self.colors, &mut biome)?;
+                    let top = v.height(xx, zz, false);
+                    if top > t.min_y {
+                        let (name, _) = biome([xx, top - 1, zz])?;
+                        if !self.surface.sparse_safe_at(&v.palette, name, &t.graph, xx, zz) {
+                            return Ok(self.surface_columns(x >> 4, z >> 4)?
+                                [((x & 15) * 16 + (z & 15)) as usize]);
+                        }
                     }
                 }
             }
         }
-        self.surface
-            .apply_column(job, &mut v, x0, z0, x, z, &self.colors, &mut biome)?;
-        let result = self.column_record(&mut v, x, z, &mut scratch, &mut last)?;
+        {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.apply_rules);
+            self.surface
+                .apply_column(job, &mut v, x0, z0, x, z, &self.colors, &mut biome)?;
+        }
+        let result = {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.record);
+            self.column_record(&mut v, x, z, &mut scratch, &mut last)?
+        };
         if let Some((bottom, padding)) = truncated {
             if result.values[0] - 7 < bottom + padding {
+                crate::prof::hit(&crate::prof::SURFACE.truncated_rebuilds);
                 // A surface rule can remove solid blocks or turn them into
                 // water. Never publish an output whose material crosses the
                 // proven retained range; rebuild its complete column instead.
@@ -905,19 +1220,25 @@ impl World {
                 return self.generate_surface_point_depth(x, z, &mut full, false);
             }
         }
-        self.work[1].fetch_add(1, Ordering::Relaxed);
-        let mut cache = self.columns.lock().map_err(|_| "surface cache lock")?;
-        if self.color_generation.load(Ordering::Acquire) != generation {
-            return Ok(result);
-        }
-        if !cache.points.contains_key(&(x, z)) {
-            while cache.points.len() >= 65536 {
-                if let Some(p) = cache.point_order.pop_front() {
-                    cache.points.remove(&p);
-                }
+        self.store_surface_result(x,z,result,generation)
+    }
+    fn store_surface_result(&self,x:i32,z:i32,result:SurfaceColumn,generation:u64) -> Result<SurfaceColumn> {
+        {
+            let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.cache_store);
+            self.work[1].fetch_add(1, Ordering::Relaxed);
+            let mut cache = self.columns.lock().map_err(|_| "surface cache lock")?;
+            if self.color_generation.load(Ordering::Acquire) != generation {
+                return Ok(result);
             }
-            cache.point_order.push_back((x, z));
-            cache.points.insert((x, z), result);
+            if !cache.points.contains_key(&(x, z)) {
+                while cache.points.len() >= 65536 {
+                    if let Some(p) = cache.point_order.pop_front() {
+                        cache.points.remove(&p);
+                    }
+                }
+                cache.point_order.push_back((x, z));
+                cache.points.insert((x, z), result);
+            }
         }
         Ok(result)
     }
@@ -930,45 +1251,104 @@ impl World {
         }
         let t = &self.terrain;
         let origin = [(cx - 2) * 16, t.min_y, (cz - 2) * 16];
-        let mut volume = Volume::new(origin, [80, t.height as usize, 80], self.palette.clone())?;
-        let ice = volume.palette.named("minecraft:ice")?;
+        // Collect the column summaries first: the proxy computes every cell from
+        // them on demand instead of materialising an 80 x height x 80 array
+        // (about 9.4 MiB at height 384). Flatten the entire region in
+        // x * 80 + z order, matching `ProxyBase::value`.
+        let mut summaries = vec![[0; 10]; 80 * 80];
         for chunk_x in cx - 2..=cx + 2 {
             for chunk_z in cz - 2..=cz + 2 {
                 let columns = self.surface_columns(chunk_x, chunk_z)?;
                 for x in 0..16 {
                     for z in 0..16 {
-                        let c = columns[(x * 16 + z) as usize].values;
-                        let end = c[0].max(c[1]);
-                        for y in t.min_y..end {
-                            let id = if y >= c[0] {
-                                if c[3] & 2 != 0 && y == c[1] - 1 {
-                                    ice
-                                } else if c[2] == 2 {
-                                    self.base_ids[Substance::Lava as usize]
-                                } else {
-                                    self.base_ids[Substance::Water as usize]
-                                }
-                            } else if c[3] & (1 << 29) != 0 {
-                                volume.palette.air
-                            } else if y == c[0] - 1 {
-                                c[4] as u32
-                            } else if c[0] - 1 - y < 4 {
-                                c[5] as u32
-                            } else {
-                                c[6] as u32
-                            };
-                            volume.set([chunk_x * 16 + x, y, chunk_z * 16 + z], id);
-                        }
+                        let local_x = (chunk_x - (cx - 2)) * 16 + x;
+                        let local_z = (chunk_z - (cz - 2)) * 16 + z;
+                        summaries[(local_x * 80 + local_z) as usize] =
+                            columns[(x * 16 + z) as usize].values;
                     }
                 }
             }
         }
+        let mut volume = Volume::proxy(
+            origin,
+            80,
+            80,
+            t.height as usize,
+            self.palette.clone(),
+            summaries,
+        )?;
         volume.write_bounds = Some((
             [cx * 16 - 16, t.min_y, cz * 16 - 16],
             [cx * 16 + 32, t.min_y + t.height, cz * 16 + 32],
         ));
         volume.write_budget = 65536;
         Ok(volume)
+    }
+    /// Preserve exact column semantics without preparing unobserved neighbours.
+    pub fn lazy_surface_proxy(self: &Arc<Self>, cx: i32, cz: i32) -> Result<Volume> {
+        if !(-1874996..=1874995).contains(&cx) || !(-1874996..=1874995).contains(&cz) {
+            return Err("proxy origin outside range".into());
+        }
+        let owner = Arc::clone(self);
+        let t = &self.terrain;
+        let mut volume = Volume::lazy_proxy(
+            [(cx - 2) * 16, t.min_y, (cz - 2) * 16], 80, 80, t.height as usize,
+            self.palette.clone(), Box::new(move |x, z| {
+                let columns = owner.surface_columns(cx - 2 + x as i32, cz - 2 + z as i32)?;
+                Ok(Arc::new(columns.iter().map(|column| column.values).collect()))
+            }),
+        )?;
+        volume.write_bounds = Some((
+            [cx * 16 - 16, t.min_y, cz * 16 - 16],
+            [cx * 16 + 32, t.min_y + t.height, cz * 16 + 32],
+        ));
+        volume.write_budget = 65536;
+        Ok(volume)
+    }
+    /// Small-page context for prediction only. Display records stay in their
+    /// own cache; exact callers and unknown features retain exact queries.
+    pub fn decoration_proxy(self: &Arc<Self>, cx: i32, cz: i32, display: bool) -> Result<Volume> {
+        self.check_active()?;
+        if !(-1874996..=1874995).contains(&cx) || !(-1874996..=1874995).contains(&cz) {
+            return Err("proxy origin outside range".into());
+        }
+        let owner = Arc::clone(self);
+        let t = &self.terrain;
+        let ox = (cx - 2) * 16;
+        let oz = (cz - 2) * 16;
+        let mut volume = Volume::paged_proxy([ox, t.min_y, oz], 80, 80, t.height as usize,
+            self.palette.clone(), 4, Box::new(move |px, pz| {
+                owner.check_active()?;
+                let points: Vec<_> = (0..16).map(|i|
+                    (ox + px as i32 * 4 + i / 4, oz + pz as i32 * 4 + i % 4)).collect();
+                let columns = owner.decoration_points(&points,display)?;
+                Ok(Arc::new(columns.iter().map(|column| column.values).collect()))
+            }))?;
+        volume.write_bounds = Some(([cx*16-16,t.min_y,cz*16-16],
+            [cx*16+32,t.min_y+t.height,cz*16+32]));
+        volume.write_budget = 65536;
+        Ok(volume)
+    }
+    pub fn decoration_points(&self, points: &[(i32,i32)], display: bool) -> Result<Vec<SurfaceColumn>> {
+        self.check_active()?;
+        let start = std::time::Instant::now();
+        let mut hits = 0;
+        {
+            let exact = self.columns.lock().map_err(|_| "surface cache lock")?;
+            let visual = self.display_columns.lock().map_err(|_| "display cache lock")?;
+            for &(x,z) in points {
+                if exact.values.contains_key(&(x>>4,z>>4)) || exact.points.contains_key(&(x,z))
+                    || display && visual.contains_key(&(x,z)) { hits += 1; }
+            }
+        }
+        let result = if display { self.display_points(points) } else { self.surface_points(points) };
+        for (counter,value) in self.decoration_queries.iter().zip([1,points.len() as u64,hits,start.elapsed().as_nanos() as u64]) {
+            counter.fetch_add(value,Ordering::Relaxed);
+        }
+        result
+    }
+    pub fn decoration_query_stats(&self) -> [u64;4] {
+        std::array::from_fn(|i| self.decoration_queries[i].load(Ordering::Relaxed))
     }
     /// Selects features from the complete 3x3 biome neighbourhood, as vanilla
     /// ChunkGenerator.applyBiomeDecoration does. Block context is a separate
@@ -1034,9 +1414,7 @@ impl World {
                 json!(blocked)
             ));
         }
-        let before = volume.blocks.clone();
-        let published = volume.published.clone();
-        let entropy = volume.decoration_entropy.clone();
+        let checkpoint = volume.decoration_checkpoint()?;
         let mut placed = 0;
         for &i in &indices {
             match self.placed(
@@ -1049,9 +1427,7 @@ impl World {
             ) {
                 Ok((yes, _)) => placed += usize::from(yes),
                 Err(e) => {
-                    volume.blocks = before;
-                    volume.published = published;
-                    volume.decoration_entropy = entropy;
+                    volume.restore_decoration(checkpoint);
                     return Err(e);
                 }
             }
@@ -1073,6 +1449,7 @@ impl World {
         cache.order.clear();
         cache.points.clear();
         cache.point_order.clear();
+        self.display_columns.lock().map_err(|_| "display cache lock")?.clear();
         Ok(())
     }
     pub fn check_active(&self) -> Result<()> {

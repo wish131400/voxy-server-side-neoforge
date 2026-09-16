@@ -8,11 +8,20 @@ use crate::{
     terrain::{Job, Terrain},
 };
 use serde_json::Value;
+mod exterior;
+pub(crate) use exterior::ExteriorColumn;
 enum Rule {
     Block(StateId),
     Sequence(Vec<Rule>),
     Condition(Condition, Box<Rule>),
     Bands,
+    /// TerraBlender `terrablender:merged`. `NamespacedSurfaceRuleSource`
+    /// dispatches on the biome's namespace and falls back to `base` whenever
+    /// the namespaced rule answers with nothing.
+    Namespaced {
+        base: Box<Rule>,
+        sources: Vec<(String, Rule)>,
+    },
 }
 enum Condition {
     Biome(Vec<String>),
@@ -26,6 +35,25 @@ enum Condition {
     Above,
     Not(Box<Condition>),
     Stone(i32, bool, i32, bool),
+    /// Alex's Caves `ac_simplex`: a simplex-noise lookup compared against a
+    /// band. Its noise is a stock Gustavson table (no world seeding), but the
+    /// scaling in `ACMath` and the coordinate truncation here are f32, so the
+    /// arithmetic is reproduced in `crate::ac_simplex`.
+    AcSimplex {
+        min: f32,
+        max: f32,
+        scale: f32,
+        y_scale: f32,
+        offset: i32,
+    },
+    /// Youkaishomecoming `youkaishomecoming:noise`. Samples the noise on the
+    /// column and at four corners offset by `radius` on the xz plane (y is
+    /// pinned to 0), and requires the corners to disagree in sign.
+    QuadNoise {
+        id: usize,
+        radius: f64,
+        threshold: f64,
+    },
 }
 struct Context<'a> {
     p: Pos,
@@ -191,22 +219,51 @@ impl Surface {
     /// Steepness reads WORLD_SURFACE_WG: solid-to-water preserves its height.
     /// Only reachable air writes can change a predecessor column's top.
     pub fn sparse_safe_for_biome(&self, palette: &Palette, biome: Option<&str>) -> bool {
-        fn known(condition: &Condition, biome: Option<&str>) -> Option<bool> {
+        self.summary_safe_for_biome(palette,biome,false,None)
+    }
+    pub(crate) fn display_safe_for_biome(&self, palette:&Palette,biome:Option<&str>)->bool {
+        self.summary_safe_for_biome(palette,biome,true,None)
+    }
+    pub(crate) fn display_safe_at(&self, palette: &Palette, biome: &str, graph: &Graph, x: i32, z: i32) -> bool {
+        self.summary_safe_for_biome(palette, Some(biome), true, Some(self.depth(graph, x, z) <= 0))
+    }
+    pub(crate) fn sparse_safe_at(&self, palette: &Palette, biome: &str, graph: &Graph, x: i32, z: i32) -> bool {
+        // Hole depends only on X/Z. Proving it false excludes air writes for
+        // the entire neighbour column, including material depths not sampled.
+        self.summary_safe_for_biome(palette, Some(biome), false, Some(self.depth(graph, x, z) <= 0))
+    }
+    fn summary_safe_for_biome(&self, palette:&Palette,biome:Option<&str>,dry:bool,hole:Option<bool>)->bool {
+        fn known(condition: &Condition, biome: Option<&str>, hole: Option<bool>) -> Option<bool> {
             match condition {
                 Condition::Biome(names) => biome.map(|b| names.iter().any(|n| n == b)),
-                Condition::Not(c) => known(c, biome).map(|b| !b),
+                Condition::Hole => hole,
+                Condition::Not(c) => known(c, biome, hole).map(|b| !b),
                 _ => None,
             }
         }
-        fn safe(rule: &Rule, p: &Palette, biome: Option<&str>) -> bool {
+        fn safe(rule: &Rule, p: &Palette, biome: Option<&str>,dry:bool,hole:Option<bool>) -> bool {
             match rule {
-                Rule::Block(id) => !p.is_air(*id),
+                Rule::Block(id) => !p.is_air(*id) && (!dry || !p.fluid(*id)),
                 Rule::Bands => true,
-                Rule::Sequence(r) => r.iter().all(|r| safe(r, p, biome)),
-                Rule::Condition(c, r) => known(c, biome) == Some(false) || safe(r, p, biome),
+                Rule::Sequence(r) => r.iter().all(|r| safe(r, p, biome,dry,hole)),
+                Rule::Condition(c, r) => known(c, biome,hole) == Some(false) || safe(r, p, biome,dry,hole),
+                Rule::Namespaced { base, sources } => match biome {
+                    // Dispatch reads the biome namespace; without a known biome
+                    // the rule cannot be proven safe.
+                    None => false,
+                    Some(name) => {
+                        let namespace = name.split(':').next().unwrap_or("");
+                        match sources.iter().find(|(n, _)| n == namespace) {
+                            // The namespaced rule may answer with nothing, in
+                            // which case the base rule runs too.
+                            Some((_, rule)) => safe(rule, p, biome,dry,hole) && safe(base, p, biome,dry,hole),
+                            None => safe(base, p, biome,dry,hole),
+                        }
+                    }
+                },
             }
         }
-        safe(&self.rule, palette, biome)
+        safe(&self.rule, palette, biome,dry,hole)
     }
     pub fn geometry_column<'b>(
         &self,
@@ -267,6 +324,10 @@ impl Surface {
                 Rule::Condition(c, r) => {
                     Some(condition(c, depth, secondary)?.max(rule(r, depth, secondary)?))
                 }
+                Rule::Namespaced { base, sources } => sources.iter().try_fold(
+                    rule(base, depth, secondary)?,
+                    |n, (_, r)| Some(n.max(rule(r, depth, secondary)?)),
+                ),
                 _ => Some(0),
             }
         }
@@ -378,12 +439,18 @@ impl Surface {
     /// Neighbour steepness, pillars and iceberg geometry await exact refinement.
     pub fn preview_materials(&self, t: &Terrain, x: i32, z: i32, floor: i32,
         water: i32, name: &str, biome: &Biome, colors: &ClimateColors) -> [StateId; 3] {
+        self.summary_materials(t,x,z,floor,water,name,biome,colors,false)
+    }
+    pub(crate) fn display_materials(&self,t:&Terrain,x:i32,z:i32,floor:i32,water:i32,name:&str,biome:&Biome,colors:&ClimateColors,steep:bool)->[StateId;3] {
+        self.summary_materials(t,x,z,floor,water,name,biome,colors,steep)
+    }
+    fn summary_materials(&self,t:&Terrain,x:i32,z:i32,floor:i32,water:i32,name:&str,biome:&Biome,colors:&ClimateColors,steep:bool)->[StateId;3] {
         let depth = self.depth(&t.graph, x, z);
         let secondary = t.graph.noise(self.secondary, x as f64, 0., z as f64);
         [1, 2, 7].map(|offset| {
             let p = [x, floor - offset, z];
             let c = Context { p, biome: name, cold: colors.temperature(biome, p) < 0.15,
-                steep: false, depth, secondary, above: offset,
+                steep, depth, secondary, above: offset,
                 below: (floor - offset - t.min_y + 1).max(1), water,
                 min_surface: floor - depth - 8 };
             self.rule(&self.rule, &t.graph, &c).unwrap_or(self.default)
@@ -395,6 +462,15 @@ impl Surface {
             Rule::Block(id) => Some(*id),
             Rule::Bands => Some(self.band(graph, c.p)),
             Rule::Sequence(rules) => rules.iter().find_map(|r| self.rule(r, graph, c)),
+            Rule::Namespaced { base, sources } => {
+                let namespace = c.biome.split(':').next().unwrap_or("");
+                if let Some((_, rule)) = sources.iter().find(|(name, _)| name == namespace) {
+                    if let Some(state) = self.rule(rule, graph, c) {
+                        return Some(state);
+                    }
+                }
+                self.rule(base, graph, c)
+            }
             Rule::Condition(test, then) => {
                 if test.matches(graph, c) {
                     self.rule(then, graph, c)
@@ -434,6 +510,11 @@ impl Surface {
             w.set(p, self.default);
         }
     }
+    pub(crate) fn iceberg_noise(&self, g: &Graph, x: i32, z: i32) -> f64 {
+        (g.noise(self.iceberg[0], x as f64, 0., z as f64) * 8.25)
+            .abs()
+            .min(g.noise(self.iceberg[1], x as f64 * 1.28, 0., z as f64 * 1.28) * 15.)
+    }
     fn frozen(
         &self,
         g: &Graph,
@@ -445,9 +526,7 @@ impl Surface {
         sea: i32,
         melt: bool,
     ) {
-        let v = (g.noise(self.iceberg[0], x as f64, 0., z as f64) * 8.25)
-            .abs()
-            .min(g.noise(self.iceberg[1], x as f64 * 1.28, 0., z as f64 * 1.28) * 15.);
+        let v = self.iceberg_noise(g, x, z);
         if v <= 1.8 {
             return;
         }
@@ -527,6 +606,33 @@ impl Condition {
                 };
                 depth <= 1 + offset + if *add { c.depth } else { 0 } + extra
             }
+            Self::AcSimplex {
+                min,
+                max,
+                scale,
+                y_scale,
+                offset,
+            } => crate::ac_simplex::ac_simplex_test(
+                c.p[0], c.p[1], c.p[2], *min, *max, *scale, *y_scale, *offset,
+            ),
+            Self::QuadNoise {
+                id,
+                radius,
+                threshold,
+            } => {
+                let x = c.p[0] as f64;
+                let z = c.p[2] as f64;
+                if g.noise(*id, x, 0.0, z).abs() > *threshold {
+                    return false;
+                }
+                let a = g.noise(*id, x - radius, 0.0, z - radius);
+                let b = g.noise(*id, x - radius, 0.0, z + radius);
+                let cc = g.noise(*id, x + radius, 0.0, z - radius);
+                let d = g.noise(*id, x + radius, 0.0, z + radius);
+                let all_negative = a < 0.0 && b < 0.0 && cc < 0.0 && d < 0.0;
+                let all_positive = a > 0.0 && b > 0.0 && cc > 0.0 && d > 0.0;
+                !(all_negative || all_positive)
+            }
         }
     }
 }
@@ -541,6 +647,27 @@ fn parse_rule(
 ) -> Result<Rule> {
     if depth > 128 {
         return Err("surface rule depth exceeded".into());
+    }
+    // `minecraft_type` only accepts the `minecraft:` prefix, so mod codecs have
+    // to be matched on the raw type string before it runs.
+    if string(v, "type")? == "terrablender:merged" {
+        let base = parse_rule(&v["base"], g, doc, p, min, height, depth + 1)?;
+        let sources = v["sources"].as_object().ok_or("missing merged sources")?;
+        if sources.len() > 256 {
+            return Err("merged source budget".into());
+        }
+        return Ok(Rule::Namespaced {
+            base: Box::new(base),
+            sources: sources
+                .iter()
+                .map(|(name, rule)| {
+                    Ok((
+                        name.clone(),
+                        parse_rule(rule, g, doc, p, min, height, depth + 1)?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
+        });
     }
     Ok(match minecraft_type(v)? {
         "block" => Rule::Block(p.intern(&v["result_state"])?),
@@ -582,6 +709,27 @@ fn parse_condition(
 ) -> Result<Condition> {
     if depth > 128 {
         return Err("surface condition depth exceeded".into());
+    }
+    // As with rules, `minecraft_type` rejects anything outside the vanilla
+    // namespace, so mod conditions are matched on the raw type first.
+    match string(v, "type")? {
+        "youkaishomecoming:noise" => {
+            return Ok(Condition::QuadNoise {
+                id: g.registered_noise(string(v, "noise")?, doc)?,
+                radius: number(v, "radius")?,
+                threshold: number(v, "threshold")?,
+            })
+        }
+        "alexscaves:ac_simplex" => {
+            return Ok(Condition::AcSimplex {
+                min: number(v, "noise_min")? as f32,
+                max: number(v, "noise_max")? as f32,
+                scale: number(v, "noise_scale")? as f32,
+                y_scale: number(v, "y_scale")? as f32,
+                offset: integer(v, "offset_type")?,
+            })
+        }
+        _ => {}
     }
     Ok(match minecraft_type(v)? {
         "biome" => Condition::Biome(

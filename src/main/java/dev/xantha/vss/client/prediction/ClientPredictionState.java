@@ -35,6 +35,13 @@ public final class ClientPredictionState {
     private static volatile boolean profileReady;
     private static volatile WorldgenProfileS2CPayload acceptedProfile;
 
+    private static volatile PreparedProfile preparedProfile;
+    private static boolean dimensionInitializing;
+    private static RustWorldgenDocument.SharedInputs connectionInputs;
+    private static final Set<ResourceKey<Level>> requestedDimensions = ConcurrentHashMap.newKeySet();
+    private record PreparedProfile(ClientWorldgenProfileDecoder.Session decoder, long generation,
+                                   PredictionCacheStorage storage) { }
+
     /** Immutable metadata already received from the server, for explicit reference export. */
     static WorldgenProfileS2CPayload referenceProfile() { return acceptedProfile; }
     private static volatile long profileInstalledNanos;
@@ -62,16 +69,13 @@ public final class ClientPredictionState {
     public static long exactCoverageRevision() {
         return exactCoverageRevision.get();
     }
-    /** Background exact-coverage sweep cadence and batch size.  The batch
-     *  keeps a full yield-band cycle around five seconds without stalling
-     *  the single profile-decoder thread. */
+    /** Background discovery resumes within separate near/far time budgets. */
     private static final long SWEEP_INTERVAL_NANOS = 200_000_000L;
-    private static final int SWEEP_BATCH = 32_768;
+    private static final PredictionCoverageSweep coverageSweep = new PredictionCoverageSweep();
     private static final java.util.concurrent.atomic.AtomicBoolean sweepUpdating =
             new java.util.concurrent.atomic.AtomicBoolean();
     private static volatile long lastSweepNanos;
     private static volatile long lastSweepLogNanos;
-    private static final AtomicInteger sweepCursor = new AtomicInteger();
     private static volatile List<int[]> sweepOffsetsReference;
     private static volatile int sweepRadiusChunks = -1;
     private static final long REQUEST_STATE_TIMEOUT_NANOS = 15_000_000_000L;
@@ -79,13 +83,20 @@ public final class ClientPredictionState {
     private static final ExecutorService PROFILE_DECODER = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "vss-worldgen-profile");
         thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
         return thread;
     });
 
     private ClientPredictionState() {
     }
 
+    private static final PredictionDimensionProfiles dimensionProfiles = new PredictionDimensionProfiles();
+
     public static void accept(WorldgenProfileS2CPayload payload) {
+        // Revision checks apply even while a dimension is still being decoded.
+        if (payload != null && acceptedProfile != null && payload.revision() < revision) return;
+        if (payload != null && payload.formatVersion() == WorldgenProfileS2CPayload.FORMAT_VERSION
+                && !payload.dimensions().isEmpty() && payload.registries().length != 0) dimensionProfiles.remember(payload);
         if (payload != null && payload.sameWorldgen(acceptedProfile)) {
             revision = Math.max(revision, payload.revision());
             return;
@@ -93,7 +104,9 @@ public final class ClientPredictionState {
         if (payload != null && profileReady && payload.revision() < revision) {
             return;
         }
-        clear();
+        boolean reuseInputs = payload != null && acceptedProfile != null
+                && payload.seed() == acceptedProfile.seed() && payload.revision() == acceptedProfile.revision();
+        reset(reuseInputs);
         if (payload == null || payload.formatVersion() != WorldgenProfileS2CPayload.FORMAT_VERSION
                 || payload.dimensions().isEmpty() || payload.registries().length == 0) {
             return;
@@ -107,69 +120,107 @@ public final class ClientPredictionState {
         RegistryAccess clientRegistries = minecraft.getConnection().registryAccess();
         PredictionCacheStorage storage = PredictionCacheStorage.current();
         acceptedProfile = payload;
+        if (connectionInputs == null) connectionInputs = new RustWorldgenDocument.SharedInputs();
+        var inputs = connectionInputs;
         long generation = DECODE_GENERATION.get();
         ResourceKey<Level> preferred = minecraft.level == null ? Level.OVERWORLD : minecraft.level.dimension();
         long receivedNanos = System.nanoTime();
         VSSLogger.info("VSS prediction profile accepted: dimensions=" + payload.dimensions().size()
                 + ", revision=" + payload.revision() + ", first=" + preferred.location());
         CompletableFuture.runAsync(() -> {
-            if (generation != DECODE_GENERATION.get()) return;
-            var timing = new PredictionInitializationTiming("profile");
-            if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction init queueMs="
-                    + (System.nanoTime() - receivedNanos) / 1_000_000L);
+            ClientWorldgenProfileDecoder.Session decoder = null;
             try {
-                ClientWorldgenProfileDecoder.decode(payload, clientRegistries, preferred,
-                        () -> generation == DECODE_GENERATION.get(), (key, sampler) -> {
-                    var installTiming = new PredictionInitializationTiming(key.location() + " install");
-                    PredictionDiskCache cache = storage == null ? null : storage.open(sampler);
-                    PredictionTileManager manager;
-                    try {
-                        manager = new PredictionTileManager(key, sampler, PredictionMemoryBudget.SHARED, cache);
-                    } catch (RuntimeException | Error failure) {
-                        if (cache != null) cache.close();
-                        throw failure; // The decoder still owns the sampler on failure.
+                decoder = ClientWorldgenProfileDecoder.prepare(payload, clientRegistries,
+                        () -> generation == DECODE_GENERATION.get(), inputs);
+                var prepared = new PreparedProfile(decoder, generation, storage);
+                minecraft.execute(() -> {
+                    if (generation != DECODE_GENERATION.get()) {
+                        PROFILE_DECODER.execute(prepared.decoder()::close);
+                        return;
                     }
-                    installTiming.mark("cacheAndManager");
-                    long queuedNanos = System.nanoTime();
+                    preparedProfile = prepared;
+                    requestCurrentDimension(minecraft, receivedNanos);
+                });
+            } catch (java.util.concurrent.CancellationException ignored) {
+                if (decoder != null) decoder.close();
+            } catch (Exception failure) {
+                if (decoder != null) decoder.close();
+                if (generation == DECODE_GENERATION.get()) VSSLogger.error("VSS worldgen profile decode failed", failure);
+            }
+        }, PROFILE_DECODER);
+    }
+
+    /** Called on the client thread, including before the first manager is ready. */
+    private static void requestCurrentDimension(Minecraft minecraft, long requestedNanos) {
+        if (!VSSClientConfig.CONFIG.enablePrediction || minecraft.level == null) return;
+        ResourceKey<Level> key = minecraft.level.dimension();
+        // Some modded transfers omit the server dimension-change event. Returning
+        // to a visited dimension must not depend on another profile packet.
+        var restored = dimensionProfiles.restore(key, acceptedProfile);
+        if (restored != null) {
+            VSSLogger.info("VSS restoring cached prediction profile for " + key.location());
+            accept(restored);
+            return;
+        }
+        PreparedProfile prepared = preparedProfile;
+        if (prepared == null || dimensionInitializing || !PredictionDimensionProfiles.contains(acceptedProfile, key)) return;
+        if (MANAGERS.containsKey(key) || !requestedDimensions.add(key)) return;
+        // Keep the current/previous manager warm. Additional visited dimensions can restore from disk.
+        // The native API has a four-world limit; never fill it with unused dimensions.
+        if (MANAGERS.size() >= 2) {
+            for (var entry : MANAGERS.entrySet()) {
+                if (!entry.getKey().equals(key) && MANAGERS.remove(entry.getKey(), entry.getValue())) {
+                    requestedDimensions.remove(entry.getKey());
+                    entry.getValue().close();
+                    break;
+                }
+            }
+        }
+        dimensionInitializing = true;
+        PROFILE_DECODER.execute(() -> {
+            if (prepared.generation() != DECODE_GENERATION.get()) return;
+            try {
+                PredictionResources.awaitRetired();
+                prepared.decoder().decode(key, () -> prepared.generation() == DECODE_GENERATION.get(), (dimension, sampler) -> {
+                    var timing = new PredictionInitializationTiming(dimension.location() + " install");
+                    PredictionDiskCache cache = prepared.storage() == null ? null : prepared.storage().open(sampler);
+                    PredictionTileManager manager;
+                    try { manager = new PredictionTileManager(dimension, sampler, PredictionMemoryBudget.SHARED, cache); }
+                    catch (RuntimeException | Error failure) {
+                        if (cache != null) cache.close();
+                        throw failure;
+                    }
+                    timing.mark("cacheAndManager");
+                    long queued = System.nanoTime();
                     minecraft.execute(() -> {
-                        if (generation != DECODE_GENERATION.get()) {
-                            manager.close();
-                            return;
+                        if (prepared.generation() != DECODE_GENERATION.get()) { manager.close(); return; }
+                        // A dimension switch during initialization must not install an unbounded queue of worlds.
+                        if (minecraft.level == null || !minecraft.level.dimension().equals(dimension)) {
+                            manager.close(); requestedDimensions.remove(dimension); return;
                         }
-                        PredictionTileManager previous = MANAGERS.put(key, manager);
+                        var previous = MANAGERS.put(dimension, manager);
                         if (previous != null) previous.close();
                         manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction);
                         if (!profileReady) profileInstalledNanos = System.nanoTime();
                         profileReady = true;
-                        VSSLogger.info("VSS prediction dimension ready: dimension=" + key.location()
+                        VSSLogger.info("VSS prediction dimension ready: dimension=" + dimension.location()
                                 + ", rust=" + (sampler instanceof RustTerrainSampler)
-                                + ", receivedToReadyMs=" + (System.nanoTime() - receivedNanos) / 1_000_000L);
+                                + ", receivedToReadyMs=" + (System.nanoTime() - requestedNanos) / 1_000_000L);
                         if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction init installQueueMs="
-                                + (System.nanoTime() - queuedNanos) / 1_000_000L + ", dimension=" + key.location());
+                                + (System.nanoTime() - queued) / 1_000_000L + ", dimension=" + dimension.location());
                     });
-                    installTiming.finish();
+                    timing.finish();
                 });
-                timing.finish();
-            } catch (java.util.concurrent.CancellationException cancelled) {
-                // A new profile/disconnect invalidated this work; published managers are cleared separately.
+            } catch (java.util.concurrent.CancellationException ignored) {
             } catch (Exception failure) {
-                throw new IllegalStateException("Unable to decode VSS worldgen profile", failure);
+                if (prepared.generation() == DECODE_GENERATION.get())
+                    VSSLogger.error("VSS prediction dimension initialization failed: " + key.location(), failure);
+            } finally {
+                minecraft.execute(() -> {
+                    if (prepared.generation() == DECODE_GENERATION.get()) dimensionInitializing = false;
+                });
             }
-        }, PROFILE_DECODER).whenComplete((ignored, failure) -> minecraft.execute(() -> {
-            if (generation != DECODE_GENERATION.get()) return;
-            if (failure != null) {
-                // A later dimension must not remove the current dimension which is already usable.
-                VSSLogger.error("VSS worldgen profile decode failed", failure);
-                if (MANAGERS.isEmpty()) clear();
-                return;
-            }
-            long exact = MANAGERS.values().stream().filter(PredictionTileManager::exactWorldgen).count();
-            long nativeCount = MANAGERS.values().stream()
-                    .filter(manager -> manager.sampler() instanceof RustTerrainSampler).count();
-            VSSLogger.info("VSS prediction samplers ready: dimensions=" + MANAGERS.size()
-                    + ", rust=" + nativeCount + ", javaOrCustom=" + (MANAGERS.size() - nativeCount)
-                    + ", exact=" + exact + ", fallback=" + (MANAGERS.size() - exact));
-        }));
+        });
     }
 
     /** Extra detail is scoped; ordinary selection covers the whole camera neighbourhood. */
@@ -314,7 +365,10 @@ public final class ClientPredictionState {
     }
 
     public static void tick() {
-        MANAGERS.values().forEach(manager -> manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction));
+        Minecraft current = Minecraft.getInstance();
+        requestCurrentDimension(current, System.nanoTime());
+        MANAGERS.forEach((key, manager) -> manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction
+                || current.level == null || !key.equals(current.level.dimension())));
         if (!profileReady || !VSSClientConfig.CONFIG.enablePrediction) {
             return;
         }
@@ -529,6 +583,7 @@ public final class ClientPredictionState {
         boolean present = state == ModCompat.LocalColumnState.PRESENT;
         CoverageCacheEntry previous = exactCoverage.get(key);
         if (present) {
+            if (previous != null && previous.present()) return true;
             // Probe positives yield IMMEDIATELY: the probe reads Voxy's own
             // storage index, so the data is already renderable on Voxy's
             // side.  Backdating the transition skips the ingest settle
@@ -557,8 +612,9 @@ public final class ClientPredictionState {
                     exactCoverageRevision.incrementAndGet();
                 }
             }
-            exactCoverage.put(key, new CoverageCacheEntry(
-                    false, now, Long.MAX_VALUE));
+            if (previous == null || previous.present()) {
+                exactCoverage.put(key, new CoverageCacheEntry(false, now, Long.MAX_VALUE));
+            }
         }
         return present;
     }
@@ -566,8 +622,8 @@ public final class ClientPredictionState {
     /**
      * Background sweep over the yield band (request radius out to Voxy's
      * render distance).  Rotates through ring offsets near-first, refreshing
-     * a bounded batch per run so the whole band cycles in a few seconds
-     * once Voxy's local index is built.  Runs on the profile-decoder thread
+     * a bounded batch per run. Slow probes increase discovery latency instead
+     * of monopolizing the profile-decoder thread. Runs there
      * with a re-entry guard like the view-focus raycast.
      */
     private static void sweepExactCoverage(ClientLevel level, int playerChunkX,
@@ -587,62 +643,26 @@ public final class ClientPredictionState {
             sweepUpdating.set(false);
             return;
         }
-        int cursor = sweepCursor.getAndUpdate(
-                value -> (value + SWEEP_BATCH) % offsets.size());
         int nearRingChunks = Math.max(16, yieldRadiusChunks / 4);
         long generation = DECODE_GENERATION.get();
         PROFILE_DECODER.execute(() -> {
             try {
                 PredictionTileManager manager = MANAGERS.get(dimension);
-                int positives = 0;
-                int negatives = 0;
-                // Near ring first, every cycle: it is the band the player is
-                // actually looking at and where VSS's own delivery is slow
-                // (rate-limited columns), so stale UNKNOWNs here show as
-                // prediction drawn over Voxy's stored LOD.
-                for (int[] offset : offsets) {
-                    if (generation != DECODE_GENERATION.get() || !VSSClientConfig.CONFIG.enablePrediction) return;
-                    if (offset[0] * offset[0] + offset[1] * offset[1]
-                            > nearRingChunks * nearRingChunks) {
-                        break;
-                    }
-                    int chunkX = playerChunkX + offset[0];
-                    int chunkZ = playerChunkZ + offset[1];
-                    if (manager != null && manager.isAuthoritative(chunkX, chunkZ)) {
-                        continue;
-                    }
-                    if (probeExactCoverage(dimension, level, chunkX, chunkZ)) {
-                        positives++;
-                    } else {
-                        negatives++;
-                    }
-                }
-                // Then the rotating far-band batch.
-                for (int index = 0; index < SWEEP_BATCH; index++) {
-                    if (generation != DECODE_GENERATION.get() || !VSSClientConfig.CONFIG.enablePrediction) return;
-                    int[] offset = offsets.get((cursor + index) % offsets.size());
-                    if (offset[0] * offset[0] + offset[1] * offset[1]
-                            <= nearRingChunks * nearRingChunks) {
-                        continue;
-                    }
-                    int chunkX = playerChunkX + offset[0];
-                    int chunkZ = playerChunkZ + offset[1];
-                    if (manager != null && manager.isAuthoritative(chunkX, chunkZ)) {
-                        continue;
-                    }
-                    if (probeExactCoverage(dimension, level, chunkX, chunkZ)) {
-                        positives++;
-                    } else {
-                        negatives++;
-                    }
-                }
+                var result = coverageSweep.run(offsets, nearRingChunks, playerChunkX, playerChunkZ, generation,
+                        () -> generation == DECODE_GENERATION.get() && VSSClientConfig.CONFIG.enablePrediction,
+                        index -> {
+                            int[] offset = offsets.get(index);
+                            int chunkX = playerChunkX + offset[0], chunkZ = playerChunkZ + offset[1];
+                            return manager != null && manager.isAuthoritative(chunkX, chunkZ)
+                                    || probeExactCoverage(dimension, level, chunkX, chunkZ);
+                        });
                 long logNow = System.nanoTime();
                 if (VSSClientConfig.CONFIG.debugLogging
                         && logNow - lastSweepLogNanos > 10_000_000_000L) {
                     lastSweepLogNanos = logNow;
                     dev.xantha.vss.common.VSSLogger.debug(
-                            "VSS exact-coverage sweep: pos=" + positives
-                                    + " neg=" + negatives
+                            "VSS exact-coverage sweep: pos=" + result.present()
+                                    + " checked=" + result.checked() + ",ms=" + result.nanos() / 1_000_000.0
                                     + ", voxy index [" + ModCompat.voxyLocalIndexDiagnostics() + "]");
                 }
             } catch (Throwable ignored) {
@@ -674,7 +694,6 @@ public final class ClientPredictionState {
                 -> offset[0] * offset[0] + offset[1] * offset[1]));
         sweepRadiusChunks = radius;
         sweepOffsetsReference = rebuilt;
-        sweepCursor.set(0);
         return rebuilt;
     }
 
@@ -787,8 +806,15 @@ public final class ClientPredictionState {
                 + ",render=" + PredictionRenderer.diagnostics();
     }
 
-    public static void clear() {
-        RustWorldgenDocument.invalidateSharedInputs();
+    public static void clear() { dimensionProfiles.clear(); reset(false); }
+
+    private static void reset(boolean preserveInputs) {
+        if (!preserveInputs) {
+            RustWorldgenDocument.invalidateSharedInputs();
+            var oldInputs = connectionInputs;
+            connectionInputs = null;
+            if (oldInputs != null) PROFILE_DECODER.execute(oldInputs::close);
+        }
         acceptedProfile = null;
         focusGeneration.incrementAndGet();
         focusScoping = false;
@@ -796,6 +822,11 @@ public final class ClientPredictionState {
         lastFocus = null;
         lastViewFocusNanos = 0L;
         DECODE_GENERATION.incrementAndGet();
+        PreparedProfile oldProfile = preparedProfile;
+        preparedProfile = null;
+        dimensionInitializing = false;
+        requestedDimensions.clear();
+        if (oldProfile != null) PROFILE_DECODER.execute(oldProfile.decoder()::close);
         PredictionRenderer.resetOcclusion();
         for (PredictionTileManager manager : MANAGERS.values()) {
             manager.close();

@@ -248,3 +248,53 @@ fn bounded_feature_writes_roll_back_published_edits() {
     assert_eq!(world.blocks, before);
     assert!(world.published.is_empty());
 }
+
+#[test]
+fn failed_decoration_step_restores_prior_committed_features_in_sparse_and_dense_volumes() {
+    let mut doc = document();
+    doc["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});
+    doc["possible_biomes"] = json!(["minecraft:plains"]);
+    doc["biomes"]["minecraft:plains"]["features"] = json!([["test:first", "test:outside"]]);
+    for (name, offset) in [("test:first", 0), ("test:outside", 100)] {
+        doc["placed_features"][name] = json!({
+            "feature": {"type":"minecraft:simple_block", "config": {
+                "to_place": {"type":"minecraft:simple_state_provider", "state":{"Name":"minecraft:dandelion"}}
+            }},
+            "placement": [{"type":"minecraft:random_offset", "xz_spread":offset,"y_spread":128}]
+        });
+    }
+    let backend = World::new(0, 0, doc).unwrap();
+    for sparse in [true, false] {
+        let mut p = backend.palette.clone();
+        let dirt = p.named("minecraft:dirt").unwrap();
+        let mut v = Volume::proxy([-16,-64,-16],32,32,384,p,
+            vec![[64,64,0,0,dirt as i32,dirt as i32,dirt as i32,0,0,0];1024]).unwrap();
+        if !sparse { v.materialize().unwrap(); }
+        v.decoration_entropy = Some(vss_native_core::random::Random::new(917, 0));
+        v.begin().unwrap();
+        v.set([1, 64, 1], dirt);
+        v.finish(true).unwrap();
+        let original = v.get([0,64,0]);
+        let published = v.published.clone();
+        let mut entropy = v.decoration_entropy.clone().unwrap();
+        let indices = backend.decoration_indices(0,0,0).unwrap();
+        assert_eq!(indices, vec![0,1]);
+        // Ensure this is a rollback-after-commit test, not an early rejection.
+        assert!(backend.placed(&mut v, "test:first",0,0,0,0).unwrap().0);
+        assert_ne!(v.get([0,64,0]),original);
+        v.set([0,64,0], original);
+        v.published = published.clone();
+        assert_eq!(v.heightmap(0,0,0),64);
+        let err = backend.decorate_step(&mut v,0,0,0).unwrap_err();
+        assert!(err.contains("missing neighbour"), "{err}");
+        assert_eq!(v.is_proxy(),sparse);
+        assert_eq!(v.get([0,64,0]),original);
+        assert_eq!(v.get([1,64,1]),dirt);
+        assert_eq!(v.published,published);
+        assert_eq!(v.heightmap(0,0,0),64);
+        assert!(!v.incomplete);
+        assert_eq!(v.decoration_entropy.as_mut().unwrap().next_long(),entropy.next_long());
+        v.begin().unwrap();
+        v.finish(true).unwrap();
+    }
+}

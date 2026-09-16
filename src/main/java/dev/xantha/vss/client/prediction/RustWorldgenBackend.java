@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 /**
- * Independent ABI 3 for the source-built Rust backend. All numerical work runs
+ * Independent ABI 5 for the source-built Rust backend. All numerical work runs
  * in Rust; Java supplies effective registries, colormaps and immutable inputs.
  *
  * <p>A surface region is before carvers/structures/decoration and
@@ -16,7 +16,7 @@ import java.nio.file.Path;
  * World/result handles must be closed; a result retains its parent world.
  */
 public final class RustWorldgenBackend {
-    public static final int ABI = 3;
+    public static final int ABI = 5;
     private static boolean loaded;
     private RustWorldgenBackend() { }
     public static synchronized void load(Path library) {
@@ -27,6 +27,9 @@ public final class RustWorldgenBackend {
         if (abi() != ABI) throw new IllegalStateException("VSS worldgen ABI mismatch");
         loaded = true;
     }
+    public static native long openPalette(String compactDocument);
+    public static native void closePalette(long palette);
+    public static native String describeCompact(long world);
     public static native int abi();
     /** In-place 36-byte compact FTF cells; validates before committing ordered tile filters. */
     public static native void freeTerraForgedFilters(ByteBuffer cells, String settings);
@@ -62,8 +65,14 @@ public final class RustWorldgenBackend {
     /** Sparse XZ int32 input, at most 64 records, same ten-int32 output as surfaceColumns. */
     public static native int surfacePoints(long world, ByteBuffer xz, ByteBuffer output, int count);
     public static native int previewPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+    /** Display-only approximation, including visual vegetation; never seed exact caches. */
+    public static native int displayPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
     /** Existing prediction surface context, 5x5 chunks, assembled in Rust. */
     public static native long surfaceProxy(long world, int centerChunkX, int centerChunkZ);
+    /** Separate display policy; exact surfaceProxy callers never see approximate records. */
+    public static native long decorationProxy(long world, int centerChunkX, int centerChunkZ, int display);
+    public static native int decorationPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+    public static native String decorationQueryStats(long world);
     /** External Java Random entropy for vanilla Collections.shuffle; not the terrain seed. */
     public static native void decorationEntropy(long result,long seed);
     /** Sparse XYZ/state-ID edits; validated atomically before any writes. */

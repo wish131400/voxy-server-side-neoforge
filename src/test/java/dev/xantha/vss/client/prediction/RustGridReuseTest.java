@@ -4,6 +4,29 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class RustGridReuseTest {
+    @Test void displayRecordsNeverBecomeExactDecorationInput() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), -64, 384,
+                "noise", "minecraft:overworld", 1L);
+        var doc = LithostitchedNativeTest.document();
+        doc.add("possible_biomes", new com.google.gson.JsonArray());
+        try (var sampler = new RustTerrainSampler(RustWorldgenBackend.create(1,0,doc.toString()),profile,
+                new ClientTerrainSampler(1,profile))) {
+            var display=sampler.sampleDisplayGrid(-16,-16,1,8,8,new ClientColumnSample[64]);
+            long approximate=java.util.Arrays.stream(display).filter(ClientColumnSample::approximate).count();
+            assertTrue(approximate>0,"exercise the display path, not only exact fallbacks");
+            assertTrue(java.util.Arrays.stream(display).allMatch(ClientColumnSample::reusableForDisplay));
+            long computed=sampler.gridComputedPoints.sum();
+            assertArrayEquals(display,sampler.sampleDisplayGrid(-16,-16,1,8,8,display));
+            assertEquals(computed,sampler.gridComputedPoints.sum());
+            var exact=sampler.sampleGrid(-16,-16,1,8,8,display,false);
+            assertTrue(java.util.Arrays.stream(exact).noneMatch(ClientColumnSample::approximate));
+            assertEquals(computed+approximate,sampler.gridComputedPoints.sum(),"exact compatibility fallbacks stay reusable");
+            for(int i=0;i<64;i++) assertEquals(exact[i],sampler.sample(-16+i%8,-16+i/8));
+        }
+    }
     @Test void diskRestoredApproximationIsResampledForFineTerrain(@org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         assertTrue(RustTerrainSampler.available());
@@ -17,7 +40,6 @@ class RustGridReuseTest {
                 new ClientTerrainSampler(1,profile))) {
             var preview = sampler.sampleGrid(-16,-16,8,4,4,new ClientColumnSample[16],true);
             assertTrue(java.util.Arrays.stream(preview).allMatch(ClientColumnSample::approximate));
-            assertEquals(0,sampler.fullChunkLoads.sum());
             var medium = sampler.sampleGrid(-16,-16,8,4,4,preview,true);
             assertArrayEquals(preview,medium);
             assertEquals(16,sampler.gridComputedPoints.sum(),"preview refinement may reuse approximations");
@@ -147,11 +169,9 @@ class RustGridReuseTest {
         long handle = RustWorldgenBackend.create(1, 0, doc.toString());
         try (var sampler = new RustTerrainSampler(handle, profile, new ClientTerrainSampler(1, profile))) {
             var grid=sampler.sampleGrid(-1,-1,1,8,8);
-            assertEquals(1,sampler.fullChunkLoads.sum(),"only the dense interior should load a full chunk");
-            assertEquals(15,sampler.gridComputedPoints.sum(),"three thin borders share sparse work");
+            assertEquals(64,sampler.gridComputedPoints.sum(),"submit only the requested border and interior columns");
             assertArrayEquals(grid,sampler.sampleGrid(-1,-1,1,8,8));
-            assertEquals(1,sampler.fullChunkLoads.sum());
-            assertEquals(15,sampler.gridComputedPoints.sum());
+            assertEquals(64,sampler.gridComputedPoints.sum());
             var full=java.nio.ByteBuffer.allocateDirect(256*40).order(java.nio.ByteOrder.LITTLE_ENDIAN);
             for(int cz=-1;cz<=0;cz++) for(int cx=-1;cx<=0;cx++) {
                 assertEquals(256,RustWorldgenBackend.surfaceColumns(handle,cx,cz,full));

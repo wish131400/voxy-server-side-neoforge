@@ -42,10 +42,10 @@ class PredictionVegetationTest {
         previousTags = BuiltInRegistries.BLOCK.getTags().collect(Collectors.toMap(
                 pair -> pair.getFirst(), pair -> pair.getSecond().stream().toList()));
         Map<TagKey<Block>, List<Holder<Block>>> tags = new HashMap<>(previousTags);
-        tags.put(BlockTags.LOGS, holders(Blocks.OAK_LOG, Blocks.BIRCH_LOG));
-        tags.put(BlockTags.LEAVES, holders(Blocks.OAK_LEAVES, Blocks.BIRCH_LEAVES));
+        tags.put(BlockTags.LOGS, holders(Blocks.OAK_LOG, Blocks.BIRCH_LOG, Blocks.JUNGLE_LOG));
+        tags.put(BlockTags.LEAVES, holders(Blocks.OAK_LEAVES, Blocks.BIRCH_LEAVES, Blocks.JUNGLE_LEAVES));
         tags.put(BlockTags.DIRT, holders(Blocks.DIRT, Blocks.GRASS_BLOCK, Blocks.COARSE_DIRT));
-        tags.put(BlockTags.REPLACEABLE_BY_TREES, holders(Blocks.AIR, Blocks.SHORT_GRASS, Blocks.OAK_LEAVES));
+        tags.put(BlockTags.REPLACEABLE_BY_TREES, holders(Blocks.AIR, Blocks.SHORT_GRASS, Blocks.OAK_LEAVES, Blocks.JUNGLE_LEAVES, Blocks.VINE));
         BuiltInRegistries.BLOCK.bindTags(tags);
     }
 
@@ -76,6 +76,31 @@ class PredictionVegetationTest {
             cache.flush();
             assertEquals(expected, vegetation.chunk(-17, 23));
             assertTrue(vegetation.diagnostics().contains(",chunks=1,"), "dirty source must generate again");
+        }
+    }
+
+    @Test
+    void cachedStackedBambooIsRepairedAndPersistedWithoutRegeneration() {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of());
+        int settings = (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees ? 1 : 0)
+                | (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionStructures ? 2 : 0) | 28;
+        var key = PredictionDiskCache.Key.surface(0, 0, settings);
+        var source = new HashMap<BlockPos, BlockState>();
+        for (int y = 64; y <= 90; y++) source.put(new BlockPos(2, y, 3), Blocks.BAMBOO.defaultBlockState());
+        source.put(new BlockPos(2, 75, 3), Blocks.BAMBOO.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.BambooStalkBlock.STAGE, 1));
+        try (var cache = new PredictionDiskCache(diskDirectory, 29)) {
+            try (var lease = cache.lease(key)) { assertTrue(cache.writeSurface(lease, source)); }
+            var vegetation = new PredictionVegetation(sampler, cache, true);
+            var result = vegetation.chunk(0, 0);
+            assertEquals(12, result.size());
+            assertTrue(vegetation.diagnostics().contains(",chunks=0,blocks=0,"));
+            assertSame(result, vegetation.chunk(0, 0));
+        }
+        try (var cache = new PredictionDiskCache(diskDirectory, 29); var lease = cache.lease(key)) {
+            var result = cache.readSurface(lease);
+            assertEquals(12, result.size(), "next session reads the repaired cache without regeneration");
+            assertFalse(result.containsKey(new BlockPos(2, 76, 3)));
         }
     }
 
@@ -197,7 +222,7 @@ class PredictionVegetationTest {
                 new SimpleBlockConfiguration(BlockStateProvider.simple(Blocks.SHORT_GRASS))), 3);
         PlacedFeature trees = tree();
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(plants, trees));
-        var prediction = new PredictionVegetation(sampler);
+        var prediction = new PredictionVegetation(sampler, null, false);
         int chunkX = -17, chunkZ = 23;
         Map<BlockPos, BlockState> actual = prediction.chunk(chunkX, chunkZ);
         assertTrue(actual.values().stream().anyMatch(state -> state.is(Blocks.OAK_LOG)),
@@ -427,6 +452,294 @@ class PredictionVegetationTest {
         return tile.cells().values().stream().flatMap(List::stream).map(voxel ->
                 new BlockPos(tile.baseX() + voxel.x(), voxel.y(), tile.baseZ() + voxel.z()))
                 .collect(Collectors.toSet());
+    }
+
+    @Test @SuppressWarnings("unchecked")
+    void completedFineTerrainStartsItsSurfaceWithoutAnotherPlannerTick() throws Exception {
+        var plants = placed(new ConfiguredFeature<>(Feature.SIMPLE_BLOCK,
+                new SimpleBlockConfiguration(BlockStateProvider.simple(Blocks.SHORT_GRASS))),3);
+        var source = sampler(48271,Blocks.GRASS_BLOCK,List.of(plants));
+        var budget = new PredictionMemoryBudget(1024L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2);
+        try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD,source,budget,null)) {
+            var key = new PredictionTileManager.PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD,0,0,0);
+            for (String name : List.of("desiredKeys","terrainLeaves","surfaceDesired")) {
+                var field = manager.getClass().getDeclaredField(name); field.setAccessible(true);
+                ((Set<PredictionTileManager.PredictionTileKey>)field.get(manager)).add(key);
+            }
+            var readyField = manager.getClass().getDeclaredField("ready"); readyField.setAccessible(true);
+            var ready = (Map<PredictionTileManager.PredictionTileKey,PredictionTileManager.PredictionTile>)readyField.get(manager);
+            ready.put(key,new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
+                    null,new PredictionDepthBound(64,64),0,1,32,2));
+            var enqueue = manager.getClass().getDeclaredMethod("enqueue",PredictionTileManager.PredictionTileKey.class,int.class,int.class,boolean.class);
+            enqueue.setAccessible(true); enqueue.invoke(manager,key,0,0,false);
+            var surfacesField = manager.getClass().getDeclaredField("surfaceReady"); surfacesField.setAccessible(true);
+            var surfaces = (Set<PredictionTileManager.PredictionTileKey>)surfacesField.get(manager);
+            long deadline = System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (!surfaces.contains(key) && System.nanoTime()<deadline) Thread.sleep(5);
+            assertTrue(surfaces.contains(key),"no tick was issued: finishing terrain must request its own plants: "+manager.surfaceDiagnostics());
+            assertTrue(ready.get(key).depthBound().maxY()>64);
+            assertEquals(0,manager.failedTileCount());
+            awaitManager(manager);
+        }
+    }
+
+    @Test void reusableTreesAreStableAcrossChunkOrderAndConcurrentJobs() throws Exception {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
+        var forward = new PredictionVegetation(sampler);
+        var reverse = new PredictionVegetation(sampler);
+        var expected = new HashMap<Integer, Map<BlockPos, BlockState>>();
+        for (int x = -12; x < 12; x++) expected.put(x, forward.chunk(x, 7));
+        for (int x = 11; x >= -12; x--) assertEquals(expected.get(x), reverse.chunk(x, 7));
+        var concurrent = new PredictionVegetation(sampler);
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            var jobs = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int x = -12; x < 12; x++) {
+                int chunk = x;
+                jobs.add(executor.submit(() -> assertEquals(expected.get(chunk), concurrent.chunk(chunk, 7))));
+            }
+            for (var job : jobs) job.get(15, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        assertTrue(forward.diagnostics().contains("treeModels={built=8,"), forward.diagnostics());
+        assertTrue(forward.diagnostics().contains("fallback=0"), forward.diagnostics());
+    }
+
+    @Test void treeModelIdentityAndMixedSelectorsPreserveActualFeatureBranches() {
+        var oak = tree();
+        var birch = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(Feature.TREE,
+                new TreeConfiguration.TreeConfigurationBuilder(BlockStateProvider.simple(Blocks.BIRCH_LOG),
+                        new StraightTrunkPlacer(4, 1, 0), BlockStateProvider.simple(Blocks.BIRCH_LEAVES),
+                        new BlobFoliagePlacer(ConstantInt.of(2), ConstantInt.of(0), 3),
+                        new TwoLayersFeatureSize(1, 0, 1)).ignoreVines().build())), oak.placement());
+        var sampler = sampler(42, Blocks.GRASS_BLOCK, List.of(oak, birch));
+        var cache = new PredictionTreeModels(RegistryAccess.EMPTY, sampler.generatorContext());
+        var plainOak = new PlacedFeature(oak.feature(), List.of());
+        var plainBirch = new PlacedFeature(birch.feature(), List.of());
+        var a = new dev.xantha.vss.client.prediction.feature.FeatureStampLevel(42, RegistryAccess.EMPTY, Blocks.GRASS_BLOCK.defaultBlockState());
+        var b = new dev.xantha.vss.client.prediction.feature.FeatureStampLevel(42, RegistryAccess.EMPTY, Blocks.GRASS_BLOCK.defaultBlockState());
+        cache.place(plainOak, a, net.minecraft.util.RandomSource.create(1), new BlockPos(0,64,0));
+        cache.place(plainBirch, b, net.minecraft.util.RandomSource.create(1), new BlockPos(0,64,0));
+        assertTrue(a.placed().values().stream().anyMatch(s -> s.is(Blocks.OAK_LOG)));
+        assertTrue(b.placed().values().stream().anyMatch(s -> s.is(Blocks.BIRCH_LOG)));
+        assertFalse(b.placed().values().stream().anyMatch(s -> s.is(Blocks.OAK_LOG)));
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var custom = new Feature<NoneFeatureConfiguration>(NoneFeatureConfiguration.CODEC) {
+            @Override public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+                calls.incrementAndGet(); return true;
+            }
+        };
+        var fallback = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(custom, NoneFeatureConfiguration.INSTANCE)), List.of());
+        var selector = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(Feature.RANDOM_SELECTOR,
+                new RandomFeatureConfiguration(List.of(new WeightedPlacedFeature(Holder.direct(fallback), 1)), Holder.direct(plainOak)))), List.of());
+        assertTrue(cache.supports(selector));
+        assertFalse(cache.supports(fallback));
+        cache.place(selector, a, net.minecraft.util.RandomSource.create(1), new BlockPos(16,64,0));
+        assertEquals(1, calls.get(), "selected custom branches must execute their original code");
+    }
+
+    @Test void reusableTreesRejectWaterAndProtectStructureBlocksBeforeWriting() {
+        var tree = new PlacedFeature(tree().feature(), List.of());
+        var sampler = sampler(42, Blocks.GRASS_BLOCK, List.of(tree));
+        var models = new PredictionTreeModels(RegistryAccess.EMPTY, sampler.generatorContext());
+        var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, 0, 0);
+        var pos = new BlockPos(0,64,0);
+        level.beginFeature(); level.setBlock(pos, Blocks.WATER.defaultBlockState(), 0, 0); level.endFeature(true);
+        var water = Map.copyOf(level.placed());
+        models.place(tree, level, net.minecraft.util.RandomSource.create(1), pos);
+        assertEquals(water, level.placed());
+        var building = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, 0, 0);
+        building.beginStructure(); building.setBlock(pos.above(2), Blocks.OAK_PLANKS.defaultBlockState(), 0, 0); building.endFeature(true);
+        var before = Map.copyOf(building.placed());
+        models.place(tree, building, net.minecraft.util.RandomSource.create(1), pos);
+        assertEquals(before, building.placed(), "blocked trunk must not leave a partial tree or soil edit");
+    }
+
+    @Test void visualAndExactSurfaceCachesHaveSeparateIdentitiesAndBothInvalidate() {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
+        try (var disk = new PredictionDiskCache(diskDirectory, 1)) {
+            var exact = new PredictionVegetation(sampler, disk, false);
+            exact.chunk(0,0);
+            var visual = new PredictionVegetation(sampler, disk, true);
+            visual.chunk(0,0);
+            assertEquals(0, disk.hits(), "visual policy cannot silently reuse old exact entries");
+            new PredictionVegetation(sampler, disk, true).chunk(0,0);
+            new PredictionVegetation(sampler, disk, false).chunk(0,0);
+            assertEquals(2, disk.hits());
+            disk.invalidateChunk(0,0); disk.flush();
+            new PredictionVegetation(sampler, disk, true).chunk(0,0);
+            new PredictionVegetation(sampler, disk, false).chunk(0,0);
+            assertEquals(2, disk.hits(), "dirty update invalidates both policies");
+        }
+    }
+
+    @Test void reusableTreeOnRustTerrainDoesNotCreateDecorationProxy() throws Exception {
+        assertTrue(RustTerrainSampler.available());
+        var tree = tree();
+        var base = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree));
+        var registry = new MappedRegistry<PlacedFeature>(Registries.PLACED_FEATURE, com.mojang.serialization.Lifecycle.stable());
+        Registry.register(registry, ResourceLocation.parse("test:tree"), tree);
+        registry.freeze();
+        var access = new RegistryAccess.ImmutableRegistryAccess(List.of(registry));
+        var context = new ClientTerrainSampler(48271, base.profile()) {
+            @Override NoiseBasedChunkGenerator generatorContext() { return base.generatorContext(); }
+            @Override RandomState randomStateContext() { return base.randomStateContext(); }
+            @Override BiomeSource biomeSourceContext() { return base.biomeSourceContext(); }
+            @Override RegistryAccess decorationAccess() { return access; }
+        };
+        var doc = LithostitchedNativeTest.document();
+        doc.getAsJsonObject("settings").add("surface_rule", com.google.gson.JsonParser.parseString("""
+                {"type":"minecraft:block","result_state":{"Name":"minecraft:grass_block"}}
+                """));
+        var features = new com.google.gson.JsonObject();
+        features.add("test:tree", PlacedFeature.DIRECT_CODEC.encodeStart(
+                lookup.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE), tree).getOrThrow());
+        doc.add("placed_features", features);
+        doc.add("possible_biomes", com.google.gson.JsonParser.parseString("[\"minecraft:plains\"]"));
+        var order = new com.google.gson.JsonArray();
+        for (int i=0;i<GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();i++) order.add(new com.google.gson.JsonArray());
+        order.add(com.google.gson.JsonParser.parseString("[\"test:tree\"]"));
+        doc.getAsJsonObject("biomes").getAsJsonObject("minecraft:plains").add("features", order);
+        try (var rust = new RustTerrainSampler(RustWorldgenBackend.create(48271,0,doc.toString()), base.profile(), context)) {
+            assertTrue(rust.supports("test:tree"), "fixture must otherwise enter native decoration");
+            var count = RustVegetationStage.class.getDeclaredField("PROXIES");
+            count.setAccessible(true);
+            var proxies = (java.util.concurrent.atomic.LongAdder)count.get(null);
+            long before = proxies.sum();
+            var vegetation = new PredictionVegetation(rust);
+            var blocks = vegetation.chunk(0,0);
+            assertTrue(blocks.values().stream().anyMatch(s -> s.is(Blocks.OAK_LOG)), vegetation.diagnostics());
+            assertEquals(before, proxies.sum(), "tree reuse must bypass the 5x5 native proxy, not merely add another cache after it");
+            assertTrue(vegetation.diagnostics().contains("fallback=0"), vegetation.diagnostics());
+        }
+    }
+
+    @Test void compareExactAndReusableTreesOnFixedChunks() {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
+        var times = new long[3][7];
+        for (int round = -2; round < 7; round++) {
+            for (boolean reuse : round % 2 == 0 ? new boolean[]{false,true} : new boolean[]{true,false}) {
+                var prediction = new PredictionVegetation(sampler, null, reuse);
+                long started = System.nanoTime();
+                int blocks = 0;
+                for (int x = -32; x < 32; x++) blocks += prediction.chunk(x,7).size();
+                long nanos = System.nanoTime() - started;
+                assertTrue(blocks > 1000);
+                if (round >= 0) times[reuse ? 1 : 0][round] = nanos;
+                if (round == 6) System.out.println("TREE_REUSE reuse=" + reuse + " blocks=" + blocks + " " + prediction.diagnostics());
+                if (reuse) {
+                    // Evict chunk results, retain only the reusable model cache.
+                    for (int x = -32; x < 32; x++) prediction.invalidate(x,7);
+                    started = System.nanoTime();
+                    int warmBlocks = 0;
+                    for (int x = -32; x < 32; x++) warmBlocks += prediction.chunk(x,7).size();
+                    nanos = System.nanoTime() - started;
+                    assertEquals(blocks, warmBlocks);
+                    if (round >= 0) times[2][round] = nanos;
+                }
+            }
+        }
+        for (var series : times) java.util.Arrays.sort(series);
+        System.out.printf(java.util.Locale.ROOT, "TREE_REUSE chunks=64 exactMs=%.3f coldModelsMs=%.3f warmModelsMs=%.3f speedup=%.3f%n",
+                times[0][3]/1e6, times[1][3]/1e6, times[2][3]/1e6, (double)times[0][3]/times[1][3]);
+    }
+
+    @Test void nativeGrassPlacementAndExtractionShareDisplayGround() throws Exception {
+        assertTrue(RustTerrainSampler.available());
+        var plant = placed(new ConfiguredFeature<>(Feature.SIMPLE_BLOCK,
+                new SimpleBlockConfiguration(BlockStateProvider.simple(Blocks.SHORT_GRASS))),4);
+        var base=sampler(48271,Blocks.GRASS_BLOCK,List.of(plant));
+        var registry=new MappedRegistry<PlacedFeature>(Registries.PLACED_FEATURE,com.mojang.serialization.Lifecycle.stable());
+        Registry.register(registry,ResourceLocation.parse("test:native_grass"),plant);registry.freeze();
+        var access=new RegistryAccess.ImmutableRegistryAccess(List.of(registry));
+        var context=new ClientTerrainSampler(48271,base.profile()) {
+            @Override NoiseBasedChunkGenerator generatorContext(){return base.generatorContext();}
+            @Override RandomState randomStateContext(){return base.randomStateContext();}
+            @Override BiomeSource biomeSourceContext(){return base.biomeSourceContext();}
+            @Override RegistryAccess decorationAccess(){return access;}
+        };
+        var doc=LithostitchedNativeTest.document();
+        doc.add("biome_source",com.google.gson.JsonParser.parseString(
+                "{\"type\":\"minecraft:fixed\",\"biome\":\"minecraft:plains\"}"));
+        doc.add("input_states",com.google.gson.JsonParser.parseString("[{\"Name\":\"minecraft:short_grass\"}]"));
+        doc.getAsJsonObject("settings").add("surface_rule",com.google.gson.JsonParser.parseString(
+                "{\"type\":\"minecraft:block\",\"result_state\":{\"Name\":\"minecraft:grass_block\"}}"));
+        var features=new com.google.gson.JsonObject();
+        features.add("test:native_grass",PlacedFeature.DIRECT_CODEC.encodeStart(
+                lookup.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE),plant).getOrThrow());
+        doc.add("placed_features",features);doc.add("possible_biomes",com.google.gson.JsonParser.parseString("[\"minecraft:plains\"]"));
+        var order=new com.google.gson.JsonArray();
+        for(int i=0;i<9;i++) order.add(new com.google.gson.JsonArray());
+        order.add(com.google.gson.JsonParser.parseString("[\"test:native_grass\"]"));
+        doc.getAsJsonObject("biomes").getAsJsonObject("minecraft:plains").add("features",order);
+        try(var rust=new RustTerrainSampler(RustWorldgenBackend.create(48271,0,doc.toString()),base.profile(),context)) {
+            for(int x=0;x<16;x+=8) for(int z=0;z<16;z+=8)
+                rust.sampleDisplayGrid(x,z,1,8,8,new ClientColumnSample[64]);
+            var prediction=new PredictionVegetation(rust);
+            var blocks=prediction.chunk(0,0);
+            assertTrue(blocks.values().stream().anyMatch(s->s.is(Blocks.SHORT_GRASS)),prediction.diagnostics());
+            assertTrue(rust.diagnostics().contains("nativeFeatures=1"),rust.diagnostics());
+            var stats=com.google.gson.JsonParser.parseString(RustWorldgenBackend.decorationQueryStats(rust.handle())).getAsJsonObject();
+            assertTrue(stats.get("pages").getAsInt()>0);
+            assertEquals(stats.get("columns"),stats.get("cached"),"native placement and Java extraction must both reuse rendered ground");
+        }
+    }
+
+    @Test void decoratedTreeSkeletonsKeepContextualVinesAndFallbacks() {
+        var base = (TreeConfiguration) tree().feature().value().config();
+        var config = new TreeConfiguration.TreeConfigurationBuilder(base.trunkProvider, base.trunkPlacer,
+                base.foliageProvider, base.foliagePlacer, base.minimumSize).ignoreVines().decorators(List.of(
+                net.minecraft.world.level.levelgen.feature.treedecorators.TrunkVineDecorator.INSTANCE,
+                new net.minecraft.world.level.levelgen.feature.treedecorators.LeaveVineDecorator(1))).build();
+        var decorated = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(Feature.TREE,config)),tree().placement());
+        var sampler = sampler(48271,Blocks.GRASS_BLOCK,List.of(decorated));
+        var prediction = new PredictionVegetation(sampler);
+        var reverse = new PredictionVegetation(sampler);
+        var maps = new HashMap<Integer, Map<BlockPos,BlockState>>();
+        for (int x=-4; x<4; x++) maps.put(x,prediction.chunk(x,7));
+        for (int x=3; x>=-4; x--) assertEquals(maps.get(x),reverse.chunk(x,7));
+        assertTrue(maps.values().stream().flatMap(m -> m.values().stream()).anyMatch(s -> s.is(Blocks.VINE)));
+        assertTrue(prediction.diagnostics().contains("fallback=0"),prediction.diagnostics());
+        var bee = new TreeConfiguration.TreeConfigurationBuilder(base.trunkProvider,base.trunkPlacer,
+                base.foliageProvider,base.foliagePlacer,base.minimumSize).decorators(List.of(
+                new net.minecraft.world.level.levelgen.feature.treedecorators.BeehiveDecorator(1))).build();
+        var models = new PredictionTreeModels(RegistryAccess.EMPTY,sampler.generatorContext());
+        assertFalse(models.supports(new PlacedFeature(Holder.direct(new ConfiguredFeature<>(Feature.TREE,bee)),List.of())));
+        var level = new PredictionDecorationLevel(sampler,sampler,RegistryAccess.EMPTY,0,0);
+        level.beginStructure();
+        for (int y=64;y<80;y++) level.setBlock(new BlockPos(-1,y,0),Blocks.OAK_PLANKS.defaultBlockState(),0,0);
+        level.endFeature(true);
+        models.place(new PlacedFeature(decorated.feature(),List.of()),level,net.minecraft.util.RandomSource.create(1),new BlockPos(0,64,0));
+        for (int y=64;y<80;y++) assertTrue(level.getBlockState(new BlockPos(-1,y,0)).is(Blocks.OAK_PLANKS));
+    }
+
+    @Test void compareDecoratedJungleSkeletonsOnFixedChunks() {
+        var configured = lookup.lookupOrThrow(Registries.CONFIGURED_FEATURE).getOrThrow(
+                net.minecraft.resources.ResourceKey.create(Registries.CONFIGURED_FEATURE,
+                        ResourceLocation.withDefaultNamespace("mega_jungle_tree")));
+        var feature = new PlacedFeature(configured, List.of(CountPlacement.of(2),InSquarePlacement.spread(),
+                HeightmapPlacement.onHeightmap(Heightmap.Types.WORLD_SURFACE_WG),BiomeFilter.biome()));
+        var sampler = sampler(48271,Blocks.GRASS_BLOCK,List.of(feature));
+        var times = new long[3][7];
+        for (int round=-2;round<7;round++) {
+            for (boolean reuse : round%2==0 ? new boolean[]{false,true}:new boolean[]{true,false}) {
+                var prediction = new PredictionVegetation(sampler,null,reuse);
+                long start=System.nanoTime(); int blocks=0;
+                for(int x=-16;x<16;x++) blocks+=prediction.chunk(x,7).size();
+                long elapsed=System.nanoTime()-start;
+                assertTrue(blocks>1000,prediction.diagnostics());
+                if(round>=0) times[reuse?1:0][round]=elapsed;
+                if(round==6) System.out.println("JUNGLE_REUSE reuse="+reuse+" blocks="+blocks+" "+prediction.diagnostics());
+                if(reuse) {
+                    for(int x=-16;x<16;x++) prediction.invalidate(x,7);
+                    start=System.nanoTime(); int warm=0;
+                    for(int x=-16;x<16;x++) warm+=prediction.chunk(x,7).size();
+                    if(round>=0) times[2][round]=System.nanoTime()-start;
+                    assertEquals(blocks,warm);
+                }
+            }
+        }
+        for(var series:times) java.util.Arrays.sort(series);
+        System.out.printf(java.util.Locale.ROOT,"JUNGLE_REUSE chunks=32 exactMs=%.3f coldMs=%.3f warmMs=%.3f%n",
+                times[0][3]/1e6,times[1][3]/1e6,times[2][3]/1e6);
     }
 
     private static PlacedFeature tree() {

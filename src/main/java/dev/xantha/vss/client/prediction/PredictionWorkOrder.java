@@ -13,7 +13,10 @@ final class PredictionWorkOrder {
 
     static int refinementWorkers(int processors, int configured) {
         int half = Math.max(1, processors / 2);
-        return configured <= 0 ? half : Math.min(half, Math.max(1, Math.min(32, configured)));
+        if (configured > 0) {
+            return Math.min(half, Math.max(1, Math.min(32, configured)));
+        }
+        return PredictionPerformanceProfile.current().refinementWorkers(processors);
     }
 
     static int localRefinementPriority(double distanceSquared, int residentAxis, boolean surface) {

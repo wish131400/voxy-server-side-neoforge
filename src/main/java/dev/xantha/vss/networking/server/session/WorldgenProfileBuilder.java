@@ -16,6 +16,12 @@ public final class WorldgenProfileBuilder {
     }
 
     public static WorldgenProfileS2CPayload build(MinecraftServer server, long revision) {
+        return build(server, revision, null);
+    }
+
+    /** Only the requested dimension contributes generator-specific registry dependencies. */
+    public static WorldgenProfileS2CPayload build(MinecraftServer server, long revision,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
         if (server == null || server.getWorldData() == null) {
             return empty(revision);
         }
@@ -24,9 +30,11 @@ public final class WorldgenProfileBuilder {
         var dependencies = new dev.xantha.vss.common.worldgen.WorldgenRegistryDependencies(server.registryAccess());
         var generators = new java.util.LinkedHashMap<ServerLevel, Encoded>();
         for (ServerLevel level : server.getAllLevels()) {
+            if (dimension != null && !dimension.equals(level.dimension())) continue;
             if (generators.size() >= WorldgenProfileS2CPayload.MAX_DIMENSIONS) break;
             generators.put(level, WorldgenCodecSnapshot.encodeGenerator(
-                    level.getChunkSource().getGenerator(), server.registryAccess(), references, dependencies));
+                    level.getChunkSource().getGenerator(), server.registryAccess(), references, dependencies,
+                    TerraBlenderRegionSnapshot.regionTypeFor(level)));
         }
         Encoded registries = WorldgenCodecSnapshot.encodeRegistries(server.registryAccess(), server.getResourceManager(), references, dependencies);
         long registryFingerprint = fingerprintBytes(registries.bytes());

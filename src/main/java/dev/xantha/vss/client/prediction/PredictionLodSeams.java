@@ -5,6 +5,7 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.*;
+import java.lang.ref.WeakReference;
 
 /** Connects the selected surface heights at ownership boundaries. No world-bottom skirts. */
 final class PredictionLodSeams {
@@ -18,6 +19,15 @@ final class PredictionLodSeams {
 
     List<Patch> update(List<Surface> surfaces) {
         boolean unchanged = surfaces.size() == previous.size();
+        if (unchanged) {
+            for (var surface:surfaces) {
+                var old=previous.get(surface.tile().key());
+                if(old==null || old.tile()!=surface.tile() || !Arrays.equals(old.allowed(),surface.allowed())) {
+                    unchanged=false;break;
+                }
+            }
+            if(unchanged) return patches;
+        }
         var inputs = new HashMap<PredictionTileKey, Surface>();
         for (Surface surface : surfaces) {
             Surface old = previous.get(surface.tile().key());
@@ -44,6 +54,9 @@ final class PredictionLodSeams {
         patches = List.copyOf(next);
         return patches;
     }
+
+    String diagnostics() { return wallCache.diagnostics(); }
+    long wallIndexBuilds() { return wallCache.builds; }
 
     void clear() { previous = Map.of(); patches = List.of(); cache.clear(); wallCache.clear(); }
 
@@ -169,12 +182,11 @@ final class PredictionLodSeams {
 
     record HeightSpan(int bottom, int top) { }
 
-    /** Index integer terrain walls once per consulted tile/update. */
+    /** Index immutable terrain walls without retaining the source mesh or tile. */
     private static final class WallIndex {
         private final Long2ObjectOpenHashMap<IntArrayList> planes = new Long2ObjectOpenHashMap<>();
-        private final PredictionQuadMesh mesh;
         WallIndex(PredictionTile tile) {
-            mesh = tile.mesh().packed();
+            var mesh = tile.mesh().packed();
             for (int q = 0; q < mesh.quadCount(); q++) {
                 int nx = Math.round(mesh.normalX(q, 0)), nz = Math.round(mesh.normalZ(q, 0));
                 if (mesh.normalY(q, 0) != 0 || Math.abs(nx) + Math.abs(nz) != 1) continue;
@@ -193,11 +205,18 @@ final class PredictionLodSeams {
                 planes.computeIfAbsent(planeKey((int) plane, nx, nz), ignored -> new IntArrayList()).add(q);
             }
         }
+        long retainedBytes() {
+            // Include hash-table capacity, list backing arrays and object/entry overhead.
+            long bytes = 256L + 16L * it.unimi.dsi.fastutil.HashCommon.arraySize(planes.size(), .75F);
+            for (var list : planes.values()) bytes += 64L + 4L * list.elements().length;
+            return bytes;
+        }
         private static long planeKey(int plane, int nx, int nz) {
             return (long) plane << 3 | (nx != 0 ? 0 : 2) | (nx + nz > 0 ? 1 : 0);
         }
         void subtract(List<HeightSpan> gaps, Surface surface, int wx, int wz, int length, int nx, int nz) {
             PredictionTile tile = surface.tile();
+            var mesh = tile.mesh().packed();
             int lx = wx - tile.baseBlockX(), lz = wz - tile.baseBlockZ();
             var candidates = planes.get(planeKey(nx != 0 ? lx : lz, nx, nz));
             if (candidates == null) return;
@@ -225,37 +244,56 @@ final class PredictionLodSeams {
         }
     }
 
-    /** Immutable geometry indices survive coverage changes, with bounded retention. */
+    /** Keep indices across camera turns; weak owners never pin unloaded tile data. */
     static final class WallCache {
-        private record Entry(PredictionTile tile, WallIndex index, int weight) { }
+        private record Entry(WeakReference<PredictionTile> tile, WallIndex index, long weight) { }
         private final LinkedHashMap<PredictionTileKey, Entry> entries = new LinkedHashMap<>(16, .75F, true);
-        private int weight;
+        private final long maxBytes;
+        private final int maxEntries;
+        private long weight, builds, hits, evictions;
+        WallCache() { this(16L * 1024 * 1024, 1024); }
+        WallCache(long maxBytes, int maxEntries) {
+            this.maxBytes = maxBytes;
+            this.maxEntries = maxEntries;
+        }
         WallIndex get(PredictionTile tile) {
             Entry old = entries.get(tile.key());
-            if (old != null && old.tile() == tile) return old.index();
+            if (old != null && old.tile().get() == tile) { hits++; return old.index(); }
             if (old != null) { entries.remove(tile.key()); weight -= old.weight(); }
             var index = new WallIndex(tile);
-            int cost = tile.mesh().packed().quadCount();
-            if (cost <= 262144) {
-                while (!entries.isEmpty() && (weight + cost > 262144 || entries.size() >= 64)) {
-                    weight -= entries.pollFirstEntry().getValue().weight();
+            builds++;
+            long cost = index.retainedBytes();
+            if (cost <= maxBytes && maxEntries > 0) {
+                while (!entries.isEmpty() && (weight + cost > maxBytes || entries.size() >= maxEntries)) {
+                    var iterator = entries.values().iterator();
+                    weight -= iterator.next().weight();
+                    iterator.remove();
+                    evictions++;
                 }
-                entries.put(tile.key(), new Entry(tile, index, cost));
+                entries.put(tile.key(), new Entry(new WeakReference<>(tile), index, cost));
                 weight += cost;
             }
             return index;
         }
         void retain(Map<PredictionTileKey, Surface> surfaces) {
-            var iterator = entries.values().iterator();
+            var iterator = entries.entrySet().iterator();
             while (iterator.hasNext()) {
                 var entry = iterator.next();
-                var surface = surfaces.get(entry.tile().key());
-                if (surface == null || surface.tile() != entry.tile()) {
-                    weight -= entry.weight(); iterator.remove();
+                var tile = entry.getValue().tile().get();
+                var surface = surfaces.get(entry.getKey());
+                // Visibility is transient. Only discard collected or replaced geometry.
+                if (tile == null || surface != null && surface.tile() != tile) {
+                    weight -= entry.getValue().weight(); iterator.remove();
                 }
             }
         }
-        void clear() { entries.clear(); weight = 0; }
+        long retainedBytes() { return weight; }
+        int size() { return entries.size(); }
+        String diagnostics() {
+            return "builds=" + builds + ",hits=" + hits + ",evictions=" + evictions
+                    + ",entries=" + entries.size() + ",bytes=" + weight;
+        }
+        void clear() { entries.clear(); weight = 0; builds = hits = evictions = 0; }
     }
 
     private static int pair(int a, int b) { return (a & 65535) | (b & 65535) << 16; }

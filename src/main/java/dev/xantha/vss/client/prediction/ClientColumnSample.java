@@ -35,6 +35,8 @@ public record ClientColumnSample(
     public static final int FLAG_SURFACE_ONLY = 1 << 28;
     /** Preview geometry must be resampled before exact terrain or decoration. */
     public static final int FLAG_APPROXIMATE = 1 << 27;
+    /** Interpolated-density display surface, distinct from the raw first preview. */
+    public static final int FLAG_DISPLAY = 1 << 26;
     public static final int PREFILLED = 0xFF;
 
     public boolean hasFluid() {
@@ -48,6 +50,7 @@ public record ClientColumnSample(
     public boolean surfaceOnly() { return (flags & FLAG_SURFACE_ONLY) != 0; }
     public boolean approximate() { return (flags & FLAG_APPROXIMATE) != 0; }
     boolean reusableFor(boolean preview) { return preview || !approximate() || captured(); }
+    boolean reusableForDisplay() { return !approximate() || captured() || (flags & FLAG_DISPLAY) != 0; }
 
     ClientColumnSample withoutVegetationHints() {
         return new ClientColumnSample(surfaceY, fluidY, biomeIndex, topBlockIndex,

@@ -477,6 +477,19 @@ pub struct NormalNoise {
     factor: f64,
 }
 impl NormalNoise {
+    /// Conservative absolute bound, including negative octave amplitudes.
+    pub(crate) fn absolute_bound(&self) -> f64 {
+        let bound = |n: &PerlinNoise| {
+            let mut weight=n.value;
+            let mut total=0.;
+            for (i,level) in n.levels.iter().enumerate() {
+                if level.is_some() { total += n.amplitudes[i].abs()*2.*weight.abs(); }
+                weight*=0.5;
+            }
+            total
+        };
+        (bound(&self.first)+bound(&self.second))*self.factor.abs()*1.000000000001
+    }
     pub fn new(random: &mut Random, first: i32, amplitudes: &[f64], legacy: bool) -> Option<Self> {
         let a = PerlinNoise::new(random, first, amplitudes, legacy)?;
         let b = PerlinNoise::new(random, first, amplitudes, legacy)?;

@@ -254,6 +254,7 @@ public final class PredictionMeshBuilder {
         for (int z = 0; z < cellAxis; z++) {
             for (int x = 0; x < cellAxis; x++) {
                 int cell = z * cellAxis + x;
+                terrain.beginCell(vegetation != null && !vegetation.blocks().isEmpty());
                 cellOffsets[cell] = terrain.vertexCount();
                 ClientColumnSample s00 = samples[index(x, z, gridSize)];
                 ClientColumnSample s10 = samples[index(x + 1, z, gridSize)];
@@ -782,30 +783,28 @@ public final class PredictionMeshBuilder {
 
     private static void addPlacedVegetation(VertexAccumulator out, PredictionVegetation.Tile tile,
                                             int cell, int surfaceY, int foliageTint, PredictionSurfaceEdits edits) {
-        if (tile.voxelSize() == 1) {
-            for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> edits.floor(x, z, surfaceY))) {
-                int direction = face.direction();
-                int color = PredictionMaterialPalette.colorForState(face.state(),
-                        direction == 0 ? 0xFF65934A : 0xFF888888, foliageTint, direction);
-                int material = packSprite(color, spriteOf(face.state(), direction));
-                if (direction == 0) {
-                    addFeatureTop(out, face.x(), face.z(), face.top(), 1, 1,
-                            material, material, material, material);
-                } else if (direction <= 2) {
-                    addFeatureZ(out, face.x(), face.z() + (direction == 2 ? 1 : 0), face.bottom(),
-                            1, face.top() - face.bottom(), material, material, material, material,
-                            direction == 1 ? -1 : 1);
-                } else {
-                    addFeatureX(out, face.x() + (direction == 4 ? 1 : 0), face.z(), face.bottom(),
-                            1, face.top() - face.bottom(), material, material, material, material,
-                            direction == 3 ? -1 : 1);
-                }
+        for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> edits.floor(x, z, surfaceY))) {
+            int direction = face.direction();
+            int color = PredictionMaterialPalette.colorForState(face.state(),
+                    direction == 0 ? 0xFF65934A : 0xFF888888, foliageTint, direction);
+            int material = packSprite(color, spriteOf(face.state(), direction));
+            if (direction == 0) {
+                addFeatureTop(out, face.x(), face.z(), face.top(), 1, 1,
+                        material, material, material, material);
+            } else if (direction <= 2) {
+                addFeatureZ(out, face.x(), face.z() + (direction == 2 ? 1 : 0), face.bottom(),
+                        1, face.top() - face.bottom(), material, material, material, material,
+                        direction == 1 ? -1 : 1);
+            } else {
+                addFeatureX(out, face.x() + (direction == 4 ? 1 : 0), face.z(), face.bottom(),
+                        1, face.top() - face.bottom(), material, material, material, material,
+                        direction == 3 ? -1 : 1);
             }
         }
         for (var voxel : tile.cell(cell)) {
             int x = voxel.x(), z = voxel.z(), size = voxel.size();
             if (!PredictionVegetation.renderable(voxel.state())) continue;
-            if (tile.voxelSize() == 1 && PredictionVegetation.woody(voxel.state())) continue;
+            if (PredictionVegetation.mergeable(voxel.state(), size)) continue;
             int floor = edits.floor(x, z, surfaceY);
             int bottom = Math.max(floor, voxel.y());
             int top = voxel.y() + size;
@@ -989,6 +988,8 @@ public final class PredictionMeshBuilder {
         private int[] colors;
         private int count;
         private int offsetX, offsetZ;
+        private int mergeStart = -1;
+        private final float[] mergeBounds = new float[10];
 
         private VertexAccumulator(int capacity) {
             positions = new float[Math.max(18, capacity * 3)];
@@ -997,6 +998,8 @@ public final class PredictionMeshBuilder {
         }
 
         int vertexCount() { return count; }
+
+        void beginCell(boolean merge) { mergeStart = merge ? count : -1; }
 
         void triangle(float x0, float y0, float z0, float[] n0, int c0,
                       float x1, float y1, float z1, float[] n1, int c1,
@@ -1010,14 +1013,20 @@ public final class PredictionMeshBuilder {
             positions[p] = x + offsetX; positions[p + 1] = y; positions[p + 2] = z + offsetZ;
             normals[p] = normal[0]; normals[p + 1] = normal[1]; normals[p + 2] = normal[2];
             colors[count++] = color;
+            if (count % 6 == 0) {
+                if (mergeStart >= 0)
+                    count = PredictionQuadMerger.mergeLast(positions, normals, colors, count, mergeStart, mergeBounds);
+                if (count > 262_144) throw new PredictionMemoryBudget.MeshLimitException();
+            }
         }
 
         private void ensure(int required) {
-            if (required > 262_144) {
+            // At most one candidate quad beyond the cap, then merge or fail.
+            if (required > 262_150) {
                 throw new PredictionMemoryBudget.MeshLimitException();
             }
             if (required * 3 <= positions.length && required <= colors.length) return;
-            int newCapacity = Math.min(262_144, Math.max(required, count * 2 + 6));
+            int newCapacity = Math.min(262_150, Math.max(required, count * 2 + 6));
             positions = java.util.Arrays.copyOf(positions, newCapacity * 3);
             normals = java.util.Arrays.copyOf(normals, newCapacity * 3);
             colors = java.util.Arrays.copyOf(colors, newCapacity);

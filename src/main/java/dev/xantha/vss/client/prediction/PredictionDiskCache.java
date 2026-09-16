@@ -23,6 +23,7 @@ final class PredictionDiskCache implements AutoCloseable {
     private static final ExecutorService COMMITS = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "vss-prediction-disk");
         thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
         return thread;
     });
     private static final ConcurrentMap<Path, Shared> ROOTS = new ConcurrentHashMap<>();
@@ -61,6 +62,12 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Shared shared;
     private volatile boolean closed;
     private final LongAdder hits = new LongAdder(), misses = new LongAdder(), writes = new LongAdder(), errors = new LongAdder();
+    // P2-12: one counter could not tell "no file yet" (normal on first visit)
+    // from "file present but rejected" (a fingerprint or format bug). These
+    // split the same misses so a low hit rate can be explained rather than
+    // guessed at.
+    private final LongAdder missAbsent = new LongAdder(), missStale = new LongAdder(),
+            missCorrupt = new LongAdder(), missIdentity = new LongAdder(), missRaced = new LongAdder();
     private final Map<String, BlockState> decodedStates = new LinkedHashMap<>(64, .75F, true);
     private final Map<BlockState, String> encodedStates = new LinkedHashMap<>(64, .75F, true);
     private final LongAdder stateDecodes = new LongAdder();
@@ -221,20 +228,21 @@ final class PredictionDiskCache implements AutoCloseable {
     long stateDecodes() { return stateDecodes.sum(); }
 
     private <T> T read(Lease lease, Decoder<T> decoder) {
-        if (!lease.readable || !lease.valid()) { misses.increment(); return null; }
+        if (!lease.readable || !lease.valid()) { missStale.increment(); misses.increment(); return null; }
         Path file = file(lease.key);
         try (var input = new DataInputStream(new InflaterInputStream(new BufferedInputStream(Files.newInputStream(file))))) {
-            if (input.readInt() != MAGIC) throw new IOException("cache magic mismatch");
+            if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
             if ((version != schema(lease.key) && !(lease.key.kind == 0 && version == 1)) || input.readLong() != fingerprint
                     || input.readInt() != lease.key.kind || input.readInt() != lease.key.x || input.readInt() != lease.key.z
-                    || input.readInt() != lease.key.detail) throw new IOException("cache identity mismatch");
+                    || input.readInt() != lease.key.detail) { missIdentity.increment(); throw new IOException("cache identity mismatch"); }
             T result = decoder.read(input, version);
-            if (input.read() != -1) throw new IOException("trailing cache data"); // also validates zlib checksum
-            if (!lease.valid()) { misses.increment(); return null; }
+            if (input.read() != -1) { missCorrupt.increment(); throw new IOException("trailing cache data"); } // also validates zlib checksum
+            if (!lease.valid()) { missRaced.increment(); misses.increment(); return null; }
             hits.increment();
             return result;
         } catch (NoSuchFileException absent) {
+            missAbsent.increment();
             misses.increment();
         } catch (IOException | RuntimeException failure) {
             error(failure);
@@ -332,7 +340,8 @@ final class PredictionDiskCache implements AutoCloseable {
         // Decoration can read 32 blocks beyond its source chunk and place
         // into neighbors. Invalidate every source whose bounded reads overlap.
         for (int z = chunkZ - 2; z <= chunkZ + 2; z++) for (int x = chunkX - 2; x <= chunkX + 2; x++) {
-            for (int settings = 0; settings < 4; settings++) keys.add(Key.surface(x, z, settings));
+            // Bit 2 separates reusable visual trees from exact feature replay.
+            for (int settings = 0; settings < 32; settings++) keys.add(Key.surface(x, z, settings));
         }
         return keys;
     }
@@ -343,7 +352,13 @@ final class PredictionDiskCache implements AutoCloseable {
                 .resolve(key.x + "_" + key.z + ".vpd");
     }
     String diagnostics() { return "disk={hits=" + hits.sum() + ",misses=" + misses.sum() + ",writes=" + writes.sum()
-            + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"; }
+            + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"
+            // Why the misses happened. `absent` is the healthy case (nothing
+            // written yet); `identity`/`corrupt` mean a stored entry was
+            // rejected, which is the state that silently destroys a warm cache.
+            + ",missReason={absent=" + missAbsent.sum() + ",stale=" + missStale.sum()
+            + ",identity=" + missIdentity.sum() + ",corrupt=" + missCorrupt.sum()
+            + ",raced=" + missRaced.sum() + "}"; }
     Path root() { return root; }
     long hits() { return hits.sum(); }
     void flush() {

@@ -67,6 +67,8 @@ final class ClientWorldgenRegistries {
     private final Map<ResourceLocation, Integer> structureSetSalts = new HashMap<>();
     private final RegistryAccess fallback;
     private final RegistryOps<JsonElement> ops;
+    /** Verbatim decoded snapshot; the Rust document reads registry sections from it. */
+    private JsonObject snapshotRoot = new JsonObject();
 
     private ClientWorldgenRegistries(RegistryAccess fallback) {
         this.fallback = fallback;
@@ -90,6 +92,7 @@ final class ClientWorldgenRegistries {
     static ClientWorldgenRegistries decode(JsonObject root, RegistryAccess fallback,
             List<net.minecraft.resources.RegistryDataLoader.RegistryData<?>> codecs) {
         ClientWorldgenRegistries registries = new ClientWorldgenRegistries(fallback);
+        registries.snapshotRoot = root;
         // Configured selectors reference placed features, which in turn reference
         // configured features. Publish all snapshot lookups before decoding either.
         registries.declareSnapshot(root, "noises", Registries.NOISE);
@@ -171,6 +174,9 @@ final class ClientWorldgenRegistries {
     }
 
     JsonObject templates() { return templates; }
+
+    /** The decoded registry snapshot, including the TerraBlender section when present. */
+    JsonObject snapshotRoot() { return snapshotRoot; }
 
     /** Mirrors Lithostitched's server-start seed binding on isolated snapshot values only. */
     void bindWorldSeed(long seed) {

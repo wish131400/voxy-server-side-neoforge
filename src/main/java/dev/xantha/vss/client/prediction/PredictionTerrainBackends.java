@@ -24,9 +24,19 @@ public final class PredictionTerrainBackends {
 
     public static Optional<ClientTerrainSampler> open(DimensionProfile profile, long seed,
                                                       RegistryAccess registries) {
+        return open(profile, seed, registries, null);
+    }
+
+    public static Optional<ClientTerrainSampler> open(DimensionProfile profile, long seed,
+                                                      RegistryAccess registries,
+                                                      ClientWorldgenRegistries worldgen) {
+        return open(profile, seed, registries, worldgen, null);
+    }
+    static Optional<ClientTerrainSampler> open(DimensionProfile profile, long seed,
+            RegistryAccess registries, ClientWorldgenRegistries worldgen, RustWorldgenDocument.SharedInputs inputs) {
         for (PredictionTerrainBackend backend : BACKENDS) {
             try {
-                Optional<ClientTerrainSampler> result = backend.open(profile, seed, registries);
+                Optional<ClientTerrainSampler> result = backend.open(profile, seed, registries, worldgen, inputs);
                 if (result.isPresent()) return result;
             } catch (RuntimeException ignored) {
                 // A failed optional backend must not disable the vanilla sampler.
