@@ -10,7 +10,7 @@ captures are supplementary regression data; they do not define the algorithm.
 
 `ClientWorldgenProfileDecoder` selects `RustTerrainSampler` for supported noise
 generators when the independently named `vss_native_core` library is available.
-The worldgen interface is JNI ABI **3** (`RustWorldgenBackend`); the noise-only
+The worldgen interface is JNI ABI **5** (`RustWorldgenBackend`); the noise-only
 probe keeps ABI 1 for validation. The release packages the same core for
 **Windows x86_64, Linux x86_64/aarch64, macOS x86_64/aarch64**.
 Unknown targets use the Java sampler. The only production native backend is this core.
@@ -28,6 +28,27 @@ uses one stable preliminary-height anchor per surface cell, and omits preview
 steepness scans. NoiseChunk-backed exact columns stop at the exterior through
 Minecraft's original iterator. FreeTerraForged selects erosion by stage rather
 than spacing and isolates approximate biome/material caches from exact work.
+
+ABI 4 adds `displayPoints` for full-resolution display terrain before exact
+surface decoration. It searches density-cell intervals on qualifying dry land,
+retains original aquifer traversal for coasts and custom fluid routers, and
+summarizes three surface materials using the original rules and local slope.
+Compatible uniform 8x8 grids probe the perimeter and four centre points before
+interpolating interiors. This is an error indicator, not a guaranteed maximum
+error bound. Structures, stateful graphs, geometry-changing rules and special
+surface biomes retain the exact fallback. Approximate records carry bits 26/27;
+only exact fallback records may populate exact caches. Existing exact disk cache
+identities stay valid, and exact decoration rejects display approximations. Work
+contexts and display results have separate bounded caches.
+
+ABI 5 adds `decorationProxy`, `decorationPoints` and `decorationQueryStats`.
+Prediction vegetation requests lazy 4x4 pages instead of entire 16x16 neighbour
+chunks. Explicit visual plant jobs can reuse the display cache; structures and
+unknown feature implementations keep exact ground queries. Original `surfaceProxy`
+semantics remain available for exact callers and differential benchmarks. Java
+and native display vegetation share the same column records. Query statistics
+are reported on demand rather than printed per feature. Final plant caches use
+a separate policy bit; exact terrain caches remain unchanged.
 
 Cross compilation from Windows uses Rust target standard libraries and pinned
 Zig 0.13.0 / cargo-zigbuild 0.23.4, through `build-cross-platform.ps1 -Package`.
@@ -206,3 +227,20 @@ The server now exports these as `noise_seed_aliases` in each generator snapshot;
 Rust consumes the aliases only during noise construction. A standalone datapack
 without the Tectonic mod does not receive this remapping. See
 `../prediction/TECTONIC_NOISE_SEEDS_2026-09-09.md` for live-server validation.
+
+Biome routing preserves Blueprint slice order and the wrapped TerraBlender
+region tree. Both the Java fallback and native core reconstruct that order;
+a bare Blueprint codec is insufficient because it drops the live routing state.
+The snapshot includes nested region metadata, and native capability checks reject
+older cores that would ignore it. The generator bytes participate in cache identity.
+
+Validation commands:
+
+```text
+cargo test --manifest-path tools/rust/vss-native-core/Cargo.toml --locked --release
+```
+
+Use the standard Gradle test task for Java regressions. Optional mod inputs are
+forwarded by `tools/prediction/compat-tests.gradle`; real OpenGL tests require
+`-I tools/prediction/gpu-tests.gradle`. Tests needing captured worlds or third-party
+jars remain opt-in. Local captures and timing reports are not included in Git.

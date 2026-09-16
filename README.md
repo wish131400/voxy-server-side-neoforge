@@ -48,7 +48,9 @@ VSS 主版本号统一固定为 `0.3`，保留加载器与 Minecraft 版本标�
 
 客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能默认开启，可用 `enablePrediction` 关闭。
 
-预测范围由 `predictionDistanceBlocks` 控制（默认 8192 方块），近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样优先使用随包的原生 Rust 后端，不可用时回退 Java；预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
+预测范围由 `predictionDistanceBlocks` 控制（默认 8192 方块），近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系与地表规则，植被和结构保留 Java 上下文及兼容回退。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
+
+生物群系快照支持 TerraBlender 区域和 Blueprint 切片的嵌套组合，Java 与 Rust 都保留内部区域选择，避免石岸被预测为玄武岩悬崖。缺少必要快照时不启用该维度预测；生成快照变化后会使用独立的本地缓存。
 
 预测只是对世界生成的近似：不执行完整雕刻、装饰与结构地形融合，也不包含玩家改动，需要完全准确时以服务端下发的真实列为准。更细的范围与缓存行为见下方客户端配置。
 
@@ -125,7 +127,7 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 
 `surface` 诊断包含地表候选/完成网格数、基础远景与近处地形是否就绪、实际生成块数、进入网格的块数，以及跳过的 feature/结构数。自动日志受 `debugLogging` 控制；也可通过 `/vssclient stats` 主动查询。Voxy/Sodium 设置页提供植被开关、地表建筑开关与地表内容范围。
 
-服务端的 `enablePredictionSync` 控制是否发送 `worldgen_profile`。客户端可用 `/vssclient stats` 查看 `profile`、`tiles`、`pending` 和当前 exact/预测会话状态。
+服务端的 `enablePredictionSync` 控制是否发送 `worldgen_profile`。客户端可用 `/vssclient stats` 查看 `profile`、`tiles`、`pending` 和当前 exact/预测会话状态；地形后端诊断会显示当前 Rust 算法标识或 Java。
 
 ### FreeTerraForged 预测适配
 

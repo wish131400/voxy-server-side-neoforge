@@ -15,9 +15,23 @@ $oldLld = $env:VSS_RUST_LLD
 try {
     $env:PATH = "$(Join-Path $toolRoot 'ziglang');$(Split-Path -Parent $cargo);$oldPath"
     $env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'
-    & $cargo build --manifest-path "$crate/Cargo.toml" --locked --release --target x86_64-pc-windows-msvc
+    # Native builds write their progress to stderr. Windows PowerShell 5.1 turns
+    # a native command's stderr into a terminating NativeCommandError while
+    # $ErrorActionPreference is 'Stop', and `2>&1` alone does not suppress it.
+    # The preference is therefore relaxed for the duration of the builds, with
+    # the explicit $LASTEXITCODE checks below carrying the failure signal. It is
+    # restored before packaging, whose cmdlets must still fail loudly.
+    $ErrorActionPreference = 'Continue'
+    # `2>&1` on the native build calls below is required on Windows PowerShell
+    # 5.1: with $ErrorActionPreference = 'Stop', a native command that writes to
+    # stderr raises a terminating NativeCommandError, and cargo reports its
+    # progress on stderr. The redirect keeps that output visible while leaving
+    # the explicit $LASTEXITCODE checks as the real failure signal. It is
+    # deliberately NOT applied to `rustc --print sysroot` below, whose stdout is
+    # used as a path.
+    & $cargo build --manifest-path "$crate/Cargo.toml" --locked --release --target x86_64-pc-windows-msvc 2>&1
     if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
-    & $zigbuild zigbuild --manifest-path "$crate/Cargo.toml" --locked --release --target x86_64-unknown-linux-gnu.2.28 --target aarch64-unknown-linux-gnu.2.28
+    & $zigbuild zigbuild --manifest-path "$crate/Cargo.toml" --locked --release --target x86_64-unknown-linux-gnu.2.28 --target aarch64-unknown-linux-gnu.2.28 2>&1
     if ($LASTEXITCODE -ne 0) { throw 'Linux builds failed' }
     $env:MACOSX_DEPLOYMENT_TARGET = '11.0'
     # rust-lld honors rustc's JNI export list and deployment target. Zig's
@@ -32,9 +46,10 @@ try {
     foreach ($target in @('x86_64-apple-darwin','aarch64-apple-darwin')) {
         & $cargo rustc --manifest-path "$crate/Cargo.toml" --locked --release --lib --target $target -- `
             -C "linker=$PSScriptRoot/ld64-windows.cmd" -C linker-flavor=ld64.lld -L "native=$stubs" `
-            -C link-arg=-install_name -C link-arg=@rpath/libvss_native_core.dylib -C strip=symbols
+            -C link-arg=-install_name -C link-arg=@rpath/libvss_native_core.dylib -C strip=symbols 2>&1
         if ($LASTEXITCODE -ne 0) { throw "macOS build failed: $target" }
     }
+    $ErrorActionPreference = 'Stop'
     if ($Package) {
         $targets = @(
             @('x86_64-pc-windows-msvc','windows-x86_64','vss_native_core.dll'),

@@ -1,5 +1,8 @@
 allprojects {
     tasks.withType(Test).configureEach {
+        // RenderSystem permits initialization only once per JVM; each hidden
+        // GL context must also have independent static shader/atlas state.
+        forkEvery = 1
         systemProperty 'vss.gpuTests', 'true'
         testLogging.showStandardStreams = true
     }

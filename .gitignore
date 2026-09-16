@@ -39,3 +39,10 @@ out/
 /tools/prediction/terrain-releases.json
 /tools/prediction/terrain-version-matrix.ps1
 /tools/rust/vss-native-core/examples/sparse_bench.rs
+
+# Local Python bytecode and diagnostic write-ups (tracked docs are unaffected).
+__pycache__/
+*.py[cod]
+/tools/prediction/*.md
+/tools/rust/*_20[0-9][0-9]-*.md
+/docs/PORT_*_SYNC_20[0-9][0-9]-*.md
