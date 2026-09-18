@@ -47,6 +47,9 @@ public final class ExistingColumnPreloader {
     }
 
     public void schedule(ServerPlayer player, PlayerRequestState state) {
+        // Strict clients pull only the next incomplete ring. Unsolicited cache
+        // replay bypasses that order and wastes disk/bandwidth on hidden columns.
+        if (state.requiresStrictLodOrder()) return;
         if (VSSServerNetworking.isServerStopping() || !persistentStore.enabled()) {
             return;
         }
@@ -70,6 +73,7 @@ public final class ExistingColumnPreloader {
             }
             ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
             PlayerRequestState state = entry.getValue();
+            if (state.requiresStrictLodOrder()) continue;
             if (player != null) {
                 updateWindow(player, state);
             }
@@ -102,6 +106,7 @@ public final class ExistingColumnPreloader {
                 }
                 ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
                 PlayerRequestState state = entry.getValue();
+                if (state.requiresStrictLodOrder()) continue;
                 if (player == null || state.preloadColumnCount() <= 0) {
                     continue;
                 }

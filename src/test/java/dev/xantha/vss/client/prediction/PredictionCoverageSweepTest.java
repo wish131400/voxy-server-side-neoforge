@@ -10,8 +10,9 @@ class PredictionCoverageSweepTest {
     @Test void slowProbesResumeBothBandsAndResetOnMovementAndGeneration() {
         var clock = new AtomicLong();
         var sweep = new PredictionCoverageSweep(clock::get);
-        var positions = new ArrayList<int[]>();
-        for (int x = 0; x < 12; x++) positions.add(new int[]{x, 0});
+        int[] packed = new int[12];
+        for (int x = 0; x < 12; x++) packed[x] = PredictionCoverageOffsets.pack(x, 0);
+        var positions = new PredictionCoverageOffsets(packed);
         var seen = new ArrayList<Integer>();
         java.util.function.IntPredicate probe = i -> { seen.add(i); clock.addAndGet(1_000_000); return (i & 1) == 0; };
         var first = sweep.run(positions, 5, 0, 0, 1, () -> true, probe);
@@ -32,8 +33,8 @@ class PredictionCoverageSweepTest {
 
     @Test void emptyAndSingleBandScansNeverRepeatAColumnWithinOnePass() {
         var sweep = new PredictionCoverageSweep(() -> 0);
-        assertEquals(0, sweep.run(List.of(), 16, 0, 0, 1, () -> true, i -> true).checked());
-        var positions = List.of(new int[]{0,0}, new int[]{1,0});
+        assertEquals(0, sweep.run(new PredictionCoverageOffsets(new int[0]), 16, 0, 0, 1, () -> true, i -> true).checked());
+        var positions = new PredictionCoverageOffsets(new int[]{0, PredictionCoverageOffsets.pack(1, 0)});
         assertEquals(2, sweep.run(positions, 16, 0, 0, 1, () -> true, i -> true).checked());
         assertEquals(2, sweep.run(positions, 0, 0, 0, 1, () -> true, i -> true).checked());
     }

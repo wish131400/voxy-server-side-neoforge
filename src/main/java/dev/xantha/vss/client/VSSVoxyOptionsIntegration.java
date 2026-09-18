@@ -240,7 +240,7 @@ public final class VSSVoxyOptionsIntegration {
                     configBuilder,
                     "vss.voxy_options.group.prediction_limits",
                      sodium08IntOption(configBuilder, "prediction_distance_blocks", "vss.voxy_options.prediction_distance_blocks",
-                             "vss.voxy_options.prediction_distance_blocks.tooltip", "HIGH", 8_192,
+                             "vss.voxy_options.prediction_distance_blocks.tooltip", "HIGH", 4_096,
                              VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
                              VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS, 1_024,
                              value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,

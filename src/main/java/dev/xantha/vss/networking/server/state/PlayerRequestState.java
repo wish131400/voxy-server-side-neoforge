@@ -296,6 +296,10 @@ public final class PlayerRequestState {
         this.clientCapabilities = clientCapabilities;
     }
 
+    public synchronized boolean requiresStrictLodOrder() {
+        return (clientCapabilities & dev.xantha.vss.common.VSSConstants.CAPABILITY_STRICT_LOD_ORDER) != 0;
+    }
+
     public synchronized boolean supportsZstdColumns() {
         return (clientCapabilities & dev.xantha.vss.common.VSSConstants.CAPABILITY_ZSTD_COLUMNS) != 0;
     }

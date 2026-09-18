@@ -83,6 +83,7 @@ final class PredictionPackedMesh {
     void morph(float[] field, int minY, int maxY) { morph=field; morphMinY=minY; morphMaxY=maxY; }
     float[] morph() { return morph; }
     long uploadBytes() { return (long)quads.length*4 + (morph == null ? 0 : (morph.length+3)/4*16L); }
+    long retainedHeapBytes() { return 4096L + quads.length * 4L + (morph == null ? 0L : morph.length * 4L); }
     int morphMinY() { return morphMinY; }
     int morphMaxY() { return morphMaxY; }
     private final int[] quads;
@@ -161,6 +162,7 @@ final class PredictionPackedMesh {
 
     /** Packs sampled voxel geometry; coverage handover never displaces faces. */
     static PredictionPackedMesh pack(PredictionTileManager.PredictionTile tile) {
+        if (tile.mesh().gpuPayload() != null) return tile.mesh().gpuPayload();
         PredictionQuadMesh src = tile.mesh().packed();
         int cellAxis = src.cellAxis();
         int terrainQuads = src.quadCount();
@@ -268,7 +270,8 @@ final class PredictionPackedMesh {
             uvYPos = false;
         } else if (cross) {
             axisClass = Math.abs(nx) > Math.abs(nz) ? 1 : 2;
-            uvYPos = true;
+            // Atlas V=0 is the sprite's top; plant height increases upward.
+            uvYPos = false;
         } else if (Math.abs(ny) >= Math.abs(nx) && Math.abs(ny) >= Math.abs(nz)) {
             axisClass = 0;
             uvYPos = false;

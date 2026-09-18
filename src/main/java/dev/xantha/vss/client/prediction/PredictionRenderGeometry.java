@@ -57,6 +57,8 @@ final class PredictionRenderGeometry {
             var entry=item.geometry();
             if(!entry.visible(camera,frustum,horizon)) continue;
             item.distance=entry.distance(camera);item.faces=VssLodFaceGroup.visibleMask(entry.bounds(),camera);
+            var payload=entry.tile().mesh().gpuPayload();
+            if(payload!=null && payload.downFaces()) item.faces |= 1 << VssLodFaceGroup.HORIZONTAL;
             visible.add(item);
         }
         visible.sort(Comparator.comparingDouble(Visible::distance));

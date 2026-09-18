@@ -48,6 +48,43 @@ class PredictionMeshMemoryTest {
         }
     }
 
+    @Test void constantFaceNormalsUseOneVectorAndPreserveNonuniformCornersExactly() {
+        float[] normals = new float[24];
+        for (int c = 0; c < 4; c++) {
+            normals[c * 3 + 1] = 1;
+            normals[12 + c * 3] = -1;
+        }
+        assertArrayEquals(new float[]{0,1,0,-1,0,0}, PredictionQuadMesh.compactNormals(normals, 2));
+        normals[18] = -.75f;
+        assertSame(normals, PredictionQuadMesh.compactNormals(normals, 2), "smooth model normals must remain lossless");
+    }
+
+    @Test void compactNormalAccessPreservesEveryPackedGpuWord() throws Exception {
+        ClientColumnSample[] samples = new ClientColumnSample[17 * 17];
+        for (int z = 0; z < 17; z++) for (int x = 0; x < 17; x++)
+            samples[z * 17 + x] = column(x < 8 ? 53 : 64 + z % 4, x < 8 ? 1 : 0, 0);
+        var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699, 1, 17, false);
+        var tile = tile(mesh, 1);
+        var quads = mesh.packed();
+        var compact = PredictionPackedMesh.pack(tile);
+        long compactBytes = quads.retainedHeapBytes();
+        for (String name : new String[]{"normals", "waterNormals"}) {
+            var field = PredictionQuadMesh.class.getDeclaredField(name); field.setAccessible(true);
+            float[] values = (float[]) field.get(quads);
+            int count = name.equals("normals") ? quads.quadCount() : quads.waterQuadCount();
+            assertEquals(count * 3, values.length);
+            float[] expanded = new float[count * 12];
+            for (int q = 0; q < count; q++) for (int c = 0; c < 4; c++)
+                System.arraycopy(values, q * 3, expanded, q * 12 + c * 3, 3);
+            field.set(quads, expanded);
+        }
+        assertArrayEquals(PredictionPackedMesh.pack(tile).quads(), compact.quads());
+        assertEquals((long)(quads.quadCount() + quads.waterQuadCount()) * 36,
+                quads.retainedHeapBytes() - compactBytes);
+        System.out.println("NORMAL_COMPACTION savedBytes=" + (quads.retainedHeapBytes() - compactBytes)
+                + ", quads=" + (quads.quadCount() + quads.waterQuadCount()));
+    }
+
     @Test
     void underwaterTerrainCarriesWaterDepthLightWithoutDarkeningTheWaterSurface() {
         int grid = 17;
@@ -69,6 +106,48 @@ class PredictionMeshMemoryTest {
             if (q < packed.terrainQuadCount()) assertTrue(loss >= 10, "submerged ground loses sky light with depth");
             else assertEquals(0, loss, "the exposed water surface remains lit by the sky");
         }
+    }
+
+    @Test void publishedMeshesKeepOneVisualPayloadAcrossFluidsVegetationAndWideTiles() {
+        for (int spacing : new int[]{1, 2, 8, 1024}) {
+            int grid = 17;
+            var samples = new ClientColumnSample[grid * grid];
+            for (int z = 0; z < grid; z++) for (int x = 0; x < grid; x++)
+                samples[z * grid + x] = column(x < 6 ? 45 : 64 + (x + z) % 3 * 8,
+                        x < 6 ? 1 : 0, x > 9 && z % 5 == 0 ? ClientColumnSample.FLAG_TREE_HERE : 0);
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699, spacing, grid,
+                    true, new PredictionFeatureStampCache(), null, null, 0, 0);
+            assertPublishedCompaction(mesh, spacing);
+        }
+    }
+
+    static void assertPublishedCompaction(PredictionMesh source, int spacing) {
+        var original = source.packed();
+        var expected = PredictionPackedMesh.pack(tile(source, spacing));
+        var compact = source.compactForRendering();
+        long before = compact.retainedHeapBytes() + expected.retainedHeapBytes();
+        var tile = tile(compact, spacing);
+        compact.prepareGpuPayload(tile);
+        var actual = compact.gpuPayload();
+        assertArrayEquals(expected.quads(), actual.quads(), "every leaf/model/fluid vertex and material must survive");
+        assertSame(actual, PredictionPackedMesh.pack(tile), "reupload must reuse the sole visual payload");
+        compact.prepareGpuPayload(tile);
+        assertSame(actual, compact.gpuPayload());
+        var summary = compact.seamMesh();
+        for (int cell = 0; cell < original.cellAxis() * original.cellAxis(); cell++) {
+            int q = original.quadForCell(cell);
+            assertEquals(q >= 0, summary.hasTop(cell));
+            if (q >= 0) {
+                assertEquals(Float.floatToRawIntBits(original.y(q, 0)), Float.floatToRawIntBits(summary.topY(cell)));
+                assertEquals(original.color(q, 0), summary.topColor(cell));
+            }
+        }
+        assertThrows(IllegalStateException.class, compact::packed, "do not lazily reconstruct discarded geometry");
+        long after = compact.retainedHeapBytes();
+        assertTrue(after < before, "summary must replace, not duplicate, the full CPU view");
+        System.out.println("PUBLISHED_MESH spacing=" + spacing + ",quads=" + actual.quadCount()
+                + ",beforeBytes=" + before + ",afterBytes=" + after + ",savedBytes=" + (before - after)
+                + ",seamBytes=" + summary.retainedHeapBytes());
     }
 
     @Test

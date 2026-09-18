@@ -41,6 +41,8 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             new it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<>(1024);
     private final ThreadLocal<ByteBuffer> scratch = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(256 * 40).order(ByteOrder.LITTLE_ENDIAN));
     private final ThreadLocal<ByteBuffer> positions = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(64 * 8).order(ByteOrder.LITTLE_ENDIAN));
+    private final ThreadLocal<ByteBuffer> wallColumn = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(16 + profile().height() * 4).order(ByteOrder.LITTLE_ENDIAN));
 
     static synchronized boolean available() {
         if (attempted) return loaded;
@@ -336,6 +338,18 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
     @Override public ClientColumnSample sampleSurface(int x, int z) { return sample(x, z); }
+    @Override ClientColumnSample wallEvidence(int x, int z, ClientColumnSample sample) {
+        if (cancelled || world == 0) return sample;
+        ByteBuffer input = positions.get();
+        ByteBuffer output = wallColumn.get();
+        input.putInt(0, x).putInt(4, z);
+        if (RustWorldgenBackend.columns(world, input, output, 1) != 1) return sample;
+        return PredictionWallEvidence.inspect(sample, profile().minY(), y -> {
+            if (y < profile().minY() || y >= profile().minY() + profile().height()) return false;
+            var state = states[output.getInt(16 + (y - profile().minY()) * 4)];
+            return !state.isAir() && state.getFluidState().isEmpty();
+        });
+    }
     @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return sample(x, z); }
     // Sparse points compute full-height density and surface neighbours. Publish
     // initial horizon coverage before paying for a complete 4,356-point grid.

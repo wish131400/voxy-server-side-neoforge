@@ -10,6 +10,44 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class PredictionMemoryBudgetTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
+    @Test void transientHeapTroughStopsBuildsWithoutImmediatelyDroppingVisibleDetail() {
+        long mib = PredictionMemoryBudget.MIB, heap = 8192L * mib;
+        var free = new AtomicLong(2000L * mib);
+        var now = new AtomicLong(-10_000_000_000L);
+        var collections = new AtomicLong();
+        var budget = PredictionMemoryBudget.adaptive(heap, free::get, now::get, 8, collections::get);
+        free.set(850L * mib);
+        assertNull(budget.tryReserveBuild());
+        assertFalse(budget.canReclaimDetail(200L * mib));
+        now.addAndGet(4_000_000_000L);
+        collections.incrementAndGet();
+        assertFalse(budget.canReclaimDetail(200L * mib), "a young collection is not sustained pressure");
+        free.set(2000L * mib);
+        assertTrue(budget.availableBuildSlots() > 0);
+        free.set(850L * mib);
+        now.addAndGet(2_000_000_000L);
+        assertFalse(budget.canReclaimDetail(200L * mib), "recovery resets the grace period");
+        now.addAndGet(5_000_000_000L);
+        assertTrue(budget.canReclaimDetail(200L * mib), "persistent, solvable pressure can fund a nearer upgrade");
+    }
+
+    @Test void tinyPredictionCacheCannotFundAWholeJvmSafetyDeficit() {
+        long mib = PredictionMemoryBudget.MIB, heap = 8192L * mib;
+        var free = new AtomicLong(154L * mib);
+        var now = new AtomicLong();
+        var budget = PredictionMemoryBudget.adaptive(heap, free::get, now::get, 8, () -> 0);
+        assertEquals(heap / 10 + PredictionMemoryBudget.BUILD_BYTES - free.get(), budget.reclaimTargetBytes());
+        now.set(10_000_000_000L);
+        assertFalse(budget.canReclaimDetail(100L * mib), "dropping every small mesh would still leave no build capacity");
+        assertEquals(0, budget.availableBuildSlots());
+        assertFalse(budget.hasFixedAllowance(), "runtime pressure must not ratchet the coverage level permanently");
+        free.set(2000L * mib);
+        assertEquals(0, budget.reclaimTargetBytes());
+        try (var resumed = budget.tryReserveBuild()) { assertNotNull(resumed); }
+    }
+
     @Test
     void workerCountFollowsThePerformanceTier() {
         var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
@@ -143,7 +181,8 @@ class PredictionMemoryBudgetTest {
         var budget = PredictionMemoryBudget.adaptive(1024L * PredictionMemoryBudget.MIB,
                 () -> 512L * PredictionMemoryBudget.MIB, () -> 1, 8, () -> 0);
         CountDownLatch start = new CountDownLatch(1);
-        try (var workers = Executors.newFixedThreadPool(8)) {
+        var workers = Executors.newFixedThreadPool(8);
+        try {
             var attempts = new ArrayList<java.util.concurrent.Future<PredictionMemoryBudget.Reservation>>();
             for (int i = 0; i < 8; i++) attempts.add(workers.submit(() -> {
                 start.await();
@@ -161,6 +200,7 @@ class PredictionMemoryBudgetTest {
                 reservations.forEach(PredictionMemoryBudget.Reservation::close);
             }
         }
+        finally { workers.shutdownNow(); }
         assertEquals(0, budget.usedBytes());
         assertEquals(3, budget.availableBuildSlots());
     }
@@ -169,7 +209,8 @@ class PredictionMemoryBudgetTest {
     void simultaneousWorkersCannotReserveBeyondSharedLimit() throws Exception {
         PredictionMemoryBudget budget = new PredictionMemoryBudget(256, 0, () -> 1024, () -> 1);
         CountDownLatch start = new CountDownLatch(1);
-        try (var workers = Executors.newFixedThreadPool(16)) {
+        var workers = Executors.newFixedThreadPool(16);
+        try {
             var attempts = new ArrayList<java.util.concurrent.Future<PredictionMemoryBudget.Reservation>>();
             for (int i = 0; i < 16; i++) {
                 attempts.add(workers.submit(() -> { start.await(); return budget.tryReserve(64); }));
@@ -186,6 +227,7 @@ class PredictionMemoryBudgetTest {
             reservations.forEach(PredictionMemoryBudget.Reservation::close);
             assertEquals(0, budget.usedBytes());
         }
+        finally { workers.shutdownNow(); }
     }
 
     @Test

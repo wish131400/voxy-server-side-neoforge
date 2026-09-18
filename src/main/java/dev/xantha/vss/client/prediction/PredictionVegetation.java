@@ -129,9 +129,16 @@ final class PredictionVegetation {
     }
 
     /** Read existing placement only; this path must never trigger world generation. */
+    boolean hasCachedChunk(int x, int z) {
+        long key = (long)Math.floorDiv(x, 16) << 32 | Math.floorDiv(z, 16) & 0xffffffffL;
+        synchronized (chunks) { return chunks.containsKey(key); }
+    }
+
+    /** Read existing placement only; this path must never trigger world generation. */
     Tile cachedDisplay(int baseX, int baseZ, int span, int spacing,
                        BiPredicate<Integer,Integer> captured) {
-        if (spacing <= 2 || spacing > 8 || !VSSClientConfig.CONFIG.predictionTrees) return Tile.EMPTY;
+        if (spacing > 8) return Tile.EMPTY;
+        int voxelSize = Math.max(1, spacing / 2);
         List<Map<BlockPos,BlockState>> existing;
         synchronized (chunks) {
             existing = chunks.entrySet().stream().filter(e -> {
@@ -143,15 +150,14 @@ final class PredictionVegetation {
         Map<BlockPos,BlockState> blocks = new HashMap<>();
         for (var chunk : existing) for (var e : chunk.entrySet()) {
             var p = e.getKey(); var state = e.getValue();
-            if (p.getX()<baseX || p.getX()>=baseX+span || p.getZ()<baseZ || p.getZ()>=baseZ+span
+            if (p.getX()<baseX-voxelSize || p.getX()>=baseX+span+voxelSize
+                    || p.getZ()<baseZ-voxelSize || p.getZ()>=baseZ+span+voxelSize
                     || captured.test(p.getX(),p.getZ())) continue;
-            if (!state.is(BlockTags.LEAVES) && !state.is(BlockTags.LOGS)) continue;
-            // Keep actual block coordinates and species. Whole columns thin
-            // deterministically; no leaf expands into a large solid voxel.
-            if (Math.floorMod(p.getX(),2)!=0 || Math.floorMod(p.getZ(),2)!=0) continue;
+            if (vegetation(state) && !VSSClientConfig.CONFIG.predictionTrees || !solid(state) && spacing > 2) continue;
             blocks.put(p,state);
         }
-        return cachedRepresentative(blocks, baseX, baseZ, span, spacing);
+        // A capture refresh must use the same geometry as the decorated tile.
+        return boundedTile(blocks, baseX, baseZ, span, spacing, voxelSize);
     }
 
     static Tile cachedRepresentative(Map<BlockPos,BlockState> blocks, int x, int z, int span, int spacing) {
@@ -233,13 +239,9 @@ final class PredictionVegetation {
         blocks.forEach((p, state) -> {
             if (thinning > 1 && (thinGroundCover(state) || state.is(Blocks.BAMBOO))
                     && (Math.floorMod(p.getX(), thinning) != 0 || Math.floorMod(p.getZ(), thinning) != 0)) return;
-            // Vanilla leaf distance/persistence affect simulation, not its
-            // baked shape. Preserve species, waterlogging and modded states.
-            if (state.getBlock() instanceof net.minecraft.world.level.block.LeavesBlock
-                    && net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(state.getBlock()).getNamespace().equals("minecraft")) {
-                state = state.setValue(net.minecraft.world.level.block.LeavesBlock.DISTANCE, 7)
-                        .setValue(net.minecraft.world.level.block.LeavesBlock.PERSISTENT, false);
-            }
+            // Resource packs may select different leaf models by distance and
+            // persistence. Merge matching rendered materials in the mesh, never
+            // rewrite a healthy leaf to the default decaying state here.
             result.put(p, state);
         });
         return result;
@@ -377,6 +379,7 @@ final class PredictionVegetation {
                 if (result != null) {
                     diskHits.increment();
                     Map<BlockPos, BlockState> repaired = PredictionBamboo.normalize(result);
+                    if (treeModels != null) repaired = PredictionLeafStates.settle(repaired);
                     if (repaired != result) {
                         result = repaired;
                         diskCache.writeSurface(lease, result);
@@ -479,6 +482,7 @@ final class PredictionVegetation {
             }
         }
         Map<BlockPos, BlockState> exterior = PredictionBamboo.normalize(surfaceBlocks(level));
+        if (treeModels != null) exterior = PredictionLeafStates.settle(exterior);
         generatedChunks.increment();
         generatedBlocks.add(exterior.size());
         return Map.copyOf(exterior);

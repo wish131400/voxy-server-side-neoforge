@@ -14,6 +14,7 @@ import dev.xantha.vss.networking.server.storage.PersistentColumnWriter;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.DiagnosticCounters;
 import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import dev.xantha.vss.config.VSSServerConfig;
@@ -35,6 +36,8 @@ public final class ColumnStorageReadPipeline {
     private final PersistentColumnWriter persistentWriter;
     private final ServerRequestStats requestStats;
     private final DiskTaskRuntime diskRuntime;
+    private final DiagnosticCounters generationDiagnostics = new DiagnosticCounters(
+            VSSLogger::isDebugEnabled, 5_000_000_000L);
 
     public ColumnStorageReadPipeline(
             PlayerRequestRegistry playerRegistry,
@@ -91,6 +94,9 @@ public final class ColumnStorageReadPipeline {
             state.clearRequest(requestId);
             return;
         }
+        generationDiagnostics.record(cacheProbe ? "storageProbe" : allowGeneration
+                ? "storageGenerationAllowed" : "storageSyncOnly");
+        logGenerationDiagnostics();
         UUID playerId = player.getUUID();
         ServerLevel level = player.serverLevel();
         MinecraftServer server = player.server;
@@ -400,6 +406,11 @@ public final class ColumnStorageReadPipeline {
 
     private void handleMissingDiskColumn(DiskReadContext readContext, ServerPlayer player, long minimumTimestamp) {
         requestStats.recordDiskReadMiss();
+        generationDiagnostics.record(readContext.cacheProbe() ? "missProbe"
+                : !readContext.allowGeneration() ? "missGenerationNotRequested"
+                : !VSSServerConfig.CONFIG.enableChunkGeneration ? "missServerGenerationDisabled"
+                : "missSubmitGeneration");
+        logGenerationDiagnostics();
         if (!readContext.cacheProbe()
                 && readContext.allowGeneration()
                 && VSSServerConfig.CONFIG.enableChunkGeneration) {
@@ -456,12 +467,22 @@ public final class ColumnStorageReadPipeline {
                 cz,
                 minimumTimestamp,
                 priority);
+        generationDiagnostics.record(accepted ? "generationAccepted" : "generationRejected");
         if (!accepted) {
             state.clearRequest(requestId);
             sendRateLimited(player, requestId);
             return;
         }
         sendGenerationQueued(player, requestId);
+    }
+
+    private void logGenerationDiagnostics() {
+        String events = generationDiagnostics.poll(System.nanoTime());
+        if (events != null) {
+            VSSLogger.debug("VSS generation diagnostic server v1: scope=storagePipelineAllPlayers"
+                    + ", generationEnabled=" + VSSServerConfig.CONFIG.enableChunkGeneration
+                    + ", " + events);
+        }
     }
 
     private static void sendRateLimited(ServerPlayer player, int requestId) {

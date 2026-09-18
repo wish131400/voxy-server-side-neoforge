@@ -60,6 +60,7 @@ sourceSets {
             include 'pack.mcmeta'
             include 'icon.png'
             include 'vss.compat.mixins.json'
+            include 'vss.strict.mixins.json'
             include 'assets/vss/**'
         }
     }
@@ -98,6 +99,7 @@ tasks.named('processResources', ProcessResources).configure {
 }
 
 tasks.named('jar', Jar).configure {
+    destinationDirectory = layout.projectDirectory.dir('lib')
     manifest {
         attributes([
                 'Specification-Title'     : mod_id,
@@ -107,7 +109,7 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Version'  : project.jar.archiveVersion,
                 'Implementation-Vendor'   : mod_authors,
                 'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
-                'MixinConfigs'            : 'vss.compat.mixins.json'
+                'MixinConfigs'            : 'vss.compat.mixins.json,vss.strict.mixins.json'
         ])
     }
 }

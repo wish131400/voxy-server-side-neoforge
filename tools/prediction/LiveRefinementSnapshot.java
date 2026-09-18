@@ -22,9 +22,11 @@ public class LiveRefinementSnapshot {
         Class<?> state=Arrays.stream(inst.getAllLoadedClasses()).filter(c->c.getName()
                 .equals("dev.xantha.vss.client.prediction.ClientPredictionState")).findFirst().orElseThrow();
         Map<?,?> managers=(Map<?,?>)field(state,"MANAGERS");
+        Class<?> renderer=Arrays.stream(inst.getAllLoadedClasses()).filter(c->c.getName()
+                .equals("dev.xantha.vss.client.prediction.PredictionRenderer")).findFirst().orElseThrow();
         for(var entry:managers.entrySet()) {
             if(!entry.getKey().toString().contains("overworld")) continue;
-            Object manager=entry.getValue();StringBuilder out=new StringBuilder("x\tz\tlod\tleaf\taxis\ttarget\tneeded\tcanRefine\tpending\tpriority\n");
+            Object manager=entry.getValue();StringBuilder out=new StringBuilder("x\tz\tlod\tleaf\taxis\ttarget\tneeded\tparentReady\tallowed\tretry\tpending\tpriority\n");
             String diag;
             synchronized(manager) {
                 Map<?,?> ready=(Map<?,?>)field(manager,"ready");
@@ -34,11 +36,24 @@ public class LiveRefinementSnapshot {
                     out.append(call(key,"tileX")).append('\t').append(call(key,"tileZ")).append('\t')
                        .append(call(key,"lod")).append('\t').append(leaves.contains(key)).append('\t')
                        .append(tile==null?0:call(tile,"cellAxis")).append('\t').append(call(manager,"targetCellAxis",key)).append('\t')
-                       .append(call(manager,"terrainBuildNeeded",key)).append('\t').append(call(manager,"refinementReady",key)).append('\t')
+                       .append(call(manager,"terrainBuildNeeded",key)).append('\t').append(call(manager,"terrainParentReady",key)).append('\t')
+                       .append(call(manager,"mediumWorkAllowed",key,false)).append('\t').append(call(manager,"retryReady",key)).append('\t')
                        .append(pending.contains(key)).append('\t').append(call(manager,"workPriority",key,false)).append('\n');
                 }
-                diag="x="+field(manager,"cameraBlockX")+",z="+field(manager,"cameraBlockZ")+"\n"+call(manager,"surfaceDiagnostics");
+                diag="x="+field(manager,"cameraBlockX")+",z="+field(manager,"cameraBlockZ")
+                    +"\nfocus="+field(manager,"buildFocus")+"\nviewFocus="+field(state,"viewFocus")
+                    +"\nupdating="+field(state,"viewFocusUpdating")+"\n"+call(manager,"surfaceDiagnostics");
             }
+            diag += "\nray="+field(renderer,"viewRay")+"\nscoping="+field(renderer,"selectionScoping")
+                    +"\nlayout="+field(manager,"layout");
+            try {
+                diag += "\nloading="+call(manager,"loadingProgress");
+                Class<?> networking=state.getClassLoader().loadClass("dev.xantha.vss.networking.client.VSSClientNetworking");
+                Object requests=field(networking,"requestManager");
+                if(requests!=null) diag += "\ngenerationPriority="+call(field(requests,"predictionPriority"),"diagnostics")
+                        +"\ngenerationLimit="+field(requests,"diagnosticGenerationLimit")
+                        +"\ngenerationInFlight="+call(field(requests,"requestTracker"),"generationSize");
+            } catch (NoSuchFieldException ignored) { }
             Files.writeString(dir.resolve("refinement.tsv"),out);
             Files.writeString(dir.resolve("diagnostics.txt"),diag);
         }

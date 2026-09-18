@@ -80,6 +80,25 @@ class PredictionVegetationTest {
     }
 
     @Test
+    void cachedUnsupportedLeafDistancesSettleWithoutReplayingWorldgen() {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of());
+        var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
+        int settings = (config.predictionTrees ? 1 : 0) | (config.predictionStructures ? 2 : 0) | 28;
+        var key = PredictionDiskCache.Key.surface(0, 0, settings);
+        var pos = new BlockPos(1, 80, 0);
+        var source = Map.of(pos.west(), Blocks.BIRCH_LOG.defaultBlockState(),
+                pos, Blocks.BIRCH_LEAVES.defaultBlockState());
+        try (var cache = new PredictionDiskCache(diskDirectory, 1)) {
+            try (var lease = cache.lease(key)) { assertTrue(cache.writeSurface(lease, source)); }
+            var vegetation = new PredictionVegetation(sampler, cache);
+            var restored = vegetation.chunk(0, 0);
+            assertEquals(1, restored.get(pos).getValue(net.minecraft.world.level.block.LeavesBlock.DISTANCE));
+            assertTrue(vegetation.diagnostics().contains(",chunks=0,blocks=0,"));
+            try (var lease = cache.lease(key)) { assertEquals(restored, cache.readSurface(lease)); }
+        }
+    }
+
+    @Test
     void cachedStackedBambooIsRepairedAndPersistedWithoutRegeneration() {
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of());
         int settings = (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees ? 1 : 0)
@@ -348,6 +367,34 @@ class PredictionVegetationTest {
             assertTrue(counts.stream().allMatch(tile -> tile.spacingBlocks() <= 2));
         } finally {
             config.predictionDistanceBlocks = distance; config.predictionSurfaceDistanceBlocks = radius; config.rememberTerrain = remember;
+        }
+    }
+
+    @Test
+    void captureRefreshKeepsCachedDecorationAndWorldEditsStillInvalidateIt() throws Exception {
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
+        var budget = new PredictionMemoryBudget(256L * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime);
+        try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD, sampler, budget)) {
+            var field = PredictionTileManager.class.getDeclaredField("vegetation");
+            field.setAccessible(true);
+            var plants = (PredictionVegetation) field.get(manager);
+            var expected = new HashMap<Integer, PredictionVegetation.Tile>();
+            for (int spacing : new int[]{1, 2, 4, 8}) {
+                expected.put(spacing, plants.tile(-16, -16, 32, spacing, true, (x,z) -> false));
+                assertFalse(expected.get(spacing).cells().isEmpty());
+            }
+            String before = plants.diagnostics();
+            manager.acceptExactColumn(0, 0);
+            assertTrue(manager.isAuthoritative(0, 0), "arrival must retain the request scheduling ownership claim");
+            manager.capturedTerrainChanged(0, 0);
+            for (int spacing : new int[]{1, 2, 4, 8}) {
+                var refreshed = plants.cachedDisplay(-16, -16, 32, spacing, (x,z) -> false);
+                assertEquals(expected.get(spacing).cells(), refreshed.cells(), "capture must retain decoration at spacing " + spacing);
+                assertEquals(expected.get(spacing).blocks(), refreshed.blocks());
+            }
+            assertEquals(before, plants.diagnostics(), "refresh must not rerun features or evict placement");
+            manager.invalidate(0, 0);
+            assertFalse(plants.hasCachedChunk(0, 0), "actual edits must still evict stale placement");
         }
     }
 

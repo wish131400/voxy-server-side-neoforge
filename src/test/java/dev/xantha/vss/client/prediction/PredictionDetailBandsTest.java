@@ -12,11 +12,28 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 class PredictionDetailBandsTest {
     @org.junit.jupiter.api.BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void fineDistanceIsIndependentOfTheHorizonAndOuterTerrainReachesMedium() {
-        for (int horizon : new int[]{1024, 8192, 10000, 65536}) {
-            int fine=Math.min(1536,horizon);
+        for (int horizon : new int[]{1024, 4096, 8192, 10000, 65536}) {
+            int fine=Math.min(dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionFineDistanceBlocks,horizon);
             assertEquals(64, PredictionDetailBands.cellAxis(fine - .001, horizon));
             assertEquals(32, PredictionDetailBands.cellAxis(fine, horizon));
             assertEquals(32, PredictionDetailBands.cellAxis(horizon, horizon));
+        }
+    }
+
+    @Test void outerTenPercentUsesProjectedDetailWithoutACoarseCap() {
+        var layout = VssLodLayout.of(4096,6,true,true);
+        for (double fraction : new double[]{.89,.9,.91,.95,.99}) {
+            int span = layout.tileBlocks(1);
+            var tile = new PredictionTileKey(Level.OVERWORLD,(int)(4096*fraction)/span,0,1);
+            double distance = Math.sqrt(PredictionWorkOrder.distanceSquared(tile,layout,0,0));
+            for (double pixels : new double[]{700,1300,20000}) {
+                int expected = PredictionDetailBands.projectedCellAxis(span*pixels/distance,
+                        layout.pixelThreshold()/VssLodLayout.TILE_QUADS);
+                assertEquals(expected,PredictionDetailBands.cellAxis(tile,layout,0,64,0,null,pixels,-64,320),
+                        "outer distance must not override projected quality: fraction="+fraction);
+            }
+            assertEquals(64,PredictionDetailBands.cellAxis(tile,layout,0,64,0,null,20000,-64,320),
+                    "ordinary outer terrain can reach full grid detail without a telescope");
         }
     }
 

@@ -53,7 +53,7 @@ public final class PredictionQuadMesh {
                                int[] waterCells, short[] waterWidths, short[] waterHeights,
                                int waterQuadCount, int cellAxis) {
         this.positions = positions;
-        this.normals = normals;
+        this.normals = compactNormals(normals, quadCount);
         this.colors = colors;
         this.cells = cells;
         this.groups = groups;
@@ -65,7 +65,7 @@ public final class PredictionQuadMesh {
         this.originLookup = buildOriginLookup(originCells, quadCount);
         this.quadCount = quadCount;
         this.waterPositions = waterPositions;
-        this.waterNormals = waterNormals;
+        this.waterNormals = compactNormals(waterNormals, waterQuadCount);
         this.waterColors = waterColors;
         this.waterCells = waterCells;
         this.waterWidths = waterWidths;
@@ -73,6 +73,20 @@ public final class PredictionQuadMesh {
         this.waterLookup = buildWaterLookup(waterCells, waterWidths, waterHeights, waterQuadCount);
         this.waterOriginLookup = buildOriginLookup(waterCells, waterQuadCount);
         this.waterQuadCount = waterQuadCount;
+    }
+
+    /** Most faces repeat one normal at all four corners; preserve unusual smooth faces verbatim. */
+    static float[] compactNormals(float[] values, int quads) {
+        if (quads == 0 || values.length != quads * 12) return values;
+        for (int q = 0; q < quads; q++) for (int corner = 1; corner < 4; corner++) {
+            for (int axis = 0; axis < 3; axis++) {
+                if (Float.floatToRawIntBits(values[q * 12 + axis])
+                        != Float.floatToRawIntBits(values[q * 12 + corner * 3 + axis])) return values;
+            }
+        }
+        float[] compact = new float[quads * 3];
+        for (int q = 0; q < quads; q++) System.arraycopy(values, q * 12, compact, q * 3, 3);
+        return compact;
     }
 
     static PredictionQuadMesh from(PredictionMesh mesh) {
@@ -419,15 +433,15 @@ public final class PredictionQuadMesh {
     }
 
     float normalX(int quad, int corner) {
-        return normals[quad * 12 + corner * 3];
+        return normals[normals.length == quadCount * 3 ? quad * 3 : quad * 12 + corner * 3];
     }
 
     float normalY(int quad, int corner) {
-        return normals[quad * 12 + corner * 3 + 1];
+        return normals[(normals.length == quadCount * 3 ? quad * 3 : quad * 12 + corner * 3) + 1];
     }
 
     float normalZ(int quad, int corner) {
-        return normals[quad * 12 + corner * 3 + 2];
+        return normals[(normals.length == quadCount * 3 ? quad * 3 : quad * 12 + corner * 3) + 2];
     }
 
     int color(int quad, int corner) {
@@ -466,15 +480,15 @@ public final class PredictionQuadMesh {
     }
 
     float waterNormalX(int quad, int corner) {
-        return waterNormals[quad * 12 + corner * 3];
+        return waterNormals[waterNormals.length == waterQuadCount * 3 ? quad * 3 : quad * 12 + corner * 3];
     }
 
     float waterNormalY(int quad, int corner) {
-        return waterNormals[quad * 12 + corner * 3 + 1];
+        return waterNormals[(waterNormals.length == waterQuadCount * 3 ? quad * 3 : quad * 12 + corner * 3) + 1];
     }
 
     float waterNormalZ(int quad, int corner) {
-        return waterNormals[quad * 12 + corner * 3 + 2];
+        return waterNormals[(waterNormals.length == waterQuadCount * 3 ? quad * 3 : quad * 12 + corner * 3) + 2];
     }
 
     int waterColor(int quad, int corner) {
@@ -540,12 +554,13 @@ public final class PredictionQuadMesh {
         int c = quad * 4;
         for (int corner = 0; corner < 4; corner++) {
             int offset = p + corner * 3;
+            int normal = normals.length * 4 == positions.length ? quad * 3 : offset;
             consumer.addVertex(poseStack.last(),
                             (float) (positions[offset] - cameraX),
                             (float) (positions[offset + 1] - cameraY),
                             (float) (positions[offset + 2] - cameraZ))
                     .setColor(colors[c + corner])
-                    .setNormal(normals[offset], normals[offset + 1], normals[offset + 2]);
+                    .setNormal(normals[normal], normals[normal + 1], normals[normal + 2]);
         }
     }
 

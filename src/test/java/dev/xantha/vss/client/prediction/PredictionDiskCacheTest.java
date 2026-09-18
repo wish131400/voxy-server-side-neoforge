@@ -110,6 +110,40 @@ class PredictionDiskCacheTest {
         }
     }
 
+    @Test void arrivalBetweenGridPointsPreservesUnloadedTerrainButEditsStillInvalidate() {
+        for (int sign : new int[]{-1, 1}) {
+            int tile = sign < 0 ? -1 : 0;
+            int between = sign < 0 ? -3 : 1;
+            int sampled = sign < 0 ? -4 : 0;
+            var coarse = PredictionDiskCache.Key.terrain(tile, tile, 6);
+            var nearby = PredictionDiskCache.Key.terrain(tile, tile, 0);
+            var plants = PredictionDiskCache.Key.surface(between, between, 3);
+            try (var cache = new PredictionDiskCache(directory, 77)) {
+                for (var key : List.of(coarse, nearby)) try (var lease = cache.lease(key)) {
+                    assertTrue(cache.writeTerrain(lease, samples()));
+                }
+                try (var lease = cache.lease(plants)) { assertTrue(cache.writeSurface(lease, Map.of())); }
+            }
+            try (var cache = new PredictionDiskCache(directory, 77)) {
+                cache.invalidateCapture(between, between);
+                cache.flush();
+            }
+            try (var cache = new PredictionDiskCache(directory, 77)) {
+                try (var lease = cache.lease(coarse)) { assertNotNull(cache.readTerrain(lease, samples().length)); }
+                try (var lease = cache.lease(nearby)) { assertNull(cache.readTerrain(lease, samples().length)); }
+                try (var lease = cache.lease(plants)) { assertEquals(Map.of(), cache.readSurface(lease), "ordinary arrival must preserve deterministic decoration"); }
+                cache.invalidateCapture(sampled, sampled);
+                try (var lease = cache.lease(coarse)) { assertNull(cache.readTerrain(lease, samples().length)); }
+                cache.flush();
+                try (var lease = cache.lease(coarse)) { assertTrue(cache.writeTerrain(lease, samples())); }
+                cache.invalidateChunk(between, between);
+                try (var lease = cache.lease(coarse)) { assertNull(cache.readTerrain(lease, samples().length)); }
+                try (var lease = cache.lease(plants)) { assertNull(cache.readSurface(lease), "world edits still invalidate decoration"); }
+                cache.flush();
+            }
+        }
+    }
+
     @Test void adjacentSurfaceCacheFilesShareParsedBlockStates() {
         var states = Map.of(new BlockPos(1, 65, 2), Blocks.OAK_LOG.defaultBlockState(),
                 new BlockPos(1, 66, 2), Blocks.OAK_LEAVES.defaultBlockState());

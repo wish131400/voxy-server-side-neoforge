@@ -117,7 +117,7 @@ final class ClientCaptureExtractor {
         if (effectiveFluid != 0) {
             flags &= ~ClientColumnSample.FLAG_SNOW;
         }
-        return new ClientColumnSample(
+        ClientColumnSample captured = new ClientColumnSample(
                 topY,
                 fluidY == Integer.MIN_VALUE ? predicted.fluidY() : fluidY,
                 predicted.biomeIndex(),
@@ -135,6 +135,12 @@ final class ClientCaptureExtractor {
                 lowerTop,
                 lowerBottom,
                 spanFloor);
+        return PredictionWallEvidence.inspectCaptured(captured, minY, y -> {
+            BlockState state = access.state(x, y, z);
+            // Material selection is narrower than occupancy. Ores, mod blocks
+            // and liquids must never be mistaken for an empty cave entrance.
+            return state == null || !state.isAir();
+        });
     }
 
     private static BlockState solidBelow(SectionAccess access, int x, int fromY, int z,

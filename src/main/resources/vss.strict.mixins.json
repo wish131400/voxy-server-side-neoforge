@@ -1,0 +1,18 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.xantha.vss.mixin",
+  "refmap": "vss.refmap.json",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "voxy.StrictVoxyVisibilityMixin",
+    "voxy.StrictVoxyUploadMixin",
+    "voxy.StrictVoxyIngestMixin",
+    "voxy.StrictVoxyMeshMixin",
+    "voxy.StrictVoxyBatchMixin",
+    "voxy.StrictVoxyMeshWorkMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

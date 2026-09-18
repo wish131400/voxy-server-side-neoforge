@@ -5,7 +5,8 @@ use crate::{
     random::Positional,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+// Job-local coordinates/IDs are lookup keys, never an evaluation order.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -97,11 +98,13 @@ pub struct Job<'a> {
     pub(crate) display: bool,
     pub(crate) reuse_density_cells: bool,
     density_cells: HashMap<[i32; 3], bool>,
+    density_ceiling: HashMap<(i32, i32), i32>,
+    density_height: Option<((i32, i32), Option<i32>)>,
     display_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
     levels: HashMap<(i32, i32), i32>,
     locations: HashMap<[i32; 3], [i32; 3]>,
     fluids: HashMap<[i32; 3], Fluid>,
-    proven_air_cells: std::collections::HashSet<[i32; 3]>,
+    proven_air_cells: FxHashSet<[i32; 3]>,
     surface_columns: HashMap<(i32, i32), Column>,
     surface_bottoms: HashMap<(i32, i32), (i32, i32)>,
     surface_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
@@ -120,24 +123,27 @@ pub struct Job<'a> {
     ///
     /// A top is a pure function of `(x, z)` given the world's fixed
     /// `adjustments`, so sharing it across columns cannot change any result.
-    pub shared_tops: Option<&'a std::sync::Mutex<HashMap<(i32, i32), Option<(i32, Substance)>>>>,
+    pub shared_tops: Option<&'a std::sync::Mutex<std::collections::HashMap<(i32, i32), Option<(i32, Substance)>>>>,
 }
 /// Owned query context, parked only within its immutable World and chunk.
 /// No borrowed terrain or structure pointers cross a call boundary.
 pub(crate) struct SurfaceWork {
     scratch: Scratch,
     density_cells: HashMap<[i32; 3], bool>,
+    density_ceiling: HashMap<(i32, i32), i32>,
+    density_height: Option<((i32, i32), Option<i32>)>,
     display_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
     levels: HashMap<(i32, i32), i32>,
     locations: HashMap<[i32; 3], [i32; 3]>,
     fluids: HashMap<[i32; 3], Fluid>,
-    proven_air_cells: std::collections::HashSet<[i32; 3]>,
+    proven_air_cells: FxHashSet<[i32; 3]>,
     tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
 }
 impl SurfaceWork {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.scratch.retained_bytes()
             + self.density_cells.capacity()*64
+            + self.density_ceiling.capacity()*64
             + (self.levels.capacity()+self.locations.capacity()+self.fluids.capacity()+self.tops.capacity()+self.proven_air_cells.capacity()+self.display_tops.capacity())*64
     }
 }
@@ -255,16 +261,18 @@ impl Terrain {
             beard: None,
             display: false,
             reuse_density_cells: false,
-            density_cells: HashMap::new(),
-            display_tops: HashMap::new(),
-            levels: HashMap::new(),
-            locations: HashMap::new(),
-            fluids: HashMap::new(),
-            proven_air_cells: std::collections::HashSet::new(),
-            surface_columns: HashMap::new(),
-            surface_bottoms: HashMap::new(),
-            surface_tops: HashMap::new(),
-            neighbour_tops: HashMap::new(),
+            density_cells: HashMap::default(),
+            density_ceiling: HashMap::default(),
+            density_height: None,
+            display_tops: HashMap::default(),
+            levels: HashMap::default(),
+            locations: HashMap::default(),
+            fluids: HashMap::default(),
+            proven_air_cells: FxHashSet::default(),
+            surface_columns: HashMap::default(),
+            surface_bottoms: HashMap::default(),
+            surface_tops: HashMap::default(),
+            neighbour_tops: HashMap::default(),
             shared_tops: None,
         })
     }
@@ -286,8 +294,37 @@ impl Terrain {
     }
 }
 impl Job<'_> {
+    /// Batch-local sparse display reuse. Exact and order-sensitive routes keep
+    /// their normal jobs. Never carry a sampled height/proof into another chunk.
+    pub(crate) fn reset_display_chunk(&mut self, x: i32, z: i32) -> Result<()> {
+        if !(-30_000_000..=30_000_000).contains(&x) || !(-30_000_000..=30_000_000).contains(&z) {
+            return Err("outside supported world coordinates".into());
+        }
+        self.scratch.reset_chunk(x & !15, z & !15);
+        self.terrain.graph.initialize_column_caches(&mut self.scratch);
+        self.beard = None;
+        self.display = false;
+        self.reuse_density_cells = false;
+        self.density_cells.clear();
+        self.density_ceiling.clear();
+        self.density_height = None;
+        self.display_tops.clear();
+        self.levels.clear();
+        self.locations.clear();
+        self.fluids.clear();
+        self.proven_air_cells.clear();
+        self.surface_columns.clear();
+        self.surface_bottoms.clear();
+        self.surface_tops.clear();
+        self.neighbour_tops.clear();
+        self.shared_tops = None;
+        Ok(())
+    }
+
     pub(crate) fn park(self) -> SurfaceWork {
-        SurfaceWork { scratch: self.scratch, density_cells: self.density_cells, display_tops: self.display_tops, levels: self.levels,
+        SurfaceWork { scratch: self.scratch, density_cells: self.density_cells, density_ceiling: self.density_ceiling,
+            density_height: self.density_height,
+            display_tops: self.display_tops, levels: self.levels,
             locations: self.locations, fluids: self.fluids, tops: self.neighbour_tops,
             proven_air_cells: self.proven_air_cells }
     }
@@ -671,7 +708,25 @@ impl Job<'_> {
     pub fn density_surface(&mut self, x: i32, z: i32) -> Option<i32> {
         let t = self.terrain;
         if t.graph.requires_complete_column_order() || self.beard.is_some() || self.scratch.beard != 0. { return None; }
-        for bottom in (t.min_y..t.min_y+t.height).step_by(t.cell_height as usize).rev() {
+        if let Some((point, height)) = self.density_height {
+            if point == (x,z) { return height; }
+        }
+        let height = self.search_density_surface(x,z);
+        // Both a top and a fully empty column are proven by the descending
+        // search. Reuse only at exactly the same coordinate, never next door.
+        self.density_height = Some(((x,z), height));
+        height
+    }
+
+    fn search_density_surface(&mut self, x: i32, z: i32) -> Option<i32> {
+        let t = self.terrain;
+        // Reuse a proof for the entire horizontal cell, never a sampled height.
+        // Every cell above this ceiling was proven non-positive at every X/Z;
+        // lower unknown cells still use the original descending interval search.
+        let horizontal = (x.div_euclid(t.cell_width), z.div_euclid(t.cell_width));
+        let ceiling = self.reuse_density_cells.then(|| self.density_ceiling.get(&horizontal).copied()).flatten();
+        let mut proved_ceiling = ceiling.is_some();
+        for bottom in (t.min_y..ceiling.unwrap_or(t.min_y+t.height)).step_by(t.cell_height as usize).rev() {
             if self.reuse_density_cells {
                 let base = [x.div_euclid(t.cell_width)*t.cell_width, bottom,
                     z.div_euclid(t.cell_width)*t.cell_width];
@@ -683,8 +738,17 @@ impl Job<'_> {
                     empty
                 };
                 if empty { continue; }
+                if !proved_ceiling {
+                    if self.density_ceiling.len() < 256 {
+                        self.density_ceiling.insert(horizontal, bottom+t.cell_height);
+                    }
+                    proved_ceiling = true;
+                }
             }
             if let Some(y) = self.density_interval(x, z, bottom, bottom+t.cell_height-1) { return Some(y); }
+        }
+        if self.reuse_density_cells && !proved_ceiling && self.density_ceiling.len() < 256 {
+            self.density_ceiling.insert(horizontal, t.min_y);
         }
         None
     }
@@ -1102,11 +1166,13 @@ impl Job<'_> {
 impl<'a> Job<'a> {
     pub(crate) fn resume(terrain: &'a Terrain, work: SurfaceWork) -> Self {
         Self { terrain, scratch: work.scratch, beard: None, display: false,
-            reuse_density_cells: false, density_cells: work.density_cells, display_tops: work.display_tops, levels: work.levels,
+            reuse_density_cells: false, density_cells: work.density_cells, density_ceiling: work.density_ceiling,
+            density_height: work.density_height,
+            display_tops: work.display_tops, levels: work.levels,
             locations: work.locations, fluids: work.fluids, neighbour_tops: work.tops,
             proven_air_cells: work.proven_air_cells,
-            surface_columns: HashMap::new(), surface_bottoms: HashMap::new(),
-            surface_tops: HashMap::new(), shared_tops: None }
+            surface_columns: HashMap::default(), surface_bottoms: HashMap::default(),
+            surface_tops: HashMap::default(), shared_tops: None }
     }
 }
 fn similarity(a: i32, b: i32) -> f64 {
@@ -1122,6 +1188,74 @@ mod fluid_bound_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/worldgen");
         serde_json::from_str(&std::fs::read_to_string(root.join(name)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn proven_ceiling_keeps_higher_thin_layers_in_neighbouring_columns() {
+        let mut d = fixture("overworld.json");
+        d["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:max",
+            "argument1":{"type":"minecraft:y_clamped_gradient","from_y":31,"to_y":33,"from_value":1.,"to_value":-1.},
+            "argument2":{"type":"minecraft:range_choice",
+                "input":{"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":-64.,"to_value":320.},
+                "min_inclusive":105,"max_exclusive":106,"when_out_of_range":-1.,
+                "when_in_range":{"type":"minecraft:range_choice","input":{"type":"lithostitched:axis","axis":"x"},
+                    "min_inclusive":-2,"max_exclusive":-1,"when_in_range":1.,"when_out_of_range":-1.}}});
+        let t = Terrain::from_document(0, &d).unwrap();
+        let mut fast = t.job(-16, -16, false).unwrap();
+        fast.reuse_density_cells = true;
+        // The first column misses the upper sheet. Its sampled height must
+        // never become a ceiling for the next column in the same noise cell.
+        assert_eq!(fast.density_surface(-4, -4), Some(31));
+        assert!(fast.density_ceiling[&(-1, -1)] > 105);
+        assert!(fast.density_ceiling[&(-1, -1)] < t.min_y + t.height);
+        let mut fast = Job::resume(&t, fast.park());
+        fast.reuse_density_cells = true;
+        for (x, z) in [(-2,-4), (-1,-4), (-4,-4), (-2,-1), (0,0)] {
+            let mut full = t.job(x, z, false).unwrap();
+            let expected = (t.min_y..t.min_y+t.height).rev().find(|&y| {
+                full.scratch.advance_block();
+                full.compute(t.final_density, [x,y,z], Mode::Cell) > 0.
+            });
+            assert_eq!(fast.density_surface(x,z), expected, "{x},{z}");
+        }
+    }
+
+    #[test]
+    fn sparse_rebase_resets_proofs_and_fallback_state_without_reallocating_graph_vectors() {
+        let d = fixture("overworld.json");
+        let t = Terrain::from_document(917, &d).unwrap();
+        let mut reused = t.job(0, 0, false).unwrap();
+        let allocation = reused.scratch.retained_bytes();
+        for (x,z) in [(0,0),(-17,-65),(4096,8192),(-4096,0),(16,-16),(0,0)] {
+            reused.reset_display_chunk(x,z).unwrap();
+            assert!(reused.density_cells.is_empty() && reused.density_ceiling.is_empty());
+            assert!(reused.surface_columns.is_empty() && reused.neighbour_tops.is_empty());
+            assert!(reused.scratch.retained_bytes() >= allocation);
+            let mut fresh = t.job(x,z,false).unwrap();
+            assert_eq!(reused.density_surface(x,z), fresh.density_surface(x,z));
+            // Fill exact fallback aquifer/ore/cache state before the next rebase.
+            assert_eq!(reused.column(x,z).unwrap().blocks, fresh.column(x,z).unwrap().blocks);
+            reused.reuse_density_cells = true;
+            reused.density_surface(x,z);
+        }
+    }
+
+    #[test]
+    fn empty_density_ceiling_cache_is_bounded_and_survives_workspace_reuse() {
+        let mut d = fixture("overworld.json");
+        d["settings"]["noise_router"]["final_density"] = json!(-1.);
+        let t = Terrain::from_document(0, &d).unwrap();
+        let mut job = t.job(0,0,false).unwrap();
+        job.reuse_density_cells = true;
+        for x in -300..300 { assert_eq!(job.density_surface(x*4,0), None); }
+        assert_eq!(job.density_ceiling.len(),256);
+        assert!(job.density_ceiling.values().all(|&y| y == t.min_y));
+        let work = job.park();
+        assert!(work.retained_bytes() >= work.density_ceiling.capacity()*64);
+        let mut job = Job::resume(&t, work);
+        job.reuse_density_cells = true;
+        assert_eq!(job.density_surface(-1200,0),None);
+        assert_eq!(job.density_surface(4096,0),None);
     }
 
     fn compare(t: &Terrain, reverse: bool) {

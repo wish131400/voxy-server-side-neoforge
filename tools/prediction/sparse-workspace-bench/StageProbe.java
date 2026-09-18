@@ -1,0 +1,1 @@
+public class StageProbe { public static native void reset(); public static native String stats(); }

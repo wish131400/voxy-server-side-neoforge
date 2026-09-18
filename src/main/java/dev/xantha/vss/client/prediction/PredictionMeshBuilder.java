@@ -181,6 +181,15 @@ public final class PredictionMeshBuilder {
                                 boolean treesEnabled, PredictionFeatureStampCache featureStamps,
                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
                                 PredictionVegetation.Tile vegetation) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize, treesEnabled,
+                featureStamps, foliageColors, waterColors, baseX, baseZ, vegetation, PredictionSimpleVegetation.Result.EMPTY);
+    }
+
+    static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
+                                int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                boolean treesEnabled, PredictionFeatureStampCache featureStamps,
+                                int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple) {
         if (gridSize < 2 || gridSize > 257) {
             throw new IllegalArgumentException("gridSize outside supported range: " + gridSize);
         }
@@ -220,7 +229,7 @@ public final class PredictionMeshBuilder {
                 }
             }
             return build(cropped, croppedColors, seaLevel, fluidColor, stepBlocks, croppedGrid,
-                    treesEnabled, featureStamps, croppedFoliage, croppedWater, baseX, baseZ, vegetation);
+                    treesEnabled, featureStamps, croppedFoliage, croppedWater, baseX, baseZ, vegetation, simple);
         }
         int cellAxis = gridSize - 1;
         int cellCount = cellAxis * cellAxis;
@@ -229,6 +238,8 @@ public final class PredictionMeshBuilder {
         // for every 64x64 tile creates avoidable multi-megabyte spikes.
         VertexAccumulator terrain = new VertexAccumulator(cellCount * 8);
         VertexAccumulator water = new VertexAccumulator(cellCount * 8);
+        var simpleCells = new java.util.HashMap<Integer, PredictionSimpleVegetation.Form>();
+        for (var form : simple.forms()) simpleCells.put(form.cell(), form);
         boolean[] waterCells = new boolean[cellCount];
         int[] cellOffsets = new int[cellCount];
         int[] cellCounts = new int[cellCount];
@@ -278,6 +289,7 @@ public final class PredictionMeshBuilder {
                 } else {
                     addColumnBlock(terrain, samples, cornerHeights, x, z, stepBlocks, gridSize,
                             h00, c00, seaLevel, columnBlendColors);
+                    addCaveInterior(terrain, s00, x * stepBlocks, z * stepBlocks, stepBlocks, seaLevel);
                 }
                 // The east and south margin columns belong to the
                 // neighbouring tiles, so they get no top here.  Only their
@@ -299,17 +311,15 @@ public final class PredictionMeshBuilder {
                             materialColors == null ? 0 : materialColors[index(x, z + 1, gridSize)],
                             seaLevel, 0, -1);
                 }
-                // Prediction supplies the exterior surface only. Underground
-                // ceilings, overhang undersides, and structures belong to
-                // exact terrain.  Structure hints remain in the sample so a
-                // future structure-aware predictor can consume them, but a
-                // generic box cannot represent either an above-ground or an
-                // underground structure without producing false geometry.
+                // Interior caps use confirmed occupancy only; structure hints
+                // cannot provide geometry for buildings or cave decorations.
                 int foliageTint = foliageColors == null
                         ? 0 : foliageColors[index(x, z, gridSize)];
                 if (vegetation != null) {
                     addPlacedVegetation(terrain, vegetation, cell, h00, foliageTint, surfaceEdits);
                 }
+                var representative = simpleCells.get(cell);
+                if (representative != null) addSimpleVegetation(terrain, representative, foliageTint);
 
                 boolean fluid = s00.hasFluid();
                 waterOffsets[cell] = water.vertexCount();
@@ -601,14 +611,16 @@ public final class PredictionMeshBuilder {
             return;
         }
         int neighbour = heights[index(neighbourX, neighbourZ, gridSize)];
-        if (neighbour == Integer.MIN_VALUE || height <= neighbour) {
+        ClientColumnSample neighborSample = samples[index(neighbourX, neighbourZ, gridSize)];
+        if (neighbour == Integer.MIN_VALUE || height <= neighbour && !PredictionWallEvidence.hasInterior(neighborSample, step)) {
             return;
         }
         // The wall spans the full height difference down to the neighbour's
         // surface; below that the neighbour's own column occludes the face,
         // so nothing is left open on tall cliffs.
-        int bottom = neighbour;
         ClientColumnSample sample = samples[index(x, z, gridSize)];
+        var exposed = PredictionWallEvidence.exposed(sample, neighborSample, height, neighbour, step);
+        if (exposed.isEmpty()) return;
         int surfaceColor = color;
         // Preserve each stratum's material. Only grass approximates the
         // vanilla tinted rim with a gradient into its dirt side.
@@ -638,12 +650,13 @@ public final class PredictionMeshBuilder {
         // [top-2, top-1], and everything below is deep material down to the
         // neighbour surface.  Clamping against the bottom keeps short walls
         // degenerate instead of inverted.
-        int underStart = Math.max(bottom, height - 1);
-        int deepStart = Math.max(bottom, height - 2);
-        emitBandGradient(out, ax, az, bx, bz, height, underStart,
-                topColor, topBandBottom, normal, step);
-        emitBand(out, ax, az, bx, bz, underStart, deepStart, underColor, normal, step);
-        emitBand(out, ax, az, bx, bz, deepStart, bottom, deepColor, normal, step);
+        for (var interval : exposed) {
+            int bottom = interval.bottom(), top = interval.top();
+            emitBandGradient(out, ax, az, bx, bz, top, Math.max(bottom, height - 1),
+                    topColor, topBandBottom, normal, step);
+            emitBand(out, ax, az, bx, bz, Math.min(top, height - 1), Math.max(bottom, height - 2), underColor, normal, step);
+            emitBand(out, ax, az, bx, bz, Math.min(top, height - 2), bottom, deepColor, normal, step);
+        }
     }
 
     /** A vertical quad between two column-edge points and a depth range. */
@@ -861,6 +874,54 @@ public final class PredictionMeshBuilder {
                             z1 - z0, y1 - y0, side, side, side, side, face == 3 ? -1 : 1);
                 }
             }
+        }
+    }
+
+    private static void addCaveInterior(VertexAccumulator out, ClientColumnSample sample,
+                                        int x, int z, int step, int seaLevel) {
+        if (!PredictionWallEvidence.hasInterior(sample, step)) return;
+        int block = PredictionMaterialPalette.wallDeepBlock(sample);
+        int base = PredictionMaterialPalette.colorForIndex(block, 0xff888888);
+        int floor = packSprite(PredictionLighting.shade(base, sample.lowerTop(), seaLevel, true, false),
+                VssLodSpriteTable.indexForBlock(block));
+        int ceiling = packSprite(PredictionLighting.shade(base, sample.surfaceBottom(), seaLevel, true, false),
+                VssLodSpriteTable.indexForBlock(block));
+        addFeatureTop(out, x, z, sample.lowerTop(), step, step, floor, floor, floor, floor);
+        float y = sample.surfaceBottom();
+        float[] normal = {0, -1, 0};
+        // The packed quad reader expects A/B/C, A/C/D. Face visibility uses
+        // the explicit normal, so the ceiling retains that corner ordering.
+        out.triangle(x, y, z, normal, ceiling, x + step, y, z, normal, ceiling,
+                x + step, y, z + step, normal, ceiling);
+        out.triangle(x, y, z, normal, ceiling, x + step, y, z + step, normal, ceiling,
+                x, y, z + step, normal, ceiling);
+    }
+
+    private static void addSimpleVegetation(VertexAccumulator out, PredictionSimpleVegetation.Form form, int tint) {
+        float x = form.x(), z = form.z(), y = form.y();
+        if (form.tree() == null) {
+            var state = net.minecraft.world.level.block.Blocks.SHORT_GRASS.defaultBlockState();
+            int color = packSprite(PredictionMaterialPalette.colorForState(state, 0xff65934a, form.grassTint()), spriteOf(state, 1));
+            float[] nx = {1, 1, 0}, nz = {0, 1, 1};
+            out.triangle(x, y, z, nx, color, x + 1, y, z + 1, nx, color, x + 1, y + 1, z + 1, nx, color);
+            out.triangle(x, y, z, nx, color, x + 1, y + 1, z + 1, nx, color, x, y + 1, z, nx, color);
+            out.triangle(x + 1, y, z, nz, color, x, y, z + 1, nz, color, x, y + 1, z + 1, nz, color);
+            out.triangle(x + 1, y, z, nz, color, x, y + 1, z + 1, nz, color, x + 1, y + 1, z, nz, color);
+            return;
+        }
+        simpleBox(out, x, z, y, 1, form.height() - 2, form.tree().log(), tint);
+        simpleBox(out, x - 2, z - 2, y + form.height() - 3, 4, 3, form.tree().leaves(), tint);
+    }
+
+    private static void simpleBox(VertexAccumulator out, float x, float z, float y, float width, float height,
+                                  net.minecraft.world.level.block.state.BlockState state, int tint) {
+        for (int face = 0; face <= 4; face++) {
+            int color = packSprite(PredictionMaterialPalette.colorForState(state, 0xff65934a, tint, face), spriteOf(state, face));
+            if (face == 0) addFeatureTop(out, x, z, y + height, width, width, color, color, color, color);
+            else if (face <= 2) addFeatureZ(out, x, face == 2 ? z + width : z, y, width, height,
+                    color, color, color, color, face == 1 ? -1 : 1);
+            else addFeatureX(out, face == 4 ? x + width : x, z, y, width, height,
+                    color, color, color, color, face == 3 ? -1 : 1);
         }
     }
 

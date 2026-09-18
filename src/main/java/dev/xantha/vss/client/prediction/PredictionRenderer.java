@@ -43,6 +43,7 @@ import org.lwjgl.system.MemoryUtil;
 public final class PredictionRenderer {
     private static final PredictionRenderTarget predictionTarget = new PredictionRenderTarget();
     private static final PredictionVanillaMask vanillaMask = new PredictionVanillaMask();
+    private static final PredictionExactCoverageMask exactMask = new PredictionExactCoverageMask();
     private static final AtomicLong frameStarts = new AtomicLong();
     private static final AtomicLong renderFrames = new AtomicLong();
     private static final AtomicLong seenTiles = new AtomicLong();
@@ -272,14 +273,15 @@ public final class PredictionRenderer {
                     pixelsPerBlock, ClientPredictionState.currentFocus());
             for (var visible : visibleDraws) {
                 var tile=visible.geometry().tile();
+                CoverageView ownershipView = view.ownership(snapshot.scopeAffects(tile.key()));
                 minSampleY=Math.min(minSampleY,tile.depthBound().minY());
                 maxSampleY=Math.max(maxSampleY,tile.depthBound().maxY());
                 CachedCoverage cached = coverageCache.get(tile.key());
                 long tileEpoch = snapshot.epoch(tile.key());
                 boolean ownershipCurrent = cached != null && cached.matchesOwnership(
-                        tile.revision(), tileEpoch, view);
+                        tile.revision(), tileEpoch, ownershipView);
                 TileCoverage coverage = ownershipCurrent ? cached.coverage() : null;
-                if (ownershipCurrent && cached.expiresAtNanos() > nowNanos) {
+                if (ownershipCurrent) {
                     coverageCacheHits.incrementAndGet();
                 } else if (!ownershipCurrent
                         || frameCoverageResolves < MAX_COVERAGE_RESOLVES_PER_FRAME) {
@@ -293,7 +295,7 @@ public final class PredictionRenderer {
                     long expiry = coverageExpiry(tile, playerChunkX, playerChunkZ,
                             nearDistance, nowNanos);
                     coverageCache.put(tile.key(), new CachedCoverage(tile.revision(),
-                            tileEpoch, expiry, view, coverage));
+                            tileEpoch, expiry, ownershipView, coverage));
                 }
                 if (coverage == null || coverage.rendered() == 0L) {
                     continue;
@@ -470,6 +472,9 @@ public final class PredictionRenderer {
         bindMaterialTextures(atlasId, lightmapId, spriteRectId);
         program.setSamplers(0, 1, 2, 3, 4);
         program.bindVanillaMask(vanillaMask, camera);
+        program.bindRealCoverage(minecraft.level.dimension(), camera);
+        program.bindExactCoverage(exactMask, minecraft.level, camera, handoffDistanceChunks(VSSClientNetworking.getEffectiveLodDistanceChunks()));
+        program.setHorizon(predictionHorizonBlocks());
         program.bindMainDepth(irisPass == null ? minecraft.getMainRenderTarget().getDepthTextureId()
                 : irisPass.depthTexture(), projection);
         if (irisPass == null) {
@@ -516,7 +521,7 @@ public final class PredictionRenderer {
     private static int handoffDistanceChunks(int nearDistance) {
         int voxyDistance = ModCompat.isVoxyLoaded()
                 ? ModCompat.getVoxyViewDistanceChunks().orElse(nearDistance) : nearDistance;
-        return Math.max(nearDistance, voxyDistance);
+        return ClientPredictionState.coverageRadiusChunks(Math.max(nearDistance, voxyDistance));
     }
 
     /** Binds the shared element buffer (two triangles per quad) and grows it. */
@@ -578,7 +583,7 @@ public final class PredictionRenderer {
         Minecraft minecraft = Minecraft.getInstance();
         if (pending == null || pending.level() != minecraft.level
                 || pending.target() != minecraft.getMainRenderTarget()) return;
-        try (var state = new PredictionIrisBridge.State(8)) {
+        try (var state = new PredictionIrisBridge.State(PredictionExactCoverageMask.TEXTURE_UNITS)) {
             predictionTarget.beginWater();
             RenderSystem.enableDepthTest();
             RenderSystem.depthFunc(GL11.GL_GEQUAL);
@@ -886,6 +891,7 @@ public final class PredictionRenderer {
         realSeamTiles.clear();
         uploadBudget.reset();
         vanillaMask.invalidate();
+        exactMask.invalidate();
         coverageCache.clear();
         List<PredictionGpuTile> released = new ArrayList<>(gpuTiles.values());
         gpuTiles.clear();
@@ -937,9 +943,17 @@ public final class PredictionRenderer {
     }
 
     record CoverageView(int playerChunkX, int playerChunkZ, double pixelsPerBlock,
-                        VssLodFocus focus, double pixelsPerQuad) {
+                        VssLodFocus focus, double pixelsPerQuad, int fineDistance) {
+        private static final CoverageView ORDINARY = new CoverageView(0, 0, 0, null, 0, 0);
+        CoverageView ownership(boolean scopedTiles) {
+            // Ordinary ownership selects the finest resident data independently
+            // of camera distance/FOV. Only telescope-only tiles depend on view.
+            // Mesh revisions and GPU residency epochs still invalidate immediately.
+            return scopedTiles ? this : ORDINARY;
+        }
         CoverageView(int playerChunkX, int playerChunkZ, double pixelsPerBlock, VssLodFocus focus) {
-            this(playerChunkX, playerChunkZ, pixelsPerBlock, focus, PredictionRenderer.pixelsPerQuad());
+            this(playerChunkX, playerChunkZ, pixelsPerBlock, focus, PredictionRenderer.pixelsPerQuad(),
+                    VSSClientConfig.CONFIG.predictionFineDistanceBlocks);
         }
     }
 

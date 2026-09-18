@@ -66,9 +66,9 @@ final class PredictionRealBoundarySeams {
         var tile = surface.tile();
         int cell = PredictionLodSeams.cellAt(tile, edge.x() + edge.nx(), edge.z() + edge.nz());
         var predicted = tile.samples()[PredictionGpuTile.sampleIndexForCell(cell, tile.cellAxis())];
-        int q = tile.mesh().packed().quadForCell(cell);
-        if (q < 0 || !predicted.hasSurface() || !edge.ground().hasSurface()) return;
-        int predictedY = Math.round(tile.mesh().packed().y(q, 0));
+        var seams = tile.mesh().seamMesh();
+        if (!seams.hasTop(cell) || !predicted.hasSurface() || !edge.ground().hasSurface()) return;
+        int predictedY = Math.round(seams.topY(cell));
         int realY = edge.ground().surfaceY();
         if (realY == predictedY || Math.abs((long) realY - predictedY) > MAX_HEIGHT_DIFFERENCE) return;
         boolean realHigher = realY > predictedY;
@@ -81,10 +81,10 @@ final class PredictionRealBoundarySeams {
         int block = PredictionMaterialPalette.groundBlock(sample);
         int under = PredictionMaterialPalette.wallUnderBlock(sample);
         int deep = PredictionMaterialPalette.wallDeepBlock(sample);
-        int tint = tile.mesh().packed().color(q, 0);
+        int tint = seams.topColor(cell);
         int first = words.size();
-        var gaps = new ArrayList<PredictionLodSeams.HeightSpan>();
-        gaps.add(new PredictionLodSeams.HeightSpan(bottom, top));
+        var gaps = new ArrayList<>(PredictionWallEvidence.intervals(sample, bottom, top,
+                realHigher ? 1 : tile.spacingBlocks()));
         if (!realHigher) index.subtractWalls(gaps, surface, x + tile.baseBlockX(), z + tile.baseBlockZ(), 1, nx, nz);
         for (var gap : gaps) {
             PredictionLodSeams.band(words, tile, cell, x, z, x + (nz != 0 ? 1 : 0), z + (nx != 0 ? 1 : 0),

@@ -7,13 +7,14 @@ import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.core.SectionPos;
+import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -71,6 +72,12 @@ public final class NbtSectionSerializer {
             int cx,
             int cz,
             Optional<CompoundTag> optionalTag) {
+        return serializeTag(level.registryAccess(), level.getMinBuildHeight(), level.getHeight(), cx, cz, optionalTag);
+    }
+
+    static LoadedColumnData serializeTag(
+            RegistryAccess registries, int minY, int height, int cx, int cz,
+            Optional<CompoundTag> optionalTag) {
         if (optionalTag.isEmpty()) {
             return null;
         }
@@ -86,9 +93,9 @@ public final class NbtSectionSerializer {
             return null;
         }
 
-        Registry<Biome> biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+        Registry<Biome> biomeRegistry = registries.registryOrThrow(Registries.BIOME);
         Holder<Biome> defaultBiome = biomeRegistry.getHolderOrThrow(Biomes.PLAINS);
-        DynamicOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, level.registryAccess());
+        DynamicOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
         Codec<PalettedContainer<BlockState>> blockStateCodec = PalettedContainer.codecRW(
                 Block.BLOCK_STATE_REGISTRY,
                 BlockState.CODEC,
@@ -105,8 +112,8 @@ public final class NbtSectionSerializer {
         buf.writeVarInt(0);
         int includedCount = 0;
         int highestIncludedSectionY = Integer.MIN_VALUE;
-        int minSectionY = level.getMinSection();
-        int maxSectionY = minSectionY + level.getSectionsCount();
+        int minSectionY = SectionPos.blockToSectionCoord(minY);
+        int maxSectionY = minSectionY + (height >> 4);
         boolean skippedUnserializableSection = false;
         ArrayList<Integer> includedSectionYs = new ArrayList<>(sections.size());
         ArrayList<Integer> includedSectionLengths = new ArrayList<>(sections.size());
@@ -119,7 +126,12 @@ public final class NbtSectionSerializer {
 
                 int sectionY = sectionTag.getByte("Y");
                 if (sectionY < minSectionY || sectionY >= maxSectionY) {
-                    skippedUnserializableSection = true;
+                    // Vanilla and C2ME serialize one extra light section above/below
+                    // the block range. Omitting those does not omit any terrain.
+                    if ((sectionY != minSectionY - 1 && sectionY != maxSectionY)
+                            || sectionTag.contains("block_states") || sectionTag.contains("biomes")) {
+                        skippedUnserializableSection = true;
+                    }
                     continue;
                 }
 
@@ -158,7 +170,7 @@ public final class NbtSectionSerializer {
 
             if (includedCount == 0) {
                 return SectionSerializer.emptyColumn(cx, cz,
-                        !skippedUnserializableSection && highestSurfaceSection(chunkNbt).isEmpty());
+                        !skippedUnserializableSection && isCompleteColumn(chunkNbt, Integer.MIN_VALUE, minY, height));
             }
 
             int endWriterIndex = buf.writerIndex();
@@ -168,7 +180,7 @@ public final class NbtSectionSerializer {
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
             boolean completeColumn = !skippedUnserializableSection
-                    && isCompleteColumn(chunkNbt, highestIncludedSectionY);
+                    && isCompleteColumn(chunkNbt, highestIncludedSectionY, minY, height);
             int[] sectionYs = includedSectionYs.stream().mapToInt(Integer::intValue).toArray();
             int[] sectionLengths = includedSectionLengths.stream().mapToInt(Integer::intValue).toArray();
             return new LoadedColumnData(
@@ -184,48 +196,33 @@ public final class NbtSectionSerializer {
         }
     }
 
-    private static boolean isCompleteColumn(CompoundTag chunkNbt, int highestIncludedSectionY) {
-        OptionalInt surfaceSection = highestSurfaceSection(chunkNbt);
-        return surfaceSection.isPresent() && highestIncludedSectionY >= surfaceSection.getAsInt();
-    }
-
-    private static OptionalInt highestSurfaceSection(CompoundTag chunkNbt) {
-        if (!chunkNbt.contains("Heightmaps", Tag.TAG_COMPOUND)) {
-            return OptionalInt.empty();
+    private static boolean isCompleteColumn(
+            CompoundTag chunkNbt, int highestIncludedSectionY, int minY, int height) {
+        if (height <= 0 || !chunkNbt.contains("Heightmaps", Tag.TAG_COMPOUND)) {
+            return false;
         }
-
-        CompoundTag heightmaps = chunkNbt.getCompound("Heightmaps");
-        long[] surface = getHeightmapArray(heightmaps);
-        if (surface.length == 0) {
-            return OptionalInt.empty();
-        }
-
-        int minY = chunkNbt.contains("yPos", Tag.TAG_INT) ? chunkNbt.getInt("yPos") * 16 : -64;
-        int height = chunkNbt.contains("Height", Tag.TAG_INT) ? chunkNbt.getInt("Height") : 384;
+        long[] surface = getHeightmapArray(chunkNbt.getCompound("Heightmaps"));
         int bits = 32 - Integer.numberOfLeadingZeros(height);
-        long mask = (1L << bits) - 1L;
-        int highestSurfaceBlockY = Integer.MIN_VALUE;
+        int valuesPerLong = 64 / bits;
+        if (surface.length != (256 + valuesPerLong - 1) / valuesPerLong) {
+            return false;
+        }
+        // Modern Minecraft pads each long; values never straddle a long boundary.
+        // Heightmap values are relative to the dimension, whose height is not
+        // stored in the vanilla chunk NBT. Use the ServerLevel's actual bounds.
+        SimpleBitStorage heights = new SimpleBitStorage(bits, 256, surface);
+        int highestSurfaceSectionY = Integer.MIN_VALUE;
         for (int i = 0; i < 256; i++) {
-            int bitIndex = i * bits;
-            int longIndex = bitIndex >> 6;
-            int bitOffset = bitIndex & 63;
-            if (longIndex >= surface.length) {
-                break;
+            int value = heights.get(i);
+            if (value > height) {
+                return false;
             }
-            long packed = surface[longIndex] >>> bitOffset;
-            int bitsInFirstLong = 64 - bitOffset;
-            if (bitsInFirstLong < bits && longIndex + 1 < surface.length) {
-                packed |= surface[longIndex + 1] << bitsInFirstLong;
-            }
-            int heightValue = (int) (packed & mask);
-            int surfaceBlockY = minY + heightValue - 1;
-            if (surfaceBlockY >= minY) {
-                highestSurfaceBlockY = Math.max(highestSurfaceBlockY, surfaceBlockY);
+            if (value != 0) {
+                highestSurfaceSectionY = Math.max(highestSurfaceSectionY,
+                        SectionPos.blockToSectionCoord(minY + value - 1));
             }
         }
-        return highestSurfaceBlockY == Integer.MIN_VALUE
-                ? OptionalInt.empty()
-                : OptionalInt.of(SectionPos.blockToSectionCoord(highestSurfaceBlockY));
+        return highestIncludedSectionY >= highestSurfaceSectionY;
     }
 
     private static long[] getHeightmapArray(CompoundTag heightmaps) {

@@ -7,6 +7,9 @@ use crate::{
     random::{Positional, Random},
 };
 use serde_json::Value;
+// Only numeric workspace keys use Fx hashing. Codec names and untrusted
+// document strings keep the standard randomized maps below.
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 mod column_plan;
 mod height_plan;
@@ -610,11 +613,11 @@ impl Graph {
             memo: vec![None; self.nodes.len()],
             horizontal: vec![HorizontalCache::default(); self.column_plan.count],
             use_column_plan: true,
-            corners: HashMap::new(),
+            corners: FxHashMap::default(),
             cells: vec![None; if raw { 0 } else { self.interpolator_count }],
             column_edges: vec![None; if raw { 0 } else { self.interpolator_count }],
-            flat: HashMap::new(),
-            cached_2d: HashMap::new(),
+            flat: FxHashMap::default(),
+            cached_2d: FxHashMap::default(),
             last_2d: vec![
                 None;
                 if self.stateful_columns && !raw {
@@ -623,7 +626,7 @@ impl Graph {
                     0
                 }
             ],
-            arrays: HashMap::new(),
+            arrays: FxHashMap::default(),
             once: vec![
                 (0, 0.);
                 if self.stateful_columns && !raw {
@@ -637,7 +640,7 @@ impl Graph {
             prepared_x: None,
             surface_slices: None,
             prepared_cell: None,
-            cell_values: HashMap::new(),
+            cell_values: FxHashMap::default(),
             final_values: vec![],
             beard: 0.,
         })
@@ -1249,25 +1252,50 @@ pub struct Scratch {
     memo: Vec<Option<([i32; 3], Mode, f64)>>,
     horizontal: Vec<HorizontalCache>,
     use_column_plan: bool,
-    corners: HashMap<(Id, [i32; 3]), f64>,
+    corners: FxHashMap<(Id, [i32; 3]), f64>,
     // One entry per interpolator, not per block or graph node.
     cells: Vec<Option<([i32; 3], [f64; 8])>>,
     column_edges: Vec<Option<([i32; 3], [f64; 2])>>,
-    flat: HashMap<(Id, i32, i32), f64>,
-    cached_2d: HashMap<(Id, i32, i32), f64>,
+    flat: FxHashMap<(Id, i32, i32), f64>,
+    cached_2d: FxHashMap<(Id, i32, i32), f64>,
     last_2d: Vec<Option<(i32, i32, f64)>>,
-    arrays: HashMap<Id, Vec<f64>>,
+    arrays: FxHashMap<Id, Vec<f64>>,
     once: Vec<(u64, f64)>,
     counter: u64,
     array_index: usize,
     prepared_x: Option<i32>,
     surface_slices: Option<Vec<i32>>,
     prepared_cell: Option<[i32; 3]>,
-    cell_values: HashMap<Id, Vec<f64>>,
+    cell_values: FxHashMap<Id, Vec<f64>>,
     final_values: Vec<f64>,
     pub beard: f64,
 }
 impl Scratch {
+    /// Reuse allocations for another NoiseChunk in the same immutable graph.
+    /// Even coordinate-keyed Flat/Cell memo can depend on the chunk origin;
+    /// reset values before changing it, including fallback traversal state.
+    pub(crate) fn reset_chunk(&mut self, x: i32, z: i32) {
+        self.origin_x = x;
+        self.origin_z = z;
+        self.span = 16;
+        self.memo.fill(None);
+        self.horizontal.fill(HorizontalCache::default());
+        self.corners.clear();
+        self.cells.fill(None);
+        self.column_edges.fill(None);
+        self.flat.clear();
+        self.cached_2d.clear();
+        self.last_2d.fill(None);
+        self.arrays.clear();
+        self.once.fill((0, 0.));
+        self.counter = 0;
+        self.array_index = 0;
+        self.clear_surface_slices();
+        self.cell_values.clear();
+        self.final_values.clear();
+        self.beard = 0.;
+    }
+
     pub(crate) fn retained_bytes(&self) -> usize {
         use std::mem::size_of;
         // Include hash bucket slack/control bytes; charge generously rather

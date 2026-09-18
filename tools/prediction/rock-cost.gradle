@@ -1,0 +1,47 @@
+// Opt-in A/B benchmark. Reconstruct only the previous wall method in a test copy.
+allprojects {
+    afterEvaluate {
+        def generated = layout.buildDirectory.dir('generated/rock-cost').get().asFile
+        sourceSets.test.java.srcDir generated
+        sourceSets.test.java.srcDir project.file('tools/prediction/rock-cost')
+        def baseline = tasks.register('generateRockCostBaseline') {
+            doLast {
+                def source = project.file('src/main/java/dev/xantha/vss/client/prediction/PredictionMeshBuilder.java').getText('UTF-8').replace('\r\n', '\n')
+                def start = source.indexOf('    private static void emitColumnWall(')
+                def end = source.indexOf('    /** A vertical quad', start)
+                assert start >= 0 && end > start
+                def method = source.substring(start, end)
+                def guard = 'height <= neighbour && !PredictionWallEvidence.hasInterior(neighborSample, step)'
+                assert method.contains(guard)
+                method = method.replace(guard, 'height <= neighbour')
+                method = method.replace('        ClientColumnSample neighborSample = samples[index(neighbourX, neighbourZ, gridSize)];\n', '')
+                def evidence = '''        var exposed = PredictionWallEvidence.exposed(sample, neighborSample, height, neighbour, step);
+        if (exposed.isEmpty()) return;'''
+                assert method.contains(evidence)
+                method = method.replace(evidence, '        int bottom = neighbour;')
+                def loopStart = method.indexOf('        for (var interval : exposed) {')
+                assert loopStart >= 0
+                method = method.substring(0, loopStart) + '''        int underStart = Math.max(bottom, height - 1);
+        int deepStart = Math.max(bottom, height - 2);
+        for (var interval : PredictionWallEvidence.intervals(sample, underStart, height, step))
+            emitBandGradient(out, ax, az, bx, bz, interval.top(), interval.bottom(), topColor, topBandBottom, normal, step);
+        for (var interval : PredictionWallEvidence.intervals(sample, deepStart, underStart, step))
+            emitBand(out, ax, az, bx, bz, interval.top(), interval.bottom(), underColor, normal, step);
+        for (var interval : PredictionWallEvidence.intervals(sample, bottom, deepStart, step))
+            emitBand(out, ax, az, bx, bz, interval.top(), interval.bottom(), deepColor, normal, step);
+    }
+
+'''
+                source = (source.substring(0, start) + method + source.substring(end)).replace('PredictionMeshBuilder', 'PredictionMeshBuilderBeforeRock')
+                def output = new File(generated, 'dev/xantha/vss/client/prediction/PredictionMeshBuilderBeforeRock.java')
+                output.parentFile.mkdirs()
+                output.setText(source, 'UTF-8')
+            }
+        }
+        tasks.named('compileTestJava').configure { dependsOn baseline }
+        tasks.withType(Test).configureEach {
+            maxHeapSize = '2g'
+            testLogging.showStandardStreams = true
+        }
+    }
+}

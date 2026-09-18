@@ -20,6 +20,169 @@ class PredictionFirstCoverageTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @Test void optionalTerrainWaitsForIdleAndFrameBudgetThenPublishesWithoutLosingParent() throws Exception {
+        try (var manager = manager(sampler(new AtomicInteger(), null, null, 32), null)) {
+            var root = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount() - 1);
+            desire(manager, root, true);
+            var targets = PredictionTileManager.class.getDeclaredField("terrainTargets"); targets.setAccessible(true);
+            targets.set(manager, java.util.Map.of(root, 32));
+            enqueue(manager, root); awaitIdle(manager);
+            assertEquals(32, manager.readyTiles().iterator().next().cellAxis());
+            var ordinary = PredictionTileManager.class.getDeclaredField("ordinaryTargets"); ordinary.setAccessible(true);
+            ordinary.set(manager, java.util.Map.of(root, 32));
+            var optional = PredictionTileManager.class.getDeclaredField("idleTargets"); optional.setAccessible(true);
+            optional.set(manager, java.util.Map.of(root, 64));
+            targets.set(manager, java.util.Map.of(root, 64));
+            enqueue(manager, root); awaitIdle(manager);
+            assertEquals(32, manager.readyTiles().iterator().next().cellAxis());
+            var allowed = PredictionTileManager.class.getDeclaredField("idleAllowed"); allowed.setAccessible(true);
+            allowed.setBoolean(manager, true);
+            PredictionFramePace.resetForTesting();
+            enqueue(manager, root); awaitIdle(manager);
+            assertEquals(32, manager.readyTiles().iterator().next().cellAxis(), "unknown frame pace cannot admit optional work");
+            long now = System.nanoTime();
+            for (int i = 60; i >= 0; i--) PredictionFramePace.recordFrame(now - i * 10_000_000L);
+            enqueue(manager, root); awaitIdle(manager);
+            assertEquals(64, manager.readyTiles().iterator().next().cellAxis());
+            assertTrue(manager.surfaceDiagnostics().contains("pending=0"));
+            long built = manager.builtTileCount();
+            enqueue(manager, root); awaitIdle(manager);
+            assertEquals(built, manager.builtTileCount(), "finished improvement must not rebuild every tick");
+            assertNotNull(manager.coveringTile(-1, -1, root.lod()));
+        } finally { PredictionFramePace.resetForTesting(); }
+    }
+
+    @Test void livePlannerStartsOptionalWorkAfterCompletingOrdinaryTargets() throws Exception {
+        int distance = VSSClientConfig.CONFIG.predictionDistanceBlocks;
+        int fine = VSSClientConfig.CONFIG.predictionFineDistanceBlocks;
+        boolean trees = VSSClientConfig.CONFIG.predictionTrees;
+        boolean structures = VSSClientConfig.CONFIG.predictionStructures;
+        VSSClientConfig.CONFIG.predictionDistanceBlocks = 1024;
+        VSSClientConfig.CONFIG.predictionFineDistanceBlocks = 256;
+        VSSClientConfig.CONFIG.predictionTrees = false;
+        VSSClientConfig.CONFIG.predictionStructures = false;
+        try (var manager = manager(sampler(new AtomicInteger(), null, null, 16), null)) {
+            assertFalse(manager.loadingProgress().ready(95), "unplanned terrain must reserve the initial prediction turn");
+            var optionalResidents = PredictionTileManager.class.getDeclaredField("idleResidents");
+            optionalResidents.setAccessible(true);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
+            while (((java.util.Map<?, ?>) optionalResidents.get(manager)).isEmpty() && System.nanoTime() < until) {
+                PredictionFramePace.resetForTesting();
+                long now = System.nanoTime();
+                for (int i = 60; i >= 0; i--) PredictionFramePace.recordFrame(now - i * 10_000_000L);
+                manager.tick(-32, 80, -32, 120, null, 0);
+                Thread.sleep(10);
+            }
+            assertFalse(((java.util.Map<?, ?>) optionalResidents.get(manager)).isEmpty(), manager.surfaceDiagnostics());
+            assertEquals(0, manager.failedTileCount());
+            var targets = PredictionTileManager.class.getDeclaredField("ordinaryTargets"); targets.setAccessible(true);
+            @SuppressWarnings("unchecked") var ordinary = (java.util.Map<PredictionTileKey, Integer>) targets.get(manager);
+            var axes = new java.util.HashMap<PredictionTileKey, Integer>();
+            manager.readyTiles().forEach(tile -> axes.put(tile.key(), tile.cellAxis()));
+            assertTrue(ordinary.entrySet().stream().allMatch(e -> axes.getOrDefault(e.getKey(), 0) >= e.getValue()));
+            assertTrue(manager.loadingProgress().ready(95), "optional refinement must not hold generation: " + manager.loadingProgress());
+        } finally {
+            VSSClientConfig.CONFIG.predictionDistanceBlocks = distance;
+            VSSClientConfig.CONFIG.predictionFineDistanceBlocks = fine;
+            VSSClientConfig.CONFIG.predictionTrees = trees;
+            VSSClientConfig.CONFIG.predictionStructures = structures;
+            PredictionFramePace.resetForTesting();
+        }
+    }
+
+    @Test void onlyOneOptionalBuildRunsAndNewOrdinaryWorkKeepsItsPlace() throws Exception {
+        var blocking = new java.util.concurrent.atomic.AtomicBoolean();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var base = sampler(new AtomicInteger(), null, null, 32);
+        var source = new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
+            @Override int initialTerrainCellAxis(int lod) { return 32; }
+            @Override public ClientColumnSample sampleForLod(int x, int z, int step) {
+                if (blocking.get()) {
+                    entered.countDown();
+                    try { if (!release.await(10, TimeUnit.SECONDS)) throw new AssertionError("build timeout"); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new java.util.concurrent.CancellationException(); }
+                }
+                return base.sample(x, z);
+            }
+            @Override public int surfaceColor(int x, int y, int z) { return 0xff70aa30; }
+            @Override public int foliageColor(int x, int y, int z) { return 0xff70aa30; }
+        };
+        try (var manager = manager(source, null)) {
+            int lod = manager.layout().levelCount() - 1;
+            var first = new PredictionTileKey(PROFILE.levelKey(), -1, -1, lod);
+            var second = new PredictionTileKey(PROFILE.levelKey(), 0, -1, lod);
+            var urgent = new PredictionTileKey(PROFILE.levelKey(), 0, 0, lod);
+            desire(manager, first, true); desire(manager, second, true);
+            var targets = PredictionTileManager.class.getDeclaredField("terrainTargets"); targets.setAccessible(true);
+            targets.set(manager, java.util.Map.of(first, 32, second, 32));
+            enqueue(manager, first); awaitIdle(manager);
+            enqueue(manager, second); awaitIdle(manager);
+            var ordinary = PredictionTileManager.class.getDeclaredField("ordinaryTargets"); ordinary.setAccessible(true);
+            ordinary.set(manager, java.util.Map.of(first, 32, second, 32));
+            var optional = PredictionTileManager.class.getDeclaredField("idleTargets"); optional.setAccessible(true);
+            optional.set(manager, java.util.Map.of(first, 64, second, 64));
+            targets.set(manager, java.util.Map.of(first, 64, second, 64));
+            var allowed = PredictionTileManager.class.getDeclaredField("idleAllowed"); allowed.setAccessible(true);
+            allowed.setBoolean(manager, true);
+            PredictionFramePace.resetForTesting();
+            long now = System.nanoTime();
+            for (int i = 60; i >= 0; i--) PredictionFramePace.recordFrame(now - i * 10_000_000L);
+            blocking.set(true);
+            enqueue(manager, first);
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            enqueue(manager, second);
+            assertEquals(1, manager.pendingCount(), "second optional build must not occupy another slot");
+            desire(manager, urgent, true);
+            enqueue(manager, urgent);
+            assertEquals(2, manager.pendingCount(), "new ordinary loading stays admitted");
+            blocking.set(false); release.countDown(); awaitIdle(manager);
+            assertTrue(manager.readyTiles().stream().anyMatch(t -> t.key().equals(urgent)));
+            assertTrue(manager.readyTiles().stream().anyMatch(t -> t.key().equals(second) && t.cellAxis() == 32));
+        } finally { blocking.set(false); release.countDown(); PredictionFramePace.resetForTesting(); }
+    }
+
+    @Test void externalHeapPressurePreservesFinishedDetailAndDoesNotRatchetCoverage() throws Exception {
+        long mib = PredictionMemoryBudget.MIB;
+        var free = new java.util.concurrent.atomic.AtomicLong(4096L * mib);
+        var clock = new java.util.concurrent.atomic.AtomicLong();
+        var budget = PredictionMemoryBudget.adaptive(8192L * mib, free::get, clock::get, 1, () -> 0);
+        try (var manager = new PredictionTileManager(PROFILE.levelKey(), sampler(new AtomicInteger(), null, null, 64), budget, null)) {
+            int top = manager.layout().levelCount() - 1;
+            var root = new PredictionTileKey(PROFILE.levelKey(), 0, 0, top);
+            var detail = new PredictionTileKey(PROFILE.levelKey(), 1, 1, top - 1);
+            var target = new PredictionTileKey(PROFILE.levelKey(), 0, 0, top - 1);
+            desire(manager, root, true); enqueue(manager, root); awaitIdle(manager);
+            desire(manager, detail, true); enqueue(manager, detail); awaitIdle(manager);
+            desire(manager, target, true);
+            var before = manager.readyTiles().stream().map(PredictionTileManager.PredictionTile::key)
+                    .collect(java.util.stream.Collectors.toSet());
+            assertTrue(before.contains(detail));
+            var coverage = PredictionTileManager.class.getDeclaredField("mediumCoverage"); coverage.setAccessible(true);
+            coverage.set(manager, new PredictionMediumCoverage(Set.of(root, target), Set.of(target)));
+            var pending = PredictionTileManager.class.getDeclaredField("mediumCoveragePending"); pending.setAccessible(true);
+            pending.setBoolean(manager, true);
+            var reclaim = PredictionTileManager.class.getDeclaredMethod("makeRoomForSurface", int.class, int.class);
+            reclaim.setAccessible(true);
+            free.set(154L * mib);
+            for (int tick = 0; tick < 30; tick++) {
+                clock.addAndGet(1_000_000_000L);
+                reclaim.invoke(manager, 0, 0);
+                assertEquals(before, manager.readyTiles().stream().map(PredictionTileManager.PredictionTile::key)
+                        .collect(java.util.stream.Collectors.toSet()), "a small detail cache cannot pay for external heap pressure");
+            }
+            var bias = PredictionTileManager.class.getDeclaredField("mediumCoverageLevelBias"); bias.setAccessible(true);
+            assertEquals(0, bias.getInt(manager));
+            assertEquals(0, manager.pendingCount());
+            free.set(4096L * mib);
+            assertEquals(false, reclaim.invoke(manager, 0, 0));
+            enqueue(manager, target); awaitIdle(manager);
+            assertTrue(manager.readyTiles().stream().anyMatch(tile -> tile.key().equals(target)));
+            assertTrue(manager.readyTiles().stream().anyMatch(tile -> tile.key().equals(detail)));
+        }
+        assertEquals(0, budget.usedBytes());
+    }
+
     @Test void backgroundBuildersDoNotInheritRenderThreadPriority() throws Exception {
         int previous=Thread.currentThread().getPriority();
         try {
@@ -34,8 +197,10 @@ class PredictionFirstCoverageTest {
         } finally {Thread.currentThread().setPriority(previous);}
     }
 
-    @Test @SuppressWarnings("unchecked")
-    void spareWorkersFinishMultipleSurfacesWhileNewPreviewStillRuns() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    @SuppressWarnings("unchecked")
+    void spareWorkersFinishMultipleSurfacesWhileNewPreviewStillRuns(boolean nearbyPreview) throws Exception {
         var blocking = new java.util.concurrent.atomic.AtomicBoolean();
         var firstEntered = new CountDownLatch(1);
         var bothEntered = new CountDownLatch(2);
@@ -67,16 +232,24 @@ class PredictionFirstCoverageTest {
             ((Set<PredictionTileKey>)desired.get(manager)).addAll(Set.of(first,second));
             var waiting = PredictionTileManager.class.getDeclaredField("previewWorkPending"); waiting.setAccessible(true);
             waiting.setBoolean(manager,true);
+            var nearby = PredictionTileManager.class.getDeclaredField("surfacePreviewWorkPending"); nearby.setAccessible(true);
+            nearby.setBoolean(manager,nearbyPreview);
             var submit = PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileKey.class,int.class,int.class,boolean.class);
             submit.setAccessible(true);
             blocking.set(true);
             try {
                 submit.invoke(manager,first,0,0,true); assertTrue(firstEntered.await(5,TimeUnit.SECONDS));
                 long frameNow = System.nanoTime();
-                for (int i=50;i>=0;i--) PredictionFramePace.recordFrame(frameNow-i*10_000_000L);
+                for (int i=50;i>=0;i--) PredictionFramePace.recordFrame(frameNow-i*(nearbyPreview ? 10_000_000L : 66_666_667L));
                 submit.invoke(manager,second,0,0,true);
                 assertTrue(bothEntered.await(5,TimeUnit.SECONDS), "spare worker must be allowed to start the second surface");
                 desire(manager,preview,true);
+                // Actual uncovered horizon work uses the coverage lane, which
+                // must still progress under the ordinary refinement fuse.
+                var coverage = PredictionTileManager.class.getDeclaredField("mediumCoverage"); coverage.setAccessible(true);
+                coverage.set(manager,new PredictionMediumCoverage(Set.of(preview),Set.of(preview)));
+                var coveragePending = PredictionTileManager.class.getDeclaredField("mediumCoveragePending"); coveragePending.setAccessible(true);
+                coveragePending.setBoolean(manager,true);
                 enqueue(manager,preview);
                 long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
                 while(manager.readyTiles().stream().noneMatch(t->t.key().equals(preview)) && System.nanoTime()<until) Thread.sleep(5);
@@ -84,7 +257,7 @@ class PredictionFirstCoverageTest {
             } finally { blocking.set(false); release.countDown(); PredictionFramePace.resetForTesting(); }
             awaitIdle(manager);
             assertEquals(0,manager.failedTileCount());
-            assertTrue(manager.surfaceDiagnostics().contains("borrowedSurfaceBuilds=1"));
+            assertTrue(manager.surfaceDiagnostics().contains("borrowedSurfaceBuilds=" + (nearbyPreview ? 1 : 0)));
         }
     }
 

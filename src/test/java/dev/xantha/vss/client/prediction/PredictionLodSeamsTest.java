@@ -86,21 +86,20 @@ class PredictionLodSeamsTest {
         assertEquals(area(initial), area(seams.update(List.of(fine, coarse, distant)).getFirst().mesh()));
     }
 
-    @Test void wallIndexSurvivesCoverageUpdatesAndReleasesReplacedGeometry() {
+    @Test void seamSummaryFollowsMeshLifetimeAndNeedsNoRenderCache() {
         var original = tile(0, 0, 2, 64);
         var replacement = tile(0, 0, 2, 80);
-        var cache = new PredictionLodSeams.WallCache();
-        Object first = cache.get(original);
-        assertSame(first, cache.get(original));
-        cache.retain(Map.of(original.key(), surface(original)));
-        assertSame(first, cache.get(original));
-        cache.retain(Map.of());
-        assertSame(first, cache.get(original), "camera culling must not discard immutable wall indices");
-        assertNotSame(first, cache.get(replacement));
-        assertNotSame(first, cache.get(original), "a new revision invalidates the old index");
-        Object second = cache.get(original);
-        cache.clear();
-        assertNotSame(second, cache.get(original));
+        var first = original.mesh().seamMesh();
+        assertSame(first, original.mesh().seamMesh());
+        assertNotSame(first, replacement.mesh().seamMesh());
+        var seams = new PredictionLodSeams();
+        seams.update(List.of(surface(original), surface(tile(1, 0, 2, 80))));
+        long builds = PredictionSeamMesh.builds();
+        seams.clear();
+        assertSame(first, original.mesh().seamMesh(), "visibility caches never own or rebuild wall data");
+        assertEquals(builds, PredictionSeamMesh.builds());
+        assertThrows(IllegalStateException.class, original.mesh()::packed,
+                "published tiles must release the complete CPU quad view");
     }
 
     @Test void turningAcrossLargeVisibleSetsReusesIndicesAndPreservesExactSeams() {
@@ -139,27 +138,16 @@ class PredictionLodSeamsTest {
                 + ",warmMs=" + warmNanos / 1e6 + ",coldMs=" + coldNanos / 1e6);
     }
 
-    @Test void wallCacheEvictsLeastRecentlyUsedWithinEntryAndByteBudgets() {
-        var a = tile(0, 0, 2, 64);
-        var b = tile(1, 0, 2, 80);
-        var c = tile(2, 0, 2, 96);
-        var cache = new PredictionLodSeams.WallCache(1024 * 1024, 2);
-        Object first = cache.get(a), second = cache.get(b);
-        assertSame(first, cache.get(a));
-        cache.get(c);
-        assertEquals(2, cache.size());
-        assertSame(first, cache.get(a));
-        assertNotSame(second, cache.get(b));
-        var probe = new PredictionLodSeams.WallCache();
-        probe.get(a);
-        long oneIndexBytes = probe.retainedBytes();
-        var bounded = new PredictionLodSeams.WallCache(oneIndexBytes, 1024);
-        bounded.get(a); bounded.get(b);
-        assertEquals(1, bounded.size());
-        assertTrue(bounded.retainedBytes() <= oneIndexBytes);
-        var tooSmall = new PredictionLodSeams.WallCache(oneIndexBytes - 1, 1024);
-        tooSmall.get(a);
-        assertEquals(0, tooSmall.size(), "oversized indices are usable without unbounded retention");
+    @Test void seamSummaryBytesAreChargedToTheOwningTile() {
+        var tile = tile(0, 0, 2, 64);
+        long payload = tile.mesh().gpuPayload().retainedHeapBytes();
+        long summary = tile.mesh().seamMesh().retainedHeapBytes();
+        assertTrue(summary > 0);
+        assertTrue(tile.mesh().retainedHeapBytes() >= payload + summary);
+        assertTrue(tile.retainedHeapBytes() >= tile.mesh().retainedHeapBytes());
+        long builds = PredictionSeamMesh.builds();
+        for (int i = 0; i < 100; i++) new PredictionLodSeams.Index(List.of(surface(tile)));
+        assertEquals(builds, PredictionSeamMesh.builds(), "camera frames cannot rebuild worker-owned indices");
     }
 
     @Test void underwaterSeamsUseTheSameWaterDepthLightingAsOrdinaryWalls() {
@@ -201,12 +189,12 @@ class PredictionLodSeamsTest {
             int y = x == 64 ? eastMargin : height;
             heights[z * 65 + x] = y;
             samples[z * 65 + x] = new ClientColumnSample(y, water, 0, ClientColumnSample.NO_BLOCK,
-                    0, 0, 0, 0, water > y ? 1 : 0, ClientColumnSample.FLAG_SURFACE_ONLY, 0,
-                    ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_SPAN,
+                    0, 0, 0, 0, water > y ? 1 : 0, PredictionWallEvidence.CHECKED, 0,
+                    ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK, -64,
                     ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
         }
         int[] colors = new int[heights.length]; Arrays.fill(colors, 0xFF808080);
-        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0xFF3F76E4, step, 65, false);
+        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0xFF3F76E4, step, 65, false).compactForRendering();
         var tile = new PredictionTile(new PredictionTileKey(Level.OVERWORLD, tx, tz, Integer.numberOfTrailingZeros(step)),
                 heights, heights, samples, mesh, new PredictionDepthBound(0, Math.max(height, water)), 0, height, 64, step);
         mesh.prepareGpuPayload(tile); return tile;
@@ -221,10 +209,10 @@ class PredictionLodSeamsTest {
         int[] heights = new int[65 * 65]; Arrays.fill(heights, height);
         var samples = new ClientColumnSample[heights.length];
         Arrays.fill(samples, new ClientColumnSample(height, height, 0, ClientColumnSample.NO_BLOCK, 0, 0, 0, 0, 0,
-                ClientColumnSample.FLAG_SURFACE_ONLY, 0, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
-                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN));
+                PredictionWallEvidence.CHECKED, 0, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
+                -64, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN));
         int[] colors = new int[heights.length]; Arrays.fill(colors, 0xFF00FF00);
-        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, step, 65, false);
+        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, step, 65, false).compactForRendering();
         var tile = new PredictionTile(new PredictionTileKey(Level.OVERWORLD, tx, tz, Integer.numberOfTrailingZeros(step)),
                 heights, heights, samples, mesh, new PredictionDepthBound(height, height), 0, height, 64, step);
         mesh.prepareGpuPayload(tile);

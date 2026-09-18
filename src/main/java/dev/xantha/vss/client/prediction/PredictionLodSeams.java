@@ -5,7 +5,6 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.*;
-import java.lang.ref.WeakReference;
 
 /** Connects the selected surface heights at ownership boundaries. No world-bottom skirts. */
 final class PredictionLodSeams {
@@ -14,7 +13,6 @@ final class PredictionLodSeams {
     private Map<PredictionTileKey, Surface> previous = Map.of();
     private List<Patch> patches = List.of();
     private final Map<PredictionTileKey, Cached> cache = new HashMap<>();
-    private final WallCache wallCache = new WallCache();
     private record Cached(Surface source, int[] edges, Surface[] neighbors, PredictionPackedMesh mesh) { }
 
     List<Patch> update(List<Surface> surfaces) {
@@ -39,8 +37,7 @@ final class PredictionLodSeams {
             inputs.put(surface.tile().key(), same ? old : surface);
         }
         if (unchanged) return patches;
-        wallCache.retain(inputs);
-        var index = new Index(inputs.values(), wallCache);
+        var index = new Index(inputs.values());
         var next = new ArrayList<Patch>();
         for (Surface requested : surfaces) {
             Surface surface = inputs.get(requested.tile().key());
@@ -55,10 +52,10 @@ final class PredictionLodSeams {
         return patches;
     }
 
-    String diagnostics() { return wallCache.diagnostics(); }
-    long wallIndexBuilds() { return wallCache.builds; }
+    String diagnostics() { return "mode=mesh-owned,builds=" + PredictionSeamMesh.builds(); }
+    long wallIndexBuilds() { return PredictionSeamMesh.builds(); }
 
-    void clear() { previous = Map.of(); patches = List.of(); cache.clear(); wallCache.clear(); }
+    void clear() { previous = Map.of(); patches = List.of(); cache.clear(); }
 
     private static Cached stitch(Surface surface, Index index, Cached old) {
         boolean sameSource = old != null && old.source() == surface;
@@ -121,17 +118,15 @@ final class PredictionLodSeams {
         int neighborCell = cellAt(neighbor, adjacentX, adjacentZ);
         if (!tile.samples()[PredictionGpuTile.sampleIndexForCell(cell, tile.cellAxis())].hasSurface()
                 || !neighbor.samples()[PredictionGpuTile.sampleIndexForCell(neighborCell, neighbor.cellAxis())].hasSurface()) return;
-        var ownQuads = tile.mesh().packed();
-        var neighborQuads = neighbor.mesh().packed();
-        int ownTop = ownQuads.quadForCell(cell), otherTop = neighborQuads.quadForCell(neighborCell);
-        if (ownTop < 0 || otherTop < 0) return;
-        int ownY = Math.round(ownQuads.y(ownTop, 0)), otherY = Math.round(neighborQuads.y(otherTop, 0));
+        var ownQuads = tile.mesh().seamMesh();
+        var neighborQuads = neighbor.mesh().seamMesh();
+        if (!ownQuads.hasTop(cell) || !neighborQuads.hasTop(neighborCell)) return;
+        int ownY = Math.round(ownQuads.topY(cell)), otherY = Math.round(neighborQuads.topY(neighborCell));
         if (ownY == otherY) return;
         boolean ownHigher = ownY > otherY;
         PredictionTile higher = ownHigher ? tile : neighbor;
         int higherCell = ownHigher ? cell : neighborCell;
-        var higherMesh = higher.mesh().packed();
-        int tint = higherMesh.color(ownHigher ? ownTop : otherTop, 0);
+        int tint = higher.mesh().seamMesh().topColor(higherCell);
         ClientColumnSample sample = higher.samples()[PredictionGpuTile.sampleIndexForCell(higherCell, higher.cellAxis())];
         int normalX = ownHigher ? nx : -nx, normalZ = ownHigher ? nz : -nz;
         int face = normalX > 0 ? 4 : normalX < 0 ? 3 : normalZ > 0 ? 2 : 1;
@@ -142,7 +137,7 @@ final class PredictionLodSeams {
         int ax = (x + (nx > 0 ? 1 : 0)) * step, az = (z + (nz > 0 ? 1 : 0)) * step;
         int bx = ax + (nz != 0 ? step : 0), bz = az + (nx != 0 ? step : 0);
         // Only fill missing wall intervals. Coplanar copies fight for depth.
-        var gaps = new ArrayList<HeightSpan>(); gaps.add(new HeightSpan(bottom, top));
+        var gaps = new ArrayList<>(PredictionWallEvidence.intervals(sample, bottom, top, higher.spacingBlocks()));
         int worldX = tile.baseBlockX() + ax, worldZ = tile.baseBlockZ() + az;
         index.subtractWalls(gaps, source, worldX, worldZ, step, normalX, normalZ);
         index.subtractWalls(gaps, adjacent, worldX, worldZ, step, normalX, normalZ);
@@ -182,120 +177,6 @@ final class PredictionLodSeams {
 
     record HeightSpan(int bottom, int top) { }
 
-    /** Index immutable terrain walls without retaining the source mesh or tile. */
-    private static final class WallIndex {
-        private final Long2ObjectOpenHashMap<IntArrayList> planes = new Long2ObjectOpenHashMap<>();
-        WallIndex(PredictionTile tile) {
-            var mesh = tile.mesh().packed();
-            for (int q = 0; q < mesh.quadCount(); q++) {
-                int nx = Math.round(mesh.normalX(q, 0)), nz = Math.round(mesh.normalZ(q, 0));
-                if (mesh.normalY(q, 0) != 0 || Math.abs(nx) + Math.abs(nz) != 1) continue;
-                int sprite = mesh.color(q, 0) >>> 24;
-                // Leaves and baked model faces can contain holes. They do not
-                // establish an opaque terrain wall behind which to omit a seam.
-                if (VssLodSpriteTable.modelFace(sprite) || VssLodSpriteTable.isCutout(sprite)) continue;
-                float plane = nx != 0 ? mesh.x(q, 0) : mesh.z(q, 0);
-                boolean rectangle = true;
-                for (int c = 0; c < 4; c++) {
-                    float v = nx != 0 ? mesh.x(q, c) : mesh.z(q, c);
-                    rectangle &= v == plane && mesh.y(q, c) == Math.rint(mesh.y(q, c));
-                }
-                if (!rectangle || plane != Math.rint(plane) || mesh.y(q, 0) != mesh.y(q, 1)
-                        || mesh.y(q, 2) != mesh.y(q, 3) || mesh.y(q, 0) <= mesh.y(q, 2)) continue;
-                planes.computeIfAbsent(planeKey((int) plane, nx, nz), ignored -> new IntArrayList()).add(q);
-            }
-        }
-        long retainedBytes() {
-            // Include hash-table capacity, list backing arrays and object/entry overhead.
-            long bytes = 256L + 16L * it.unimi.dsi.fastutil.HashCommon.arraySize(planes.size(), .75F);
-            for (var list : planes.values()) bytes += 64L + 4L * list.elements().length;
-            return bytes;
-        }
-        private static long planeKey(int plane, int nx, int nz) {
-            return (long) plane << 3 | (nx != 0 ? 0 : 2) | (nx + nz > 0 ? 1 : 0);
-        }
-        void subtract(List<HeightSpan> gaps, Surface surface, int wx, int wz, int length, int nx, int nz) {
-            PredictionTile tile = surface.tile();
-            var mesh = tile.mesh().packed();
-            int lx = wx - tile.baseBlockX(), lz = wz - tile.baseBlockZ();
-            var candidates = planes.get(planeKey(nx != 0 ? lx : lz, nx, nz));
-            if (candidates == null) return;
-            int start = nx != 0 ? lz : lx;
-            for (int q : candidates) {
-                float a = nx != 0 ? mesh.z(q, 0) : mesh.x(q, 0);
-                float b = nx != 0 ? mesh.z(q, 1) : mesh.x(q, 1);
-                if (Math.min(a,b) > start || Math.max(a,b) < start + length) continue;
-                int owner = mesh.coverageCell(q);
-                if (mesh.coverageUsesLocalPosition(q)) {
-                    int along = Math.floorDiv(start + length / 2, tile.spacingBlocks());
-                    owner = nx != 0 ? along * tile.cellAxis() + owner % tile.cellAxis()
-                            : owner / tile.cellAxis() * tile.cellAxis() + along;
-                }
-                if (owner < 0 || owner >= surface.allowed().length || !surface.allowed()[owner]) continue;
-                int bottom = Math.round(mesh.y(q,2)), top = Math.round(mesh.y(q,0));
-                for (int i = gaps.size() - 1; i >= 0; i--) {
-                    HeightSpan gap = gaps.get(i);
-                    if (top <= gap.bottom() || bottom >= gap.top()) continue;
-                    gaps.remove(i);
-                    if (gap.bottom() < bottom) gaps.add(new HeightSpan(gap.bottom(), bottom));
-                    if (top < gap.top()) gaps.add(new HeightSpan(top, gap.top()));
-                }
-            }
-        }
-    }
-
-    /** Keep indices across camera turns; weak owners never pin unloaded tile data. */
-    static final class WallCache {
-        private record Entry(WeakReference<PredictionTile> tile, WallIndex index, long weight) { }
-        private final LinkedHashMap<PredictionTileKey, Entry> entries = new LinkedHashMap<>(16, .75F, true);
-        private final long maxBytes;
-        private final int maxEntries;
-        private long weight, builds, hits, evictions;
-        WallCache() { this(16L * 1024 * 1024, 1024); }
-        WallCache(long maxBytes, int maxEntries) {
-            this.maxBytes = maxBytes;
-            this.maxEntries = maxEntries;
-        }
-        WallIndex get(PredictionTile tile) {
-            Entry old = entries.get(tile.key());
-            if (old != null && old.tile().get() == tile) { hits++; return old.index(); }
-            if (old != null) { entries.remove(tile.key()); weight -= old.weight(); }
-            var index = new WallIndex(tile);
-            builds++;
-            long cost = index.retainedBytes();
-            if (cost <= maxBytes && maxEntries > 0) {
-                while (!entries.isEmpty() && (weight + cost > maxBytes || entries.size() >= maxEntries)) {
-                    var iterator = entries.values().iterator();
-                    weight -= iterator.next().weight();
-                    iterator.remove();
-                    evictions++;
-                }
-                entries.put(tile.key(), new Entry(new WeakReference<>(tile), index, cost));
-                weight += cost;
-            }
-            return index;
-        }
-        void retain(Map<PredictionTileKey, Surface> surfaces) {
-            var iterator = entries.entrySet().iterator();
-            while (iterator.hasNext()) {
-                var entry = iterator.next();
-                var tile = entry.getValue().tile().get();
-                var surface = surfaces.get(entry.getKey());
-                // Visibility is transient. Only discard collected or replaced geometry.
-                if (tile == null || surface != null && surface.tile() != tile) {
-                    weight -= entry.getValue().weight(); iterator.remove();
-                }
-            }
-        }
-        long retainedBytes() { return weight; }
-        int size() { return entries.size(); }
-        String diagnostics() {
-            return "builds=" + builds + ",hits=" + hits + ",evictions=" + evictions
-                    + ",entries=" + entries.size() + ",bytes=" + weight;
-        }
-        void clear() { entries.clear(); weight = 0; builds = hits = evictions = 0; }
-    }
-
     private static int pair(int a, int b) { return (a & 65535) | (b & 65535) << 16; }
     private static long key(int x, int z) { return (long) x << 32 | z & 0xFFFFFFFFL; }
     static int cellAt(PredictionTile tile, int x, int z) {
@@ -305,19 +186,14 @@ final class PredictionLodSeams {
 
     static final class Index {
         private final SortedMap<Integer, Long2ObjectOpenHashMap<Surface>> levels = new TreeMap<>();
-        private final Map<PredictionTile, WallIndex> walls = new IdentityHashMap<>();
-        private final WallCache wallCache;
         private final int[] spans;
         private final Long2ObjectOpenHashMap<Surface>[] levelTables;
         void subtractWalls(List<HeightSpan> gaps, Surface surface, int x, int z, int length, int nx, int nz) {
             if (surface == null || gaps.isEmpty()) return;
-            walls.computeIfAbsent(surface.tile(), tile -> wallCache == null ? new WallIndex(tile) : wallCache.get(tile))
-                    .subtract(gaps, surface, x, z, length, nx, nz);
+            surface.tile().mesh().seamMesh().subtract(gaps, surface, x, z, length, nx, nz);
         }
-        Index(Collection<Surface> surfaces) { this(surfaces, null); }
         @SuppressWarnings("unchecked")
-        Index(Collection<Surface> surfaces, WallCache wallCache) {
-            this.wallCache = wallCache;
+        Index(Collection<Surface> surfaces) {
             for (Surface surface : surfaces) {
                 PredictionTile tile = surface.tile();
                 levels.computeIfAbsent(tile.spanBlocks(), ignored -> new Long2ObjectOpenHashMap<>())

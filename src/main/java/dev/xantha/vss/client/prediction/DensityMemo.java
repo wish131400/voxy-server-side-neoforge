@@ -48,9 +48,11 @@ final class DensityMemo {
         }
         try {
             return wrapTransformableRoots(roots);
-        } catch (UnsupportedOperationException unsupported) {
+        } catch (UnsupportedOperationException | ClassCastException unsupported) {
             // Compiled graphs can reject replacing their runtime cache nodes
-            // (C2ME's IFastCacheLike, for example). This memo is optional:
+            // (C2ME's IFastCacheLike, for example). Older DFC versions reject
+            // the visitor explicitly; newer generated constructors CHECKCAST
+            // the replacement and throw ClassCastException. This memo is optional:
             // preserve every original root, including those already visited,
             // so a failed optimization cannot disable the worldgen context.
             dev.xantha.vss.common.VSSLogger.debug("VSS density memo skipped: graph rejects transformation ("

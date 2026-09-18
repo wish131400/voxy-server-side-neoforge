@@ -44,6 +44,7 @@ public final class VSSClientNetworking {
     private static volatile boolean waitingForHandshake;
     private static volatile boolean handshakeSent;
     private static int handshakeRetryTicks;
+    private static final PredictionCapabilitySync PREDICTION_CAPABILITY_SYNC = new PredictionCapabilitySync();
     private static volatile LodRequestManager requestManager;
     private static final ClientColumnProcessor COLUMN_PROCESSOR = new ClientColumnProcessor();
     private static final AtomicLong columnsReceived = new AtomicLong();
@@ -58,6 +59,23 @@ public final class VSSClientNetworking {
 
     public static boolean isServerEnabled() {
         return serverEnabled;
+    }
+
+    public static boolean shouldApplyStrictLodOrder() {
+        if (serverEnabled) return true;
+        if (!waitingForHandshake || !VSSClientConfig.CONFIG.receiveServerLods) return false;
+        var connection = Minecraft.getInstance().getConnection();
+        return connection != null && connection.hasChannel(SessionConfigS2CPayload.TYPE);
+    }
+
+    public static boolean strictColumnReady(int cx, int cz) {
+        LodRequestManager manager = requestManager;
+        return manager != null && manager.strictColumnReady(cx, cz);
+    }
+
+    public static boolean strictColumnRenderReady(int cx, int cz, java.util.function.IntPredicate ready) {
+        LodRequestManager manager = requestManager;
+        return manager != null && manager.strictColumnRenderReady(cx, cz, ready);
     }
 
     public static boolean isClientLodSessionActive() {
@@ -305,6 +323,7 @@ public final class VSSClientNetworking {
                             column.chunkZ(),
                             columnData);
                     if (accepted) {
+                        manager.recordStrictSections(column.chunkX(), column.chunkZ(), columnData);
                         ClientPredictionState.onExactColumn(column.dimension(), column.chunkX(), column.chunkZ(), columnData);
                     }
                     return accepted;
@@ -393,6 +412,7 @@ public final class VSSClientNetworking {
 
     @SubscribeEvent
     public static void onClientLogin(ClientPlayerNetworkEvent.LoggingIn event) {
+        dev.xantha.vss.compat.StrictLodVisibility.reset();
         ClientPredictionState.clear();
         ModCompat.onDisconnect();
         serverEnabled = false;
@@ -402,6 +422,7 @@ public final class VSSClientNetworking {
         waitingForHandshake = false;
         handshakeSent = false;
         handshakeRetryTicks = 0;
+        PREDICTION_CAPABILITY_SYNC.reset();
         requestManager = null;
         if (!VSSClientConfig.CONFIG.receiveServerLods) {
             return;
@@ -421,6 +442,11 @@ public final class VSSClientNetworking {
         ModCompat.init();
         ensureHandshakePending();
         tryPendingHandshake();
+        PREDICTION_CAPABILITY_SYNC.tick(
+                serverEnabled && !waitingForHandshake && VSSClientConfig.CONFIG.receiveServerLods
+                        && Minecraft.getInstance().getConnection() != null && isClientWorldReady(),
+                VSSClientConfig.CONFIG.enablePrediction,
+                () -> sendHandshake("Prediction capability update failed: "));
         LodRequestManager manager = requestManager;
         if (manager != null && serverEnabled) {
             manager.tick();
@@ -523,7 +549,9 @@ public final class VSSClientNetworking {
 
     private static boolean sendHandshake(String failurePrefix) {
         try {
-            VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, clientCapabilities()));
+            int capabilities = clientCapabilities();
+            VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, capabilities));
+            PREDICTION_CAPABILITY_SYNC.sent(capabilities);
             return true;
         } catch (Exception e) {
             VSSLogger.debug(failurePrefix + e.getMessage());
@@ -533,6 +561,7 @@ public final class VSSClientNetworking {
 
     private static int clientCapabilities() {
         int clientCaps = VSSApi.hasVoxelConsumers() ? VSSConstants.CAPABILITY_VOXEL_COLUMNS : 0;
+        if (ModCompat.isVoxyLoaded()) clientCaps |= VSSConstants.CAPABILITY_STRICT_LOD_ORDER;
         if (VSSClientConfig.CONFIG.enablePrediction) {
             clientCaps |= VSSConstants.CAPABILITY_PREDICTIVE_WORLDGEN;
         }
@@ -567,6 +596,8 @@ public final class VSSClientNetworking {
     }
 
     private static void stopClientSession(boolean resetStats) {
+        PREDICTION_CAPABILITY_SYNC.reset();
+        dev.xantha.vss.compat.StrictLodVisibility.reset();
         ClientPredictionState.clear();
         ModCompat.onDisconnect();
         LodRequestManager manager = requestManager;

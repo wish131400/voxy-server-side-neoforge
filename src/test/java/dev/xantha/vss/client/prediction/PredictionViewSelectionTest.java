@@ -55,6 +55,35 @@ class PredictionViewSelectionTest {
     }
 
     @Test
+    void residentCliffCanBeSelectedWhenExactRayMissesAndOutsideHorizonCannot() {
+        var plain = new ClientTerrainSampler(42L, PROFILE) {
+            @Override public int surfaceY(int x, int z) { return 64; }
+        };
+        var layout = VssLodLayout.of(4096, 6, true, false);
+        var shape = PredictionCoverageWorkTest.tile(0, 7, 3, layout);
+        int[] heights = new int[65*65]; java.util.Arrays.fill(heights, 220);
+        var sample = new ClientColumnSample(220, 220, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
+        var samples = new ClientColumnSample[65*65]; java.util.Arrays.fill(samples, sample);
+        var cliff = new PredictionTileManager.PredictionTile(shape.key(), heights, heights, samples,
+                shape.mesh(), new PredictionDepthBound(220,220), 0, 1, 64, 8);
+        var snapshot = new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,
+                layout, java.util.Map.of(cliff.key(), cliff), java.util.Map.of());
+        var origin = new Vec3(16, 177, 0);
+        var direction = new Vec3(0, 0, 1);
+        assertNull(ClientPredictionState.pickViewFocus(plain, origin, direction, 4096, .08, 9000));
+        var focus = ClientPredictionState.pickResidentViewFocus(snapshot, origin, direction, 4096, .08, 9000);
+        assertNotNull(focus, "visible coarse cliff must trigger refinement even when exact ray sees sky");
+        assertEquals(3584, focus.z(), .01);
+        var plan = PredictionLodPlanner.plan(net.minecraft.world.level.Level.OVERWORLD, 16,177,0,layout,focus,1300);
+        assertTrue(plan.stream().anyMatch(key -> key.lod()==0 && contains(layout,key,focus.x(),focus.z()+1)));
+        assertNull(ClientPredictionState.pickResidentViewFocus(snapshot, origin, direction, 3000, .08, 9000),
+                "a resident parent outside the configured horizon must not expand generation");
+        assertNull(ClientPredictionState.pickResidentViewFocus(snapshot, new Vec3(16,300,0), direction,4096,.08,9000),
+                "sky above the resident mountain must remain a miss");
+    }
+
+    @Test
     void focusTouchesAParentEvenWhenItsCenterIsOutside() {
         VssLodFocus focus = new VssLodFocus(100, 100, 192, 9000);
         assertFalse(focus.contains(2048, 2048));

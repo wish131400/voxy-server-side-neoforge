@@ -347,6 +347,22 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     void invalidateChunk(int x, int z) { invalidate(affected(x, z)); }
+
+    void invalidateCapture(int x, int z) {
+        var keys = affected(x, z);
+        // Authoritative arrivals only replace sampled columns. Match the live
+        // manager's sparse-grid dependency check for unloaded tiles too; otherwise
+        // a chunk between far grid points deletes useful persisted ancestors.
+        // Explicit world edits still use the conservative invalidateChunk path.
+        keys.removeIf(key -> key.kind != 0 || !captureIntersects(key, x, z));
+        invalidate(keys);
+    }
+
+    private static boolean captureIntersects(Key key, int x, int z) {
+        int spacing = 1 << key.detail, span = VssLodLayout.BASE_TILE_BLOCKS << key.detail;
+        return PredictionTileManager.captureIntersectsAxis(x * 16L, key.x * (long) span, span, spacing)
+                && PredictionTileManager.captureIntersectsAxis(z * 16L, key.z * (long) span, span, spacing);
+    }
     Path file(Key key) {
         return root.resolve(key.kind + "-" + key.detail).resolve((key.x >> 5) + "_" + (key.z >> 5))
                 .resolve(key.x + "_" + key.z + ".vpd");

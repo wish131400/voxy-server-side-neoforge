@@ -71,10 +71,10 @@ public final class PredictionIrisBridge {
         void bindFrame(PredictionRenderer.Frame frame) {
             program.setIrisFrame(new Matrix4f(frame.projection()).invert(), width, height, zeroToOne, materialIds,
                     depthFunc == GL11.GL_GEQUAL || depthFunc == GL11.GL_GREATER ? 0.0F : 1.0F);
-            if (bindImages != null) bindImages.accept(8);
+            if (bindImages != null) bindImages.accept(PredictionExactCoverageMask.TEXTURE_UNITS);
             // Voxy installs sampler objects. Our atlas and metadata require their
-            // own texture filtering; unbind those overrides on the eight VSS units.
-            for (int unit = 0; unit < 8; unit++) GL33.glBindSampler(unit, 0);
+            // own texture filtering; unbind those overrides on the VSS units.
+            for (int unit = 0; unit < PredictionExactCoverageMask.TEXTURE_UNITS; unit++) GL33.glBindSampler(unit, 0);
         }
     }
 
@@ -100,7 +100,7 @@ public final class PredictionIrisBridge {
             Object images = call(field(pipeline, "data"), "getImageSet");
             int count = images == null ? 0 : (int) ((String) call(images, "layout")).lines()
                     .filter(line -> line.contains("BASE_SAMPLER_BINDING_INDEX+")).count();
-            int units = 8 + count;
+            int units = PredictionExactCoverageMask.TEXTURE_UNITS + count;
             if (units > GL11.glGetInteger(GL20.GL_MAX_TEXTURE_IMAGE_UNITS)) {
                 throw new IllegalStateException("Shader pack requires too many texture units for prediction: " + units);
             }
@@ -128,9 +128,9 @@ public final class PredictionIrisBridge {
         String patch(String name, String source) {
             try {
                 String patched = (String) call(pipeline, name, null, source);
-                // Voxy reserves units 6+ for pack inputs; prediction has eight
+                // Voxy reserves units 6+ for pack inputs; prediction has nine
                 // local textures. Move the whole pack sampler set together.
-                return patched.replace("#define BASE_SAMPLER_BINDING_INDEX 6", "#define BASE_SAMPLER_BINDING_INDEX 8");
+                return patched.replace("#define BASE_SAMPLER_BINDING_INDEX 6", "#define BASE_SAMPLER_BINDING_INDEX " + PredictionExactCoverageMask.TEXTURE_UNITS);
             } catch (ReflectiveOperationException failure) {
                 throw new IllegalStateException("Voxy shader adapter API unavailable", failure);
             }
@@ -261,7 +261,7 @@ public final class PredictionIrisBridge {
             for (int unit = 0; unit < textures.length; unit++) {
                 GL13.glActiveTexture(GL13.GL_TEXTURE0 + unit);
                 for (int target = 0; target < TARGETS.length; target++) {
-                    if (target == 0 && unit < 8) {
+                    if (target == 0 && unit < PredictionExactCoverageMask.TEXTURE_UNITS) {
                         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
                         RenderSystem.bindTexture(textures[unit][target]);
                     }

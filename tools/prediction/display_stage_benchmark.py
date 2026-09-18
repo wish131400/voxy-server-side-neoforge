@@ -71,7 +71,7 @@ def instrument(crate):
             '            if mode() == 3 && (!eligible || !hint_ok) {\n'
             '                count("fallback_hint_points", indices.len());\n'
             '                let _scope=Scope::new("exact_fallback");')
-    replace('            let mut job = if eligible {', '            let mut job = { let _scope=Scope::new("job_setup"); if eligible {')
+    replace('            let mut job = if sparse_batch {', '            let mut job = { let _scope=Scope::new("job_setup"); if sparse_batch {')
     replace('            job.display = eligible;', '            };\n            job.display = eligible;')
     # The additional block above must return the Job, not a semicolon expression.
     replace('            };\n            };\n            job.display = eligible;',

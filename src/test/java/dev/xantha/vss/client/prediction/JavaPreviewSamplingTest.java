@@ -39,6 +39,17 @@ class JavaPreviewSamplingTest {
                 LevelHeightAccessor.create(profile.minY(),profile.height()),settings.seaLevel(),List.of(),null,access);
     }
 
+    @Test void decodedJavaColorsHaveStableIdentityButOpaqueProvidersDoNot() throws Exception {
+        var identity = new PredictionColorCache(() -> 12345L);
+        var source = sampler(LithostitchedNativeTest.document(), 42);
+        assertEquals(12345L, source.colorCacheFingerprint(identity));
+        assertEquals(12345L, ClientTerrainSampler.withSurfaceOverride(source, (x,z) -> 64).colorCacheFingerprint(identity));
+        var opaque = new ClientTerrainSampler(source, (x,z) -> 64) {
+            @Override public int surfaceColor(int x, int y, int z) { return 0xff001234; }
+        };
+        assertEquals(Long.MIN_VALUE, opaque.colorCacheFingerprint(identity));
+    }
+
     @Test void previewUsesRealMaterialRulesButDoesNotPopulateExactColumnCache(@TempDir java.nio.file.Path directory) throws Exception {
         var doc = LithostitchedNativeTest.document();
         doc.getAsJsonObject("settings").add("surface_rule",JsonParser.parseString(

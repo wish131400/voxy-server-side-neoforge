@@ -19,6 +19,29 @@ fn document() -> Value {
 }
 
 #[test]
+fn sparse_workspace_matches_individual_queries_across_chunks_and_revisits() {
+    for seed in [0, -917] {
+        let d = document();
+        let batched = World::new(seed, 13, d.clone()).unwrap();
+        let oracle = World::new(seed, 13, d).unwrap();
+        for step in [16, 64, 128, 256, 512] {
+            let mut points: Vec<_> = (0..64)
+                .map(|i| (-4097 + i % 8 * step, -65 + i / 8 * step)).collect();
+            // Duplicate/nearby points and shuffled groups retain their original output order.
+            points[62] = points[3];
+            points.reverse();
+            let expected: Vec<_> = points.iter().map(|&p| oracle.display_points(&[p]).unwrap()[0].values).collect();
+            let actual: Vec<_> = batched.display_points(&points).unwrap().iter().map(|r| r.values).collect();
+            assert_eq!(actual, expected, "seed={seed}, step={step}");
+            assert_eq!(actual, batched.display_points(&points).unwrap().iter().map(|r| r.values).collect::<Vec<_>>());
+        }
+        let dense: Vec<_> = (0..64).map(|i| (-16+i%8, 16+i/8)).collect();
+        assert_eq!(batched.display_points(&dense).unwrap().iter().map(|r|r.values).collect::<Vec<_>>(),
+                   oracle.display_points(&dense).unwrap().iter().map(|r|r.values).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn dense_cell_bounds_keep_local_thin_layers_across_negative_coordinates() {
     let mut d = document();
     d["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});

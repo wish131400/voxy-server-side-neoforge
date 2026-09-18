@@ -23,6 +23,9 @@ final class PredictionMemoryBudget {
     private long used;
     private long pausedUntil;
     private boolean paused;
+    private boolean detailPressure;
+    private long detailPressureSince;
+    private static final long DETAIL_PRESSURE_GRACE_NANOS = 5_000_000_000L;
 
     PredictionMemoryBudget(long limit, long minimumFree, LongSupplier freeHeap, LongSupplier clock) {
         this(limit, minimumFree, freeHeap, clock, Integer.MAX_VALUE);
@@ -88,8 +91,15 @@ final class PredictionMemoryBudget {
         return paused() || BUILD_BYTES > availableBytes();
     }
 
+    synchronized boolean allowsIdleRefinement() {
+        // Optional quality must leave room for normal loading, even with a
+        // single-worker pool. This allowance is in addition to the GC reserve.
+        return !paused() && availableBytes() >= BUILD_BYTES + 256L * MIB;
+    }
+
     private long availableBytes() {
         long headroom = Math.max(0, freeHeap.getAsLong() - minimumFree - (adaptive ? workingBytes : 0));
+        if (adaptive && headroom >= BUILD_BYTES) detailPressure = false;
         return adaptive ? headroom : Math.min(limit - used, headroom);
     }
 
@@ -101,11 +111,30 @@ final class PredictionMemoryBudget {
         // Running jobs may release their workspaces shortly; do not evict
         // cached terrain just because all build slots are currently reserved.
         if (paused() || adaptive && activeBuilders != 0) return 0;
-        long shortage = Math.max(0, BUILD_BYTES - availableBytes());
+        // Preserve the safety deficit too. Clamping availableBytes to zero
+        // understated severe pressure as just one workspace, encouraging
+        // repeated visible-detail eviction that could never admit a build.
+        long shortage = adaptive ? Math.max(0, minimumFree + BUILD_BYTES - freeHeap.getAsLong())
+                : Math.max(0, BUILD_BYTES - availableBytes());
         if (!adaptive) return shortage;
+        if (shortage == 0) detailPressure = false;
+        else if (!detailPressure) {
+            detailPressure = true;
+            detailPressureSince = clock.getAsLong();
+        }
         refreshCollections();
         return Math.max(0, shortage - awaitingCollectionBytes);
     }
+
+    /** A visible downgrade must be sustained and capable of funding its replacement. */
+    synchronized boolean canReclaimDetail(long reclaimableBytes) {
+        long target = reclaimTargetBytes();
+        return target > 0 && (!adaptive || detailPressure
+                && clock.getAsLong() - detailPressureSince >= DETAIL_PRESSURE_GRACE_NANOS
+                && reclaimableBytes >= target);
+    }
+
+    boolean hasFixedAllowance() { return !adaptive; }
 
     private void refreshCollections() {
         long count = collections.getAsLong();

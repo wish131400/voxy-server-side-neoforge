@@ -13,6 +13,22 @@ public record BatchChunkRequestC2SPayload(
         boolean[] allowGeneration,
         boolean[] cacheProbe,
         int count) implements CustomPacketPayload {
+    public BatchChunkRequestC2SPayload {
+        if (count < 0 || count > VSSConstants.MAX_BATCH_CHUNK_REQUESTS
+                || requestIds.length < count || packedPositions.length < count
+                || clientTimestamps.length < count || allowGeneration.length < count
+                || cacheProbe.length < count) {
+            throw new IllegalArgumentException("Invalid batch chunk request arrays/count");
+        }
+        // The scanner reuses its buffers next tick. Network encoding and integrated
+        // server dispatch may happen later, so the packet must own its used entries.
+        requestIds = java.util.Arrays.copyOf(requestIds, count);
+        packedPositions = java.util.Arrays.copyOf(packedPositions, count);
+        clientTimestamps = java.util.Arrays.copyOf(clientTimestamps, count);
+        allowGeneration = java.util.Arrays.copyOf(allowGeneration, count);
+        cacheProbe = java.util.Arrays.copyOf(cacheProbe, count);
+    }
+
     public static final CustomPacketPayload.Type<BatchChunkRequestC2SPayload> TYPE = VSSPayloadCodecs.type("batch_chunk_request");
     public static final StreamCodec<RegistryFriendlyByteBuf, BatchChunkRequestC2SPayload> STREAM_CODEC =
             VSSPayloadCodecs.codec(BatchChunkRequestC2SPayload::encode, BatchChunkRequestC2SPayload::decode);

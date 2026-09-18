@@ -8,7 +8,7 @@ the independent noise verification probe uses ABI 1. Minecraft method mapping
 and directly executed oracles are documented in `tools/rust/README.md` and
 `tools/rust/VANILLA_PIPELINE.md`.
 
-The crate uses `jni`, `md-5`, `serde_json`, `fastnoise-lite` and their dependencies at the exact
+The crate uses `jni`, `md-5`, `serde_json`, `fastnoise-lite`, `rustc-hash` and their dependencies at the exact
 versions recorded in `Cargo.lock`. Dependency license declarations and notices
 are supplied by the corresponding crates. Source-built binaries are currently
 packaged for Windows x86_64, Linux x86_64/aarch64 and macOS x86_64/aarch64.
@@ -71,3 +71,33 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## rustc-hash 2.1.1
+
+https://github.com/rust-lang/rustc-hash
+
+Distributed under its MIT option:
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

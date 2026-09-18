@@ -50,11 +50,10 @@ public final class ClientPredictionState {
     private static final Map<CellKey, Long> exactAcceptedTimes = new ConcurrentHashMap<>();
     /**
      * Voxy's local index is deliberately queried outside the render loop's
-     * hot path. A negative result is short-lived because the index may still
-     * be building, while a positive result remains valid for this client
-     * world and is removed when the column/session changes.
+     * hot path. Only positives are retained in sparse pages; a negative
+     * result needs no per-column object. Unknown index state preserves positives.
      */
-    private static final Map<CellKey, CoverageCacheEntry> exactCoverage = new ConcurrentHashMap<>();
+    private static final PredictionExactCoverageIndex exactCoverage = new PredictionExactCoverageIndex();
     /**
      * Bumped whenever a cell's exact ownership MATERIALLY flips to Voxy
      * (ingest, background sweep discovery, session reset).  Renderer
@@ -67,8 +66,16 @@ public final class ClientPredictionState {
 
     /** Revision of the exact-ownership cache; see {@link #exactCoverageRevision}. */
     public static long exactCoverageRevision() {
-        return exactCoverageRevision.get();
+        return exactCoverageRevision.get() + dev.xantha.vss.compat.StrictLodVisibility.revision();
     }
+
+    static CompletableFuture<PredictionExactCoverageMask.Snapshot> exactCoverageSnapshot(
+            ResourceKey<Level> dimension, int cx, int cz, int radius) {
+        return CompletableFuture.supplyAsync(() -> exactCoverage.snapshot(dimension, cx, cz, radius,
+                System.nanoTime()), PROFILE_DECODER);
+    }
+
+    static long exactCoverageDataRevision() { return exactCoverageRevision.get(); }
     /** Background discovery resumes within separate near/far time budgets. */
     private static final long SWEEP_INTERVAL_NANOS = 200_000_000L;
     private static final PredictionCoverageSweep coverageSweep = new PredictionCoverageSweep();
@@ -76,7 +83,8 @@ public final class ClientPredictionState {
             new java.util.concurrent.atomic.AtomicBoolean();
     private static volatile long lastSweepNanos;
     private static volatile long lastSweepLogNanos;
-    private static volatile List<int[]> sweepOffsetsReference;
+    private static volatile PredictionCoverageOffsets sweepOffsetsReference;
+    private static long coverageRetainedAt;
     private static volatile int sweepRadiusChunks = -1;
     private static final long REQUEST_STATE_TIMEOUT_NANOS = 15_000_000_000L;
     private static final AtomicLong DECODE_GENERATION = new AtomicLong();
@@ -288,17 +296,21 @@ public final class ClientPredictionState {
             return;
         }
         var samplerRef = manager.sampler();
+        var resident = manager.renderSnapshot();
         long generation = focusGeneration.get();
         double scale = PredictionRenderer.selectionPixelsPerBlock(minecraft);
         double tanHalf = Math.max(1, minecraft.getMainRenderTarget().height) / (2.0D * scale);
         PROFILE_DECODER.execute(() -> {
             try {
-                VssLodFocus picked = pickViewFocus(samplerRef, origin, direction,
+                VssLodFocus picked = pickResidentViewFocus(resident, origin, direction,
                         predictionHorizonBlocks(), tanHalf, scale);
+                if (picked == null) picked = pickViewFocus(samplerRef, origin, direction,
+                        predictionHorizonBlocks(), tanHalf, scale);
+                VssLodFocus selected = picked;
                 minecraft.execute(() -> {
                     if (generation == focusGeneration.get() && minecraft.level == level
                             && minecraft.player != null && minecraft.player.isScoping()) {
-                        viewFocus = new ViewFocus(picked);
+                        viewFocus = new ViewFocus(selected);
                     }
                 });
             } catch (Throwable ignored) {
@@ -313,15 +325,39 @@ public final class ClientPredictionState {
                                    net.minecraft.world.phys.Vec3 origin,
                                    net.minecraft.world.phys.Vec3 direction,
                                    double range, double tanHalfFov, double scale) {
+        return pickViewFocus(sampler::surfaceY, origin, direction, range, tanHalfFov, scale, Double.MAX_VALUE);
+    }
+
+    static VssLodFocus pickResidentViewFocus(PredictionTileManager.RenderSnapshot snapshot,
+                                           net.minecraft.world.phys.Vec3 origin,
+                                           net.minecraft.world.phys.Vec3 direction,
+                                           double range, double tanHalfFov, double scale) {
+        // Coarse rendered columns can stand above the exact height at the
+        // crosshair. Pick their resident footprint without recomputing density.
+        return pickViewFocus((x,z) -> {
+            var tile = snapshot.coveringTileAtDetail(Math.floorDiv(x,16), Math.floorDiv(z,16), 0);
+            if (tile == null) return Integer.MIN_VALUE;
+            int sx = Math.max(0, Math.min(tile.cellAxis()-1, Math.floorDiv(x-tile.baseBlockX(),tile.spacingBlocks())));
+            int sz = Math.max(0, Math.min(tile.cellAxis()-1, Math.floorDiv(z-tile.baseBlockZ(),tile.spacingBlocks())));
+            var sample = tile.samples()[sz*(tile.cellAxis()+1)+sx];
+            if (sample.hasFluid()) return Math.max(sample.fluidY(), sample.hasSurface() ? sample.surfaceY() : Integer.MIN_VALUE);
+            return sample.hasSurface() ? tile.heightAt(x-tile.baseBlockX(),z-tile.baseBlockZ()) : Integer.MIN_VALUE;
+        }, origin, direction, range, tanHalfFov, scale, 2.0D);
+    }
+
+    private static VssLodFocus pickViewFocus(java.util.function.IntBinaryOperator height,
+                                           net.minecraft.world.phys.Vec3 origin,
+                                           net.minecraft.world.phys.Vec3 direction,
+                                           double range, double tanHalfFov, double scale, double maximumStep) {
         double previous = 0.0D;
         // Horizontal and upward rays can hit mountains too. A sky miss has no focus.
         for (double distance = Math.min(2.0D, range); range > 0.0D;
-                distance = Math.min(range, distance + Math.max(2.0D, distance / 128.0D))) {
+                distance = Math.min(range, distance + Math.min(maximumStep, Math.max(2.0D, distance / 128.0D)))) {
             double x = origin.x + direction.x * distance;
             double y = origin.y + direction.y * distance;
             double z = origin.z + direction.z * distance;
-            if (y <= sampler.surfaceY((int) Math.floor(x), (int) Math.floor(z))) {
-                double hit = refineViewHit(sampler, origin, direction, previous, distance);
+            if (y <= height.applyAsInt((int) Math.floor(x), (int) Math.floor(z))) {
+                double hit = refineViewHit(height, origin, direction, previous, distance);
                 double radius = Math.min(4096.0D, Math.max(PredictionWorkOrder.SCOPED_RADIUS_BLOCKS,
                         hit * tanHalfFov * 3.0D + 192.0D));
                 return new VssLodFocus(origin.x + direction.x * hit,
@@ -333,7 +369,7 @@ public final class ClientPredictionState {
         return null;
     }
 
-    private static double refineViewHit(ClientTerrainSampler sampler,
+    private static double refineViewHit(java.util.function.IntBinaryOperator height,
                                         net.minecraft.world.phys.Vec3 origin,
                                         net.minecraft.world.phys.Vec3 direction,
                                         double low, double high) {
@@ -342,7 +378,7 @@ public final class ClientPredictionState {
             double x = origin.x + direction.x * mid;
             double y = origin.y + direction.y * mid;
             double z = origin.z + direction.z * mid;
-            int surface = sampler.surfaceY((int) Math.floor(x), (int) Math.floor(z));
+            int surface = height.applyAsInt((int) Math.floor(x), (int) Math.floor(z));
             if (y <= surface) {
                 high = mid;
             } else {
@@ -387,6 +423,7 @@ public final class ClientPredictionState {
         if (VssLodSpriteTable.refresh(blockAtlas.getSprite(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("block/stone")))) {
             RustWorldgenDocument.invalidateSharedInputs();
+            PredictionColorCache.RESOURCES.invalidate();
             MANAGERS.values().forEach(PredictionTileManager::invalidateAppearance);
             for (var manager : List.copyOf(MANAGERS.values())) {
                 if (manager.sampler() instanceof RustTerrainSampler rust) PROFILE_DECODER.execute(() -> {
@@ -434,6 +471,11 @@ public final class ClientPredictionState {
                 requestTimes.remove(key, started);
             }
         });
+    }
+
+    public static PredictionLoadingProgress loadingProgress(ResourceKey<Level> dimension) {
+        PredictionTileManager manager = dimension == null ? null : MANAGERS.get(dimension);
+        return manager == null ? PredictionLoadingProgress.INITIALIZING : manager.loadingProgress();
     }
 
     public static boolean shouldDeferExactColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ, long nowNanos) {
@@ -487,10 +529,10 @@ public final class ClientPredictionState {
     }
 
     public static void onExactColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+        // Arrival is not a world edit. Capture refreshes the sampled ground;
+        // rendering hands over only once real geometry reaches the screen.
         PredictionTileManager manager = MANAGERS.get(dimension);
-        if (manager != null) {
-            manager.invalidate(chunkX, chunkZ);
-        }
+        if (manager != null) manager.acceptExactColumn(chunkX, chunkZ);
         if (dimension != null) {
             CellKey key = new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ));
             cellStates.put(key, CellState.EXACT);
@@ -499,9 +541,7 @@ public final class ClientPredictionState {
             // reads the cache without probing, so ingest must publish the
             // handover itself (the ExactCoverageGate settle window inside
             // hasExactCoverage still applies).
-            CoverageCacheEntry previous = exactCoverage.put(key, new CoverageCacheEntry(
-                    true, exactAcceptedTimes.get(key), Long.MAX_VALUE));
-            if (previous == null || !previous.present()) {
+            if (exactCoverage.confirm(dimension, chunkX, chunkZ, exactAcceptedTimes.get(key))) {
                 exactCoverageRevision.incrementAndGet();
             }
             requestTimes.remove(key);
@@ -549,6 +589,7 @@ public final class ClientPredictionState {
      */
     public static boolean hasExactCoverage(ResourceKey<Level> dimension, ClientLevel level,
                                             int chunkX, int chunkZ) {
+        if (!dev.xantha.vss.compat.StrictLodVisibility.visible(dimension, chunkX, chunkZ)) return false;
         if (dimension == null || level == null || !dimension.equals(level.dimension())) {
             return false;
         }
@@ -568,22 +609,18 @@ public final class ClientPredictionState {
                 return true;
             }
         }
-        CoverageCacheEntry cached = exactCoverage.get(key);
-        return cached != null && cached.ownsAt(now);
+        return exactCoverage.owns(dimension, chunkX, chunkZ, now);
     }
 
     /** Reflection probe that refreshes the cache; background threads only.
      *  Returns the freshly-probed presence. */
     private static boolean probeExactCoverage(ResourceKey<Level> dimension, ClientLevel level,
                                               int chunkX, int chunkZ) {
-        CellKey key = new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ));
         long now = System.nanoTime();
         ModCompat.LocalColumnState state = ModCompat.getVoxyLocalColumnState(
                 level, chunkX, chunkZ);
         boolean present = state == ModCompat.LocalColumnState.PRESENT;
-        CoverageCacheEntry previous = exactCoverage.get(key);
         if (present) {
-            if (previous != null && previous.present()) return true;
             // Probe positives yield IMMEDIATELY: the probe reads Voxy's own
             // storage index, so the data is already renderable on Voxy's
             // side.  Backdating the transition skips the ingest settle
@@ -592,14 +629,9 @@ public final class ClientPredictionState {
             // meshes over the freshly loaded real LOD (the mixing report).
             // The settle only protects the delivery path, where the ingest
             // ack precedes Voxy's render-node build (onExactColumn).
-            long transitionStarted = previous != null && previous.present()
-                    ? previous.transitionStartedNanos()
-                    : now - ExactCoverageGate.SETTLE_NANOS;
-            if (previous == null || !previous.present()) {
+            if (exactCoverage.confirm(dimension, chunkX, chunkZ, now - ExactCoverageGate.SETTLE_NANOS)) {
                 exactCoverageRevision.incrementAndGet();
             }
-            exactCoverage.put(key, new CoverageCacheEntry(
-                    true, transitionStarted, Long.MAX_VALUE));
         } else {
             // Definitive MISS (index ready, not confirmed, not stored): the
             // ingest record is stale — Voxy genuinely has no data here, so
@@ -611,9 +643,7 @@ public final class ClientPredictionState {
                 if (manager != null && manager.revokeAuthoritative(chunkX, chunkZ)) {
                     exactCoverageRevision.incrementAndGet();
                 }
-            }
-            if (previous == null || previous.present()) {
-                exactCoverage.put(key, new CoverageCacheEntry(false, now, Long.MAX_VALUE));
+                if (exactCoverage.remove(dimension, chunkX, chunkZ)) exactCoverageRevision.incrementAndGet();
             }
         }
         return present;
@@ -638,21 +668,24 @@ public final class ClientPredictionState {
         }
         lastSweepNanos = now;
         ResourceKey<Level> dimension = level.dimension();
-        List<int[]> offsets = sweepOffsets(yieldRadiusChunks);
-        if (offsets.isEmpty()) {
-            sweepUpdating.set(false);
-            return;
-        }
-        int nearRingChunks = Math.max(16, yieldRadiusChunks / 4);
+        int radius = coverageRadiusChunks(yieldRadiusChunks);
+        int nearRingChunks = Math.max(16, radius / 4);
         long generation = DECODE_GENERATION.get();
         PROFILE_DECODER.execute(() -> {
             try {
+                if (generation != DECODE_GENERATION.get() || !VSSClientConfig.CONFIG.enablePrediction) return;
+                // Build/sort offsets on the background executor, never the tick thread.
+                PredictionCoverageOffsets offsets = sweepOffsets(radius);
+                if (now - coverageRetainedAt >= 5_000_000_000L) {
+                    coverageRetainedAt = now;
+                    if (exactCoverage.retain(dimension, playerChunkX, playerChunkZ, radius + 64))
+                        exactCoverageRevision.incrementAndGet();
+                }
                 PredictionTileManager manager = MANAGERS.get(dimension);
                 var result = coverageSweep.run(offsets, nearRingChunks, playerChunkX, playerChunkZ, generation,
                         () -> generation == DECODE_GENERATION.get() && VSSClientConfig.CONFIG.enablePrediction,
                         index -> {
-                            int[] offset = offsets.get(index);
-                            int chunkX = playerChunkX + offset[0], chunkZ = playerChunkZ + offset[1];
+                            int chunkX = playerChunkX + offsets.x(index), chunkZ = playerChunkZ + offsets.z(index);
                             return manager != null && manager.isAuthoritative(chunkX, chunkZ)
                                     || probeExactCoverage(dimension, level, chunkX, chunkZ);
                         });
@@ -673,26 +706,19 @@ public final class ClientPredictionState {
     }
 
     /** Near-first ring offsets inside the yield radius, rebuilt on resize. */
-    private static List<int[]> sweepOffsets(int yieldRadiusChunks) {
-        List<int[]> offsets = sweepOffsetsReference;
+    static int coverageRadiusChunks(int requested) {
+        int horizon = (int) Math.ceil(predictionHorizonBlocks() / 16.0);
+        return Math.max(1, Math.min(512, Math.min(requested, horizon + 32)));
+    }
+
+    private static PredictionCoverageOffsets sweepOffsets(int yieldRadiusChunks) {
+        PredictionCoverageOffsets offsets = sweepOffsetsReference;
         if (offsets != null && offsets.size() > 0
                 && sweepRadiusChunks == yieldRadiusChunks) {
             return offsets;
         }
-        int radius = Math.max(1, yieldRadiusChunks);
-        List<int[]> rebuilt = new ArrayList<>(radius * radius * 2);
-        // Square ring walk ordered by distance so the sweep refreshes the
-        // near band far more often than the outer stored-data band.
-        for (int dz = -radius; dz <= radius; dz++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                if (dx * dx + dz * dz <= radius * radius) {
-                    rebuilt.add(new int[]{dx, dz});
-                }
-            }
-        }
-        rebuilt.sort(Comparator.comparingInt((int[] offset)
-                -> offset[0] * offset[0] + offset[1] * offset[1]));
-        sweepRadiusChunks = radius;
+        PredictionCoverageOffsets rebuilt = PredictionCoverageOffsets.around(yieldRadiusChunks);
+        sweepRadiusChunks = yieldRadiusChunks;
         sweepOffsetsReference = rebuilt;
         return rebuilt;
     }
@@ -798,6 +824,8 @@ public final class ClientPredictionState {
                 + ",fallbackSamplers=" + fallbackSamplers
                 + ",lodBands=" + lodBands
                 + ",sampleCache=" + cachedSamples
+                + ",coveragePages=" + exactCoverage.pageCount()
+                + ",coverageOffsetBytes=" + (sweepOffsetsReference == null ? 0L : 4L * sweepOffsetsReference.size())
                 + ",persistentSamples=" + persistentSamples
                 + ",layoutLevels=" + MANAGERS.values().stream()
                         .mapToInt(manager -> manager.layout().levelCount()).max().orElse(0)
@@ -811,6 +839,7 @@ public final class ClientPredictionState {
     private static void reset(boolean preserveInputs) {
         if (!preserveInputs) {
             RustWorldgenDocument.invalidateSharedInputs();
+            PredictionColorCache.RESOURCES.invalidate();
             var oldInputs = connectionInputs;
             connectionInputs = null;
             if (oldInputs != null) PROFILE_DECODER.execute(oldInputs::close);
@@ -862,11 +891,4 @@ public final class ClientPredictionState {
         }
     }
 
-    private record CoverageCacheEntry(boolean present, long transitionStartedNanos,
-                                      long expiresAtNanos) {
-        boolean ownsAt(long nowNanos) {
-            return present && ExactCoverageGate.ownsPrediction(
-                    ModCompat.LocalColumnState.PRESENT, transitionStartedNanos, nowNanos);
-        }
-    }
 }

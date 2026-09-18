@@ -29,8 +29,8 @@ public class VSSClientConfig extends JsonConfig {
     @SerializedName("enablePrediction")
     public boolean enablePrediction = true;
     /** Prediction horizon, in blocks. */
-    public int predictionDistanceBlocks = 8_192;
-    public int predictionFineDistanceBlocks = 1_536;
+    public int predictionDistanceBlocks = 4_096;
+    public int predictionFineDistanceBlocks = 512;
     public int predictionBackgroundWorkers = 2;
     public int predictionRefinementWorkers = 0;
     /** Prediction detail profile: low, normal, high or extreme. */
@@ -70,11 +70,11 @@ public class VSSClientConfig extends JsonConfig {
         help.put("enableXaeroMapBridge", "是否将服务端远景写入 Xaero 世界地图；默认 true。可用 /vssclient xaero disable 临时关闭。");
         help.put("performanceTier", "预测性能档位 low/medium/high；默认 medium。low 使用四分之一核心并保留 45 FPS 保险丝，medium 使用一半核心并保留 30 FPS 保险丝，high 沿用旧版全核心配置且不自动降载。距离、细节等画质参数与档位无关。");
         help.put("enablePrediction", "是否根据服务端同步的种子和世界生成元数据在远处生成预测地形；默认 true。");
-        help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 8192；范围 "
+        help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 4096；范围 "
                 + MIN_PREDICTION_DISTANCE_BLOCKS + "-" + MAX_PREDICTION_DISTANCE_BLOCKS
                 + "。它独立于 VSS 的 lodDistanceChunks。");
         help.put("predictionDetail", "预测地形细节等级 low/normal/high/extreme；影响屏幕像素阈值。");
-        help.put("predictionFineDistanceBlocks", "普通精细地形距离，单位方块；默认 1536，范围 256-4096，独立于预测远景距离；高空按实际距离降低精度，望远镜可突破此距离。");
+        help.put("predictionFineDistanceBlocks", "普通精细地形距离，单位方块；默认 512，范围 256-4096，独立于预测远景距离；高空按实际距离降低精度，望远镜可突破此距离。");
         help.put("predictionBackgroundWorkers", "视野外地形的后台任务槽；默认 2，范围 1-4。近处和当前视野优先，已加载的远景仍保留。");
         help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修任务槽，包含视野内地形和植被；默认 0 表示跟随性能档位（low 3 / medium 6 / high 为一半逻辑线程），也可指定 1-32 手动覆盖。缺失覆盖、望远镜目标和脏列修复优先处理。");
         help.put("predictionTrees", "是否生成近处及望远镜目标区域的原版树木、草等地表植被；默认 true。");

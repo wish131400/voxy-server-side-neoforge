@@ -10,6 +10,8 @@ class PredictionGraphicsSupportTest {
         assertNull(PredictionGraphicsSupport.unsupportedReason(true, true, true, 16, 16));
         assertNotNull(PredictionGraphicsSupport.unsupportedReason(false, false, false, 16, 16));
         assertNotNull(PredictionGraphicsSupport.unsupportedReason(true, true, true, 7, 16));
+        assertNotNull(PredictionGraphicsSupport.unsupportedReason(false, true, false, 8, 16));
+        assertNull(PredictionGraphicsSupport.unsupportedReason(false, true, false, 9, 16));
         assertNotNull(PredictionGraphicsSupport.unsupportedReason(false, true, true, 16, 1));
     }
 }

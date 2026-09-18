@@ -65,6 +65,10 @@ final class ClientPresenceReporter {
         queueRegionForColumn(dimension, packed);
     }
 
+    byte[] sectionManifest(ResourceKey<Level> dimension, long packed) {
+        return ClientLodPresenceCache.sectionManifest(scope, dimension, packed);
+    }
+
     void removeKnownColumn(ResourceKey<Level> dimension, long packed) {
         ClientLodPresenceCache.removeColumn(scope, dimension, packed);
     }

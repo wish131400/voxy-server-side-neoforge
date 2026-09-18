@@ -3,6 +3,7 @@ package dev.xantha.vss.compat;
 import dev.xantha.vss.api.VSSApi;
 import dev.xantha.vss.api.VoxelColumnData;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.DiagnosticCounters;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -25,28 +26,6 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 final class VoxyCompat {
     private static final int VOXY_BASE_LOD_LEVEL = 0;
     private static final long LOCAL_INDEX_RETRY_NANOS = 30_000_000_000L;
-    private static final long LOCAL_INDEX_REFRESH_NANOS = 30_000_000_000L;
-    /**
-     * Movement-triggered rebuild: the stored-section snapshot is only as
-     * fresh as its build.  Voxy keeps loading stored sections from its
-     * disk archive as the player advances, and a snapshot that predates
-     * them reads hasStored=false for freshly entered columns — prediction
-     * then drew its meshes over Voxy's stored LOD there (the mixing
-     * report).  Crossing the trigger distance rebuilds within the move
-     * window instead of waiting out the full refresh interval.
-     */
-    private static final long LOCAL_INDEX_MOVE_REFRESH_NANOS = 5_000_000_000L;
-    private static final int LOCAL_INDEX_MOVE_TRIGGER_CHUNKS = 8;
-    /** Teleport tier: a jump this large lands in terrain the snapshot has
-     *  never covered, and every probed column reads hasStored=false until
-     *  the rebuild lands — prediction then drew over the stored LOD Voxy
-     *  was already rendering there.  Let a teleport re-scan almost
-     *  immediately instead of waiting out the movement window. */
-    private static final long LOCAL_INDEX_TELEPORT_REFRESH_NANOS = 500_000_000L;
-    private static final int LOCAL_INDEX_TELEPORT_TRIGGER_CHUNKS = 64;
-    /** How long after a teleport the short re-scan cadence keeps running. */
-    private static final long LOCAL_INDEX_TELEPORT_WATCH_NANOS = 30_000_000_000L;
-
     private static MethodHandle worldIdentifierOf;
     private static MethodHandle rawIngest;
     private static MethodHandle worldEngineNullable;
@@ -57,6 +36,9 @@ final class VoxyCompat {
     private static volatile MethodHandle getEnabled;
     private static volatile MethodHandle getEnableRendering;
     private static volatile MethodHandle getIngestEnabled;
+    private static final DiagnosticCounters ingestDiagnostics = new DiagnosticCounters(
+            VSSLogger::isDebugEnabled, 5_000_000_000L);
+    private static volatile String lastAcceptedColumn = "none";
     private static boolean voxyStateInitialized;
     private static boolean lastRenderAvailable;
     private static boolean lastIngestAvailable;
@@ -91,25 +73,35 @@ final class VoxyCompat {
                             DataLayer.class));
 
             VSSApi.registerColumnProcessingConsumer((level, dimension, chunkX, chunkZ, columnData) -> {
+                ingestDiagnostics.record("columnsOffered");
                 if (!VSSClientNetworking.isClientLodSessionActive()) {
+                    ingestDiagnostics.record("columnsRejected");
                     return false;
                 }
                 try {
                     if (!isIngestAvailable()) {
+                        ingestDiagnostics.record("columnsRejected");
                         return false;
                     }
                     Object worldId = worldIdentifierOf.invoke(level);
                     if (worldId == null) {
+                        ingestDiagnostics.record("columnsRejected");
                         return false;
                     }
 
                     if (columnData.sections().length == 0) {
                         if (columnData.replaceMissingSections()) {
                             if (!clearMissingSections(worldId, level, chunkX, chunkZ, Set.of())) {
+                                ingestDiagnostics.record("columnsRejected");
                                 return false;
                             }
                         }
                         markLocalColumnPresent(level, chunkX, chunkZ);
+                        ingestDiagnostics.record("columnsAccepted");
+                        ingestDiagnostics.record("emptyColumnsAccepted");
+                        if (VSSLogger.isDebugEnabled()) {
+                            lastAcceptedColumn = dimension.location() + "@" + chunkX + "," + chunkZ;
+                        }
                         return true;
                     }
 
@@ -118,21 +110,28 @@ final class VoxyCompat {
                         accepted &= ingestSection(worldId, sectionData, chunkX, chunkZ);
                     }
                     if (!accepted) {
+                        ingestDiagnostics.record("columnsRejected");
                         return false;
                     }
                     if (columnData.replaceMissingSections()) {
                         Set<Integer> presentSections = replacementSectionSet(columnData);
                         if (!clearMissingSections(worldId, level, chunkX, chunkZ, presentSections)) {
+                            ingestDiagnostics.record("columnsRejected");
                             return false;
                         }
                     }
                     markLocalColumnPresent(level, chunkX, chunkZ);
+                    ingestDiagnostics.record("columnsAccepted");
+                    if (VSSLogger.isDebugEnabled()) {
+                        lastAcceptedColumn = dimension.location() + "@" + chunkX + "," + chunkZ;
+                    }
                     return true;
                 } catch (Throwable e) {
                     if (e instanceof Error && !(e instanceof LinkageError) && !(e instanceof AssertionError)) {
                         throw (Error) e;
                     }
                     VSSLogger.error("Voxy raw ingest failed", e);
+                    ingestDiagnostics.record("columnsRejected");
                     return false;
                 }
             });
@@ -202,6 +201,22 @@ final class VoxyCompat {
     }
 
     static void clientTick() {
+        if (!VSSClientNetworking.isClientLodSessionActive()) {
+            ingestDiagnostics.reset();
+            lastAcceptedColumn = "none";
+        } else {
+            String events = ingestDiagnostics.poll(System.nanoTime());
+            if (events != null) {
+                var minecraft = net.minecraft.client.Minecraft.getInstance();
+                var player = minecraft.player;
+                VSSLogger.debug("VSS voxy ingest diagnostic v2: " + events
+                        + ",lastAccepted=" + lastAcceptedColumn
+                        + ",playerChunk=" + (player == null ? "none"
+                                : (player.getBlockX() >> 4) + "," + (player.getBlockZ() >> 4))
+                        + ",clientView=" + minecraft.options.getEffectiveRenderDistance()
+                        + ",acceptedMeans=enqueued-not-rendered");
+            }
+        }
         boolean renderAvailable = isRenderAvailable();
         boolean ingestAvailable = isIngestAvailable();
         if (!voxyStateInitialized) {
@@ -218,12 +233,25 @@ final class VoxyCompat {
         lastIngestAvailable = ingestAvailable;
     }
 
+    private static boolean trackedRawIngest(Object worldId, LevelChunkSection section,
+                                            int cx, int sy, int cz, DataLayer block, DataLayer sky) throws Throwable {
+        StrictLodVisibility.beginIngest(section, cx, cz);
+        try {
+            boolean accepted = (boolean) rawIngest.invoke(worldId, section, cx, sy, cz, block, sky);
+            if (!accepted) StrictLodVisibility.cancelIngest(section);
+            return accepted;
+        } catch (Throwable failure) {
+            StrictLodVisibility.cancelIngest(section);
+            throw failure;
+        }
+    }
+
     private static boolean ingestSection(
             Object worldId,
             VoxelColumnData.SectionData sectionData,
             int chunkX,
             int chunkZ) throws Throwable {
-        return (boolean) rawIngest.invoke(
+        boolean accepted = trackedRawIngest(
                 worldId,
                 sectionData.section(),
                 chunkX,
@@ -231,6 +259,8 @@ final class VoxyCompat {
                 chunkZ,
                 sectionData.blockLight(),
                 sectionData.skyLight());
+        ingestDiagnostics.record(accepted ? "rawSectionsAccepted" : "rawSectionsRejected");
+        return accepted;
     }
 
     private static Set<Integer> replacementSectionSet(VoxelColumnData columnData) {
@@ -253,7 +283,7 @@ final class VoxyCompat {
         int maxSection = minSection + level.getSectionsCount();
         for (int sectionY = minSection; sectionY < maxSection; sectionY++) {
             if (!presentSections.contains(sectionY)) {
-                accepted &= (boolean) rawIngest.invoke(
+                boolean sectionAccepted = trackedRawIngest(
                         worldId,
                         new LevelChunkSection(level.registryAccess().registryOrThrow(Registries.BIOME)),
                         chunkX,
@@ -261,6 +291,8 @@ final class VoxyCompat {
                         chunkZ,
                         null,
                         null);
+                ingestDiagnostics.record(sectionAccepted ? "rawSectionsAccepted" : "rawSectionsRejected");
+                accepted &= sectionAccepted;
             }
         }
         return accepted;
@@ -283,31 +315,16 @@ final class VoxyCompat {
             if (getStorage == null || iterateStoredSectionPositions == null || index.unavailable) {
                 return ModCompat.LocalColumnState.UNKNOWN;
             }
-            // Refresh periodically even after the first build (see the move
-            // trigger above): a frozen index made every newly-visited area
-            // read hasStored=false, so prediction drew over Voxy's stored
-            // LOD there.  The rebuild swaps shadow maps atomically, so
-            // queries never observe a half-cleared index.
-            long sinceBuildNanos = System.nanoTime() - index.lastBuildCompletedNanos;
-            int centerDistance = Math.max(
-                    Math.abs(chunkX - index.buildCenterChunkX),
-                    Math.abs(chunkZ - index.buildCenterChunkZ));
-            boolean movedPastSnapshot = centerDistance >= LOCAL_INDEX_MOVE_TRIGGER_CHUNKS;
-            boolean teleported = centerDistance >= LOCAL_INDEX_TELEPORT_TRIGGER_CHUNKS;
-            // A stationary player right after a teleport still watches Voxy
-            // load stored LOD outward for a while; keep re-scanning on a
-            // short cadence so freshly loaded columns stop reading MISSING.
-            boolean teleportFresh = System.nanoTime() - index.lastTeleportTriggerNanos
-                    < LOCAL_INDEX_TELEPORT_WATCH_NANOS;
-            if (!index.ready
-                    || sinceBuildNanos > LOCAL_INDEX_REFRESH_NANOS
-                    || (movedPastSnapshot && sinceBuildNanos > LOCAL_INDEX_MOVE_REFRESH_NANOS)
-                    || ((teleported || teleportFresh)
-                    && sinceBuildNanos > LOCAL_INDEX_TELEPORT_REFRESH_NANOS)) {
-                if (teleported) {
-                    index.lastTeleportTriggerNanos = System.nanoTime();
-                }
-                startLocalIndexBuild(engine, index, chunkX, chunkZ);
+            // This index covers all stored sections. A distant query is not
+            // player movement and must not trigger a whole-database rebuild.
+            long now = System.nanoTime();
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft != null && minecraft.level == level && minecraft.player != null) {
+                index.refresh.observePlayer(minecraft.player.getBlockX() >> 4,
+                        minecraft.player.getBlockZ() >> 4, now);
+            }
+            if (index.refresh.shouldRefresh(index.ready, index.lastBuildCompletedNanos, now)) {
+                startLocalIndexBuild(engine, index);
             }
             if (!index.ready) {
                 return ModCompat.LocalColumnState.UNKNOWN;
@@ -353,8 +370,7 @@ final class VoxyCompat {
         }
     }
 
-    private static void startLocalIndexBuild(Object engine, LocalSectionIndex index,
-                                             int centerChunkX, int centerChunkZ) {
+    private static void startLocalIndexBuild(Object engine, LocalSectionIndex index) {
         long now = System.nanoTime();
         if (now - index.nextBuildAttemptNanos < 0L) {
             return;
@@ -362,8 +378,8 @@ final class VoxyCompat {
         if (!index.buildStarted.compareAndSet(false, true)) {
             return;
         }
-        index.buildCenterChunkX = centerChunkX;
-        index.buildCenterChunkZ = centerChunkZ;
+        index.refresh.startedBuild();
+        index.builds.incrementAndGet();
         Thread thread = new Thread(() -> {
             try {
                 // Build into shadow maps and swap atomically: clearing the
@@ -386,6 +402,7 @@ final class VoxyCompat {
                 index.swapStored(shadowStored);
                 index.ready = true;
                 index.lastBuildCompletedNanos = System.nanoTime();
+                index.buildNanos.addAndGet(index.lastBuildCompletedNanos - now);
             } catch (Throwable e) {
                 index.ready = false;
                 if (isUnsupportedLocalIndexQuery(e)) {
@@ -445,13 +462,9 @@ final class VoxyCompat {
         private volatile boolean unavailable;
         private volatile long nextBuildAttemptNanos;
         private volatile long lastBuildCompletedNanos;
-        /** Probe centre the running build was triggered from; the movement
-         *  trigger compares later probes against it. */
-        private volatile int buildCenterChunkX;
-        private volatile int buildCenterChunkZ;
-        /** Last teleport-tier trigger; keeps the short re-scan cadence
-         *  alive while Voxy loads the area around a stationary player. */
-        private volatile long lastTeleportTriggerNanos;
+        private final LocalIndexRefreshPolicy refresh = new LocalIndexRefreshPolicy();
+        private final java.util.concurrent.atomic.AtomicLong builds = new java.util.concurrent.atomic.AtomicLong();
+        private final java.util.concurrent.atomic.AtomicLong buildNanos = new java.util.concurrent.atomic.AtomicLong();
 
         private void markConfirmed(int chunkX, int chunkZ) {
             mark(confirmedRegions, chunkX, chunkZ);
@@ -512,7 +525,8 @@ final class VoxyCompat {
             return "none";
         }
         return "ready=" + index.ready + ",unavailable=" + index.unavailable
-                + ",storedRegions=" + index.storedRegionCount();
+                + ",storedRegions=" + index.storedRegionCount()
+                + ",builds=" + index.builds.get() + ",buildMs=" + index.buildNanos.get() / 1_000_000L;
     }
 
     private static volatile LocalSectionIndex lastLocalIndex;

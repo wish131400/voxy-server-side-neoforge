@@ -30,6 +30,7 @@ md-5 = "0.10.6"
 jni = { version = "0.21.1", default-features = false }
 
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
+rustc-hash = "=2.1.1"
 
 [profile.release]
 opt-level = 3

@@ -50,6 +50,7 @@ class PredictionLiveMeshReplayTest {
                             data.samples(),materialColors,63,0xb22d78c5,2,(int)Math.sqrt(data.samples().length),true,null,
                             data.foliageTints(),data.waterTints(),tx*128,tz*128,t));
                     assertTrue(result.vertexCount()>0 && result.vertexCount()<=262144);
+                    PredictionMeshMemoryTest.assertPublishedCompaction(result, 2);
                     var kinds = new TreeMap<String,Integer>(); blocks.values().forEach(s->kinds.merge(BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString(),1,Integer::sum));
                     System.out.println("REPLAY tile="+tx+","+tz+" missing="+missing+" blocks="+blocks.size()+" kinds="+kinds);
                     for (int size : new int[]{0,1,2,4,8}) {

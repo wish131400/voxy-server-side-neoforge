@@ -38,14 +38,14 @@ mod admission_probe {
 /// Bounded FIFO for independent display columns. Updating an existing column never
 /// consumes another slot; overflow evicts one entry rather than the whole horizon.
 pub(super) struct DisplayColumns {
-    values: HashMap<(i32, i32), SurfaceColumn>,
+    values: rustc_hash::FxHashMap<(i32, i32), SurfaceColumn>,
     order: std::collections::VecDeque<(i32, i32)>,
     capacity: usize,
     pub(super) evictions: u64,
 }
 impl DisplayColumns {
     pub(super) fn new(capacity: usize) -> Self {
-        Self { values: HashMap::new(), order: std::collections::VecDeque::new(), capacity, evictions: 0 }
+        Self { values: rustc_hash::FxHashMap::default(), order: std::collections::VecDeque::new(), capacity, evictions: 0 }
     }
     pub(super) fn get(&self, key: &(i32, i32)) -> Option<&SurfaceColumn> { self.values.get(key) }
     pub(super) fn contains_key(&self, key: &(i32, i32)) -> bool { self.values.contains_key(key) }
@@ -132,6 +132,11 @@ impl World {
         // Density traversal keeps its separate Job workspace. Reuse one lazy
         // Raw workspace across chunk groups instead of allocating a full graph per group.
         let mut biome_scratch = None;
+        // Widely spaced grid points visit many chunks only once. A single
+        // batch-local workspace avoids allocating/freeing graph-sized vectors
+        // and rotating the eight-chunk dense-query cache for every such point.
+        let sparse_batch = groups.len() >= 8 && groups.values().all(|indices| indices.len() <= 4);
+        let mut sparse_work: Option<Job<'_>> = None;
         for ((cx, cz), indices) in groups {
             self.check_active()?;
             let eligible = !self.terrain.graph.requires_complete_column_order()
@@ -153,7 +158,12 @@ impl World {
                 }
                 continue;
             }
-            let mut job = if eligible {
+            let mut job = if sparse_batch {
+                match sparse_work.take() {
+                    Some(mut job) => { job.reset_display_chunk(cx * 16, cz * 16)?; job }
+                    None => self.terrain.job(cx * 16, cz * 16, false)?,
+                }
+            } else if eligible {
                 let mut pool = self.display_work.lock().map_err(|_| "display work lock")?;
                 match pool
                     .iter()
@@ -206,7 +216,9 @@ impl World {
                 };
                 result[i] = row;
             }
-            if eligible {
+            if sparse_batch {
+                sparse_work = Some(job);
+            } else if eligible {
                 let work = job.park();
                 if work.retained_bytes() <= 2 * 1024 * 1024 {
                     let mut pool = self.display_work.lock().map_err(|_| "display work lock")?;

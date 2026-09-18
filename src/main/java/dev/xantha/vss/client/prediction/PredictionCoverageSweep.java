@@ -7,7 +7,7 @@ import java.util.function.LongSupplier;
 
 /** Resumable near/far scans; used only on the single profile executor. */
 final class PredictionCoverageSweep {
-    private List<int[]> offsets;
+    private PredictionCoverageOffsets offsets;
     private int nearEnd, nearCursor, farCursor, centerX, centerZ, radius;
     private long generation = Long.MIN_VALUE;
     private final LongSupplier clock;
@@ -16,7 +16,7 @@ final class PredictionCoverageSweep {
 
     record Result(int checked, int present, long nanos) { }
 
-    Result run(List<int[]> positions, int nearRadius, int x, int z, long epoch,
+    Result run(PredictionCoverageOffsets positions, int nearRadius, int x, int z, long epoch,
                BooleanSupplier current, IntPredicate probe) {
         if (offsets != positions || radius != nearRadius || generation != epoch || centerX != x || centerZ != z) {
             offsets = positions; radius = nearRadius; generation = epoch; centerX = x; centerZ = z;
@@ -24,8 +24,8 @@ final class PredictionCoverageSweep {
             int low = 0, high = positions.size();
             while (low < high) {
                 int mid = (low + high) >>> 1;
-                int[] p = positions.get(mid);
-                if ((long) p[0] * p[0] + (long) p[1] * p[1] <= (long) nearRadius * nearRadius) low = mid + 1;
+                int px = positions.x(mid), pz = positions.z(mid);
+                if ((long) px * px + (long) pz * pz <= (long) nearRadius * nearRadius) low = mid + 1;
                 else high = mid;
             }
             nearEnd = low; nearCursor = 0; farCursor = nearEnd;

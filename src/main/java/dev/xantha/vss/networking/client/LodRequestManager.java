@@ -4,6 +4,7 @@ import dev.xantha.vss.common.ChebyshevRingOffsets;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.DiagnosticCounters;
 import dev.xantha.vss.compat.ModCompat;
 import dev.xantha.vss.client.prediction.ClientPredictionState;
 import dev.xantha.vss.config.VSSClientConfig;
@@ -23,6 +24,28 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
 public final class LodRequestManager {
+    private final java.util.concurrent.ConcurrentHashMap<Long, int[]> strictSections =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private int strictScanRing = -1;
+    private int strictScanCursor;
+
+    public boolean strictColumnReady(int cx, int cz) {
+        long packed = PositionUtil.packPosition(cx, cz);
+        return strictSections.containsKey(packed);
+    }
+
+    public boolean strictColumnRenderReady(int cx, int cz, java.util.function.IntPredicate ready) {
+        int[] sections = strictSections.get(PositionUtil.packPosition(cx, cz));
+        if (sections == null) return false;
+        for (int y : sections) if (!ready.test(y)) return false;
+        return true;
+    }
+
+    synchronized void recordStrictSections(int cx, int cz, dev.xantha.vss.api.VoxelColumnData data) {
+        strictSections.put(PositionUtil.packPosition(cx, cz), java.util.Arrays.stream(data.sections())
+                .filter(section -> !section.section().hasOnlyAir()).mapToInt(section -> section.sectionY()).toArray());
+        dev.xantha.vss.compat.StrictLodVisibility.workChanged();
+    }
     private static final int SCAN_INTERVAL_TICKS = 0;
     private static final long SYNC_REQUEST_TIMEOUT_NANOS = 30_000_000_000L;
     private static final long GENERATION_REQUEST_TIMEOUT_NANOS = 300_000_000_000L;
@@ -96,9 +119,17 @@ public final class LodRequestManager {
     private int lastEffectiveLodDistance = -1;
     private boolean scanCompletedForCurrentOffsets;
     private boolean nearScanCompletedForCurrentOffsets;
+    private boolean nearScanCompletedOnce;
     private long nextFullScanRetryNanos;
     private double dirtyRefreshBudget;
     private long lastRequestDiagnosticNanos;
+    private final DiagnosticCounters generationDiagnostics = new DiagnosticCounters(
+            VSSLogger::isDebugEnabled, REQUEST_DIAGNOSTIC_INTERVAL_NANOS);
+    private int diagnosticBatchLimit;
+    private int diagnosticGenerationSlots;
+    private final PredictionGenerationPriority predictionPriority = new PredictionGenerationPriority();
+    private int diagnosticGenerationLimit;
+    private boolean diagnosticXaeroBackpressure;
 
     private static class RequestBuffers {
         final int[] requestIds = new int[VSSConstants.MAX_BATCH_CHUNK_REQUESTS];
@@ -173,6 +204,7 @@ public final class LodRequestManager {
         }
 
         Minecraft mc = Minecraft.getInstance();
+        if (mc.isPaused()) return;
         LocalPlayer player = mc.player;
         ClientLevel level = mc.level;
         if (player == null || level == null || player.isRemoved()) {
@@ -214,6 +246,7 @@ public final class LodRequestManager {
                 }
             }
             if (firstKnownPosition || isTeleport) {
+                predictionPriority.reset();
                 resetScanCursorPastProtectedSyncWindow(lodDistance);
             } else if (moveDistance > 0) {
                 rebaseScanCursorAfterMove(lodDistance);
@@ -235,6 +268,7 @@ public final class LodRequestManager {
         scanTickCounter = 0;
         scanAndSend(level, player);
         finishCacheOnlyReloadPassIfReady();
+        logGenerationDiagnostics(playerCx, playerCz, lodDistance);
     }
 
     public synchronized ColumnReceiveResult onColumnTransferPart(
@@ -248,6 +282,13 @@ public final class LodRequestManager {
         }
 
         long packed = PositionUtil.packPosition(cx, cz);
+        if (!cacheOnlyReload.isActive() && !dev.xantha.vss.compat.StrictLodVisibility.requestable(dimension, cx, cz)) {
+            // A retracted frontier must not leave an already rejected response in flight
+            // until its network timeout. The retry remains subject to the same frontier.
+            failTrackedRequest(requestId, packed);
+            generationDiagnostics.record("strictAdmissionDeferred");
+            return new ColumnReceiveResult(false, false, false, packed);
+        }
         if (!isWithinCurrentLodWindow(packed)) {
             return new ColumnReceiveResult(false, false, false, Long.MIN_VALUE);
         }
@@ -283,6 +324,10 @@ public final class LodRequestManager {
         }
         long packed = PositionUtil.packPosition(cx, cz);
         boolean activeRequest = requestId >= 0 && requestTracker.matches(requestId, packed);
+        if (!cacheOnlyReload.isActive() && !dev.xantha.vss.compat.StrictLodVisibility.requestable(dimension, cx, cz)) {
+            failTrackedRequest(requestId, packed);
+            return ColumnProcessingResult.STALE;
+        }
         if (!activeRequest && (requestTracker.contains(packed)
                 || !isWithinCurrentLodWindow(packed)
                 || !isColumnVersionAllowed(packed, columnTimestamp, true))) {
@@ -474,6 +519,7 @@ public final class LodRequestManager {
     }
 
     public synchronized void onRateLimited(int requestId) {
+        generationDiagnostics.record("rateLimitedResponse");
         long packed = requestTracker.remove(requestId);
         if (packed != Long.MIN_VALUE) {
             markRateLimited(packed);
@@ -488,18 +534,29 @@ public final class LodRequestManager {
      * back to the normal generation candidate queue.
      */
     private void handleCacheProbeMiss(long packed) {
+        generationDiagnostics.record("probeMiss");
         columnTimestamps.remove(packed);
         clearBackoff(packed);
         deferredColumns.remove(packed);
         if (generationAllowed() && shouldPromoteNotGeneratedToGeneration(packed)) {
             diskMissedColumns.add(packed);
             deferColumn(packed);
+            generationDiagnostics.record(deferredColumns.contains(packed)
+                    ? "probePromoted" : "probePromotionQueueFull");
             return;
         }
+        generationDiagnostics.record(cacheOnlyReload.isActive() ? "probeBlockedCacheOnly"
+                : !generationAllowed() ? "probeBlockedGenerationDisabled" : "probeBlockedFrontierOrPlayer");
         clearMissState(packed);
+        if (dev.xantha.vss.compat.StrictLodVisibility.active() && !cacheOnlyReload.isActive()) {
+            // A strict frontier can wait here indefinitely. Do not turn a
+            // generation-disabled hole into a cache probe every client tick.
+            markBackoff(packed, false);
+        }
     }
 
     public synchronized void onBackpressured(int requestId) {
+        generationDiagnostics.record("backpressureResponse");
         long packed = requestTracker.remove(requestId);
         if (packed != Long.MIN_VALUE) {
             markBackpressure(packed);
@@ -579,6 +636,7 @@ public final class LodRequestManager {
     }
 
     public synchronized void onGenerationQueued(int requestId) {
+        generationDiagnostics.record("generationQueuedResponse");
         long packed = requestTracker.positionFor(requestId);
         if (packed == Long.MIN_VALUE) {
             return;
@@ -693,15 +751,23 @@ public final class LodRequestManager {
         int lodDistance = getEffectiveLodDistance();
         deferredColumns.recenter(playerCx, playerCz);
         RequestWindow requestWindow = createRequestWindow();
+        generationDiagnostics.record("scanTicks");
+        diagnosticGenerationSlots = requestWindow.generationRemaining();
+        diagnosticBatchLimit = 0;
         if (!requestWindow.hasCapacity()) {
+            generationDiagnostics.record("scanNoCapacity");
             return;
         }
 
         int maxCount = Math.min(
                 Math.min(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, requestWindow.remaining()),
                 maxRequestsPerTick());
-        maxCount = limitForXaeroBackpressure(maxCount,
-                ModCompat.shouldBackpressureXaeroMapInput());
+        diagnosticXaeroBackpressure = ModCompat.shouldBackpressureXaeroMapInput();
+        maxCount = limitForXaeroBackpressure(maxCount, diagnosticXaeroBackpressure);
+        diagnosticBatchLimit = maxCount;
+        if (diagnosticXaeroBackpressure) {
+            generationDiagnostics.record("xaeroThrottledTicks");
+        }
         int[] requestIds = requestBuffers.requestIds;
         long[] positions = requestBuffers.positions;
         long[] timestamps = requestBuffers.timestamps;
@@ -710,30 +776,18 @@ public final class LodRequestManager {
         int count = 0;
 
         if (lodDistance <= 0) {
+            generationDiagnostics.record("scanDistanceZero");
             return;
         }
 
         ensureOrderedOffsets(lodDistance);
         int protectedSyncDistance = getVanillaProtectedSyncDistance();
         long now = System.nanoTime();
-        int maxAllowedRingThisTick = lodDistance;
         ScanBudget scanBudget = ScanBudget.create(scanBoostTicks > 0);
 
-        count = scanNearSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, scanBudget);
-        count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
-                DeferredDrainMode.DIRTY_ONLY);
-        // Keep one visible loading frontier after a teleport. The outer scan
-        // and ordinary deferred work start only after the near scan has fully
-        // crossed its first 32-chunk ring.
-        if (shouldRunOuterScan(nearScanCompletedForCurrentOffsets)) {
-            count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions, timestamps,
-                    allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget);
-            count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance, requestIds, positions,
-                    timestamps, allowGeneration, cacheProbe, count, maxCount, requestWindow, now, maxAllowedRingThisTick, scanBudget,
-                    DeferredDrainMode.ALL);
-        }
+        count = collectRequests(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                requestIds, positions, timestamps, allowGeneration, cacheProbe,
+                maxCount, requestWindow, now, scanBudget);
         if (scanBoostTicks > 0) {
             scanBoostTicks--;
         }
@@ -742,8 +796,71 @@ public final class LodRequestManager {
             dirtyRefreshBudget = Math.max(0.0D, dirtyRefreshBudget - requestWindow.dirtySent());
             VSSClientNetworking.sendBatchRequest(new BatchChunkRequestC2SPayload(
                     requestIds, positions, timestamps, allowGeneration, cacheProbe, count));
+            generationDiagnostics.add("sentGeneration", requestWindow.generationSent());
+            generationDiagnostics.add("sentSync", requestWindow.syncSent());
+            generationDiagnostics.add("sentDirty", requestWindow.dirtySent());
+            generationDiagnostics.add("sentProbe", count - requestWindow.generationSent()
+                    - requestWindow.syncSent() - requestWindow.dirtySent());
             logRequestBatch(now, count, requestWindow.syncSent(), requestWindow.generationSent(), requestWindow.dirtySent(), lodDistance, playerCx, playerCz);
         }
+    }
+
+    // Service confirmed work before discovering more misses. Bound this phase so
+    // cooling/deferred candidates cannot consume the whole tick or probe budget.
+    private int collectRequests(int playerCx, int playerCz, int lodDistance, int protectedSyncDistance,
+                                int[] requestIds, long[] positions, long[] timestamps,
+                                boolean[] allowGeneration, boolean[] cacheProbe, int maxCount,
+                                RequestWindow requestWindow, long now, ScanBudget scanBudget) {
+        if (dev.xantha.vss.compat.StrictLodVisibility.active() && !cacheOnlyReload.isActive()) {
+            return collectStrictRequests(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                    requestIds, positions, timestamps, allowGeneration, cacheProbe, maxCount, requestWindow, now, scanBudget);
+        }
+        int deferredLimit = Math.max(1, maxCount / 2);
+        int count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                requestIds, positions, timestamps, allowGeneration, cacheProbe, 0,
+                deferredLimit, requestWindow, now, lodDistance, scanBudget.slice(3), DeferredDrainMode.ALL);
+        count = scanNearSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                requestIds, positions, timestamps, allowGeneration, cacheProbe, count,
+                maxCount, requestWindow, now, nearScanCompletedOnce ? scanBudget.slice(2) : scanBudget);
+        if (!nearScanCompletedOnce && nearScanCompletedForCurrentOffsets) {
+            // Do not immediately scan the same 4,225 near columns a second time.
+            scanOffsetIndex = Math.max(scanOffsetIndex, Math.min(orderedOffsetCount,
+                    ChebyshevRingOffsets.firstIndexForRing(Math.min(lodDistance,
+                            VSSConstants.SYNC_NEAR_DISTANCE_CHUNKS) + 1)));
+        }
+        nearScanCompletedOnce |= nearScanCompletedForCurrentOffsets;
+        if (shouldRunOuterScan(nearScanCompletedOnce)) {
+            count = scanNewSyncColumns(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                    requestIds, positions, timestamps, allowGeneration, cacheProbe, count,
+                    maxCount, requestWindow, now, lodDistance, scanBudget);
+        }
+        return count;
+    }
+
+    private int collectStrictRequests(int playerCx, int playerCz, int lodDistance, int protectedSyncDistance,
+                                     int[] requestIds, long[] positions, long[] timestamps,
+                                     boolean[] allowGeneration, boolean[] cacheProbe, int maxCount,
+                                     RequestWindow window, long now, ScanBudget budget) {
+        var frontier = dev.xantha.vss.compat.StrictLodVisibility.snapshot();
+        if (frontier.x() != playerCx || frontier.z() != playerCz || !java.util.Objects.equals(frontier.dimension(), lastDimension)) return 0;
+        int ring = Math.min(lodDistance, frontier.requestRing());
+        softFrontierRadius = ring;
+        if (strictScanRing != ring) { strictScanRing = ring; strictScanCursor = ChebyshevRingOffsets.firstIndexForRing(ring); }
+        int count = drainDeferredColumns(playerCx, playerCz, lodDistance, protectedSyncDistance,
+                requestIds, positions, timestamps, allowGeneration, cacheProbe, 0, maxCount,
+                window, now, ring, budget.slice(2), DeferredDrainMode.ALL);
+        int start = ChebyshevRingOffsets.firstIndexForRing(ring);
+        int end = ChebyshevRingOffsets.firstIndexForRing(ring + 1);
+        for (int scanned = 0; scanned < end - start && count < maxCount && budget.canScanMore(); scanned++) {
+            if (strictScanCursor < start || strictScanCursor >= end) strictScanCursor = start;
+            long offset = ChebyshevRingOffsets.offsetAt(strictScanCursor++);
+            long packed = PositionUtil.packPosition(playerCx + decodeOffsetX(offset), playerCz + decodeOffsetZ(offset));
+            budget.recordCandidate();
+            if (requeueGenerationCandidate(packed)) continue;
+            count = appendClusterCandidate(packed, playerCx, playerCz, lodDistance, protectedSyncDistance,
+                    requestIds, positions, timestamps, allowGeneration, cacheProbe, count, maxCount, window, now, ring);
+        }
+        return count;
     }
 
     private RequestWindow createRequestWindow() {
@@ -753,6 +870,11 @@ public final class LodRequestManager {
         int generationConcurrencyLimit = sessionConfig.generationEnabled()
                 ? Math.max(1, sessionConfig.generationConcurrencyLimitPerPlayer())
                 : 0;
+
+        generationConcurrencyLimit = predictionPriority.limit(generationConcurrencyLimit,
+                VSSClientNetworking.isPredictionActive(),
+                ClientPredictionState.loadingProgress(lastDimension), System.nanoTime());
+        diagnosticGenerationLimit = generationConcurrencyLimit;
 
         int generationSlots = Math.max(0, generationConcurrencyLimit - generationInFlightCount);
         int dirtySlots = Math.max(0, DIRTY_REFRESH_CONCURRENCY_LIMIT - dirtyInFlightCount);
@@ -908,112 +1030,145 @@ public final class LodRequestManager {
             int maxAllowedRing,
             ScanBudget scanBudget,
             DeferredDrainMode mode) {
-        if (count >= maxCount || deferredColumns.queuedEntries() <= 0 || !scanBudget.canScanMore()) {
+        if (count >= maxCount) {
+            generationDiagnostics.record(mode == DeferredDrainMode.ALL
+                    ? "deferredAllBatchFull" : "deferredDirtyBatchFull");
+            return count;
+        }
+        if (deferredColumns.queuedEntries() <= 0) {
+            return count;
+        }
+        if (!scanBudget.canScanMore()) {
+            generationDiagnostics.record(mode == DeferredDrainMode.ALL
+                    ? "deferredAllBudgetExhausted" : "deferredDirtyBudgetExhausted");
             return count;
         }
         if (mode == DeferredDrainMode.DIRTY_ONLY && dirtyColumns.isEmpty()) {
             return count;
         }
 
-        LongList candidates = DeferredCandidateOrdering.order(
-                deferredColumns.pollClosestCandidates(
-                        Math.min(MAX_DEFERRED_CANDIDATES_PER_TICK, scanBudget.remainingCandidates()),
-                        mode == DeferredDrainMode.DIRTY_ONLY),
-                playerCx,
-                playerCz,
-                lodDistance,
-                dirtyColumns::contains,
-                this::isGenerationCandidate);
+        var postponed = new it.unimi.dsi.fastutil.longs.LongArrayList();
+        int attempts = Math.min(MAX_DEFERRED_CANDIDATES_PER_TICK, deferredColumns.queuedEntries());
+        try {
+            while (attempts > 0 && count < maxCount && scanBudget.canScanMore()
+                    && (requestWindow.hasAnyNormalCandidateCapacity()
+                        || !dirtyColumns.isEmpty() && requestWindow.canSend(true, false, 0))) {
+                // The queue already orders urgent work and then distance. Pull
+                // small batches instead of removing/sorting/reinserting 2,048
+                // entries even when only one request slot remains.
+                LongList candidates = deferredColumns.pollClosestCandidates(
+                        Math.min(32, Math.min(attempts, scanBudget.remainingCandidates())),
+                        mode == DeferredDrainMode.DIRTY_ONLY);
+                if (candidates.isEmpty()) break;
+                attempts -= candidates.size();
+                generationDiagnostics.add(mode == DeferredDrainMode.ALL
+                        ? "deferredAllPolled" : "deferredDirtyPolled", candidates.size());
+                LongIterator candidateIterator = candidates.longIterator();
+                while (candidateIterator.hasNext()) {
+                    long packed = candidateIterator.nextLong();
+                    boolean dirtyRefresh = dirtyColumns.contains(packed);
+                    if (!mode.accepts(dirtyRefresh)) {
+                        generationDiagnostics.record("deferredWrongMode");
+                        postponed.add(packed);
+                        continue;
+                    }
+                    if (!scanBudget.canScanMore()) {
+                        generationDiagnostics.record("deferredCandidateBudgetExhausted");
+                        postponed.add(packed);
+                        continue;
+                    }
+                    scanBudget.recordCandidate();
+                    if (count >= maxCount || !requestWindow.hasCapacity()) {
+                        generationDiagnostics.record("deferredCandidateBatchOrWindowFull");
+                        postponed.add(packed);
+                        continue;
+                    }
+                    if (!deferredColumns.remove(packed)) {
+                        generationDiagnostics.record("deferredNoLongerQueued");
+                        continue;
+                    }
 
-        int firstNormalDeferredRing = -1;
+                    int cx = PositionUtil.unpackX(packed);
+                    int cz = PositionUtil.unpackZ(packed);
+                    int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
 
-        LongIterator candidateIterator = candidates.longIterator();
-        while (candidateIterator.hasNext()) {
-            long packed = candidateIterator.nextLong();
-            boolean dirtyRefresh = dirtyColumns.contains(packed);
-            if (!mode.accepts(dirtyRefresh)) {
-                requeueDeferredColumn(packed, dirtyRefresh);
-                continue;
-            }
-            if (!scanBudget.canScanMore()) {
-                requeueDeferredColumn(packed, dirtyRefresh);
-                continue;
-            }
-            scanBudget.recordCandidate();
-            if (count >= maxCount || !requestWindow.hasCapacity()) {
-                requeueDeferredColumn(packed, dirtyRefresh);
-                continue;
-            }
-            if (!deferredColumns.remove(packed)) {
-                continue;
-            }
+                    if (!cacheOnlyReload.isActive() && !dev.xantha.vss.compat.StrictLodVisibility.requestable(lastDimension, cx, cz)) {
+                        postponed.add(packed);
+                        continue;
+                    }
 
-            int cx = PositionUtil.unpackX(packed);
-            int cz = PositionUtil.unpackZ(packed);
-            int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
+                    if (ring > lodDistance) {
+                        generationDiagnostics.record("deferredOutsideDistance");
+                        if (!dirtyRefresh) {
+                            clearMissState(packed);
+                        }
+                        continue;
+                    }
 
-            if (ring > lodDistance) {
-                if (!dirtyRefresh) {
-                    clearMissState(packed);
+                    if (ring > maxAllowedRing) {
+                        if (!dirtyRefresh || ring > maxAllowedRing + 10) {
+                            generationDiagnostics.record("deferredOutsideAllowedRing");
+                            postponed.add(packed);
+                            continue;
+                        }
+                    }
+
+                    if (isCoolingDown(packed, now)) {
+                        generationDiagnostics.record("deferredCooldown");
+                        postponed.add(packed);
+                        continue;
+                    }
+                    if (!shouldRequestColumn(packed, now)) {
+                        generationDiagnostics.record("deferredNotRequestable");
+                        continue;
+                    }
+
+                    boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
+                    boolean cacheProbe = !dirtyRefresh
+                            && !generationCandidate
+                            && requiresFirstPassCacheProbe(packed);
+                    if (!dirtyRefresh
+                            && !generationCandidate
+                            && !cacheProbe
+                            && isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)) {
+                        generationDiagnostics.record("deferredProtectedWindow");
+                        continue;
+                    }
+                    if (!dirtyRefresh && !isWithinSoftFrontier(packed, playerCx, playerCz)) {
+                        generationDiagnostics.record("deferredOutsideFrontier");
+                        postponed.add(packed);
+                        continue;
+                    }
+                    if (!requestWindow.canSend(dirtyRefresh, generationCandidate, cacheProbe, ring)) {
+                        generationDiagnostics.record(generationCandidate ? "deferredNoGenerationSlot"
+                                : dirtyRefresh ? "deferredNoDirtySlot" : cacheProbe ? "deferredNoProbeSlot"
+                                : "deferredNoSyncSlot");
+                        postponed.add(packed);
+                        continue;
+                    }
+
+                    count = appendRequest(
+                            packed,
+                            requestIds,
+                            positions,
+                            timestamps,
+                            allowGeneration,
+                            cacheProbeFlags,
+                            count,
+                            generationCandidate,
+                            cacheProbe,
+                            now);
+                    requestWindow.record(dirtyRefresh, generationCandidate, cacheProbe, ring);
                 }
-                continue;
+                // Strict mode also scans its current ring below. Once generation is
+                // full, one small deferred batch is enough; do not repeatedly remove
+                // and reinsert the entire generation backlog just because probe/sync
+                // slots remain. Ring scanning still discovers cache probes this tick.
+                if (dev.xantha.vss.compat.StrictLodVisibility.active() && !cacheOnlyReload.isActive()
+                        && !requestWindow.hasGenerationCapacity()) break;
             }
-
-            if (ring > maxAllowedRing) {
-                if (!dirtyRefresh || ring > maxAllowedRing + 10) {
-                    requeueDeferredColumn(packed, dirtyRefresh);
-                    continue;
-                }
-            }
-
-            if (!dirtyRefresh) {
-                if (firstNormalDeferredRing < 0) {
-                    firstNormalDeferredRing = ring;
-                } else if (ring > firstNormalDeferredRing + 1) {
-                    requeueDeferredColumn(packed, false);
-                    continue;
-                }
-            }
-
-            if (isCoolingDown(packed, now)) {
-                requeueDeferredColumn(packed, dirtyRefresh);
-                continue;
-            }
-            if (!shouldRequestColumn(packed, now)) {
-                continue;
-            }
-
-            boolean generationCandidate = !dirtyRefresh && isGenerationCandidate(packed);
-            boolean cacheProbe = !dirtyRefresh
-                    && !generationCandidate
-                    && requiresFirstPassCacheProbe(packed);
-            if (!dirtyRefresh
-                    && !generationCandidate
-                    && !cacheProbe
-                    && isInsideProtectedSyncWindow(packed, playerCx, playerCz, protectedSyncDistance)) {
-                continue;
-            }
-            if (!dirtyRefresh && !isWithinSoftFrontier(packed, playerCx, playerCz)) {
-                requeueDeferredColumn(packed, false);
-                continue;
-            }
-            if (!requestWindow.canSend(dirtyRefresh, generationCandidate, cacheProbe, ring)) {
-                requeueDeferredColumn(packed, dirtyRefresh);
-                continue;
-            }
-
-            count = appendRequest(
-                    packed,
-                    requestIds,
-                    positions,
-                    timestamps,
-                    allowGeneration,
-                    cacheProbeFlags,
-                    count,
-                    generationCandidate,
-                    cacheProbe,
-                    now);
-            requestWindow.record(dirtyRefresh, generationCandidate, cacheProbe, ring);
+        } finally {
+            for (long packed : postponed) requeueDeferredColumn(packed, dirtyColumns.contains(packed));
         }
         return count;
     }
@@ -1245,12 +1400,13 @@ public final class LodRequestManager {
         }
 
         long timestamp = columnTimestamps.get(packed);
-        if (timestamp > 0L && !dirty) {
+        boolean strict = dev.xantha.vss.compat.StrictLodVisibility.active();
+        if (timestamp > 0L && !dirty && (!strict || strictSections.containsKey(packed))) {
             return false;
         }
         // VSS prediction owns the distant band once a tile is ready. Dirty
         // columns and the near band always remain authoritative.
-        if (!dirty && timestamp <= 0L && lastDimension != null
+        if (!strict && !dirty && timestamp <= 0L && lastDimension != null
                 && ClientPredictionState.shouldDeferExactColumn(
                         lastDimension,
                         PositionUtil.unpackX(packed),
@@ -1337,6 +1493,15 @@ public final class LodRequestManager {
 
     void restoreKnownColumn(long packed, long columnTimestamp) {
         if (columnTimestamp > 0L) {
+            if (!strictSections.containsKey(packed)) {
+                byte[] manifest = presenceReporter.sectionManifest(lastDimension, packed);
+                if (manifest != null) {
+                    int[] sections = new int[manifest.length];
+                    for (int i = 0; i < manifest.length; i++) sections[i] = manifest[i];
+                    strictSections.put(packed, sections);
+                    dev.xantha.vss.compat.StrictLodVisibility.workChanged();
+                }
+            }
             columnTimestamps.put(packed, Math.max(columnTimestamps.get(packed), columnTimestamp));
             diskMissedColumns.remove(packed);
             if (!dirtyColumns.contains(packed)) {
@@ -1347,6 +1512,11 @@ public final class LodRequestManager {
     }
 
     boolean reconcileMissingColumn(long packed) {
+        strictSections.remove(packed);
+        if (dev.xantha.vss.compat.StrictLodVisibility.completed(lastDimension,
+                PositionUtil.unpackX(packed), PositionUtil.unpackZ(packed))) {
+            dev.xantha.vss.compat.StrictLodVisibility.invalidate();
+        }
         columnTimestamps.remove(packed);
         if (lastDimension != null) {
             presenceReporter.removeKnownColumn(lastDimension, packed);
@@ -1448,6 +1618,7 @@ public final class LodRequestManager {
     }
 
     long requestTimestampFor(long packed) {
+        if (dev.xantha.vss.compat.StrictLodVisibility.active() && !strictSections.containsKey(packed)) return -1L;
         long timestamp = columnTimestamps.get(packed);
         if (!dirtyColumns.contains(packed) || timestamp > 0L) {
             return timestamp;
@@ -1497,6 +1668,7 @@ public final class LodRequestManager {
         }
         lastRequestDiagnosticNanos = now;
         VSSLogger.debug("LOD requests sent: count=" + count
+                + ", cacheProbe=" + (count - syncCount - generationCount - dirtyCount)
                 + ", sync=" + syncCount
                 + ", generation=" + generationCount
                 + ", dirty=" + dirtyCount
@@ -1506,10 +1678,44 @@ public final class LodRequestManager {
                 + ", playerChunk=" + playerCx + "," + playerCz);
     }
 
+    /** Reports even when scanAndSend emits no packet; does not consume scan budget. */
+    private void logGenerationDiagnostics(int playerCx, int playerCz, int lodDistance) {
+        String events = generationDiagnostics.poll(System.nanoTime());
+        if (events == null) {
+            return;
+        }
+        VSSLogger.debug("VSS generation diagnostic client v1: scheduler=near-first-unrestricted-display-v3, strict="
+                + dev.xantha.vss.compat.StrictLodVisibility.diagnostics() + ", dimension=" + lastDimension.location()
+                + ", playerChunk=" + playerCx + "," + playerCz
+                + ", distance=" + lodDistance
+                + ", generationEnabled=" + sessionConfig.generationEnabled()
+                + ", generationAllowed=" + generationAllowed()
+                + ", cacheOnly=" + cacheOnlyReload.isActive()
+                + ", xaeroBackpressure=" + diagnosticXaeroBackpressure
+                + ", nearScanComplete=" + nearScanCompletedForCurrentOffsets
+                + ", nearCursor=" + nearScanOffsetIndex
+                + ", outerScanComplete=" + scanCompletedForCurrentOffsets
+                + ", outerCursor=" + scanOffsetIndex + "/" + orderedOffsetCount
+                + ", frontier=" + softFrontierRadius
+                + ", missMarked=" + diskMissedColumns.size()
+                + ", deferred=" + deferredColumns.size()
+                + ", deferredQueued=" + deferredColumns.queuedEntries()
+                + ", pending=" + requestTracker.size()
+                + ", generationInFlight=" + requestTracker.generationSize()
+                + ", probesInFlight=" + requestTracker.cacheProbeSize()
+                + ", generationSlotsAtScanStart=" + diagnosticGenerationSlots
+                + ", predictionPriority=" + predictionPriority.diagnostics()
+                + ", generationLimit=" + diagnosticGenerationLimit
+                + ", predictionLoading=" + ClientPredictionState.loadingProgress(lastDimension)
+                + ", batchLimit=" + diagnosticBatchLimit
+                + ", " + events);
+    }
+
     private void timeoutSweep() {
         long now = System.nanoTime();
         for (ClientRequestTracker.TimedOutRequest request : requestTracker.drainTimedOut(now)) {
             long packed = request.packed();
+            generationDiagnostics.record("requestTimeout");
             markTimeout(packed);
             deferColumn(packed, dirtyColumns.contains(packed));
         }
@@ -1600,7 +1806,8 @@ public final class LodRequestManager {
             return;
         }
 
-        int activeGenerationRadius = Math.min(lodDistance, Math.max(0, softFrontierRadius));
+        // Scanning is discovery progress, not the lifetime of an accepted request.
+        int activeGenerationRadius = lodDistance;
         LongOpenHashSet staleRequests = new LongOpenHashSet();
         requestTracker.forEachGenerationInFlight(packed -> {
             if (!requestTracker.isDirtyRefreshPosition(packed)
@@ -1610,6 +1817,7 @@ public final class LodRequestManager {
         });
         for (long packed : staleRequests) {
             requestTracker.cancel(packed);
+            deferredColumns.remove(packed);
             clearMissState(packed);
         }
 
@@ -1638,6 +1846,7 @@ public final class LodRequestManager {
             }
         }
         for (long packed : staleColumns) {
+            strictSections.remove(packed);
             columnTimestamps.remove(packed);
             dirtyColumns.remove(packed);
             dirtyColumnTimestamps.remove(packed);
@@ -1685,6 +1894,14 @@ public final class LodRequestManager {
     }
 
     private void resetRequestState() {
+        predictionPriority.reset();
+        diagnosticGenerationLimit = 0;
+        dev.xantha.vss.compat.StrictLodVisibility.invalidate();
+        strictSections.clear(); strictScanRing = -1; strictScanCursor = 0;
+        generationDiagnostics.reset();
+        diagnosticBatchLimit = 0;
+        diagnosticGenerationSlots = 0;
+        diagnosticXaeroBackpressure = false;
         requestTracker.cancelAll();
         columnTimestamps.clear();
         dirtyColumns.clear();
@@ -1703,6 +1920,7 @@ public final class LodRequestManager {
         lastEffectiveLodDistance = -1;
         scanCompletedForCurrentOffsets = false;
         nearScanCompletedForCurrentOffsets = false;
+        nearScanCompletedOnce = false;
         nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
         dirtyRefreshBudget = 0.0D;
@@ -1717,6 +1935,7 @@ public final class LodRequestManager {
     private void resetScanCursor() {
         scanOffsetIndex = 0;
         resetNearScanCursor();
+        nearScanCompletedOnce = false;
         scanCompletedForCurrentOffsets = false;
         nextFullScanRetryNanos = 0L;
         scanTickCounter = SCAN_INTERVAL_TICKS - 1;
@@ -1739,7 +1958,16 @@ public final class LodRequestManager {
     }
 
     private void rebaseScanCursorAfterMove(int lodDistance) {
-        resetScanCursorPastProtectedSyncWindow(lodDistance);
+        ensureOrderedOffsets(lodDistance);
+        // Preserve both incomplete passes while walking. Restarting each time the
+        // player crosses a chunk kept distant discovery pinned to the inner rings.
+        if (nearScanCompletedForCurrentOffsets) {
+            nearScanOffsetIndex = 0;
+            nearScanCompletedForCurrentOffsets = false;
+        }
+        // The new edge of the translated window must be visited on the next pass.
+        // Do not reset an active pass, the audit cursor, or accepted generation.
+        nextFullScanRetryNanos = 0L;
     }
 
     private void setScanCursorAtRing(int ring) {
@@ -1750,6 +1978,7 @@ public final class LodRequestManager {
         int clampedRing = Math.min(ring, orderedOffsetDistance + 1);
         int index = Math.min(orderedOffsetCount, ChebyshevRingOffsets.firstIndexForRing(clampedRing));
         resetNearScanCursor();
+        nearScanCompletedOnce = false;
         scanOffsetIndex = index;
         softFrontierRadius = Math.max(0, Math.min(ring - 1, orderedOffsetDistance));
         scanCompletedForCurrentOffsets = index >= orderedOffsetCount;
@@ -1807,15 +2036,28 @@ public final class LodRequestManager {
         return ChebyshevRingOffsets.ring(offset);
     }
 
-    private static final class ScanBudget {
+    static final class ScanBudget {
         private int remainingCandidates;
-        private int checksUntilDeadline;
+        private int checksUntilDeadline = 1;
         private final long deadlineNanos;
+        private final java.util.function.LongSupplier clock;
+        private final ScanBudget parent;
+        private boolean expired;
 
         private ScanBudget(int remainingCandidates, long deadlineNanos) {
+            this(remainingCandidates, deadlineNanos, System::nanoTime, null);
+        }
+
+        ScanBudget(int remainingCandidates, long deadlineNanos, java.util.function.LongSupplier clock) {
+            this(remainingCandidates, deadlineNanos, clock, null);
+        }
+
+        private ScanBudget(int remainingCandidates, long deadlineNanos,
+                           java.util.function.LongSupplier clock, ScanBudget parent) {
             this.remainingCandidates = Math.max(0, remainingCandidates);
             this.deadlineNanos = deadlineNanos;
-            this.checksUntilDeadline = SCAN_DEADLINE_CHECK_INTERVAL;
+            this.clock = clock;
+            this.parent = parent;
         }
 
         static ScanBudget create(boolean boosted) {
@@ -1824,23 +2066,27 @@ public final class LodRequestManager {
             return new ScanBudget(candidateLimit, System.nanoTime() + scanNanos);
         }
 
+        ScanBudget slice(int divisor) {
+            long now = clock.getAsLong();
+            return new ScanBudget(Math.max(1, remainingCandidates / divisor),
+                    now + Math.max(0L, deadlineNanos - now) / divisor, clock, this);
+        }
+
         boolean canScanMore() {
-            if (remainingCandidates <= 0) {
-                return false;
-            }
-            if (--checksUntilDeadline > 0) {
-                return true;
-            }
+            if (expired || remainingCandidates <= 0 || parent != null && !parent.canScanMore()) return false;
+            if (--checksUntilDeadline > 0) return true;
             checksUntilDeadline = SCAN_DEADLINE_CHECK_INTERVAL;
-            return System.nanoTime() - deadlineNanos <= 0L;
+            expired = clock.getAsLong() - deadlineNanos >= 0L;
+            return !expired;
         }
 
         void recordCandidate() {
             remainingCandidates = Math.max(0, remainingCandidates - 1);
+            if (parent != null) parent.recordCandidate();
         }
 
         int remainingCandidates() {
-            return remainingCandidates;
+            return parent == null ? remainingCandidates : Math.min(remainingCandidates, parent.remainingCandidates());
         }
     }
 

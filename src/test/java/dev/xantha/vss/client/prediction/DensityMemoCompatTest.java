@@ -39,6 +39,26 @@ class DensityMemoCompatTest {
         assertSame(original, DensityMemo.wrapRoots(original)[0]);
     }
 
+    @Test void generatedRuntimeCacheCastKeepsAllOriginalRoots() {
+        var cache = new RestrictedFunction();
+        DensityFunction compiled = new RestrictedFunction() {
+            @Override public DensityFunction mapAll(Visitor visitor) {
+                // Compiled constructors retain a concrete cache interface.
+                // Counting succeeds, but replacing the cache must fail here.
+                RestrictedFunction transformed = (RestrictedFunction) visitor.apply(cache);
+                return this;
+            }
+            @Override public double compute(FunctionContext context) { return cache.compute(context); }
+        };
+        DensityFunction[] roots = {DensityFunctions.constant(3), compiled, null};
+        var result = DensityMemo.wrapRoots(roots);
+        assertSame(roots, result, "discard all partial wrappers after a compiled cache cast fails");
+        var point = new DensityFunction.SinglePointContext(-17, 70, 33);
+        assertEquals(53, result[1].compute(point));
+        cache.offset = 9;
+        assertEquals(62, result[1].compute(point), "retain compiled cache ownership at repeated coordinates");
+    }
+
     @Test void unexpectedTransformationBugsAreNotSilentlySwallowed() {
         var failure = new IllegalStateException("broken graph");
         DensityFunction original = new RestrictedFunction() {

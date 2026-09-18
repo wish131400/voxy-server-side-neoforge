@@ -94,8 +94,10 @@ class ClientCaptureExtractorTest {
         assertEquals(65, captured.surfaceY(), "portal lintel must not raise the terrain to its roof");
         assertEquals(BuiltInRegistries.BLOCK.getId(Blocks.COARSE_DIRT), captured.topBlockIndex());
         assertEquals(0, captured.structureIndex());
-        assertFalse(captured.floating());
-        assertFalse(captured.hasLowerSpan());
+        assertEquals(64, captured.surfaceBottom(), "the one-block ground must not extend through captured air");
+        assertTrue(captured.hasLowerSpan(), "buried blocks still occupy space below the natural surface");
+        assertEquals(48, captured.lowerTop());
+        assertTrue(PredictionWallEvidence.intervals(captured, 48, 64, 1).isEmpty());
 
         section.setBlockState(8, 0, 8, Blocks.OBSIDIAN.defaultBlockState());
         below.setBlockState(8, 15, 8, Blocks.COARSE_DIRT.defaultBlockState());
@@ -104,6 +106,40 @@ class ClientCaptureExtractorTest {
                 new VoxelColumnData.SectionData(3, below, null, null)}, 1L, true);
         assertEquals(65, ClientCaptureExtractor.extract(0, 0, natural, sampler()).surfaceY(),
                 "supported surface obsidian remains a valid ground material");
+    }
+
+    @Test
+    void oresUntaggedBlocksAndLiquidsBelowGroundAreNotAir() {
+        for (var block : new net.minecraft.world.level.block.Block[]{Blocks.IRON_ORE,
+                Blocks.DEEPSLATE_DIAMOND_ORE, Blocks.STONE_BRICKS, Blocks.GLASS, Blocks.WATER, Blocks.LAVA}) {
+            var section = section();
+            section.setBlockState(8, 15, 8, Blocks.COARSE_DIRT.defaultBlockState());
+            for (int y=0;y<15;y++) section.setBlockState(8,y,8,block.defaultBlockState());
+            var data = new VoxelColumnData(new VoxelColumnData.SectionData[]{
+                    new VoxelColumnData.SectionData(0,section,null,null)},1L,true);
+            var captured = ClientCaptureExtractor.extract(0,0,data,sampler());
+            assertEquals(16,captured.surfaceY());
+            assertEquals(0,captured.surfaceBottom(),block.toString());
+            assertNotEquals(0,captured.flags() & PredictionWallEvidence.CAPTURED_OCCUPANCY);
+            assertFalse(PredictionWallEvidence.hasInterior(captured));
+            assertEquals(java.util.List.of(new PredictionLodSeams.HeightSpan(0,16)),
+                    PredictionWallEvidence.intervals(captured,0,16,1));
+        }
+    }
+
+    @Test
+    void completeCaptureCutsOnlyActualBoundedAir() {
+        var section = section();
+        section.setBlockState(8,15,8,Blocks.COARSE_DIRT.defaultBlockState());
+        section.setBlockState(8,0,8,Blocks.IRON_ORE.defaultBlockState());
+        var data = new VoxelColumnData(new VoxelColumnData.SectionData[]{
+                new VoxelColumnData.SectionData(0,section,null,null)},1L,true);
+        var captured = ClientCaptureExtractor.extract(0,0,data,sampler());
+        assertTrue(PredictionWallEvidence.hasInterior(captured));
+        assertEquals(15,captured.surfaceBottom());
+        assertEquals(1,captured.lowerTop());
+        assertTrue(PredictionWallEvidence.intervals(captured,1,15,1).isEmpty());
+        assertFalse(PredictionWallEvidence.intervals(captured,1,15,4).isEmpty());
     }
 
     private static ClientTerrainSampler sampler() {

@@ -8,6 +8,8 @@ import dev.xantha.vss.compat.ModCompat;
 import org.junit.jupiter.api.Test;
 
 class PredictionRendererTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test
     void periodicExpiryRetainsOwnershipButChangedOwnersInvalidateTheMask() {
         var view = new PredictionRenderer.CoverageView(0, 0, 700.0, null);

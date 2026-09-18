@@ -4,9 +4,9 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 
 /**
- * Immutable CPU mesh produced on a prediction worker. The render thread walks
- * these arrays only when a tile or its exact-coverage mask changes, uploads a
- * static GPU buffer, and reuses that buffer on subsequent frames.
+ * Worker-built mesh. Published tiles retain one packed upload payload plus an
+ * exact CPU seam summary; their complete triangle and quad views are released.
+ * The render thread uploads that payload and reuses the GPU buffer across frames.
  */
 public final class PredictionMesh {
     final float[] positions;
@@ -25,19 +25,33 @@ public final class PredictionMesh {
     final int[] waterCounts;
     private final int cellAxis;
     final int spacingBlocks;
-    /** Lazily materialised Packed top-face quad buffer. */
+    /** Worker-side quad view, released after preparing a compact published mesh. */
     private volatile PredictionQuadMesh packed;
     private volatile PredictionPackedMesh gpuPayload;
+    private volatile PredictionSeamMesh seamMesh;
     private float[] morph;
+    /** Set once by the publishing worker after lossless sample interning. */
+    int retainedSampleObjects = -1;
     void morph(float[] field) { morph = field; }
 
     /** Worker-only packing, completed before this mesh enters render residency. */
     void prepareGpuPayload(PredictionTileManager.PredictionTile tile) {
+        if (gpuPayload != null) return;
+        seamMesh();
         gpuPayload = PredictionPackedMesh.pack(tile);
         gpuPayload.morph(morph, tile.depthBound().minY(), tile.depthBound().maxY());
+        // All CPU consumers now use the exact seam summary. Retain complete
+        // vertices only for legacy/test triangle meshes, never published tiles.
+        if (positions.length == 0 && waterPositions.length == 0) packed = null;
     }
 
     PredictionPackedMesh gpuPayload() { return gpuPayload; }
+
+    PredictionSeamMesh seamMesh() {
+        PredictionSeamMesh result = seamMesh;
+        if (result == null) seamMesh = result = new PredictionSeamMesh(packed());
+        return result;
+    }
 
     PredictionMesh(float[] positions, float[] normals, int[] colors,
                    float[] waterPositions, float[] waterNormals, int[] waterColors,
@@ -113,14 +127,14 @@ public final class PredictionMesh {
     }
 
     /**
-     * Returns a compact quad representation of the top faces.  The legacy
-     * triangle arrays remain available for walls and for protocol tests, but
-     * the renderer uses this buffer for the dominant terrain surface so each
-     * cell is submitted as four vertices instead of two duplicated triangles.
+     * Returns the worker-side quad representation before publication. Legacy
+     * triangle fixtures also retain this view; production render consumers use
+     * gpuPayload() and seamMesh() after prepareGpuPayload releases it.
      */
     public PredictionQuadMesh packed() {
         PredictionQuadMesh result = packed;
         if (result == null) {
+            if (gpuPayload != null) throw new IllegalStateException("Published geometry is stored in the GPU payload; use seamMesh for CPU queries");
             result = PredictionQuadMesh.from(this);
             packed = result;
         }
@@ -144,8 +158,10 @@ public final class PredictionMesh {
                 + (cellCounts == null ? 0 : cellCounts.length)
                 + (waterOffsets == null ? 0 : waterOffsets.length)
                 + (waterCounts == null ? 0 : waterCounts.length);
-        return 512L + (morph == null ? 0L : morph.length * 4L) + (floats + ints) * 4L + waterCells.length
-                + (packed == null ? 0L : packed.retainedHeapBytes());
+        return 512L + (gpuPayload != null || morph == null ? 0L : morph.length * 4L) + (floats + ints) * 4L + waterCells.length
+                + (packed == null ? 0L : packed.retainedHeapBytes())
+                + (seamMesh == null ? 0L : seamMesh.retainedHeapBytes())
+                + (gpuPayload == null ? 0L : gpuPayload.retainedHeapBytes());
     }
 
     public int cellIndexForVertex(int vertexIndex) {

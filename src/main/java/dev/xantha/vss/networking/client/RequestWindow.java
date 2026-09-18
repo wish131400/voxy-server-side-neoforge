@@ -56,6 +56,10 @@ final class RequestWindow {
         return nearSyncRemaining > 0 || midSyncRemaining > 0 || farSyncRemaining > 0 || distantSyncRemaining > 0;
     }
 
+    int generationRemaining() {
+        return generationRemaining;
+    }
+
     boolean hasGenerationCapacity() {
         return generationRemaining > 0;
     }

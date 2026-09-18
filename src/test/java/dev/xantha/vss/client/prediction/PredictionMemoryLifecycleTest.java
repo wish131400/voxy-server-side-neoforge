@@ -28,7 +28,9 @@ class PredictionMemoryLifecycleTest {
         VSSClientConfig.CONFIG.rememberTerrain = false;
         VSSClientConfig.CONFIG.predictionDistanceBlocks = 1024;
         VSSClientConfig.CONFIG.predictionTrees = false;
-        PredictionMemoryBudget budget = new PredictionMemoryBudget(144L * PredictionMemoryBudget.MIB,
+        // Flat samples now share storage; leave only 4 MiB above the workspace
+        // so this regression still exercises actual memory pressure.
+        PredictionMemoryBudget budget = new PredictionMemoryBudget(132L * PredictionMemoryBudget.MIB,
                 0, () -> Long.MAX_VALUE, System::nanoTime);
         try (PredictionTileManager manager = new PredictionTileManager(PROFILE.levelKey(), plain(), budget)) {
             var leaves = PredictionLodPlanner.plan(PROFILE.levelKey(), 2261, 123, 3901,

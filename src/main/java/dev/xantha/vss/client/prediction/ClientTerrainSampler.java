@@ -275,6 +275,16 @@ public class ClientTerrainSampler {
 
     ClientTerrainSampler decorationContext() { return this; }
 
+    ClientColumnSample wallEvidence(int x, int z, ClientColumnSample sample) {
+        if (generatorContext() == null || randomStateContext() == null) return sample;
+        var column = generatorContext().getBaseColumn(x, z,
+                net.minecraft.world.level.LevelHeightAccessor.create(profile.minY(), profile.height()), randomStateContext());
+        return PredictionWallEvidence.inspect(sample, profile.minY(), y -> {
+            var state = column.getBlock(y);
+            return !state.isAir() && state.getFluidState().isEmpty();
+        });
+    }
+
     String biomeCacheDiagnostics() {
         return biomeCache == null ? "unavailable" : biomeCache.diagnostics();
     }
@@ -290,7 +300,16 @@ public class ClientTerrainSampler {
     // fallback; requiring the final 64x64 grid here made the first visible
     // tile wait for thousands of density/NoiseChunk samples.
     /** Stable resource-colormap identity, or unavailable for opaque color providers. */
-    long colorCacheFingerprint() { return Long.MIN_VALUE; }
+    long colorCacheFingerprint() {
+        return colorCacheFingerprint(PredictionColorCache.RESOURCES);
+    }
+
+    long colorCacheFingerprint(PredictionColorCache resources) {
+        // Only our decoded resolver is covered by the worldgen snapshot and
+        // these colormaps. Opaque integrations must opt in with their own identity.
+        return getClass() == ClientTerrainSampler.class && biomeSource != null && randomState != null
+                ? resources.fingerprint() : Long.MIN_VALUE;
+    }
 
     int initialTerrainCellAxis(int lod) { return generator == null ? VssLodLayout.TILE_QUADS : PredictionWorkOrder.initialCellAxis(lod); }
 

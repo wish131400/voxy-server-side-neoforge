@@ -6,6 +6,7 @@ import dev.xantha.vss.networking.server.storage.SectionSerializer;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.DiagnosticCounters;
 import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import dev.xantha.vss.config.VSSServerConfig;
@@ -86,6 +87,8 @@ public final class ChunkGenerationService {
     private long maxTicketWaitTicks;
     private long totalPackingWaitNanos;
     private long maxPackingWaitNanos;
+    private final DiagnosticCounters ticketDiagnostics = new DiagnosticCounters(
+            VSSLogger::isDebugEnabled, 5_000_000_000L);
     private int startsThisTick;
     private volatile long packingEpoch;
     private long nextPackingTaskSequence;
@@ -291,6 +294,7 @@ public final class ChunkGenerationService {
         pruneStalePlayerRequests(server, results);
         promoteQueued();
         if (active.isEmpty()) {
+            logTicketDiagnostics(server);
             return results.isEmpty() ? List.of() : results;
         }
 
@@ -303,6 +307,7 @@ public final class ChunkGenerationService {
             generation.ticksWaiting++;
 
             LevelChunk chunk = generation.level.getChunkSource().getChunkNow(generation.pos.x, generation.pos.z);
+            generation.chunkReady = chunk != null;
             if (chunk == null) {
                 if (generation.ticksWaiting <= config.automaticGenerationTimeoutSeconds() * 20) {
                     continue;
@@ -322,6 +327,7 @@ public final class ChunkGenerationService {
                 removeTicket(generation);
                 iterator.remove();
                 totalTimeouts++;
+                ticketDiagnostics.record("timedOut");
                 continue;
             }
 
@@ -341,6 +347,11 @@ public final class ChunkGenerationService {
                 SectionSerializer.ColumnSnapshot snapshot = SectionSerializer.snapshotColumn(
                         generation.level, chunk, generation.pos.x, generation.pos.z);
                 handedOffPacking = submitPackingTask(generationKey, generation, snapshot);
+                ticketDiagnostics.record("handedToPacking");
+                if (VSSLogger.isDebugEnabled()
+                        && nearestPlayerRing(server, generation) > server.getPlayerList().getViewDistance()) {
+                    ticketDiagnostics.record("handedToPackingBeyondServerView");
+                }
             } catch (Exception e) {
                 if (e instanceof RejectedExecutionException) {
                     totalPackingRejected++;
@@ -372,7 +383,56 @@ public final class ChunkGenerationService {
             iterator.remove();
         }
         promoteQueued();
+        logTicketDiagnostics(server);
         return results;
+    }
+
+    // Read-only inspection: never call getChunk/getChunkFuture here; those can block
+    // the server thread and would change the loading behavior being diagnosed.
+    private void logTicketDiagnostics(MinecraftServer server) {
+        String events = ticketDiagnostics.poll(System.nanoTime());
+        if (events == null) return;
+        int ready = 0;
+        int beyondView = 0;
+        int viewDistance = server.getPlayerList().getViewDistance();
+        for (PendingGeneration generation : active.values()) {
+            if (generation.chunkReady) ready++;
+            if (nearestPlayerRing(server, generation) > viewDistance) beyondView++;
+        }
+        long now = System.nanoTime();
+        List<String> samples = active.values().stream()
+                .sorted(Comparator.comparingLong(generation -> generation.startedNanos))
+                .limit(4)
+                .map(generation -> {
+                    String state;
+                    try {
+                        state = generation.level.getChunkSource().getChunkDebugData(generation.pos)
+                                .replaceAll("\\u00a7.", "").replace('\n', '|').replace('\r', ' ');
+                    } catch (RuntimeException e) {
+                        state = "inspectionFailed:" + e.getClass().getSimpleName();
+                    }
+                    return generation.level.dimension().location() + "@" + generation.pos.x + "," + generation.pos.z
+                            + "{ring=" + nearestPlayerRing(server, generation)
+                            + ",ageMs=" + (now - generation.startedNanos) / 1_000_000L
+                            + ",ticks=" + generation.ticksWaiting + ",ready=" + generation.chunkReady
+                            + ",holder=" + state + "}";
+                }).toList();
+        VSSLogger.debug("VSS generation ticket diagnostic v2: mainThread=" + server.isSameThread()
+                + ",serverView=" + viewDistance + ",active=" + active.size() + ",queued=" + queued.size()
+                + ",ready=" + ready + ",waiting=" + (active.size() - ready) + ",beyondServerView=" + beyondView
+                + ",started=" + totalSubmitted + ",completed=" + totalCompleted
+                + ",timeouts=" + totalTimeouts + ",oldest=" + samples + "," + events);
+    }
+
+    private static int nearestPlayerRing(MinecraftServer server, PendingGeneration generation) {
+        int nearest = Integer.MAX_VALUE;
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.serverLevel() == generation.level) {
+                nearest = Math.min(nearest, PositionUtil.chebyshevDistance(
+                        generation.pos.x, generation.pos.z, player.getBlockX() >> 4, player.getBlockZ() >> 4));
+            }
+        }
+        return nearest;
     }
 
     public synchronized void cancelRequest(UUID playerUuid, int requestId) {
@@ -394,6 +454,7 @@ public final class ChunkGenerationService {
 
     public synchronized void releaseIdleMemory() {
         packingEpoch++;
+        ticketDiagnostics.reset();
         for (PendingGeneration generation : active.values()) {
             removeTicket(generation);
         }
@@ -732,6 +793,8 @@ public final class ChunkGenerationService {
         // Distance 0 targets FULL chunks without promoting remote LOD work to ticking forced chunks.
         generation.level.getChunkSource().addRegionTicket(VSS_GEN_TICKET, generation.pos, VSS_GEN_TICKET_DISTANCE, generation.pos);
         generation.ticksWaiting = 0;
+        generation.startedNanos = System.nanoTime();
+        ticketDiagnostics.record("ticketAdded");
         active.put(key, generation);
         for (GenerationCallback callback : generation.callbacks) {
             incrementCount(callback.playerUuid());
@@ -1365,6 +1428,8 @@ public final class ChunkGenerationService {
         private final List<GenerationCallback> callbacks = new ArrayList<>();
         private long minimumTimestamp;
         private int ticksWaiting;
+        private long startedNanos;
+        private boolean chunkReady;
         private long queueRevision;
         private final long queuedNanos = System.nanoTime();
 

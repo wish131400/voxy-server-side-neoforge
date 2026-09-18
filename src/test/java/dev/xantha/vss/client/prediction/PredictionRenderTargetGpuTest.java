@@ -396,6 +396,8 @@ class PredictionRenderTargetGpuTest {
                 }
             }
             glUniform3f(glGetUniformLocation(program, "VanillaMaskOrigin"), 1024, 1024, 1024);
+            verifyReadyColumnHandoff(terrain, target, main, buffers, iris);
+            verifyPredictionHorizon(terrain, target, main, buffers, iris);
             if (!iris) verifyFarVoxyDepth(terrain, target, main, buffers);
             if (!iris) {
                 verifyPlanarHandoff(terrain, target, main, buffers, true);
@@ -404,7 +406,9 @@ class PredictionRenderTargetGpuTest {
             verifyClosedCliffDuringTransition(terrain, target, main, buffers, textures, iris);
             verifyMixedLodSeams(terrain, target, main, buffers, textures, iris);
             verifyRealBoundarySeams(terrain, target, main, buffers, textures, iris);
+            verifyUnverifiedCliffAndConfirmedCave(terrain, target, main, buffers, textures, iris);
             verifyWideTerrainEdge(terrain, target, main, buffers, iris);
+            verifyPlantTextureOrientation(terrain, target, main, buffers, textures, iris);
             verifyWaterAndBakedUvs(terrain, target, main, buffers, textures, iris);
             if (iris) verifyIrisDepthConventions(terrain, target, main, buffers);
             if (!iris) verifyWaterMaskBoundary(terrain, target, main, buffers, textures);
@@ -489,6 +493,126 @@ class PredictionRenderTargetGpuTest {
                 glBindVertexArray(0);
             }
         }
+    }
+
+    private static void verifyPredictionHorizon(PredictionTerrainProgram terrain, TextureTarget target,
+                                               TextureTarget main, int[] buffers, boolean iris) {
+        int y = 32768 + 96 * 4;
+        int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                1, 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+        glBindBuffer(GL_TEXTURE_BUFFER,buffers[0]); glBufferData(GL_TEXTURE_BUFFER,roof,GL_STATIC_DRAW);
+        try {
+            for (float height : new float[]{512,4096}) for (float fov : new float[]{70,7}) {
+                var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(fov),1,.05F,65536));
+                terrain.setCamera(new Matrix4f().lookAlong(0,-1,0,0,0,-1),projection.matrix());
+                if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(),64,64,false,new int[256]);
+                terrain.setTile(-8192,-height,-8192,16384,1,true);
+                terrain.setOpaqueAlpha(1);
+                main.bindWrite(true); RenderSystem.depthMask(true); glClearDepth(iris?0:1); glClear(GL_DEPTH_BUFFER_BIT);
+                target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(),projection);
+                float radius = (height-96)*(float)Math.tan(Math.toRadians(fov)*.5)*.65F;
+                for (boolean water : new boolean[]{false,true}) {
+                    roof[6] = 1 | (water ? 1 << PredictionPackedMesh.FLAGS_FLUID_SHIFT : 0);
+                    glBindBuffer(GL_TEXTURE_BUFFER,buffers[0]); glBufferData(GL_TEXTURE_BUFFER,roof,GL_STATIC_DRAW);
+                    terrain.setHorizon(0); var baseline = terrainPixels();
+                    terrain.setHorizon(radius); var clipped = terrainPixels();
+                    int kept=0,removed=0;
+                    for(int py=4;py<60;py++) for(int px=4;px<60;px++) {
+                        double x=((px+.5)/32-1)*(height-96)*Math.tan(Math.toRadians(fov)*.5);
+                        double z=((py+.5)/32-1)*(height-96)*Math.tan(Math.toRadians(fov)*.5);
+                        int p=(py*64+px)*4;
+                        if(Math.hypot(x,z)<radius*.98) {
+                            assertEquals(baseline.get(p),clipped.get(p),"inside horizon must retain the existing mesh");
+                            assertTrue((clipped.get(p)&255)>50); kept++;
+                        } else if(Math.hypot(x,z)>radius*1.02) {
+                            assertTrue((baseline.get(p)&255)>50,"fixture must reproduce leaked parent geometry");
+                            assertEquals(0,clipped.get(p)&255,"outside horizon must not show an unrefinable parent slab"); removed++;
+                        }
+                    }
+                    assertTrue(kept>500 && removed>500);
+                    if(!water) saveHandoffPixels("horizon-"+iris+"-"+(int)height+"-"+(int)fov,clipped);
+                }
+            }
+        } finally { terrain.setHorizon(0); }
+        System.out.println("PASS: horizontal horizon clips coarse parent terrain and water, preserving interior at altitude and zoom; Iris="+iris);
+    }
+
+    private static void verifyReadyColumnHandoff(PredictionTerrainProgram terrain, TextureTarget target,
+                                                TextureTarget main, int[] buffers, boolean iris) {
+        int y = 32768 + 96 * 4;
+        int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                1, 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+        glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, roof, GL_STATIC_DRAW);
+        int exactGrid = glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "ExactCoverageGrid");
+        var exactMask = new PredictionExactCoverageMask();
+        var exactColumns = PredictionExactCoverageMask.Snapshot.around(0, 0, 32);
+        java.util.Arrays.fill(exactColumns.columns(), (byte) 255);
+        try {
+            var pending = PredictionExactCoverageMask.class.getDeclaredField("pending");
+            pending.setAccessible(true);
+            pending.set(exactMask, java.util.concurrent.CompletableFuture.completedFuture(exactColumns));
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        exactMask.bind(null, net.minecraft.world.phys.Vec3.ZERO, 32,
+                glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "ExactCoverage"), exactGrid);
+        int exactTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        assertEquals(129, glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH));
+        assertEquals(GL_NO_ERROR, glGetError(), "actual odd-width coverage upload");
+        glUniform3f(exactGrid, 0, 0, 0);
+        try {
+            for (float height : new float[]{152, 512, 4096}) for (float fov : new float[]{70, 7}) {
+                var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(fov), 1, .05F, 65536));
+                var view = new Matrix4f().lookAlong(0, -1, 0, 0, 0, -1).translate(.15F, 0, -.1F);
+                terrain.setCamera(view, projection.matrix());
+                if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+                terrain.setTile(-8192, -height, -8192, 8, 1, true);
+                terrain.setOpaqueAlpha(1);
+                double realDepth = iris ? 1.0 / (height - 64) : VssLodProjection.distanceToVanillaDepth(height - 64, projection);
+                main.bindWrite(true); RenderSystem.depthMask(true); glClearDepth(realDepth); glClear(GL_DEPTH_BUFFER_BIT);
+                target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+                terrain.setRealCoverage(0, 0, 0, 0);
+                int center = (32 * 64 + 32) * 4;
+                assertTrue((terrainPixels().get(center) & 255) > 100, "unready columns retain prediction");
+                terrain.setRealCoverage(-10000, -10000, 10000, 10000);
+                assertEquals(0, terrainPixels().get(center) & 255,
+                        "ready real ground must win a 32-block height disagreement from above; Iris=" + iris + " height=" + height);
+                terrain.setRealCoverage(5000, 5000, 6000, 6000);
+                assertTrue((terrainPixels().get(center) & 255) > 100, "outside the ready frontier prediction stays visible");
+                glUniform3f(exactGrid, -1024, -1024, 128);
+                assertEquals(0, terrainPixels().get(center) & 255,
+                        "an existing real column outside the complete ring must keep its cliff detail");
+                glUniform3f(exactGrid, 5000, 5000, 128);
+                assertTrue((terrainPixels().get(center) & 255) > 100,
+                        "unrelated cached columns cannot erase foreground prediction");
+                glUniform3f(exactGrid, -1024, -1024, 128);
+                terrain.setRealCoverage(-10000, -10000, 10000, 10000);
+                // Only half the real terrain has drawn. Readiness must never
+                // erase the other half of a prediction tile or its sky fallback.
+                float[] partial = new float[4096];
+                for (int py = 0; py < 64; py++) for (int px = 0; px < 64; px++)
+                    partial[py * 64 + px] = px < 32 ? (float)realDepth : iris ? 0 : 1;
+                RenderSystem.activeTexture(GL_TEXTURE7); RenderSystem.bindTexture(main.getDepthTextureId());
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, partial);
+                var pixels = terrainPixels();
+                assertEquals(0, pixels.get((32 * 64 + 31) * 4) & 255, "actual real pixels take ownership");
+                assertTrue((pixels.get(center) & 255) > 100, "not-yet-drawn pixels retain prediction inside a ready ring");
+                for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++) {
+                    int red = pixels.get((py * 64 + px) * 4) & 255;
+                    if (px < 32) assertEquals(0, red, "handoff must cover oblique rays as well as the centre");
+                    else assertTrue(red > 100, "every missing real pixel retains prediction");
+                }
+                saveHandoffPixels("ready-column-" + iris + "-" + (int)height + "-" + (int)fov, pixels);
+                // A distant wall beyond the confirmed frontier cannot steal
+                // foreground prediction inside that frontier.
+                terrain.setCamera(new Matrix4f().lookAlong(0, -1, -1, 0, 1, 0), projection.matrix());
+                terrain.setRealCoverage(-10000, -height - 200, 10000, 10000);
+                main.bindWrite(true);
+                glClearDepth(iris ? 1.0 / (height + 4000) : VssLodProjection.distanceToVanillaDepth(height + 4000, projection));
+                glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+                assertTrue((terrainPixels().get(center) & 255) > 100, "unrelated distant real columns cannot erase foreground prediction");
+                glUniform3f(exactGrid, 0, 0, 0);
+            }
+        } finally { terrain.setRealCoverage(0, 0, 0, 0); glUniform3f(exactGrid, 0, 0, 0); glDeleteTextures(exactTexture); }
+        System.out.println("PASS: ready-column handoff with height mismatch, partial real draw, sky fallback and distant walls; Iris=" + iris);
     }
 
     private static void verifyPlanarHandoff(PredictionTerrainProgram terrain, TextureTarget target,
@@ -668,7 +792,7 @@ class PredictionRenderTargetGpuTest {
                     ClientColumnSample.FLAG_SURFACE_ONLY, 0, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
                     ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
         }
-        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, 16, 3, false);
+        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, 16, 3, false).compactForRendering();
         var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                 net.minecraft.world.level.Level.OVERWORLD, 0, 0, 4), new int[0], new int[0], samples, mesh,
                 new PredictionDepthBound(64, 66), 0, 1, 2, 16);
@@ -678,6 +802,7 @@ class PredictionRenderTargetGpuTest {
             mesh.morph(new float[]{0,0,0,0,1,0,0,0,0});
             java.util.concurrent.CompletableFuture.runAsync(() -> mesh.prepareGpuPayload(tile)).join();
             assertArrayEquals(packed.quads(), mesh.gpuPayload().quads());
+            assertThrows(IllegalStateException.class, mesh::packed, "GPU upload must not retain a second full CPU mesh");
             assertTrue(gpu.ensureMesh(tile));
             assertSame(mesh.gpuPayload(), gpu.packed());
             assertFalse(gpu.ensureMesh(tile), "unchanged tiles cannot upload repeatedly");
@@ -872,6 +997,89 @@ class PredictionRenderTargetGpuTest {
         } catch (java.io.IOException failure) { throw new java.io.UncheckedIOException(failure); }
     }
 
+
+    private static void verifyUnverifiedCliffAndConfirmedCave(PredictionTerrainProgram terrain,
+            TextureTarget target, TextureTarget main, int[] buffers, int[] textures, boolean iris) {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(55), 1, .05F, 65536));
+        terrain.setCamera(new Matrix4f().lookAlong(1, 0, 0, 0, 1, 0), projection.matrix());
+        if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+        main.bindWrite(true);
+        glClearDepth(iris ? 0 : 1);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        target.bindWrite(true);
+        terrain.bindMainDepth(main.getDepthTextureId(), projection);
+        RenderSystem.disableDepthTest();
+        RenderSystem.activeTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_BUFFER, textures[4]);
+        RenderSystem.activeTexture(GL_TEXTURE3);
+        RenderSystem.bindTexture(textures[3]);
+        for (int mode = 0; mode < 5; mode++) {
+            terrain.setCamera(new Matrix4f().lookAlong(1, 0, 0, 0, 1, 0), projection.matrix());
+            RenderSystem.activeTexture(GL_TEXTURE3); RenderSystem.bindTexture(textures[3]);
+            boolean cave = mode == 3;
+            int step = mode >= 3 ? 1 : 16, axis = 32 / step, grid = axis + 1;
+            var coverage = new float[axis * axis]; java.util.Arrays.fill(coverage,1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, axis, axis, 0, GL_RED, GL_FLOAT, coverage);
+            var samples = new ClientColumnSample[grid * grid];
+            for (int i = 0; i < samples.length; i++) {
+                int height = (i % grid) * step < 16 ? 64 : 120;
+                var sample = PredictionSimpleVegetationTest.sample(height);
+                samples[i] = mode >= 2 ? PredictionWallEvidence.inspectCaptured(
+                        PredictionCaveInteriorTest.captured(height), -64, y -> y >= 105 || y < 65)
+                        : mode == 1 ? PredictionWallEvidence.inspect(sample, -64, y -> y >= 105 || y < 65) : sample;
+                if (mode == 4 && i % grid >= 24)
+                    samples[i] = PredictionWallEvidence.inspectCaptured(PredictionCaveInteriorTest.captured(120), -64, y -> true);
+            }
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, step, grid, false).compactForRendering();
+            var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
+                    net.minecraft.world.level.Level.OVERWORLD, 0, 0, 4), new int[0], new int[0], samples, mesh,
+                    new PredictionDepthBound(64, 120), 0, 1, axis, step);
+            var packed = PredictionPackedMesh.pack(tile);
+            glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]);
+            glBufferData(GL_TEXTURE_BUFFER, packed.quads(), GL_STATIC_DRAW);
+            int[] elements = new int[packed.quadCount() * 6], corners = {0,1,2,0,2,3};
+            for (int q = 0; q < packed.quadCount(); q++) for (int c = 0; c < 6; c++) elements[q*6+c] = q*4+corners[c];
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[2]);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, elements, GL_STATIC_DRAW);
+            terrain.setTile(40, -80, -16, step, axis, true);
+            terrain.setMorph(packed, 0);
+            var pixels = terrainPixels(packed.quadCount());
+            int center = (32*64+32)*4;
+            int light = (pixels.get(center)&255)+(pixels.get(center+1)&255)+(pixels.get(center+2)&255);
+            if (cave) assertEquals(0, light, "confirmed cave must remain open; Iris=" + iris);
+            else assertTrue(light > 30, "cliff must stay closed; mode=" + mode + "; Iris=" + iris);
+            saveSeamPixels(cave ? "confirmed-cave-open" : "cliff-closed-mode-" + mode, iris, 55);
+            if (cave) {
+                // Look from inside the known gap, independently at its floor
+                // and ceiling. Neither surface may replace foreground real LOD.
+                terrain.setTile(-24, -80, -16, step, axis, true);
+                for (int direction : new int[]{-1, 1}) {
+                    terrain.setCamera(new Matrix4f().lookAlong(0, direction, 0, 0, 0, -1), projection.matrix());
+                    main.bindWrite(true);
+                    glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+                    target.bindWrite(true);
+                    var interior = terrainPixels(packed.quadCount());
+                    int interiorLight = (interior.get(center)&255)+(interior.get(center+1)&255)+(interior.get(center+2)&255);
+                    assertTrue(interiorLight > 30, "missing cave " + (direction < 0 ? "floor" : "ceiling") + "; Iris=" + iris);
+                    saveSeamPixels(direction < 0 ? "cave-interior-floor" : "cave-interior-ceiling", iris, 55);
+                    main.bindWrite(true);
+                    glClearDepth(iris ? 1.0 / 4 : VssLodProjection.distanceToVanillaDepth(4, projection));
+                    glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+                    var occluded = terrainPixels(packed.quadCount());
+                    assertEquals(0, (occluded.get(center)&255)+(occluded.get(center+1)&255)+(occluded.get(center+2)&255),
+                            "real foreground must win over cave caps");
+                }
+                main.bindWrite(true);
+                glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+                target.bindWrite(true);
+            }
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 1, 1, 0, GL_RED, GL_FLOAT, new float[]{1});
+        System.out.println("PASS: coarse unverified cliff stays closed and confirmed cave stays open (Iris=" + iris + ")");
+    }
+
+
     private static void verifyWideTerrainEdge(PredictionTerrainProgram terrain, TextureTarget target,
             TextureTarget main, int[] buffers, boolean iris) {
         var sample = new ClientColumnSample(64, 64, 0, ClientColumnSample.NO_BLOCK, 0, 0, 0, 0, 0,
@@ -905,6 +1113,64 @@ class PredictionRenderTargetGpuTest {
             assertTrue((pixels.get((y * 64 + x) * 4 + 1) & 255) > 30,
                     "neighboring 65536-block tiles must meet without a shortened edge; Iris=" + iris + ",pixel=" + x + "," + y);
         }
+    }
+
+    private static void verifyPlantTextureOrientation(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, int[] textures, boolean iris) {
+        var sample = PredictionSimpleVegetationTest.sample(64);
+        var samples = new ClientColumnSample[]{sample,sample,sample,sample};
+        var plants = PredictionVegetation.Tile.of(java.util.Map.of(
+                new net.minecraft.core.BlockPos(0,64,0),
+                net.minecraft.world.level.block.Blocks.DANDELION.defaultBlockState()),0,0,1,1,1);
+        var mesh = PredictionMeshBuilder.build(samples,null,63,0,1,2,true,null,null,null,0,0,plants);
+        var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
+                net.minecraft.world.level.Level.OVERWORLD,0,0,0),new int[4],new int[4],samples,mesh,
+                new PredictionDepthBound(64,65),0,1,1,1);
+        var packed = PredictionPackedMesh.pack(tile);
+        var words = new it.unimi.dsi.fastutil.ints.IntArrayList();
+        for (int i=0;i<packed.quads().length;i+=12) {
+            if ((packed.quads()[i+6] & PredictionPackedMesh.FLAG_UNSHADED)==0) continue;
+            var quad = java.util.Arrays.copyOfRange(packed.quads(),i,i+12);
+            // Substitute a diagnostic sprite while preserving production UV flags.
+            quad[6] = (quad[6] & ~PredictionPackedMesh.FLAG_SPRITE_MASK) | 1;
+            for (int c : new int[]{7,9,10,11}) quad[c] = (quad[c] & 0x0f000000) | 0xffffff;
+            words.addElements(words.size(),quad);
+        }
+        assertEquals(24,words.size(),"the actual flower must have two crossed quads");
+        glBindBuffer(GL_TEXTURE_BUFFER,buffers[0]);
+        glBufferData(GL_TEXTURE_BUFFER,words.toIntArray(),GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,buffers[2]);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,new int[]{0,1,2,0,2,3,4,5,6,4,6,7},GL_STATIC_DRAW);
+        RenderSystem.activeTexture(GL_TEXTURE0); RenderSystem.bindTexture(textures[0]);
+        // Top of the sprite red (petals), bottom green (stem).
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,2,0,GL_RGBA,GL_FLOAT,
+                new float[]{1,0,0,1, 0,1,0,1});
+        RenderSystem.activeTexture(GL_TEXTURE2); RenderSystem.bindTexture(textures[2]);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA32F,2,2,0,GL_RGBA,GL_FLOAT,
+                new float[]{0,0,0,0, 0,0,1,1, 0,0,0,0, 1,1,1,1});
+        RenderSystem.activeTexture(GL_TEXTURE3); RenderSystem.bindTexture(textures[3]);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_R8,1,1,0,GL_RED,GL_FLOAT,new float[]{1});
+        var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(55),1,.05F,65536));
+        if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(),64,64,false,new int[256]);
+        terrain.setOpaqueAlpha(1); terrain.setMorph(packed,0);
+        RenderSystem.disableBlend(); RenderSystem.disableDepthTest();
+        main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+        target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(),projection);
+        for (int direction : new int[]{-1,1}) {
+            terrain.setCamera(new Matrix4f().lookAlong(0,0,direction,0,1,0),projection.matrix());
+            terrain.setTile(-.5F,-64.5F,direction*2-.5F,1,1,false);
+            var pixels = terrainPixels(2);
+            int top=(38*64+32)*4,bottom=(25*64+32)*4;
+            saveSeamPixels("upright-flower-"+direction,iris,55);
+            System.out.println("FLOWER_PIXELS direction="+direction+" Iris="+iris
+                    +" top="+(pixels.get(top)&255)+","+(pixels.get(top+1)&255)
+                    +" bottom="+(pixels.get(bottom)&255)+","+(pixels.get(bottom+1)&255));
+            assertTrue((pixels.get(top)&255)>200 && (pixels.get(top+1)&255)<20,
+                    "flower petals must be above the stem; direction="+direction+"; Iris="+iris);
+            assertTrue((pixels.get(bottom+1)&255)>200 && (pixels.get(bottom)&255)<20,
+                    "flower stem must be below the petals; direction="+direction+"; Iris="+iris);
+        }
+        System.out.println("PASS: production flower has petals above stem from both sides (Iris="+iris+")");
     }
 
     private static void verifyWaterAndBakedUvs(PredictionTerrainProgram terrain, TextureTarget target,

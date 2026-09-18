@@ -28,7 +28,8 @@ final class PredictionGraphicsSupport {
     static String unsupportedReason(boolean iris, boolean gl32, boolean gl46, int fragmentUnits, int vertexUnits) {
         if (!gl32) return "OpenGL 3.2 is required";
         if (iris && !gl46) return "the Voxy/Iris shader path requires OpenGL 4.6";
-        if (fragmentUnits < 8 || vertexUnits < 2) return "insufficient texture units (fragment >= 8, vertex >= 2)";
+        if (fragmentUnits < PredictionExactCoverageMask.TEXTURE_UNITS || vertexUnits < 2)
+            return "insufficient texture units (fragment >= " + PredictionExactCoverageMask.TEXTURE_UNITS + ", vertex >= 2)";
         return null;
     }
 

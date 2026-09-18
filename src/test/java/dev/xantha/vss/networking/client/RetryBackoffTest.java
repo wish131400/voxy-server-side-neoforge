@@ -6,6 +6,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 class RetryBackoffTest {
+    @Test
+    void sustainedBackpressureSlowsRetriesButSuccessfulDeliveryRestoresFastRetry() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+        for (int i=0; i<100; i++) backoff.markBackpressure(42L);
+        assertTrue(backoff.isCoolingDown(42L, 1999L));
+        assertFalse(backoff.isCoolingDown(42L, 2000L));
+        backoff.clear(42L);
+        backoff.markBackpressure(42L);
+        assertTrue(backoff.isCoolingDown(42L, 249L));
+        assertFalse(backoff.isCoolingDown(42L, 250L));
+    }
 
     @Test
     void firstNormalBackoffUsesBaseDelay() {
