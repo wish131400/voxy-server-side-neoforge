@@ -1,5 +1,7 @@
 # Voxy Server Side NeoForge
 
+[0.3 更新日志](CHANGELOG.md)
+
 Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
 ## 支持版本
@@ -48,7 +50,7 @@ VSS 主版本号统一固定为 `0.3`，保留加载器与 Minecraft 版本标�
 
 客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能默认开启，可用 `enablePrediction` 关闭。
 
-预测范围由 `predictionDistanceBlocks` 控制（默认 8192 方块），近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系与地表规则，植被和结构保留 Java 上下文及兼容回退。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
+预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），普通精细地形距离由 `predictionFineDistanceBlocks` 控制（默认 512 方块）。最外层 10% 不强制锁定粗 LOD，仍按屏幕像素误差及可用预算渐进细化。近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系与地表规则，植被和结构保留 Java 上下文及兼容回退。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
 
 生物群系快照支持 TerraBlender 区域和 Blueprint 切片的嵌套组合，Java 与 Rust 都保留内部区域选择，避免石岸被预测为玄武岩悬崖。缺少必要快照时不启用该维度预测；生成快照变化后会使用独立的本地缓存。
 
@@ -111,7 +113,8 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 | `offThreadSectionProcessing` | `true` | 在线程外解码和处理收到的列 |
 | `enableXaeroMapBridge` | `true` | 将服务端远景写入 Xaero 世界地图 |
 | `enablePrediction` | `true` | 使用 VSS 自己的种子驱动远处预测 |
-| `predictionDistanceBlocks` | `8192` | 独立预测远景范围，单位方块，独立于 VSS |
+| `predictionDistanceBlocks` | `4096` | 独立预测远景范围，单位方块，独立于 VSS |
+| `predictionFineDistanceBlocks` | `512` | 普通精细地形距离，单位方块，独立于预测远景距离 |
 | `predictionSurfaceDistanceBlocks` | `768` | 实际近处地形外的地表细化宽度，范围 128–2048 方块 |
 | `predictionTrees` | `true` | 近处及望远镜目标的树木、草等植被 |
 | `predictionStructures` | `true` | 近处及望远镜目标的地表建筑 |
