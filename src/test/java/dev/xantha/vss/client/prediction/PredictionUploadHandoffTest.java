@@ -10,6 +10,8 @@ import net.minecraft.world.level.Level;
 import org.junit.jupiter.api.Test;
 
 class PredictionUploadHandoffTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     private static final VssLodLayout LAYOUT = VssLodLayout.of(65536, 6, true, true);
 
     @Test void frameBudgetKeepsCoarseCoverageUntilEachChildHasActuallyUploaded() {
@@ -81,6 +83,22 @@ class PredictionUploadHandoffTest {
         assertFalse(budget.allows(1));
         budget.reset();
         assertTrue(budget.allows(1));
+    }
+
+    @Test void seamAndMaskUploadsReduceOptionalUpgradesWithoutStarvingProgress() {
+        var budget = new PredictionUploadBudget();
+        budget.recordRequired(4096, PredictionUploadBudget.MAX_NANOS);
+        budget.reset();
+        assertTrue(budget.allows(1), "one upgrade still makes progress");
+        budget.record(1, 1);
+        assertFalse(budget.allows(1), "handoff costs must reserve the next frame's optional budget");
+        budget.reset();
+        budget.record(1, 1);
+        assertTrue(budget.allows(1), "unchanged seams must not permanently consume a budget");
+        budget.recordRequired(PredictionUploadBudget.MAX_BYTES, 0);
+        budget.clear();
+        budget.record(1, 1);
+        assertTrue(budget.allows(1), "world reset removes the previous world's reservation");
     }
 
     @Test void loadedDetailSurvivesDistanceSelectionAndCoarserChildPreviews() {

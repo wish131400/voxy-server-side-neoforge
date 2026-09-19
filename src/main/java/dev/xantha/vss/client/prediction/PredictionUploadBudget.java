@@ -8,11 +8,24 @@ final class PredictionUploadBudget {
     private int tiles;
     private long bytes;
     private long nanos;
+    private long requiredBytes, requiredNanos, reservedBytes, reservedNanos;
 
-    void reset() { tiles = 0; bytes = 0; nanos = 0; }
+    // Masks and seams publish atomically with ownership. Reserve their measured
+    // cost against the NEXT frame's optional mesh upgrades instead of tearing a handoff.
+    void recordRequired(long bytes, long nanos) {
+        requiredBytes += bytes; requiredNanos += nanos;
+    }
+
+    void reset() {
+        reservedBytes = requiredBytes; reservedNanos = requiredNanos;
+        requiredBytes = 0; requiredNanos = 0;
+        tiles = 0; bytes = 0; nanos = 0;
+    }
+
+    void clear() { requiredBytes = 0; requiredNanos = 0; reset(); }
 
     boolean allows(long nextBytes) {
-        return tiles == 0 || tiles < MAX_TILES && bytes + nextBytes <= MAX_BYTES && nanos < MAX_NANOS;
+        return tiles == 0 || tiles < MAX_TILES && bytes + nextBytes + reservedBytes <= MAX_BYTES && nanos + reservedNanos < MAX_NANOS;
     }
 
     void record(long uploadedBytes, long elapsedNanos) {
@@ -21,5 +34,7 @@ final class PredictionUploadBudget {
         nanos += elapsedNanos;
     }
 
-    String diagnostics() { return "uploads=" + tiles + ",uploadBytes=" + bytes + ",uploadUs=" + nanos / 1000; }
+    String diagnostics() { return "uploads=" + tiles + ",uploadBytes=" + bytes + ",uploadUs=" + nanos / 1000
+            + ",handoffBytes=" + requiredBytes + ",handoffUs=" + requiredNanos / 1000
+            + ",reservedHandoffUs=" + reservedNanos / 1000; }
 }

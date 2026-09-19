@@ -185,6 +185,9 @@ class PredictionRenderTargetGpuTest {
                 verifySurfaceRendering(vao, true);
                 verifyIrisPrograms();
                 verifyIrisState();
+                verifyAsynchronousTimings();
+                verifyCoverageTextureReuse();
+                verifyPublishedCoverageAndSeamBatch();
                 verifySharedVoxyFog(vao);
             } finally {
                 glDeleteVertexArrays(vao);
@@ -1251,6 +1254,8 @@ class PredictionRenderTargetGpuTest {
     }
 
     private static void verifyIrisState() {
+        verifyEntityTextureAfterNativePass();
+        verifyEntityRasterStateAfterNativePass();
         int active = glGetInteger(GL_ACTIVE_TEXTURE);
         int draw = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
         RenderSystem.enableDepthTest();
@@ -1259,9 +1264,9 @@ class PredictionRenderTargetGpuTest {
         glEnablei(GL_BLEND, 1);
         try (PredictionIrisBridge.State saved = new PredictionIrisBridge.State(16)) {
             assertEquals(active, glGetInteger(GL_ACTIVE_TEXTURE));
-            RenderSystem.disableDepthTest();
-            RenderSystem.depthFunc(GL_GEQUAL);
-            RenderSystem.disableBlend();
+            glDisable(GL_DEPTH_TEST);
+            PredictionGlState.depthFunc(GL_GEQUAL);
+            PredictionGlState.disableBlend();
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glActiveTexture(GL_TEXTURE0 + 15);
         }
@@ -1274,6 +1279,182 @@ class PredictionRenderTargetGpuTest {
         assertEquals(GL_NO_ERROR, glGetError(), "Iris state restore beyond Minecraft's 12 cached units");
         glDisablei(GL_BLEND, 1);
         System.out.println("PASS: Iris texture/sampler, framebuffer, depth and indexed blend state restoration");
+    }
+
+    private static void verifyAsynchronousTimings() {
+        String previous = System.getProperty("vss.renderTimings");
+        int externalQuery = glGenQueries();
+        try {
+            System.setProperty("vss.renderTimings", "true");
+            PredictionRenderTimings.frame(30);
+            glBeginQuery(GL_TIME_ELAPSED, externalQuery);
+            int query = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE);
+            assertTrue(query >= 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            PredictionRenderTimings.gpuEnd(query);
+            glEndQuery(GL_TIME_ELAPSED);
+            assertEquals(GL_NO_ERROR, glGetError(), "timestamps must coexist with shader pack elapsed queries");
+            // Waiting is confined to this GPU test. Production only checks AVAILABLE on later frames.
+            glFinish();
+            PredictionRenderTimings.frame(31);
+            assertTrue(PredictionRenderTimings.diagnostics().contains("OPAQUEGpuMs="));
+            assertEquals(-1, PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE),
+                    "unsampled frames issue no GPU queries");
+            PredictionRenderTimings.frame(60);
+            int[] queries = new int[16];
+            for (int i = 0; i < queries.length; i++) {
+                queries[i] = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.WATER);
+                assertTrue(queries[i] >= 0);
+            }
+            assertEquals(-1, PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.WATER),
+                    "a full ring drops a sample instead of blocking or allocating");
+            for (int queryId : queries) PredictionRenderTimings.gpuEnd(queryId);
+            assertEquals(GL_NO_ERROR, glGetError());
+        } finally {
+            PredictionRenderTimings.reset(); PredictionRenderTimings.frame(61);
+            glDeleteQueries(externalQuery);
+            if (previous == null) System.clearProperty("vss.renderTimings");
+            else System.setProperty("vss.renderTimings", previous);
+        }
+        System.out.println("PASS: asynchronous GPU timestamps, external query coexistence, bounded ring and cleanup");
+    }
+
+    private static void verifyPublishedCoverageAndSeamBatch() {
+        try (var gpu = new PredictionGpuTile(null)) {
+            gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], 4));
+            boolean[] first = new boolean[16]; java.util.Arrays.fill(first, true);
+            assertEquals(16, gpu.updatePublishedCoverage(first));
+            assertEquals(0, gpu.updatePublishedCoverage(first));
+            boolean[] second = first.clone(); second[0] = false;
+            assertEquals(16, gpu.updatePublishedCoverage(second));
+            assertEquals(0, gpu.updatePublishedCoverage(second));
+            // General callers still get defensive mutation detection; it invalidates the published token.
+            second[1] = false;
+            assertEquals(16, gpu.updateCoverage(second));
+            assertEquals(0, gpu.updatePublishedCoverage(second));
+            gpu.close();
+            gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], 4));
+            assertEquals(16, gpu.updatePublishedCoverage(second), "resource reset forces a fresh mask upload");
+        }
+        var batch = new PredictionRenderer.SeamBatch();
+        var tile = PredictionLodSeamsTest.tile(0, 0, 2, 64);
+        var allowed = new boolean[64 * 64]; java.util.Arrays.fill(allowed, true);
+        var patch = new PredictionLodSeams.Patch(new PredictionLodSeams.Surface(tile, allowed), tile.mesh().gpuPayload());
+        var patches = java.util.List.of(patch);
+        var first = batch.prepare(patches);
+        assertEquals(1, first.size());
+        assertSame(first, batch.prepare(patches), "unchanged seam list skips GPU preparation");
+        assertTrue(batch.prepare(java.util.List.of()).isEmpty(), "removed seams stop drawing immediately");
+        assertNotSame(first, batch.prepare(patches), "reappearing seam is prepared again");
+        batch.clear();
+        try {
+            var drain = PredictionRenderer.class.getDeclaredMethod("drainRetiredTiles"); drain.setAccessible(true);
+            for (int i = 0; i < 3; i++) drain.invoke(null);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        assertEquals(GL_NO_ERROR, glGetError());
+        RenderSystem.activeTexture(GL_TEXTURE0);
+        System.out.println("PASS: published coverage versions, reset and seam batch reuse/removal");
+    }
+
+    private static void verifyCoverageTextureReuse() {
+        try (var gpu = new PredictionGpuTile(null)) {
+            int textureId = 0;
+            for (int axis : new int[]{4, 4, 8}) {
+                gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], axis));
+                boolean[] allowed = new boolean[axis * axis];
+                java.util.Arrays.fill(allowed, true);
+                assertEquals(allowed.length, gpu.updateCoverage(allowed));
+                gpu.bindYield(3);
+                int actualTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
+                if (textureId != 0) assertEquals(textureId, actualTexture);
+                textureId = actualTexture;
+                assertEquals(GL_R8, glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT));
+                assertEquals(axis, glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH));
+                assertEquals(0, gpu.updateCoverage(allowed));
+                allowed[0] = false;
+                assertEquals(allowed.length, gpu.updateCoverage(allowed), "detect caller mutation too");
+                gpu.bindYield(3);
+                ByteBuffer pixels = BufferUtils.createByteBuffer(allowed.length);
+                glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
+                assertEquals(0, pixels.get(0));
+                assertEquals(255, pixels.get(1) & 255);
+                assertEquals(GL_NO_ERROR, glGetError());
+            }
+        }
+        RenderSystem.activeTexture(GL_TEXTURE0);
+        System.out.println("PASS: coverage R8 storage reuse, changed ownership pixels and resize");
+    }
+
+    private static void verifyEntityTextureAfterNativePass() {
+        int[] textures = {glGenTextures(), glGenTextures(), glGenTextures(), glGenTextures()};
+        try {
+            // Minecraft remembers A while Voxy temporarily binds B directly.
+            // Restoring B through RenderSystem must not make Minecraft forget A:
+            // Voxy will restore its raw bindings without updating that cache.
+            RenderSystem.activeTexture(GL_TEXTURE0);
+            RenderSystem.bindTexture(textures[0]);
+            glBindTexture(GL_TEXTURE_2D, textures[1]);
+            try (var saved = new PredictionIrisBridge.State(16)) {
+                PredictionRenderer.bindMaterialTextures(textures[2], textures[3], textures[2]);
+            }
+            assertEquals(textures[1], glGetInteger(GL_TEXTURE_BINDING_2D), "resume Voxy's raw binding");
+            glBindTexture(GL_TEXTURE_2D, textures[0]);
+            RenderSystem.bindTexture(textures[1]);
+            assertEquals(textures[1], glGetInteger(GL_TEXTURE_BINDING_2D),
+                    "entity texture bind after Voxy must not be skipped by a polluted Minecraft cache");
+        } finally {
+            for (int texture : textures) com.mojang.blaze3d.platform.GlStateManager._deleteTexture(texture);
+            RenderSystem.activeTexture(GL_TEXTURE0);
+        }
+    }
+
+    private static void verifyEntityRasterStateAfterNativePass() {
+        for (boolean fail : new boolean[]{false, true}) {
+            RenderSystem.enableCull();
+            RenderSystem.disableDepthTest();
+            RenderSystem.depthFunc(GL_LESS);
+            RenderSystem.depthMask(false);
+            RenderSystem.enableBlend();
+            // Voxy's native pass deliberately differs from the cached entity state.
+            glDisable(GL_CULL_FACE);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_GEQUAL);
+            glDepthMask(true);
+            glDisable(GL_BLEND);
+            try {
+                try (var saved = new PredictionIrisBridge.State(16)) {
+                    PredictionGlState.enableDepthTest();
+                    PredictionGlState.depthFunc(GL_GEQUAL);
+                    PredictionGlState.depthMask(true);
+                    PredictionGlState.disableCull();
+                    PredictionGlState.disableBlend();
+                    if (fail) throw new IllegalStateException("simulated failed prediction draw");
+                }
+            } catch (IllegalStateException expected) { assertTrue(fail); }
+            assertFalse(PredictionGlState.isolated, "scope released even after render failure");
+            assertFalse(glIsEnabled(GL_CULL_FACE));
+            assertTrue(glIsEnabled(GL_DEPTH_TEST));
+            assertEquals(GL_GEQUAL, glGetInteger(GL_DEPTH_FUNC));
+            assertTrue(glGetBoolean(GL_DEPTH_WRITEMASK));
+            assertFalse(glIsEnabled(GL_BLEND));
+            // Voxy returns to the original native state; entity RenderTypes must
+            // still emit their cached transitions instead of incorrectly skipping.
+            glEnable(GL_CULL_FACE);
+            glDisable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glDepthMask(false);
+            glEnable(GL_BLEND);
+            RenderSystem.disableCull();
+            RenderSystem.enableDepthTest();
+            RenderSystem.depthFunc(GL_GEQUAL);
+            RenderSystem.depthMask(true);
+            RenderSystem.disableBlend();
+            assertFalse(glIsEnabled(GL_CULL_FACE), "entity cull transition");
+            assertTrue(glIsEnabled(GL_DEPTH_TEST), "entity depth transition");
+            assertEquals(GL_GEQUAL, glGetInteger(GL_DEPTH_FUNC), "entity depth function");
+            assertTrue(glGetBoolean(GL_DEPTH_WRITEMASK), "entity depth writes");
+            assertFalse(glIsEnabled(GL_BLEND), "entity blending transition");
+        }
     }
 
     private static void verifyIrisPrograms() {

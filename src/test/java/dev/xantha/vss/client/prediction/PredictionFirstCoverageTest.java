@@ -20,6 +20,22 @@ class PredictionFirstCoverageTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @Test void presenceCheckTracksPublicationAndCloseWithoutBuildingASnapshot() throws Exception {
+        var manager = manager(sampler(new AtomicInteger(), null, null, 32), null);
+        try {
+            assertFalse(manager.hasReadyTiles());
+            var root = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount() - 1);
+            desire(manager, root, true);
+            enqueue(manager, root); awaitIdle(manager);
+            assertTrue(manager.hasReadyTiles());
+            var snapshot = PredictionTileManager.class.getDeclaredField("renderSnapshot"); snapshot.setAccessible(true);
+            assertNull(snapshot.get(manager));
+            for (int i = 0; i < 1000; i++) assertTrue(manager.hasReadyTiles());
+            assertNull(snapshot.get(manager), "presence polling cannot allocate a render snapshot");
+        } finally { manager.close(); }
+        assertFalse(manager.hasReadyTiles());
+    }
+
     @Test void optionalTerrainWaitsForIdleAndFrameBudgetThenPublishesWithoutLosingParent() throws Exception {
         try (var manager = manager(sampler(new AtomicInteger(), null, null, 32), null)) {
             var root = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount() - 1);

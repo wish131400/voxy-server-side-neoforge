@@ -21,6 +21,26 @@ class PredictionSpriteTableTest {
     }
 
     @Test
+    void materialMappingRevisionChangesForNewModelRowsAndResourceReload() {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        long initial = VssLodSpriteTable.materialRevision();
+        try (SpriteContents contents = contents("stone", 0xFF808080)) {
+            var sprite = new Sprite(contents, 0);
+            var quad = new net.minecraft.client.renderer.block.model.BakedQuad(new int[32], -1,
+                    net.minecraft.core.Direction.UP, sprite, true);
+            int block = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(net.minecraft.world.level.block.Blocks.STONE);
+            int row = VssLodSpriteTable.registerModelFace(quad, block);
+            long revision = VssLodSpriteTable.materialRevision();
+            assertTrue(revision > initial);
+            assertEquals(block, VssLodSpriteTable.materialBlocks()[row]);
+            assertEquals(row, VssLodSpriteTable.registerModelFace(quad, block));
+            assertEquals(revision, VssLodSpriteTable.materialRevision());
+            VssLodSpriteTable.close();
+            assertTrue(VssLodSpriteTable.materialRevision() > revision);
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void actualVanillaTerracottaAverageReachesTheMeshBeforeGpuUpload() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();

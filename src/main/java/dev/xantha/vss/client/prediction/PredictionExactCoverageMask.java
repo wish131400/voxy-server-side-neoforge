@@ -1,6 +1,5 @@
 package dev.xantha.vss.client.prediction;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.phys.Vec3;
@@ -40,9 +39,9 @@ final class PredictionExactCoverageMask {
 
     void bind(ClientLevel nextLevel, Vec3 camera, int radius, int sampler, int bounds) {
         if (level != nextLevel) { invalidate(); level = nextLevel; }
-        RenderSystem.activeTexture(GL13.GL_TEXTURE8);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE8);
         if (texture == -1) texture = GL11.glGenTextures();
-        RenderSystem.bindTexture(texture);
+        PredictionGlState.bindTexture(texture);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture);
         if (pending != null && pending.isDone()) {
             Snapshot completed = pending.getNow(null);

@@ -1,6 +1,6 @@
 # Voxy Server Side NeoForge
 
-[0.3 更新日志](CHANGELOG.md)
+[0.3.1 更新日志](CHANGELOG.md)
 
 Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
@@ -10,14 +10,14 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.3-neoforge-1.21.1` |
+| VSS | `0.3.1-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
 
-VSS 主版本号统一固定为 `0.3`，保留加载器与 Minecraft 版本标识，完整版本号为 `0.3-neoforge-1.21.1`，输出文件为 `vss-0.3-neoforge-1.21.1.jar`。后续构建也沿用此版本号；不同构建可通过构建时间与 JAR 的 SHA-256 区分。配置结构和网络协议使用独立的内部版本标记。
+当前版本为 `0.3.1-neoforge-1.21.1`，输出文件为 `lib/vss-0.3.1-neoforge-1.21.1.jar`。配置结构和网络协议使用独立的内部版本标记。
 
-客户端和服务端必须安装协议一致的 VSS；更新时请使用同一次构建的 JAR，不要仅凭固定版本号判断两端兼容。
+客户端和服务端必须安装协议一致的 VSS；更新时请使用同一次构建的 JAR，不要仅凭模组版本号判断两端兼容。
 
 ## 安装
 

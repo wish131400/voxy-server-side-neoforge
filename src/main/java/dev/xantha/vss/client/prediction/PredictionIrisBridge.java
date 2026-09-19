@@ -40,7 +40,7 @@ public final class PredictionIrisBridge {
         if (!VSSClientConfig.CONFIG.enablePrediction) return;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft == null || minecraft.level == null
-                || ClientPredictionState.readyTiles(minecraft.level.dimension()).isEmpty()) return;
+                || !ClientPredictionState.hasReadyTiles(minecraft.level.dimension())) return;
         if (!PredictionGraphicsSupport.available(true)) return;
         Bridge bridge = BRIDGES.computeIfAbsent(pipeline, Bridge::new);
         if (bridge.failed) return;
@@ -57,6 +57,12 @@ public final class PredictionIrisBridge {
         } catch (Throwable failure) {
             bridge.failed = true;
             VSSLogger.warn("VSS prediction disabled for this Voxy/Iris pipeline; real LOD remains enabled", failure);
+        }
+    }
+
+    static void beginFrame() {
+        for (Bridge bridge : BRIDGES.values()) {
+            bridge.framePlan.clear(); bridge.depthView.clear();
         }
     }
 
@@ -88,8 +94,12 @@ public final class PredictionIrisBridge {
         int width;
         int height;
         int format;
-        int snapshotFrame = Integer.MIN_VALUE;
+        final PredictionFramePlan<Boolean> depthView = new PredictionFramePlan<>();
         PredictionTileManager.RenderSnapshot meshSnapshot;
+        final PredictionFramePlan<PredictionRenderer.PreparedFrame> framePlan = new PredictionFramePlan<>();
+        int cachedTextureUnits;
+        long materialRevision = Long.MIN_VALUE;
+        int[] materialIds = new int[256];
         Object data;
         IntConsumer imageBindings;
         it.unimi.dsi.fastutil.objects.Object2IntMap<BlockState> blockIds;
@@ -97,6 +107,7 @@ public final class PredictionIrisBridge {
         Bridge(Object pipeline) { this.pipeline = pipeline; }
 
         int textureUnits() throws ReflectiveOperationException {
+            if (cachedTextureUnits != 0) return cachedTextureUnits;
             Object images = call(field(pipeline, "data"), "getImageSet");
             int count = images == null ? 0 : (int) ((String) call(images, "layout")).lines()
                     .filter(line -> line.contains("BASE_SAMPLER_BINDING_INDEX+")).count();
@@ -104,7 +115,7 @@ public final class PredictionIrisBridge {
             if (units > GL11.glGetInteger(GL20.GL_MAX_TEXTURE_IMAGE_UNITS)) {
                 throw new IllegalStateException("Shader pack requires too many texture units for prediction: " + units);
             }
-            return units;
+            return cachedTextureUnits = units;
         }
 
         @SuppressWarnings("unchecked")
@@ -148,30 +159,42 @@ public final class PredictionIrisBridge {
             int w = (int) field(viewport, "width");
             int h = (int) field(viewport, "height");
             int frameId = (int) field(viewport, "frameId");
-            // Retain REAL opaque depth for water ownership. A new snapshot
-            // here would include our own terrain and erase shallow water.
-            if (!translucent || snapshotFrame != frameId) {
-                snapshotDepth(texture, w, h);
-                snapshotFrame = frameId;
-                var level = net.minecraft.client.Minecraft.getInstance().level;
-                meshSnapshot = level == null ? null : ClientPredictionState.renderSnapshot(level.dimension());
-            }
-            int[] ids = new int[256];
-            int[] blocks = VssLodSpriteTable.materialBlocks();
-            if (blockIds != null) for (int row = 0; row < blocks.length; row++) {
-                if (blocks[row] >= 0) ids[row] = Math.max(0,
-                        blockIds.getInt(BuiltInRegistries.BLOCK.byId(blocks[row]).defaultBlockState()));
-            }
             PredictionRenderer.Frame frame = new PredictionRenderer.Frame(
                     new Matrix4f((Matrix4f) field(viewport, "modelView")),
                     new Matrix4f((Matrix4f) field(viewport, "projection")),
                     new Vec3((double) field(viewport, "cameraX"), (double) field(viewport, "cameraY"),
                             (double) field(viewport, "cameraZ")));
+            var level = Minecraft.getInstance().level;
+            // Retain REAL opaque depth for water ownership. A new snapshot
+            // here would include our own terrain and erase shallow water.
+            if (!translucent || depthView.get(viewport, level, null, 0, 0, frameId, w, h, frame) == null) {
+                framePlan.clear();
+                long copyStart = PredictionRenderTimings.start();
+                int query = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.DEPTH_COPY);
+                try { snapshotDepth(texture, w, h); }
+                finally {
+                    PredictionRenderTimings.gpuEnd(query);
+                    PredictionRenderTimings.end(PredictionRenderTimings.Stage.DEPTH_COPY, copyStart);
+                }
+                depthView.put(viewport, level, null, 0, 0, frameId, w, h, frame, true);
+                meshSnapshot = level == null ? null : ClientPredictionState.renderSnapshot(level.dimension());
+            }
+            long revision = VssLodSpriteTable.materialRevision();
+            if (materialRevision != revision) {
+                int[] ids = new int[256];
+                int[] blocks = VssLodSpriteTable.materialBlocks();
+                if (blockIds != null) for (int row = 0; row < blocks.length; row++) {
+                    if (blocks[row] >= 0) ids[row] = Math.max(0,
+                            blockIds.getInt(BuiltInRegistries.BLOCK.byId(blocks[row]).defaultBlockState()));
+                }
+                materialIds = ids;
+                materialRevision = revision;
+            }
             GL11.glViewport(0, 0, w, h);
             PredictionRenderer.renderIris(frame, new Pass(program, depthCopy,
                     GL11.glGetInteger(GL11.GL_DEPTH_FUNC), w, h,
                     GL11.glGetInteger(GL45.GL_CLIP_DEPTH_MODE) == GL45.GL_ZERO_TO_ONE,
-                    translucent, ids, imageBindings), meshSnapshot);
+                    translucent, materialIds, imageBindings), meshSnapshot, framePlan, viewport, frameId);
         }
 
         void snapshotDepth(int source, int w, int h) {
@@ -192,6 +215,7 @@ public final class PredictionIrisBridge {
 
         @Override public void close() {
             meshSnapshot = null;
+            framePlan.clear(); depthView.clear();
             if (opaque != null) opaque.close();
             if (water != null) water.close();
             if (depthCopy != 0) GL11.glDeleteTextures(depthCopy);
@@ -219,10 +243,14 @@ public final class PredictionIrisBridge {
         throw new NoSuchMethodException(name);
     }
 
-    /** Restore Voxy's in-progress pass, including indexed MRT blend settings. */
+    /** Restore raw pass state; isolated Voxy callbacks leave Minecraft/Iris caches untouched. */
     static final class State implements AutoCloseable {
+        final long captureStart = PredictionRenderTimings.start();
+        final boolean isolated;
+        final boolean previousIsolation;
         final int program = GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM);
         final int vao = GL11.glGetInteger(GL30.GL_VERTEX_ARRAY_BINDING);
+        final int textureBuffer = GL11.glGetInteger(GL31.GL_TEXTURE_BUFFER);
         final int draw = GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING);
         final int read = GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING);
         final int active = GL11.glGetInteger(GL13.GL_ACTIVE_TEXTURE);
@@ -238,7 +266,11 @@ public final class PredictionIrisBridge {
         static final int[] BINDINGS = {GL11.GL_TEXTURE_BINDING_2D, GL12.GL_TEXTURE_BINDING_3D,
                 GL30.GL_TEXTURE_BINDING_2D_ARRAY, GL13.GL_TEXTURE_BINDING_CUBE_MAP, GL31.GL_TEXTURE_BINDING_BUFFER};
 
-        State(int textureUnits) {
+        State(int textureUnits) { this(textureUnits, true); }
+
+        State(int textureUnits, boolean isolated) {
+            this.isolated = isolated;
+            this.previousIsolation = PredictionGlState.isolated;
             GL11.glGetIntegerv(GL11.GL_VIEWPORT, viewport);
             textures = new int[textureUnits][6];
             for (int unit = 0; unit < textures.length; unit++) {
@@ -255,13 +287,24 @@ public final class PredictionIrisBridge {
                 blend[i][3] = GL30.glGetIntegeri(GL14.GL_BLEND_SRC_ALPHA, i);
                 blend[i][4] = GL30.glGetIntegeri(GL14.GL_BLEND_DST_ALPHA, i);
             }
+            PredictionGlState.isolated = isolated;
+            PredictionRenderTimings.end(PredictionRenderTimings.Stage.STATE, captureStart);
         }
 
         @Override public void close() {
+            long timingStart = PredictionRenderTimings.start();
+            try { restore(); }
+            finally {
+                PredictionGlState.isolated = previousIsolation;
+                PredictionRenderTimings.end(PredictionRenderTimings.Stage.STATE, timingStart);
+            }
+        }
+
+        private void restore() {
             for (int unit = 0; unit < textures.length; unit++) {
                 GL13.glActiveTexture(GL13.GL_TEXTURE0 + unit);
                 for (int target = 0; target < TARGETS.length; target++) {
-                    if (target == 0 && unit < PredictionExactCoverageMask.TEXTURE_UNITS) {
+                    if (!isolated && target == 0 && unit < PredictionExactCoverageMask.TEXTURE_UNITS) {
                         RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
                         RenderSystem.bindTexture(textures[unit][target]);
                     }
@@ -269,19 +312,29 @@ public final class PredictionIrisBridge {
                 }
                 GL33.glBindSampler(unit, textures[unit][5]);
             }
-            RenderSystem.activeTexture(active);
+            if (!isolated) RenderSystem.activeTexture(active);
             GL13.glActiveTexture(active);
             GL30.glBindVertexArray(vao);
+            GL15.glBindBuffer(GL31.GL_TEXTURE_BUFFER, textureBuffer);
             com.mojang.blaze3d.platform.GlStateManager._glUseProgram(program);
             GL30.glBindFramebuffer(GL30.GL_DRAW_FRAMEBUFFER, draw);
             GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, read);
             GL11.glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-            RenderSystem.depthFunc(depthFunc);
-            RenderSystem.depthMask(depthMask);
-            if (depth) RenderSystem.enableDepthTest(); else RenderSystem.disableDepthTest();
-            if (cull) RenderSystem.enableCull(); else RenderSystem.disableCull();
-            // Set the cached global flag before restoring indexed overrides.
-            if (blend[0][0] != 0) RenderSystem.enableBlend(); else RenderSystem.disableBlend();
+            if (!isolated) {
+                RenderSystem.depthFunc(depthFunc);
+                RenderSystem.depthMask(depthMask);
+                if (depth) RenderSystem.enableDepthTest(); else RenderSystem.disableDepthTest();
+                if (cull) RenderSystem.enableCull(); else RenderSystem.disableCull();
+                if (blend[0][0] != 0) RenderSystem.enableBlend(); else RenderSystem.disableBlend();
+                // Keep the ordinary pass cache in sync before MRT overrides.
+                RenderSystem.blendFuncSeparate(blend[0][1], blend[0][2], blend[0][3], blend[0][4]);
+            }
+            // Native Voxy state may intentionally differ from the Minecraft cache.
+            // Do not restore it through Iris's blend/depth lock interception.
+            GL11.glDepthFunc(depthFunc);
+            GL11.glDepthMask(depthMask);
+            if (depth) GL11.glEnable(GL11.GL_DEPTH_TEST); else GL11.glDisable(GL11.GL_DEPTH_TEST);
+            if (cull) GL11.glEnable(GL11.GL_CULL_FACE); else GL11.glDisable(GL11.GL_CULL_FACE);
             for (int i = 0; i < blend.length; i++) {
                 restoreBlend(i, blend[i][1], blend[i][2], blend[i][3], blend[i][4]);
                 if (blend[i][0] != 0) GL30.glEnablei(GL11.GL_BLEND, i); else GL30.glDisablei(GL11.GL_BLEND, i);

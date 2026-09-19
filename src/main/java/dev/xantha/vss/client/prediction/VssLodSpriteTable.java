@@ -38,6 +38,8 @@ final class VssLodSpriteTable {
     // row back to an unrelated grass/snow sprite produces convincing-looking
     // but completely wrong streaks.
     private static final int MAX_SPRITES = 254;
+    private static volatile long materialRevision;
+    static long materialRevision() { return materialRevision; }
     private static final Map<ResourceLocation, Integer> INDEX_BY_SPRITE = new HashMap<>();
     // Read from worker threads (mesh building) while the render thread
     // resolves new blocks, so the maps must be concurrent.  Two rows per
@@ -194,6 +196,7 @@ final class VssLodSpriteTable {
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
             modelFlags = new byte[256];
+            materialRevision++;
             averageColorsArgb = null;
             seeded = false;
             broken = false;
@@ -248,7 +251,11 @@ final class VssLodSpriteTable {
         Integer cached = INDEX_BY_STATE_FACE.get(key);
         if (cached != null) return cached;
         synchronized (VssLodSpriteTable.class) {
-            return INDEX_BY_STATE_FACE.computeIfAbsent(key, ignored -> resolve(state, face));
+            return INDEX_BY_STATE_FACE.computeIfAbsent(key, ignored -> {
+                int row = resolve(state, face);
+                materialRevision++;
+                return row;
+            });
         }
     }
 
@@ -296,6 +303,7 @@ final class VssLodSpriteTable {
                 return cached;
             }
             int index = resolve(blockId, face);
+            materialRevision++;
             if (face == 0) {
                 INDEX_BY_BLOCK.put(blockId, index);
             } else if (face < 0) {
@@ -344,6 +352,7 @@ final class VssLodSpriteTable {
                 int index = registerSprite(sprite);
                 if (index == FLAT) return 0;
                 FLUID_SPRITES[kind] = index;
+                materialRevision++;
                 return index;
             } catch (Throwable failure) {
                 return 0;
@@ -549,6 +558,7 @@ final class VssLodSpriteTable {
         int row = RECTS.size();
         MODEL_ROWS.put(key, row);
         MODEL_BLOCKS.put(row, blockId);
+        materialRevision++;
         byte[] flags = modelFlags.clone();
         flags[row] = (byte) (quad.isShade() ? 1 : 3);
         modelFlags = flags;
@@ -631,14 +641,14 @@ final class VssLodSpriteTable {
                 data.put((2 + c / 4) * width * 4 + (i + 1) * 4 + c % 4, modelUvs.get(i)[c]);
             }
             data.flip();
-            GlStateManager._bindTexture(textureId);
+            PredictionGlState.bindTexture(textureId);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGBA32F, width, 4, 0,
                     GL11.GL_RGBA, GL11.GL_FLOAT, data);
-            GlStateManager._bindTexture(0);
+            PredictionGlState.bindTexture(0);
             MemoryUtil.memFree(data);
             return textureId;
         } catch (Throwable failure) {
@@ -738,6 +748,7 @@ final class VssLodSpriteTable {
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
             modelFlags = new byte[256];
+            materialRevision++;
         }
         averageColorsArgb = null;
         seeded = false;

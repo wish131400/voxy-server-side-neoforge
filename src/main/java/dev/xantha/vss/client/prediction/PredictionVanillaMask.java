@@ -1,7 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
 import com.mojang.blaze3d.platform.TextureUtil;
-import com.mojang.blaze3d.systems.RenderSystem;
 import java.nio.ByteBuffer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -172,7 +171,7 @@ final class PredictionVanillaMask {
         if (texture == -1) {
             texture = TextureUtil.generateTextureId();
         }
-        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0 + unit);
         GL11.glBindTexture(GL12.GL_TEXTURE_3D, texture);
         refresh();
         org.lwjgl.opengl.GL20.glUniform3f(originUniform,
@@ -187,7 +186,7 @@ final class PredictionVanillaMask {
     }
 
     static void unbind(int unit) {
-        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0 + unit);
         GL11.glBindTexture(GL12.GL_TEXTURE_3D, 0);
     }
 

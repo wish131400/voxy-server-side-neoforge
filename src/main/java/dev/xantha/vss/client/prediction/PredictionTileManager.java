@@ -1168,6 +1168,9 @@ public final class PredictionTileManager implements AutoCloseable {
         return sampler.exactWorldgen();
     }
 
+    /** A render-hook presence check must not copy/sort the full ready collection. */
+    public boolean hasReadyTiles() { return !ready.isEmpty(); }
+
     public synchronized Collection<PredictionTile> readyTiles() {
         List<PredictionTile> snapshot = new ArrayList<>(ready.values());
         snapshot.sort(Comparator.comparingInt(tile -> tile.key().lod()));
@@ -1194,26 +1197,19 @@ public final class PredictionTileManager implements AutoCloseable {
         RenderSnapshot(ResourceKey<Level> dimension, VssLodLayout layout,
                        Map<PredictionTileKey, PredictionTile> tiles, Map<PredictionTileKey, Long> epochs) {
             this.dimension = dimension; this.layout = layout; this.tiles = tiles; this.epochs = epochs;
-            this.scopedTiles = tiles.values().stream().anyMatch(PredictionTile::scopeOnly);
-            var families = new HashSet<PredictionTileKey>();
-            if (scopedTiles) {
-                for (var scoped : tiles.values()) {
-                    if (!scoped.scopeOnly()) continue;
-                    for (var candidate : tiles.keySet()) {
-                        var parent = candidate.lod() >= scoped.key().lod() ? candidate : scoped.key();
-                        var child = candidate.lod() >= scoped.key().lod() ? scoped.key() : candidate;
-                        int shift = parent.lod() - child.lod();
-                        if (parent.dimension().equals(child.dimension()) && (child.tileX() >> shift) == parent.tileX()
-                                && (child.tileZ() >> shift) == parent.tileZ()) families.add(candidate);
-                    }
-                }
-            }
-            scopedFamilies = Set.copyOf(families);
+            scopedFamilies = PredictionScopeFamilies.find(tiles);
+            this.scopedTiles = !scopedFamilies.isEmpty();
             levels = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap[layout.levelCount()];
+            int[] counts = new int[levels.length];
+            for (var tile : tiles.values()) {
+                int lod = tile.key().lod();
+                if (lod >= 0 && lod < counts.length && dimension.equals(tile.key().dimension())) counts[lod]++;
+            }
+            for (int lod = 0; lod < counts.length; lod++) if (counts[lod] != 0)
+                levels[lod] = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>(counts[lod]);
             for (var tile : tiles.values()) {
                 int lod = tile.key().lod();
                 if (lod < 0 || lod >= levels.length || !dimension.equals(tile.key().dimension())) continue;
-                if (levels[lod] == null) levels[lod] = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
                 levels[lod].put(pack(tile.key().tileX(), tile.key().tileZ()), tile);
             }
         }

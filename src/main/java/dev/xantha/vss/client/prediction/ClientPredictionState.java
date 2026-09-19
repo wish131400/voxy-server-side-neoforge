@@ -555,6 +555,11 @@ public final class ClientPredictionState {
         if (manager != null) manager.captureExactColumn(chunkX, chunkZ, data);
     }
 
+    public static boolean hasReadyTiles(ResourceKey<Level> dimension) {
+        PredictionTileManager manager = MANAGERS.get(dimension);
+        return manager != null && manager.hasReadyTiles();
+    }
+
     public static Collection<PredictionTileManager.PredictionTile> readyTiles(ResourceKey<Level> dimension) {
         PredictionTileManager manager = MANAGERS.get(dimension);
         return manager == null ? List.of() : manager.readyTiles();

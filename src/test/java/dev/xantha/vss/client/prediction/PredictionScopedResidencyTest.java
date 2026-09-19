@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 import dev.xantha.vss.client.prediction.PredictionTileManager.*;
 
 class PredictionScopedResidencyTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void scopeReleaseSelectsCachedMediumAndNextLookReusesTheSameFineMesh() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         var layout=VssLodLayout.of(8192,6,true,false);

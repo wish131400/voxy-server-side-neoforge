@@ -1,6 +1,5 @@
 package dev.xantha.vss.client.prediction;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL20;
@@ -56,6 +55,11 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private final int sharedFog;
     private final int sharedFogColor;
     private final float[] faceTints = new float[7];
+    private final float[] matrixValues = new float[16];
+    private int[] boundMaterialIds;
+    private float boundSpacing = Float.NaN;
+    private int boundCellAxis = -1, boundAverage = -1;
+    private boolean morphActive;
 
     private PredictionTerrainProgram() {
         this(TERRAIN_VERTEX, TERRAIN_FRAGMENT);
@@ -125,11 +129,14 @@ final class PredictionTerrainProgram implements AutoCloseable {
     }
 
     void setIrisFrame(Matrix4f inverseProjection, int width, int height, boolean zeroToOne, int[] ids, float clearDepth) {
-        GL20.glUniformMatrix4fv(program.uniform("VssInverseProjection"), false, inverseProjection.get(new float[16]));
+        GL20.glUniformMatrix4fv(program.uniform("VssInverseProjection"), false, inverseProjection.get(matrixValues));
         GL20.glUniform2f(program.uniform("VssViewport"), width, height);
         GL20.glUniform1i(program.uniform("VssZeroToOne"), zeroToOne ? 1 : 0);
         GL20.glUniform1f(program.uniform("VssClearDepth"), clearDepth);
-        org.lwjgl.opengl.GL30.glUniform1uiv(program.uniform("VssMaterialIds[0]"), ids);
+        if (!java.util.Arrays.equals(boundMaterialIds, ids)) {
+            org.lwjgl.opengl.GL30.glUniform1uiv(program.uniform("VssMaterialIds[0]"), ids);
+            boundMaterialIds = ids.clone();
+        }
     }
 
     void use() {
@@ -137,8 +144,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     }
 
     void setCamera(Matrix4f modelView, Matrix4f projection) {
-        GL20.glUniformMatrix4fv(this.modelView, false, modelView.get(new float[16]));
-        GL20.glUniformMatrix4fv(this.projection, false, projection.get(new float[16]));
+        GL20.glUniformMatrix4fv(this.modelView, false, modelView.get(matrixValues));
+        GL20.glUniformMatrix4fv(this.projection, false, projection.get(matrixValues));
         var origin = new Matrix4f(modelView).invert().transformPosition(new org.joml.Vector3f());
         GL20.glUniform3f(viewOrigin, origin.x, origin.y, origin.z);
     }
@@ -173,14 +180,30 @@ final class PredictionTerrainProgram implements AutoCloseable {
 
     void setTile(float offsetX, float offsetY, float offsetZ, float spacing, int cellAxis,
                  boolean useAverage) {
-        GL20.glUniform2f(morph, 0, 0);
+        if (morphActive) {
+            GL20.glUniform2f(morph, 0, 0);
+            morphActive = false;
+        }
         GL20.glUniform3f(tileOffset, offsetX, offsetY, offsetZ);
-        GL20.glUniform1f(this.spacing, spacing);
-        GL20.glUniform1i(this.cellAxis, cellAxis);
-        GL20.glUniform1i(this.useAverage, useAverage ? 1 : 0);
+        if (boundSpacing != spacing) {
+            GL20.glUniform1f(this.spacing, spacing); boundSpacing = spacing;
+        }
+        if (boundCellAxis != cellAxis) {
+            GL20.glUniform1i(this.cellAxis, cellAxis); boundCellAxis = cellAxis;
+        }
+        int average = useAverage ? 1 : 0;
+        if (boundAverage != average) {
+            GL20.glUniform1i(this.useAverage, average); boundAverage = average;
+        }
     }
 
     void setMorph(PredictionPackedMesh mesh, float amount) {
+        if (amount <= 0) {
+            if (morphActive) GL20.glUniform2f(morph, 0, 0);
+            morphActive = false;
+            return;
+        }
+        morphActive = true;
         GL20.glUniform2f(morph, mesh.quadCount() * 3, amount);
         GL20.glUniform2f(morphBounds, mesh.morphMinY(), mesh.morphMaxY());
     }
@@ -202,8 +225,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     }
 
     void bindMainDepth(int texture, VssLodProjection.MatrixData projection) {
-        RenderSystem.activeTexture(GL13.GL_TEXTURE7);
-        RenderSystem.bindTexture(texture);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE7);
+        PredictionGlState.bindTexture(texture);
         org.lwjgl.opengl.GL11.glBindTexture(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, texture);
         GL20.glUniform1i(mainDepth, 7);
         GL20.glUniform2f(mainDepthPlanes, projection.vanillaA(), projection.vanillaB());
@@ -215,8 +238,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     void bindVoxyDepth(PredictionVoxyDepth.Frame frame, Matrix4f mainMvp) {
         GL20.glUniform1i(program.uniform("VoxyDepthAvailable"), frame == null ? 0 : 1);
         if (frame == null) return;
-        RenderSystem.activeTexture(GL13.GL_TEXTURE5);
-        RenderSystem.bindTexture(frame.texture());
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE5);
+        PredictionGlState.bindTexture(frame.texture());
         org.lwjgl.opengl.GL11.glBindTexture(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, frame.texture());
         // Recover the main projection's clip W from Voxy's original depth.
         // Using both homogeneous rows preserves view bob and camera rotation.
@@ -274,6 +297,10 @@ final class PredictionTerrainProgram implements AutoCloseable {
             uniform float Spacing;
             uniform int CellAxis;
             uniform float DirectionalTint[7];
+            uniform int UseAverage;
+            flat out int vMaterialValid;
+            flat out vec4 vMaterialAverage;
+            flat out vec4 vMaterialRect;
             flat out float vSprite;
             out vec4 vColor;
             out float vSkyLight;
@@ -383,6 +410,13 @@ final class PredictionTerrainProgram implements AutoCloseable {
              relative = local + TileOffset;
                 vDistance = length(relative.xz);
                 vSprite = float(sprite);
+                vMaterialValid = UseAverage == 0 && sprite > 0u && int(sprite) < textureSize(SpriteTable, 0).x ? 1 : 0;
+                vMaterialAverage = vec4(1.0);
+                vMaterialRect = vec4(0.0);
+                if (vMaterialValid != 0) {
+                    vMaterialAverage = texelFetch(SpriteTable, ivec2(int(sprite), 1), 0);
+                    vMaterialRect = texelFetch(SpriteTable, ivec2(int(sprite), 0), 0);
+                }
                 uint cornerColor = corner == 0 ? texelB.w
                         : corner == 1 ? texelC.y : corner == 2 ? texelC.z : texelC.w;
                 vSkyLight = 15.0 - float(cornerColor >> 28u);
@@ -451,6 +485,9 @@ final class PredictionTerrainProgram implements AutoCloseable {
             uniform float Spacing;
             uniform int CellAxis;
             uniform float OpaqueAlpha;
+            flat in int vMaterialValid;
+            flat in vec4 vMaterialAverage;
+            flat in vec4 vMaterialRect;
             flat in float vSprite;
             in vec4 vColor;
             flat in float vCutout;
@@ -530,6 +567,21 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // useful interior, but never display unrefinable outer slabs.
                 if (HorizonDistance > 0.0 && dot(relative.xz, relative.xz)
                         > HorizonDistance * HorizonDistance) discard;
+                // Reject cells owned by another prediction tile before depth reconstruction.
+                ivec2 sourceCell = ivec2(int(vCell) % CellAxis, int(vCell) / CellAxis);
+                ivec2 cell = vCellLocal > 0.5
+                        ? ivec2(int(floor(localXZ.x / Spacing)),
+                                int(floor(localXZ.y / Spacing)))
+                        : sourceCell;
+                // A wall lies on a cell boundary. Its perpendicular coordinate
+                // must stay on the owning column, including at the tile edge.
+                if (vCoverageAxis == 1u) cell.x = sourceCell.x;
+                if (vCoverageAxis == 2u) cell.y = sourceCell.y;
+                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis
+                        || cell.y >= CellAxis
+                        || texelFetch(Yield, cell, 0).r < 0.5) {
+                    discard;
+                }
                 // Compare in the main target's depth space. Equal/quantized
                 // depths belong to Voxy; a closer prediction still occludes
                 // distant cut faces. Sky must remain fillable at any distance.
@@ -628,20 +680,6 @@ final class PredictionTerrainProgram implements AutoCloseable {
                     discard;
                 }
                 float detailWeight = 1.0 - smoothstep(0.5, 1.0, footprint);
-                ivec2 sourceCell = ivec2(int(vCell) % CellAxis, int(vCell) / CellAxis);
-                ivec2 cell = vCellLocal > 0.5
-                        ? ivec2(int(floor(localXZ.x / Spacing)),
-                                int(floor(localXZ.y / Spacing)))
-                        : sourceCell;
-                // A wall lies on a cell boundary. Its perpendicular coordinate
-                // must stay on the owning column, including at the tile edge.
-                if (vCoverageAxis == 1u) cell.x = sourceCell.x;
-                if (vCoverageAxis == 2u) cell.y = sourceCell.y;
-                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis
-                        || cell.y >= CellAxis
-                        || texelFetch(Yield, cell, 0).r < 0.5) {
-                    discard;
-                }
                 vec4 color = vColor * ColorModulator;
                 if (color.a == 0.0) {
                     discard;
@@ -656,12 +694,12 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 vec4 albedo = vec4(color.rgb, vWater > 0.5 && vWater < 1.5 ? 180.0 / 255.0 : 1.0);
                 vec3 materialTint = vec3(1.0);
                 vec2 materialUv = fract(tileUv);
-                if (UseAverage == 0 && vSprite > 0.5 && int(vSprite) < textureSize(SpriteTable, 0).x) {
-                    vec4 averageRow = texelFetch(SpriteTable, ivec2(int(vSprite), 1), 0);
+                if (vMaterialValid != 0) {
+                    vec4 averageRow = vMaterialAverage;
                     vec3 tintRatio = min(color.rgb / max(averageRow.rgb, vec3(0.004)),
                             vec3(1.25));
                     materialTint = tintRatio;
-                    vec4 rect = texelFetch(SpriteTable, ivec2(int(vSprite), 0), 0);
+                    vec4 rect = vMaterialRect;
                     vec2 size = rect.zw - rect.xy;
                     if (detailWeight > 0.0
                             && size.x > 0.0 && size.y > 0.0) {

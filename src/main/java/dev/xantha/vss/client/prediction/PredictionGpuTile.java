@@ -2,7 +2,6 @@ package dev.xantha.vss.client.prediction;
 
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.platform.TextureUtil;
-import com.mojang.blaze3d.systems.RenderSystem;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -31,12 +30,22 @@ final class PredictionGpuTile implements AutoCloseable {
     private long meshRevision = Long.MIN_VALUE;
     private PredictionPackedMesh packed;
     private boolean[] coverage;
+    private boolean[] publishedCoverage;
+
+    /** Renderer-only contract: published ownership arrays are never mutated. */
+    int updatePublishedCoverage(boolean[] allowed) {
+        if (coverage != null && publishedCoverage == allowed) return 0;
+        int bytes = updateCoverage(allowed);
+        publishedCoverage = allowed;
+        return bytes;
+    }
     private long uploadedAt;
     float morphAmount(long now) { return packed == null || packed.morph() == null ? 0 : PredictionMorph.amount(now-uploadedAt); }
 
     private int quadBuffer = -1;
     private int quadTexture = -1;
     private int yieldTexture = -1;
+    private int yieldAxis;
 
     PredictionGpuTile(PredictionTileManager.PredictionTileKey key) {
         this.key = key;
@@ -70,45 +79,63 @@ final class PredictionGpuTile implements AutoCloseable {
         // The mesh changed shape; force the coverage mask to re-upload even
         // if the boolean array happens to be equal to the previous one.
         coverage = null;
+        publishedCoverage = null;
         return true;
     }
 
-    void ensureSeams(PredictionPackedMesh next) {
-        if (packed == next) return;
-        if (packed == null || !Arrays.equals(packed.quads(), next.quads())) ensureQuadBuffer(next.quads(), next.morph());
+    long ensureSeams(PredictionPackedMesh next) {
+        if (packed == next) return 0;
+        boolean changed = packed == null || !Arrays.equals(packed.quads(), next.quads());
+        if (changed) ensureQuadBuffer(next.quads(), next.morph());
         packed = next;
+        return changed ? next.uploadBytes() : 0;
     }
 
     /** Uploads the exact-coverage cell mask when it changed. */
-    void updateCoverage(boolean[] allowed) {
+    int updateCoverage(boolean[] allowed) {
+        // This general API also accepts caller-mutated arrays (including GPU fixtures).
+        publishedCoverage = null;
         if (packed == null || Arrays.equals(coverage, allowed)) {
-            return;
+            return 0;
         }
         int axis = packed.cellAxis();
-        ByteBuffer pixels = ByteBuffer.allocateDirect(axis * axis)
-                .order(ByteOrder.nativeOrder());
-        for (int cell = 0; cell < axis * axis; cell++) {
-            pixels.put((byte) (allowed[cell] ? 255 : 0));
+        ByteBuffer pixels = MemoryUtil.memAlloc(axis * axis);
+        int alignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
+        GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
+        try {
+            for (int cell = 0; cell < axis * axis; cell++) {
+                pixels.put((byte) (allowed[cell] ? 255 : 0));
+            }
+            pixels.flip();
+            if (yieldTexture == -1) {
+                yieldTexture = TextureUtil.generateTextureId();
+                PredictionGlState.bindTexture(yieldTexture);
+                GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER,
+                        GL11.GL_NEAREST);
+                GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER,
+                        GL11.GL_NEAREST);
+                GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S,
+                        GL12Compat.CLAMP_TO_EDGE);
+                GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T,
+                        GL12Compat.CLAMP_TO_EDGE);
+            } else {
+                PredictionGlState.bindTexture(yieldTexture);
+            }
+            if (yieldAxis != axis) {
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, org.lwjgl.opengl.GL30.GL_R8, axis, axis, 0,
+                        GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, pixels);
+                yieldAxis = axis;
+            } else {
+                GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, axis, axis,
+                        GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, pixels);
+            }
+            PredictionGlState.bindTexture(0);
+            coverage = allowed.clone();
+            return axis * axis;
+        } finally {
+            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, alignment);
+            MemoryUtil.memFree(pixels);
         }
-        pixels.flip();
-        if (yieldTexture == -1) {
-            yieldTexture = TextureUtil.generateTextureId();
-            GlStateManager._bindTexture(yieldTexture);
-            GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER,
-                    GL11.GL_NEAREST);
-            GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER,
-                    GL11.GL_NEAREST);
-            GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S,
-                    GL12Compat.CLAMP_TO_EDGE);
-            GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T,
-                    GL12Compat.CLAMP_TO_EDGE);
-        } else {
-            GlStateManager._bindTexture(yieldTexture);
-        }
-        GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RED, axis, axis, 0,
-                GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, pixels);
-        GlStateManager._bindTexture(0);
-        coverage = allowed.clone();
     }
 
     private void ensureQuadBuffer(int[] quads, float[] morph) {
@@ -160,11 +187,11 @@ final class PredictionGpuTile implements AutoCloseable {
         if (texture == -1) {
             return;
         }
-        RenderSystem.activeTexture(GL13.GL_TEXTURE0 + unit);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0 + unit);
         if (target == TEXTURE_BUFFER) {
             GL31.glBindTexture(TEXTURE_BUFFER, texture);
         } else {
-            GlStateManager._bindTexture(texture);
+            PredictionGlState.bindTexture(texture);
         }
     }
 
@@ -186,9 +213,11 @@ final class PredictionGpuTile implements AutoCloseable {
         if (yieldTexture != -1) {
             TextureUtil.releaseTextureId(yieldTexture);
             yieldTexture = -1;
+            yieldAxis = 0;
         }
         packed = null;
         coverage = null;
+        publishedCoverage = null;
         meshRevision = Long.MIN_VALUE;
     }
 

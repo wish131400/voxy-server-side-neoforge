@@ -13,6 +13,8 @@ final class PredictionLodSeams {
     private Map<PredictionTileKey, Surface> previous = Map.of();
     private List<Patch> patches = List.of();
     private final Map<PredictionTileKey, Cached> cache = new HashMap<>();
+    private long localReuses;
+    long localReuses() { return localReuses; }
     private record Cached(Surface source, int[] edges, Surface[] neighbors, PredictionPackedMesh mesh) { }
 
     List<Patch> update(List<Surface> surfaces) {
@@ -37,11 +39,22 @@ final class PredictionLodSeams {
             inputs.put(surface.tile().key(), same ? old : surface);
         }
         if (unchanged) return patches;
+        // Changes elsewhere in the frustum cannot alter this tile's border queries.
+        // Bound the extra region comparisons; large changes use the complete path.
+        var changed = new ArrayList<Surface>();
+        for (var old : previous.values()) if (inputs.get(old.tile().key()) != old) changed.add(old);
+        for (var current : inputs.values()) if (previous.get(current.tile().key()) != current) changed.add(current);
         var index = new Index(inputs.values());
         var next = new ArrayList<Patch>();
         for (Surface requested : surfaces) {
             Surface surface = inputs.get(requested.tile().key());
-            Cached item = stitch(surface, index, cache.get(surface.tile().key()));
+            Cached old = cache.get(surface.tile().key());
+            Cached item;
+            if (old != null && old.source() == surface && changed.size() <= 64
+                    && !touchesChangedRegion(surface.tile(), changed)) {
+                item = old;
+                localReuses++;
+            } else item = stitch(surface, index, old);
             cache.put(surface.tile().key(), item);
             PredictionPackedMesh mesh = item.mesh();
             if (mesh.quadCount() != 0) next.add(new Patch(surface, mesh));
@@ -52,10 +65,25 @@ final class PredictionLodSeams {
         return patches;
     }
 
-    String diagnostics() { return "mode=mesh-owned,builds=" + PredictionSeamMesh.builds(); }
+    String diagnostics() { return "mode=mesh-owned,builds=" + PredictionSeamMesh.builds()
+            + ",localReuses=" + localReuses; }
     long wallIndexBuilds() { return PredictionSeamMesh.builds(); }
 
     void clear() { previous = Map.of(); patches = List.of(); cache.clear(); }
+
+    private static boolean touchesChangedRegion(PredictionTile source, List<Surface> changes) {
+        for (var change : changes) if (touchesBorderRegion(source, change.tile())) return true;
+        return false;
+    }
+
+    private static boolean touchesBorderRegion(PredictionTile source, PredictionTile changed) {
+        long sx = source.baseBlockX(), sz = source.baseBlockZ();
+        long cx = changed.baseBlockX(), cz = changed.baseBlockZ();
+        // Index.at reads at most one block outside the owning footprint. Include
+        // parent/child overlap, negative coordinates and tiles sharing just an edge.
+        return cx <= sx + source.spanBlocks() && cx + changed.spanBlocks() > sx - 1
+                && cz <= sz + source.spanBlocks() && cz + changed.spanBlocks() > sz - 1;
+    }
 
     private static Cached stitch(Surface surface, Index index, Cached old) {
         boolean sameSource = old != null && old.source() == surface;

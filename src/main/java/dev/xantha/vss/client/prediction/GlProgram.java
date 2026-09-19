@@ -7,6 +7,7 @@ import java.util.List;
 final class GlProgram implements AutoCloseable {
     private static final int LOG_LENGTH = 32_768;
     private final int id;
+    private final java.util.Map<String, Integer> uniforms = new java.util.HashMap<>();
 
     private GlProgram(int id) {
         this.id = id;
@@ -42,7 +43,7 @@ final class GlProgram implements AutoCloseable {
     }
 
     int uniform(String name) {
-        return GlStateManager._glGetUniformLocation(id, name);
+        return uniforms.computeIfAbsent(name, key -> GlStateManager._glGetUniformLocation(id, key));
     }
 
     void use() {

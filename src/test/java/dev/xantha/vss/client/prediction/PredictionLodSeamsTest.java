@@ -11,6 +11,37 @@ import org.junit.jupiter.api.Test;
 class PredictionLodSeamsTest {
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @Test void localChangesSkipUnrelatedBordersAndStillMatchAFullRebuild() {
+        var cache = new PredictionLodSeams();
+        var fixed = List.of(surface(tile(-1, -1, 2, 64)), surface(tile(0, -1, 4, 96)));
+        var current = new ArrayList<>(fixed);
+        cache.update(current);
+        var far = surface(tile(100, 100, 2, 80));
+        current.add(far);
+        var actual = cache.update(current);
+        assertTrue(cache.localReuses() >= 2, "unrelated tiles skip all per-edge neighbor lookups");
+        for (int move = 0; move < 8; move++) {
+            // Add/remove, adjacent height changes and ownership changes, including negative coordinates.
+            current = new ArrayList<>(fixed);
+            current.add(far);
+            if ((move & 1) == 0) current.set(1, surface(tile(0, -1, 4, 80 + move)));
+            if (move % 3 == 0) {
+                var old = current.get(1);
+                boolean[] allowed = old.allowed().clone();
+                for (int z = 0; z < 64; z++) allowed[z * 64] = false;
+                current.set(1, new PredictionLodSeams.Surface(old.tile(), allowed));
+            }
+            if (move % 4 == 0) current.remove(1);
+            actual = cache.update(current);
+            var expected = new PredictionLodSeams().update(current);
+            assertEquals(expected.size(), actual.size());
+            for (int i = 0; i < actual.size(); i++) {
+                assertSame(expected.get(i).surface().tile(), actual.get(i).surface().tile());
+                assertArrayEquals(expected.get(i).mesh().quads(), actual.get(i).mesh().quads());
+            }
+        }
+    }
+
     @Test void mixedLevelsConnectExactlyTheDisplayedHeightsOnBothAxesAndHeightOrders() {
         for (int step : new int[]{1, 2, 4, 16, 64}) for (boolean alongX : new boolean[]{true, false})
             for (boolean fineHigher : new boolean[]{true, false}) {

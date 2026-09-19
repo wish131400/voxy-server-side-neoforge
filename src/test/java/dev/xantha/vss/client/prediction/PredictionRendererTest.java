@@ -11,6 +11,35 @@ class PredictionRendererTest {
     @org.junit.jupiter.api.BeforeAll
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void seamSelectionIgnoresSortingButTracksOwnersAndWorldReset() throws Exception {
+        PredictionRenderer.resetOcclusion();
+        var drawType = Class.forName(PredictionRenderer.class.getName() + "$Draw");
+        var ctor = drawType.getDeclaredConstructors()[0]; ctor.setAccessible(true);
+        var append = PredictionRenderer.class.getDeclaredMethod("appendSeams", java.util.List.class); append.setAccessible(true);
+        var inputs = PredictionRenderer.class.getDeclaredField("seamInputs"); inputs.setAccessible(true);
+        var a = PredictionLodSeamsTest.tile(-10, -10, 2, 64);
+        var b = PredictionLodSeamsTest.tile(10, 10, 2, 64);
+        var maskA = new boolean[4096]; var maskB = new boolean[4096];
+        java.util.Arrays.fill(maskA, true); java.util.Arrays.fill(maskB, true);
+        Object da = ctor.newInstance(a, null, maskA, false, VssLodFaceGroup.ALL, 0f);
+        Object db = ctor.newInstance(b, null, maskB, false, VssLodFaceGroup.ALL, 0f);
+        try {
+            append.invoke(null, new java.util.ArrayList(java.util.List.of(da, db)));
+            Object original = inputs.get(null);
+            append.invoke(null, new java.util.ArrayList(java.util.List.of(db, da)));
+            org.junit.jupiter.api.Assertions.assertSame(original, inputs.get(null), "camera order alone preserves seam inputs");
+            var changed = maskA.clone(); changed[0] = false;
+            Object nextA = ctor.newInstance(a, null, changed, false, VssLodFaceGroup.ALL, 0f);
+            append.invoke(null, new java.util.ArrayList(java.util.List.of(db, nextA)));
+            org.junit.jupiter.api.Assertions.assertNotSame(original, inputs.get(null), "new ownership invalidates the selection");
+            append.invoke(null, new java.util.ArrayList(java.util.List.of(db)));
+            assertEquals(1, ((java.util.List) inputs.get(null)).size(), "removed tiles must not remain selected");
+        } finally { PredictionRenderer.resetOcclusion(); }
+        assertTrue(((java.util.List) inputs.get(null)).isEmpty(), "world/resource reset releases selected inputs");
+    }
+
+    @Test
     void periodicExpiryRetainsOwnershipButChangedOwnersInvalidateTheMask() {
         var view = new PredictionRenderer.CoverageView(0, 0, 700.0, null);
         var coverage = new PredictionRenderer.TileCoverage(new boolean[]{true}, 1, 1, 0, 0);
