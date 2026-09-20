@@ -17,7 +17,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** Source-built Rust terrain, surface and tint backend. Work runs on prediction builders. */
 final class RustTerrainSampler extends ClientTerrainSampler implements AutoCloseable {
-    static final String ALGORITHM = "vanilla-rust-abi5-vegetation-pages-r1";
+    static final String ALGORITHM = "vanilla-rust-abi6-interior-r1";
     private static boolean attempted, loaded;
     private volatile long world;
     private volatile boolean cancelled;
@@ -338,6 +338,21 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
     @Override public ClientColumnSample sampleSurface(int x, int z) { return sample(x, z); }
+    @Override ClientColumnSample sampleInterior(int x, int z) {
+        ByteBuffer input = positions.get(), output = wallColumn.get();
+        input.putInt(0, x).putInt(4, z);
+        if (RustWorldgenBackend.interiorColumns(handle(), input, output, 1) != 1)
+            throw new IllegalStateException("Incomplete native interior column");
+        int min = context.interiorMinY(), height = output.getInt(12);
+        if (height < 1 || height > profile().height()) throw new IllegalStateException("Interior column height mismatch");
+        return PredictionColumnVolume.sample(min, height, y -> {
+            int state = output.getInt(16 + (y - min) * 4);
+            return states[state].isAir() ? -1 : blocks[state];
+        }, block -> {
+            var state = net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+            return state.getFluidState().isEmpty() ? 0 : state.is(Blocks.LAVA) ? 2 : 1;
+        }).asSample();
+    }
     @Override ClientColumnSample wallEvidence(int x, int z, ClientColumnSample sample) {
         if (cancelled || world == 0) return sample;
         ByteBuffer input = positions.get();

@@ -11,7 +11,7 @@ final class PredictionMorph {
                 || parent.heights().length != (parent.cellAxis()+1)*(parent.cellAxis()+1)
                 || child.heights().length != axis*axis || child.spacingBlocks() <= 2) return null;
         // Fluid banks must stay at the same positions as their unmorphed water.
-        for (var s : child.samples()) if (s == null || !s.hasSurface() || s.hasFluid() || s.captured()) return null;
+        for (var s : child.samples()) if (s == null || !s.hasSurface() || s.hasFluid() || s.captured() || s.volume() != null) return null;
         float[] delta = new float[axis * axis];
         boolean changed = false;
         int span = child.cellAxis() * child.spacingBlocks();

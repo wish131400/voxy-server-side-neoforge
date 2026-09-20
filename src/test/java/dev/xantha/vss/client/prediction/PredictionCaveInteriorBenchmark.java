@@ -8,9 +8,9 @@ import org.junit.jupiter.api.*;
 class PredictionCaveInteriorBenchmark {
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
-    @Test void compareSameOccupancyWithAndWithoutInteriorCaps() {
+    @Test void compareUnverifiedAndConfirmedCaveGeometry() {
         var cave=PredictionCaveInteriorTest.cave();
-        var noCaps=new ClientColumnSample(cave.surfaceY(),cave.fluidY(),cave.biomeIndex(),cave.topBlockIndex(),
+        var unchecked=new ClientColumnSample(cave.surfaceY(),cave.fluidY(),cave.biomeIndex(),cave.topBlockIndex(),
                 cave.structureIndex(),cave.treeKind(),cave.treeDensity(),cave.treeHeight(),cave.fluid(),
                 cave.flags() & ~PredictionWallEvidence.CHECKED,cave.groundFeatureKind(),cave.underBlockIndex(),
                 cave.deepBlockIndex(),cave.surfaceBottom(),cave.lowerTop(),cave.lowerBottom(),cave.spanFloor());
@@ -19,7 +19,7 @@ class PredictionCaveInteriorBenchmark {
             for(var grid:samples) Arrays.fill(grid,PredictionSimpleVegetationTest.sample(120));
             for(int k=0;k<cells;k++) {
                 int cell=k*67%4096,index=(cell/64+1)*66+cell%64+1;
-                samples[0][index]=noCaps; samples[1][index]=cave;
+                samples[0][index]=unchecked; samples[1][index]=cave;
             }
             long[][] times=new long[2][40]; int[] quads=new int[2];
             for(int iteration=0;iteration<64;iteration++) for(int order=0;order<2;order++) {
@@ -32,9 +32,19 @@ class PredictionCaveInteriorBenchmark {
                 quads[mode]=count;
             }
             for(var values:times) Arrays.sort(values);
-            assertEquals(cells*2,quads[1]-quads[0]);
+            // Confirmed occupancy now also exposes the solid sides of adjacent
+            // columns. Total quad difference includes those walls and greedy
+            // top splitting; verify the actual floor/ceiling contract directly.
+            var verified = PredictionMeshBuilder.build(samples[1],null,63,0,1,66,false);
+            int floor=0,ceiling=0;
+            for(int vertex=0;vertex<verified.vertexCount();vertex++) {
+                if(verified.y(vertex)==65 && verified.normalY(vertex)==1) floor++;
+                if(verified.y(vertex)==105 && verified.normalY(vertex)==-1) ceiling++;
+            }
+            assertEquals(cells*6,floor);
+            assertEquals(cells*6,ceiling);
             System.out.printf(Locale.ROOT,
-                    "CAVE_CAPS cells=%d offMedianMs=%.3f onMedianMs=%.3f offP95Ms=%.3f onP95Ms=%.3f addedQuads=%d packedKiB=%.3f extraColumnQueries=0%n",
+                    "CAVE_GEOMETRY cells=%d offMedianMs=%.3f onMedianMs=%.3f offP95Ms=%.3f onP95Ms=%.3f addedQuads=%d packedKiB=%.3f extraColumnQueries=0%n",
                     cells,(times[0][19]+times[0][20])/2e6,(times[1][19]+times[1][20])/2e6,
                     times[0][37]/1e6,times[1][37]/1e6,quads[1]-quads[0],(quads[1]-quads[0])*48/1024.0);
         }

@@ -29,6 +29,7 @@ pub struct Definition {
     pub fluid: bool,
     pub motion_blocking: bool,
     pub double_plant: bool,
+    pub replaceable: Option<bool>,
     pub support_faces: Option<u8>,
     pub shape_update: String,
 }
@@ -76,6 +77,7 @@ impl Palette {
                 fluid: flag("fluid")?,
                 motion_blocking: flag("motion_blocking")?,
                 double_plant: flag("double_plant")?,
+                replaceable: value["replaceable"].as_bool(),
                 support_faces: value["support_faces"]
                     .as_u64()
                     .filter(|n| *n <= 63)
@@ -291,6 +293,7 @@ impl Palette {
 /// on demand, storing only the cells a feature actually changed.
 type ChunkColumns = Arc<Vec<[i32; 10]>>;
 type ColumnLoader = Box<dyn Fn(usize, usize) -> Result<ChunkColumns> + Send + Sync>;
+type InteriorLoader = Box<dyn Fn(usize, usize) -> Result<Arc<Vec<StateId>>> + Send + Sync>;
 
 pub struct ProxyBase {
     /// `width * depth` column summaries, `c[0..10]` as produced by
@@ -300,6 +303,8 @@ pub struct ProxyBase {
     lazy_chunks: Vec<OnceLock<Result<ChunkColumns>>>,
     page_axis: usize,
     loader: Option<ColumnLoader>,
+    interior_loader: Option<InteriorLoader>,
+    interior_columns: Vec<OnceLock<Result<Arc<Vec<StateId>>>>>,
     air: StateId,
     water: StateId,
     lava: StateId,
@@ -325,6 +330,15 @@ impl ProxyBase {
         })
     }
     fn value(&self, i: usize, origin_y: i32, height: usize) -> Result<StateId> {
+        if let Some(loader) = &self.interior_loader {
+            let c = i / height;
+            let values = self.interior_columns[c].get_or_init(|| {
+                let values = loader(c / self.depth, c % self.depth)?;
+                if values.len() != height { return Err("interior proxy column height".into()); }
+                Ok(values)
+            });
+            return Ok(values.as_ref().map_err(Clone::clone)?[i % height]);
+        }
         let c = self.column(i / height)?;
         let y = origin_y + (i % height) as i32;
         let end = c[0].max(c[1]);
@@ -502,6 +516,8 @@ impl Volume {
             lazy_chunks: Vec::new(),
             page_axis: 16,
             loader: None,
+            interior_loader: None,
+            interior_columns: Vec::new(),
             air,
             water,
             lava,
@@ -513,6 +529,16 @@ impl Volume {
     pub fn lazy_proxy(origin: Pos, width: usize, depth: usize, height: usize,
                       palette: Palette, loader: ColumnLoader) -> Result<Self> {
         Self::paged_proxy(origin, width, depth, height, palette, 16, loader)
+    }
+    /// Sparse edits over lazy, complete 3D columns. No exterior heightfield approximation.
+    pub fn interior_proxy(origin: Pos, width: usize, depth: usize, height: usize,
+                          palette: Palette, loader: InteriorLoader) -> Result<Self> {
+        let mut volume = Self::proxy(origin, width, depth, height, palette, vec![[0; 10]; width * depth])?;
+        let proxy = volume.proxy.as_mut().unwrap();
+        proxy.columns.clear();
+        proxy.interior_columns = (0..width * depth).map(|_| OnceLock::new()).collect();
+        proxy.interior_loader = Some(loader);
+        Ok(volume)
     }
     /// Lazy pages use x-major column order. Small pages avoid sampling an
     /// entire neighbour chunk when only a canopy edge touches it.
@@ -668,6 +694,9 @@ impl Volume {
     fn scan_heightmap(&mut self, x: i32, z: i32, kind: u8) -> i32 {
         let mut top = self.origin[1] + self.size[1] as i32;
         if let (Some(proxy), Some(i)) = (&self.proxy, self.index([x, self.origin[1], z])) {
+            if proxy.interior_loader.is_some() {
+                return self.scan_heightmap_from(x, z, kind, top);
+            }
             let column = i / self.size[1];
             match proxy.column(column) {
                 Ok(c) => top = top.min(c[0].max(c[1])

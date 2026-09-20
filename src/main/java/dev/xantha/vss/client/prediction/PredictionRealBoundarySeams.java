@@ -2,6 +2,7 @@ package dev.xantha.vss.client.prediction;
 
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import java.util.*;
+import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 
 /** Joins compiled vanilla ground to the currently selected prediction surface. */
 final class PredictionRealBoundarySeams {
@@ -14,53 +15,102 @@ final class PredictionRealBoundarySeams {
     static final int REAL_LOWER = 1 << 26;
     record Edge(int x, int z, int nx, int nz, ClientColumnSample ground) { }
     private record Input(PredictionLodSeams.Surface surface, List<Edge> edges) { }
-    private record Cached(Input input, PredictionPackedMesh mesh) { }
-    private final Map<PredictionTileManager.PredictionTileKey, Cached> cache = new HashMap<>();
-    private Map<PredictionTileManager.PredictionTileKey, PredictionLodSeams.Surface> previous = Map.of();
-    private List<Edge> previousEdges = List.of();
-    private List<PredictionLodSeams.Patch> patches = List.of();
+    private record Cached(Input input, PredictionPackedMesh mesh, PredictionLodSeams.Patch patch) { }
+    private final Map<PredictionTileKey,Cached> cache=new LinkedHashMap<>();
+    private final Map<PredictionTileKey,PredictionLodSeams.Patch> patchByKey=new LinkedHashMap<>();
+    private final Map<PredictionTileKey,PredictionLodSeams.Surface> previous=new HashMap<>();
+    private final PredictionLodSeams.Index adapterIndex=new PredictionLodSeams.Index(List.of());
+    private final PredictionSpatialIndex<List<Edge>> edgeIndex=new PredictionSpatialIndex<>();
+    private final Map<PredictionTileKey,LinkedHashSet<Edge>> grouped=new HashMap<>();
+    private final IdentityHashMap<Edge,PredictionTileKey> owners=new IdentityHashMap<>();
+    private final IdentityHashMap<Edge,Integer> edgeOrder=new IdentityHashMap<>();
+    private List<Edge> previousEdges=List.of();
+    private List<PredictionLodSeams.Patch> patches=List.of();
+    private long examinedEdges;
+    long examinedEdges() { return examinedEdges; }
 
-    List<PredictionLodSeams.Patch> update(List<PredictionLodSeams.Surface> surfaces, List<Edge> edges) {
-        boolean unchanged = surfaces.size() == previous.size() && edges.equals(previousEdges);
-        for (var surface : surfaces) {
-            var old = previous.get(surface.tile().key());
-            unchanged &= old != null && old.tile() == surface.tile() && Arrays.equals(old.allowed(), surface.allowed());
-        }
-        if (unchanged) return patches;
-        var index = new PredictionLodSeams.Index(surfaces);
-        var grouped = new LinkedHashMap<PredictionLodSeams.Surface, List<Edge>>();
-        for (var edge : edges) {
-            var surface = index.at(edge.x() + edge.nx(), edge.z() + edge.nz());
-            // Integer block edges cannot be encoded by the scaled far-tile format.
-            if (surface != null && surface.tile().spanBlocks() <= 65535)
-                grouped.computeIfAbsent(surface, ignored -> new ArrayList<>()).add(edge);
-        }
-        var result = new ArrayList<PredictionLodSeams.Patch>();
-        var active = new HashSet<PredictionTileManager.PredictionTileKey>();
-        grouped.forEach((surface, boundary) -> {
-            var key = surface.tile().key();
-            active.add(key);
-            var old = cache.get(key);
-            if (old == null || old.input().surface().tile() != surface.tile()
-                    || !Arrays.equals(old.input().surface().allowed(), surface.allowed())
-                    || !old.input().edges().equals(boundary)) {
-                var words = new IntArrayList();
-                for (var edge : boundary) emit(words, surface, edge, index);
-                old = new Cached(new Input(surface, List.copyOf(boundary)),
-                        PredictionPackedMesh.terrainRecords(words.toIntArray(), surface.tile().cellAxis()));
-                cache.put(key, old);
+    List<PredictionLodSeams.Patch> update(List<PredictionLodSeams.Surface> surfaces,List<Edge> edges) {
+        var changed=new HashSet<PredictionTileKey>();
+        var removed=new HashSet<>(previous.keySet());
+        for(var surface:surfaces) {
+            var key=surface.tile().key();removed.remove(key);
+            var old=previous.get(key);
+            if(old==null || old.tile()!=surface.tile() || !Arrays.equals(old.allowed(),surface.allowed())) {
+                previous.put(key,surface);adapterIndex.put(surface);changed.add(key);
             }
-            if (old.mesh().quadCount() != 0) result.add(new PredictionLodSeams.Patch(surface, old.mesh()));
-        });
-        cache.keySet().retainAll(active);
-        previous = new HashMap<>();
-        for (var surface : surfaces) previous.put(surface.tile().key(), surface);
-        previousEdges = List.copyOf(edges);
-        patches = List.copyOf(result);
+        }
+        for(var key:removed) { previous.remove(key);adapterIndex.remove(key);changed.add(key); }
+        var delta=apply(adapterIndex,changed,edges);
+        if(!delta.patches().isEmpty() || !delta.removed().isEmpty()) patches=List.copyOf(patchByKey.values());
         return patches;
     }
 
-    void clear() { cache.clear(); previous = Map.of(); previousEdges = List.of(); patches = List.of(); }
+    PredictionLodSeams.Changes apply(PredictionLodSeams.Index index,Set<PredictionTileKey> changed,List<Edge> edges) {
+        boolean newEdges=edges!=previousEdges && !edges.equals(previousEdges);
+        if(changed.isEmpty() && !newEdges) return PredictionLodSeams.Changes.EMPTY;
+        var touched=new LinkedHashSet<PredictionTileKey>();
+        Collection<Edge> pending;
+        if(newEdges) {
+            touched.addAll(grouped.keySet());grouped.clear();owners.clear();edgeIndex.clear();edgeOrder.clear();
+            var cells=new HashMap<PredictionTileKey,List<Edge>>();
+            for(var edge:edges) {
+                edgeOrder.put(edge,edgeOrder.size());
+                var key=new PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD,
+                        Math.floorDiv(edge.x()+edge.nx(),64),Math.floorDiv(edge.z()+edge.nz(),64),0);
+                cells.computeIfAbsent(key,unused->new ArrayList<>()).add(edge);
+            }
+            cells.forEach(edgeIndex::put);pending=edges;previousEdges=edges;
+        } else {
+            var nearby=Collections.newSetFromMap(new IdentityHashMap<Edge,Boolean>());
+            for(var key:changed) {
+                long span=64L<<key.lod(),x=key.tileX()*span,z=key.tileZ()*span;
+                edgeIndex.intersect(x,z,x+span,z+span,nearby::addAll);
+            }
+            pending=nearby;
+        }
+        for(var edge:pending) {
+            examinedEdges++;
+            var old=owners.remove(edge);
+            if(old!=null) {
+                touched.add(old);
+                var group=grouped.get(old);
+                if(group!=null) { group.remove(edge);if(group.isEmpty()) grouped.remove(old); }
+            }
+            var surface=index.at(edge.x()+edge.nx(),edge.z()+edge.nz());
+            if(surface==null || surface.tile().spanBlocks()>65535) continue;
+            var key=surface.tile().key();owners.put(edge,key);touched.add(key);
+            grouped.computeIfAbsent(key,unused->new LinkedHashSet<>()).add(edge);
+        }
+        var upserts=new LinkedHashMap<PredictionTileKey,PredictionLodSeams.Patch>();
+        var removed=new HashSet<PredictionTileKey>();
+        for(var key:touched) {
+            var group=grouped.get(key);
+            if(group==null || group.isEmpty()) {
+                cache.remove(key);if(patchByKey.remove(key)!=null) removed.add(key);continue;
+            }
+            var first=group.iterator().next();
+            var surface=index.at(first.x()+first.nx(),first.z()+first.nz());
+            var ordered=new ArrayList<>(group);ordered.sort(Comparator.comparingInt(edgeOrder::get));
+            var boundary=List.copyOf(ordered);
+            var old=cache.get(key);
+            // Mask changes can alter which existing wall interval must be subtracted.
+            if(old!=null && old.input().surface()==surface && old.input().edges().equals(boundary)
+                    && !changed.contains(key)) continue;
+            var words=new IntArrayList();
+            for(var edge:boundary) emit(words,surface,edge,index);
+            var mesh=PredictionPackedMesh.terrainRecords(words.toIntArray(),surface.tile().cellAxis());
+            var patch=mesh.quadCount()==0?null:new PredictionLodSeams.Patch(surface,mesh);
+            cache.put(key,new Cached(new Input(surface,boundary),mesh,patch));
+            if(patch==null) { if(patchByKey.remove(key)!=null) removed.add(key); }
+            else { patchByKey.put(key,patch);upserts.put(key,patch); }
+        }
+        return new PredictionLodSeams.Changes(upserts,removed,Set.of(),Set.of());
+    }
+
+    void clear() {
+        cache.clear();patchByKey.clear();previous.clear();adapterIndex.clear();edgeIndex.clear();
+        grouped.clear();owners.clear();edgeOrder.clear();previousEdges=List.of();patches=List.of();
+    }
 
     private static void emit(IntArrayList words, PredictionLodSeams.Surface surface, Edge edge, PredictionLodSeams.Index index) {
         var tile = surface.tile();

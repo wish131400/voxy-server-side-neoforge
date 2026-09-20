@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.LongAdder;
 final class PredictionSeamMesh {
     private static final int WALL_WORDS = 5;
     private static final int LOCAL_COVERAGE = 1;
+    private static final int TERRAIN_WALL = 2;
     private static final LongAdder BUILDS = new LongAdder();
     private final float[] topY;
     private final int[] topColors;
@@ -53,8 +54,9 @@ final class PredictionSeamMesh {
             walls[at + 1] = Float.floatToRawIntBits(Math.max(a, b));
             walls[at + 2] = Math.round(source.y(q, 2));
             walls[at + 3] = Math.round(source.y(q, 0));
-            walls[at + 4] = (source.coverageCell(q) << 1)
-                    | (source.coverageUsesLocalPosition(q) ? LOCAL_COVERAGE : 0);
+            walls[at + 4] = (source.coverageCell(q) << 2)
+                    | (source.coverageUsesLocalPosition(q) ? LOCAL_COVERAGE : 0)
+                    | (source.terrainWall(q) ? TERRAIN_WALL : 0);
         }
         BUILDS.increment();
     }
@@ -89,6 +91,11 @@ final class PredictionSeamMesh {
 
     void subtract(List<PredictionLodSeams.HeightSpan> gaps, PredictionLodSeams.Surface surface,
                   int wx, int wz, int length, int nx, int nz) {
+        subtract(gaps, surface, wx, wz, length, nx, nz, null);
+    }
+
+    void subtract(List<PredictionLodSeams.HeightSpan> gaps, PredictionLodSeams.Surface surface,
+                  int wx, int wz, int length, int nx, int nz, byte[] replaced) {
         var tile = surface.tile();
         int lx = wx - tile.baseBlockX(), lz = wz - tile.baseBlockZ();
         int plane = Arrays.binarySearch(planes, planeKey(nx != 0 ? lx : lz, nx, nz));
@@ -97,13 +104,15 @@ final class PredictionSeamMesh {
         for (int candidate = offsets[plane]; candidate < offsets[plane + 1]; candidate++) {
             int at = candidate * WALL_WORDS;
             if (Float.intBitsToFloat(walls[at]) > start || Float.intBitsToFloat(walls[at + 1]) < start + length) continue;
-            int owner = walls[at + 4] >> 1;
+            int owner = walls[at + 4] >> 2;
             if ((walls[at + 4] & LOCAL_COVERAGE) != 0) {
                 int along = Math.floorDiv(start + length / 2, tile.spacingBlocks());
                 owner = nx != 0 ? along * tile.cellAxis() + owner % tile.cellAxis()
                         : owner / tile.cellAxis() * tile.cellAxis() + along;
             }
             if (owner < 0 || owner >= surface.allowed().length || !surface.allowed()[owner]) continue;
+            if ((walls[at + 4] & TERRAIN_WALL) != 0 && PredictionBoundaryWalls.replaced(replaced, owner, tile.cellAxis(), tile.spacingBlocks(),
+                    nx != 0 ? lx : lz, nx != 0)) continue;
             int bottom = walls[at + 2], top = walls[at + 3];
             for (int i = gaps.size() - 1; i >= 0; i--) {
                 var gap = gaps.get(i);

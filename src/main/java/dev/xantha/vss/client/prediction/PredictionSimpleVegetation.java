@@ -14,7 +14,9 @@ import net.minecraft.world.level.levelgen.feature.configurations.TreeConfigurati
 final class PredictionSimpleVegetation {
     static final int MAX_FORMS = 256;
     private static final int MAX_HINTS = 4096;
-    record Species(BlockState log, BlockState leaves) { }
+    record Species(BlockState log, BlockState leaves, BlockState ground) {
+        Species(BlockState log, BlockState leaves) { this(log, leaves, null); }
+    }
     record Hint(List<Species> trees, boolean grass) {
         static final Hint EMPTY = new Hint(List.of(), false);
     }
@@ -64,6 +66,10 @@ final class PredictionSimpleVegetation {
             String name = placed.unwrapKey().map(k -> k.location().toString()).orElse("");
             grass |= name.startsWith("minecraft:") && (name.contains("grass") || name.contains("fern"));
             for (var feature : placed.value().getFeatures().toList()) {
+                if (feature.config() instanceof net.minecraft.world.level.levelgen.feature.HugeFungusConfiguration fungus) {
+                    if (species.size() < 8) species.add(new Species(fungus.stemState, fungus.hatState, fungus.validBaseState));
+                    continue;
+                }
                 if (!(feature.config() instanceof TreeConfiguration tree)) continue;
                 var random = RandomSource.create(0);
                 var log = tree.trunkProvider.getState(random, BlockPos.ZERO);
@@ -104,10 +110,17 @@ final class PredictionSimpleVegetation {
         for (int z = 0; z < axis; z++) for (int x = 0; x < axis; x++) {
             int i = (z + 1) * grid + x + 1, cell = z * axis + x;
             var s = samples[i];
+            if (s.volume() != null) {
+                if (exact.cell(cell).isEmpty()) addInteriorForms(forms, samples, grid, step, baseX, baseZ,
+                        x, z, cell, seed, hints);
+                continue;
+            }
             if (!s.hasSurface() || s.hasFluid() || s.snow() || s.ice()
                     || s.topBlockIndex() != PredictionMaterialPalette.grassBlockIndex()) continue;
             int wx = baseX + x * step, wz = baseZ + z * step;
             Hint hint = hints.get(wx, s.surfaceY(), wz);
+            if (hint.trees().stream().anyMatch(t -> t.ground() != null))
+                hint = new Hint(hint.trees().stream().filter(t -> t.ground() == null).toList(), hint.grass());
             if (step > 8) {
                 if (!hint.trees().isEmpty()) {
                     if (tints == null) tints = grass.clone();
@@ -140,7 +153,41 @@ final class PredictionSimpleVegetation {
             forms.subList(MAX_FORMS, forms.size()).clear();
             forms.sort(Comparator.comparingInt(Form::cell));
         }
+        for (var form : forms) maxY = Math.max(maxY, form.y() + form.height());
         return new Result(List.copyOf(forms), tints, maxY);
+    }
+
+    private static void addInteriorForms(List<Form> forms, ClientColumnSample[] samples, int grid, int step,
+                                          int baseX, int baseZ, int x, int z, int cell, long seed, Hints hints) {
+        int wx = baseX + x * step, wz = baseZ + z * step;
+        int parcel = Math.max(16, step);
+        int px = Math.floorDiv(wx, parcel) * parcel + parcel / 2;
+        int pz = Math.floorDiv(wz, parcel) * parcel + parcel / 2;
+        if (px < wx || px >= wx + step || pz < wz || pz >= wz + step) return;
+        var volume = samples[(z + 1) * grid + x + 1].volume();
+        for (int run = 0; run < volume.size(); run++) {
+            int y = volume.top(run);
+            if (volume.fluid(run) != 0 || volume.occupied(y, false)) continue;
+            long hash = mix(seed ^ (long)Math.floorDiv(px, parcel) * 0x9e3779b97f4a7c15L
+                    ^ (long)Math.floorDiv(pz, parcel) * 0xc2b2ae3d27d4eb4fL ^ (long)y * 0x632be59bd9b4e019L);
+            if ((hash & 15) >= (step <= 8 ? 10 : 5)) continue;
+            var hint = hints.get(px, y, pz);
+            var ground = net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(volume.block(run));
+            var fungi = hint.trees().stream().filter(t -> t.ground() != null && t.ground().is(ground)).toList();
+            if (fungi.isEmpty()) continue;
+            int height = 5 + (int)((hash >>> 16) & 3);
+            boolean clear = true;
+            // Check all sampled columns touched by the cap, using retained geometry only.
+            for (int zz = Math.floorDiv(pz - baseZ - 2, step); zz <= Math.floorDiv(pz - baseZ + 1, step); zz++)
+                for (int xx = Math.floorDiv(px - baseX - 2, step); xx <= Math.floorDiv(px - baseX + 1, step); xx++) {
+                    if (xx < -1 || zz < -1 || xx >= grid - 1 || zz >= grid - 1) { clear = false; continue; }
+                    var neighbor = samples[(zz + 1) * grid + xx + 1].volume();
+                    if (neighbor == null || !neighbor.occupied(y - 1, true)) { clear = false; continue; }
+                    for (int yy = y; yy < y + height; yy++) if (neighbor.occupied(yy, false)) { clear = false; break; }
+                }
+            if (clear) forms.add(new Form(cell, px - baseX, pz - baseZ, y, height,
+                    fungi.get(Math.floorMod(hash >>> 8, fungi.size())), 0));
+        }
     }
 
     static long mix(long value) {

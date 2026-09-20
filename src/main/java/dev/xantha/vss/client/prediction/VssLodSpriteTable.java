@@ -70,6 +70,7 @@ final class VssLodSpriteTable {
     /** Whether each registered row contains transparent pixels. */
     private static final List<Boolean> CUTOUTS = new ArrayList<>();
     private static final List<float[]> MODEL_UVS = new ArrayList<>();
+    private static final Map<Integer, int[]> STATIC_FIRE = new HashMap<>();
     private static final Map<ModelUvKey, Integer> MODEL_ROWS = new HashMap<>();
     private static final Map<Integer, Integer> MODEL_BLOCKS = new HashMap<>();
     private static volatile byte[] modelFlags = new byte[256];
@@ -117,6 +118,8 @@ final class VssLodSpriteTable {
             return;
         }
         seeded = true;
+        indexForState(net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 1);
+        indexForState(net.minecraft.world.level.block.Blocks.SOUL_FIRE.defaultBlockState(), 1);
         for (int blockId : PredictionMaterialPalette.seedBlockIds()) {
             if (blockId != Integer.MIN_VALUE) {
                 indexForBlock(blockId);
@@ -193,6 +196,7 @@ final class VssLodSpriteTable {
             AVERAGES.clear();
             CUTOUTS.clear();
             MODEL_UVS.clear();
+            STATIC_FIRE.clear();
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
             modelFlags = new byte[256];
@@ -257,6 +261,12 @@ final class VssLodSpriteTable {
                 return row;
             });
         }
+    }
+
+    static int fireColor(net.minecraft.world.level.block.state.BlockState state) {
+        int average = averageForState(state, 1);
+        return average != 0 ? average : state.is(net.minecraft.world.level.block.Blocks.SOUL_FIRE)
+                ? 0xFF53DDE5 : 0xFFFFA629;
     }
 
     static int averageForState(net.minecraft.world.level.block.state.BlockState state, int face) {
@@ -474,6 +484,12 @@ final class VssLodSpriteTable {
             if (state.isAir()) {
                 return FLAT;
             }
+            if (PredictionVegetation.fire(state)) {
+                boolean soul = state.is(net.minecraft.world.level.block.Blocks.SOUL_FIRE);
+                var sprite = Minecraft.getInstance().getModelManager().getAtlas(TextureAtlas.LOCATION_BLOCKS)
+                        .getSprite(ResourceLocation.withDefaultNamespace(soul ? "block/soul_fire_0" : "block/fire_0"));
+                return registerStaticFire(sprite, soul ? 1 : 0);
+            }
             var model = Minecraft.getInstance().getBlockRenderer().getBlockModel(state);
             TextureAtlasSprite sprite = null;
             net.minecraft.core.Direction direction = switch (face) {
@@ -482,6 +498,7 @@ final class VssLodSpriteTable {
                 case 2 -> net.minecraft.core.Direction.SOUTH;
                 case 3 -> net.minecraft.core.Direction.WEST;
                 case 4 -> net.minecraft.core.Direction.EAST;
+                case 5 -> net.minecraft.core.Direction.DOWN;
                 default -> null;
             };
             if (direction != null) {
@@ -533,6 +550,23 @@ final class VssLodSpriteTable {
         INDEX_BY_SPRITE.put(name, index);
         dirty = true;
         return index;
+    }
+
+    /** Share a single static 16x16 first-frame appearance per fire type. */
+    static synchronized int registerStaticFire(TextureAtlasSprite sprite, int kind) {
+        int row = registerSprite(sprite);
+        if (row == FLAT || STATIC_FIRE.containsKey(kind)) return row;
+        NativeImage source = sprite.contents().getOriginalImage();
+        int[] pixels = new int[16 * 16];
+        for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
+            pixels[y * 16 + x] = source.getPixelRGBA(x * sprite.contents().width() / 16,
+                    y * sprite.contents().height() / 16);
+        }
+        STATIC_FIRE.put(kind, pixels);
+        // Negative U selects a static 16x16 snapshot stored below the material rows.
+        RECTS.set(row - 1, new float[]{-1, kind, 16, 16});
+        dirty = true;
+        return row;
     }
 
     /** Preserve each baked face's UV rectangle and rotation, not its particle icon. */
@@ -608,19 +642,22 @@ final class VssLodSpriteTable {
             List<float[]> rects;
             List<float[]> averages;
             List<float[]> modelUvs;
+            Map<Integer, int[]> fire;
             synchronized (VssLodSpriteTable.class) {
                 rects = new ArrayList<>(RECTS);
                 averages = new ArrayList<>(AVERAGES);
                 modelUvs = new ArrayList<>(MODEL_UVS);
+                fire = new HashMap<>(STATIC_FIRE);
                 publishAverageColors();
                 dirty = false;
             }
-            int width = Math.max(1, rects.size() + 1);
+            int width = Math.max(fire.isEmpty() ? 1 : 16, rects.size() + 1);
+            int height = fire.isEmpty() ? 4 : 36;
             // Row 0: atlas rectangles; row 1: alpha-weighted averages;
             // rows 2/3: the four original UV corners of baked model faces.
             // Index 0 stays zero and is the flat-colour sentinel.
-            FloatBuffer data = MemoryUtil.memAllocFloat(width * 4 * 4);
-            for (int i = 0; i < width * 4 * 4; i++) {
+            FloatBuffer data = MemoryUtil.memAllocFloat(width * height * 4);
+            for (int i = 0; i < width * height * 4; i++) {
                 data.put(0.0F);
             }
             for (int i = 0; i < rects.size(); i++) {
@@ -640,16 +677,26 @@ final class VssLodSpriteTable {
             for (int i = 0; i < modelUvs.size(); i++) for (int c = 0; c < modelUvs.get(i).length; c++) {
                 data.put((2 + c / 4) * width * 4 + (i + 1) * 4 + c % 4, modelUvs.get(i)[c]);
             }
+            fire.forEach((kind, pixels) -> {
+                for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
+                    int pixel = pixels[y * 16 + x], offset = ((4 + kind * 16 + y) * width + x) * 4;
+                    data.put(offset, FastColor.ABGR32.red(pixel) / 255F);
+                    data.put(offset + 1, FastColor.ABGR32.green(pixel) / 255F);
+                    data.put(offset + 2, FastColor.ABGR32.blue(pixel) / 255F);
+                    data.put(offset + 3, FastColor.ABGR32.alpha(pixel) / 255F);
+                }
+            });
             data.flip();
             PredictionGlState.bindTexture(textureId);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
             GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
-            GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGBA32F, width, 4, 0,
-                    GL11.GL_RGBA, GL11.GL_FLOAT, data);
+            try (var unpack = PredictionPixelUnpack.begin()) {
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_RGBA32F, width, height, 0,
+                        GL11.GL_RGBA, GL11.GL_FLOAT, data);
+            } finally { MemoryUtil.memFree(data); }
             PredictionGlState.bindTexture(0);
-            MemoryUtil.memFree(data);
             return textureId;
         } catch (Throwable failure) {
             broken = true;
@@ -745,6 +792,7 @@ final class VssLodSpriteTable {
             AVERAGES.clear();
             CUTOUTS.clear();
             MODEL_UVS.clear();
+            STATIC_FIRE.clear();
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
             modelFlags = new byte[256];

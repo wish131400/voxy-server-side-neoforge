@@ -16,6 +16,8 @@
     "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
+    "client.IrisPredictionCaptureMixin",
+    "client.IrisPredictionShaderCaptureMixin",
     "client.SpyglassOverlayTimingMixin",
     "client.FreeTerraForgedPredictionFiltersMixin",
     "client.ClientPacketListenerServerIdentityMixin",

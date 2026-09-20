@@ -22,6 +22,13 @@ public final class VSSClientCommands {
                             return 1;
                         }))
                 .then(Commands.literal("prediction")
+                        .then(Commands.literal("rendercapture")
+                                .executes(context -> captureRender(context.getSource(), 0.5, 0.65))
+                                .then(Commands.argument("x", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0, 1))
+                                        .then(Commands.argument("y", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0, 1))
+                                                .executes(context -> captureRender(context.getSource(),
+                                                        com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "x"),
+                                                        com.mojang.brigadier.arguments.DoubleArgumentType.getDouble(context, "y"))))))
                         .then(Commands.literal("capture")
                                 .executes(context -> {
                                     var source = context.getSource();
@@ -60,5 +67,15 @@ public final class VSSClientCommands {
                                             "vss.command.xaero_reload.started", cleared), false);
                                     return 1;
                                 }))));
+    }
+
+    private static int captureRender(net.minecraft.commands.CommandSourceStack source, double x, double y) {
+        var result = dev.xantha.vss.client.prediction.PredictionRenderCapture.request(x, y);
+        if (!result.isCompletedExceptionally()) source.sendSuccess(() -> Component.translatable("vss.command.render_capture.started"), false);
+        result.whenComplete((path, failure) -> net.minecraft.client.Minecraft.getInstance().execute(() -> {
+            if (failure == null) source.sendSuccess(() -> Component.translatable("vss.command.render_capture.done", path.toString()), false);
+            else source.sendFailure(Component.translatable("vss.command.render_capture.failed", failure.getMessage()));
+        }));
+        return result.isCompletedExceptionally() ? 0 : 1;
     }
 }

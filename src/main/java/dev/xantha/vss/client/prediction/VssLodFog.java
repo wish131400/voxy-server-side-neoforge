@@ -3,6 +3,15 @@ package dev.xantha.vss.client.prediction;
 /** Fog parameters shared by the predicted terrain pass and its water pass. */
 public record VssLodFog(boolean haze, float start, float end,
                              float aerialDensity, boolean overridesVanilla) {
+    /** Display fog follows both renderers, never the padded metadata scan radius. */
+    static VssLodFog shared(int predictionDistance, int realDistance, int vanillaDistance, boolean haze) {
+        var fog = of(Math.max(predictionDistance, realDistance), haze, .55, .5, true);
+        // Even an unusually large vanilla range must retain a gradual fade.
+        float clearDistance = Math.min(Math.max(0, vanillaDistance), fog.end() * .9F);
+        return new VssLodFog(haze, Math.max(fog.start(), clearDistance), fog.end(),
+                fog.aerialDensity(), true);
+    }
+
     public static VssLodFog of(int maxDistanceBlocks, boolean haze,
                                     double fogStart, double aerialPerspective,
                                     boolean overridesVanilla) {

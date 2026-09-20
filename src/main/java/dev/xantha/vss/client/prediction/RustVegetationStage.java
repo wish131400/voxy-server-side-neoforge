@@ -70,7 +70,7 @@ final class RustVegetationStage implements AutoCloseable {
     }
 
     void selectStep(List<PlacedFeature> features, int step) {
-        boolean display = visualPlants && step == net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
+        boolean display = !sampler.interiorTerrain() && visualPlants && step == net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
         if (display != displayProxy) { finish(); close(); synced=false; displayProxy=display; }
         this.step = step;
         // Structures and Java features may have changed the shared level
@@ -95,7 +95,7 @@ final class RustVegetationStage implements AutoCloseable {
                 if (!VOLUMES.tryAcquire()) throw new PredictionWorkDeferred();
                 permit=true;
                 long proxyStarted = System.nanoTime();
-                volume=RustWorldgenBackend.decorationProxy(sampler.handle(),x,z,displayProxy ? 1 : 0);
+                volume=RustWorldgenBackend.decorationProxy(sampler.handle(),x,z,sampler.interiorTerrain() ? 2 : displayProxy ? 1 : 0);
                 RustWorldgenBackend.decorationEntropy(volume,java.util.concurrent.ThreadLocalRandom.current().nextLong());
                 PROXY_NANOS.add(System.nanoTime() - proxyStarted);
                 PROXIES.increment();

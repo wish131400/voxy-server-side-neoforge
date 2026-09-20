@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *                  | uvYPos | bank/down | positive face | LOD texture scale
  * i7: corner 0 rgb (24) | skylight loss (bits 28-31)
  * i8: source cell index
- * i9: corner 1 rgb (24) | source-cell coverage (bit 24) | real boundary/lower (25/26) | skylight loss (bits 28-31)
+ * i9: corner 1 rgb (24) | source-cell coverage (24) | real boundary/lower (25/26) | terrain wall (27) | skylight loss (28-31)
  * i10: corner 2 rgb (24) + skylight loss     i11: corner 3 rgb (24) + skylight loss
  * </pre>
  *
@@ -338,6 +338,7 @@ final class PredictionPackedMesh {
                     : src.color(quad, corner)) & 0x00FFFFFF;
         }
         packed[9] |= sourceCoverage << 24;
+        if (!water && src.terrainWall(quad)) packed[9] |= 1 << 27;
     }
 
     private static void packWaterLight(int[] words, PredictionTileManager.PredictionTile tile,

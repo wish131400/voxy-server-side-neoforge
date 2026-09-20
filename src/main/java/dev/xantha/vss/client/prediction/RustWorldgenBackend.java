@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 /**
- * Independent ABI 5 for the source-built Rust backend. All numerical work runs
+ * Independent ABI 6 for the source-built Rust backend. All numerical work runs
  * in Rust; Java supplies effective registries, colormaps and immutable inputs.
  *
  * <p>A surface region is before carvers/structures/decoration and
@@ -16,7 +16,7 @@ import java.nio.file.Path;
  * World/result handles must be closed; a result retains its parent world.
  */
 public final class RustWorldgenBackend {
-    public static final int ABI = 5;
+    public static final int ABI = 6;
     private static boolean loaded;
     private RustWorldgenBackend() { }
     public static synchronized void load(Path library) {
@@ -45,6 +45,8 @@ public final class RustWorldgenBackend {
     public static native int density(long world, String routerNode, ByteBuffer xyz, ByteBuffer output, int count);
     /** XZ int32 input; record = four int32 (surface, floor, fluid, height), then height int32 state IDs. */
     public static native int columns(long world, ByteBuffer xz, ByteBuffer output, int count);
+    /** Complete material columns, same record layout as columns. */
+    public static native int interiorColumns(long world, ByteBuffer xz, ByteBuffer output, int count);
     /** 1..5 chunks per side; returns a native volume result, not a world handle. */
     public static native long surfaceRegion(long world, int minChunkX, int minChunkZ, int sideChunks);
     /** Copies a complete bounded neighbourhood snapshot; state IDs refer to describe(world). */

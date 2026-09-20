@@ -15,6 +15,7 @@ use decorators::{sorted_positions, Decorator};
 mod mushroom;
 mod shape;
 mod special;
+mod nether;
 use special::{Branches, Roots};
 
 pub struct Placed {
@@ -30,10 +31,13 @@ pub enum Feature {
     Boolean(Box<Placed>, Box<Placed>),
     Tree(Tree),
     Mushroom(mushroom::Mushroom),
+    Nether(nether::NetherFeature),
     None,
 }
 enum Modifier {
     Count(IntProvider),
+    EveryLayer(IntProvider),
+    Range(nether::HeightRange),
     Square,
     Height(u8),
     WaterDepth(i32),
@@ -44,7 +48,7 @@ enum Modifier {
     NoiseCount(i32, f64, f64),
     NoiseThreshold(f64, i32, i32),
 }
-enum Predicate {
+pub enum Predicate {
     True,
     All(Vec<Self>),
     Any(Vec<Self>),
@@ -179,6 +183,15 @@ impl Placed {
         let mut repeat = None;
         match &self.modifiers[index] {
             Modifier::Count(n) => repeat = Some(n.sample(r)),
+            Modifier::Range(range) => p[1] = range.sample(w, r)?,
+            Modifier::EveryLayer(count) => {
+                // Vanilla builds this stream eagerly before downstream features
+                // consume random values or alter the sampled floors.
+                let positions = nether::layer_positions(w, r, p, count, c)?;
+                let mut result = false;
+                for q in positions { result |= self.step(next, w, r, q, c)?; }
+                return Ok(result);
+            }
             Modifier::Square => {
                 p[0] += r.next_bounded(16);
                 p[2] += r.next_bounded(16);
@@ -351,6 +364,8 @@ impl Feature {
                 Box::new(Placed::parse(&config["feature_false"], doc, p, depth + 1)?),
             ),
             "tree" => Self::Tree(Tree::parse(config, p)?),
+            "huge_fungus" | "nether_forest_vegetation" | "glowstone_blob" | "weeping_vines" | "twisting_vines" | "spring_feature" =>
+                Self::Nether(nether::NetherFeature::parse(minecraft_type(v)?, config, p)?),
             "huge_brown_mushroom" | "huge_red_mushroom" => Self::Mushroom(
                 mushroom::Mushroom::parse(config, minecraft_type(v)? == "huge_red_mushroom", p)?,
             ),
@@ -422,6 +437,7 @@ impl Feature {
             }
             Self::Tree(tree) => tree.place(w, r, p),
             Self::Mushroom(m) => m.place(w, r, p),
+            Self::Nether(feature) => feature.place(w, r, p, c),
         }
     }
     /// An incomplete halo or an unsupported survival hook rolls back writes
@@ -466,6 +482,14 @@ fn survives(w: &mut Volume, p: Pos, id: StateId) -> Result<bool> {
     }
     let name = w.palette.state(id).name.as_str();
     match name {
+        "minecraft:crimson_roots" | "minecraft:warped_roots" | "minecraft:nether_sprouts" =>
+            Ok(w.palette.tag(below, "minecraft:nylium") || w.palette.is(below, "minecraft:soul_soil")
+                || w.palette.tag(below, "minecraft:dirt") || w.palette.is(below, "minecraft:farmland")),
+        "minecraft:crimson_fungus" | "minecraft:warped_fungus" =>
+            Ok(w.palette.tag(below, "minecraft:nylium") || w.palette.is(below, "minecraft:mycelium")
+                || w.palette.is(below, "minecraft:soul_soil") || w.palette.tag(below, "minecraft:dirt") || w.palette.is(below, "minecraft:farmland")),
+        "minecraft:soul_fire" => Ok(w.palette.tag(below,"minecraft:soul_fire_base_blocks")),
+        "minecraft:fire" if w.palette.is(below,"minecraft:netherrack") => Ok(true),
         "minecraft:azalea" | "minecraft:flowering_azalea" | "minecraft:mangrove_propagule" => {
             if name == "minecraft:mangrove_propagule"
                 && w.palette
@@ -1519,6 +1543,8 @@ impl Modifier {
     fn parse(v: &Value, p: &mut Palette) -> Result<Self> {
         Ok(match minecraft_type(v)? {
             "count" => Self::Count(IntProvider::parse(&v["count"])?),
+            "count_on_every_layer" => Self::EveryLayer(IntProvider::parse(&v["count"])?),
+            "height_range" => Self::Range(nether::HeightRange::parse(&v["height"])?),
             "in_square" => Self::Square,
             "heightmap" => Self::Height(match string(v, "heightmap")? {
                 "WORLD_SURFACE" | "WORLD_SURFACE_WG" => 0,

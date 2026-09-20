@@ -17,6 +17,62 @@ class PredictionDiskCacheTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @Test void batchedHeadersSurviveReopenAndRespectInvalidationAndCorruption() throws Exception {
+        var key = PredictionDiskCache.Key.terrain(-1, 2, 0);
+        ClientColumnSample[] grid = new ClientColumnSample[66 * 66];
+        Arrays.fill(grid, samples()[0]);
+        try (var cache = new PredictionDiskCache(directory, 77); var lease = cache.lease(key)) {
+            assertTrue(cache.writeTerrain(lease, grid));
+        }
+        try (var cache = new PredictionDiskCache(directory, 77)) {
+            cache.probeTerrain(List.of(key, PredictionDiskCache.Key.terrain(99,99,0)));
+            cache.flush();
+            assertEquals(64, cache.cachedTerrainAxis(key));
+            // A valid header is merely a hint, never proof that the payload is valid.
+            byte[] bytes = Files.readAllBytes(cache.file(key));
+            Files.write(cache.file(key), Arrays.copyOf(bytes, bytes.length - 8));
+            try (var lease = cache.lease(key)) { assertNull(cache.readTerrainData(lease, 0)); }
+            cache.forgetTerrain(key);
+            assertEquals(0, cache.cachedTerrainAxis(key));
+            cache.invalidate(List.of(key));
+            cache.probeTerrain(List.of(key));
+            cache.flush();
+            assertEquals(0, cache.cachedTerrainAxis(key));
+        }
+    }
+
+    @Test void canonicalSurfaceMarkerDoesNotInvalidateOldResultsOrNetherEdits() {
+        var key = PredictionDiskCache.Key.surface(0,0,99);
+        var blocks = Map.of(new BlockPos(0,64,0), Blocks.FIRE.defaultBlockState());
+        try (var cache = new PredictionDiskCache(directory,77)) {
+            try (var lease = cache.lease(key)) {
+                assertTrue(cache.writeSurface(lease, blocks));
+                assertFalse(cache.readSurfaceData(lease).canonical());
+                assertTrue(cache.writeSurface(lease, blocks, true));
+                assertTrue(cache.readSurfaceData(lease).canonical());
+                assertEquals(blocks,cache.readSurface(lease));
+            }
+            cache.invalidateChunk(0,0);
+            try (var lease = cache.lease(key)) { assertNull(cache.readSurface(lease)); }
+        }
+    }
+
+    @Test void headerBatchesContinueWithoutAnotherPlannerTick() throws Exception {
+        var keys = new ArrayList<PredictionDiskCache.Key>();
+        for (int x=0;x<257;x++) keys.add(PredictionDiskCache.Key.terrain(x,0,0));
+        var last = keys.get(keys.size()-1);
+        var grid = new ClientColumnSample[66*66]; Arrays.fill(grid,samples()[0]);
+        try (var disk=new PredictionDiskCache(directory,77); var lease=disk.lease(last)) {
+            assertTrue(disk.writeTerrain(lease,grid));
+        }
+        try (var disk=new PredictionDiskCache(directory,77)) {
+            disk.probeTerrain(keys);
+            long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while (disk.cachedTerrainAxis(last)==0 && System.nanoTime()<deadline) Thread.sleep(5);
+            assertEquals(64,disk.cachedTerrainAxis(last));
+        }
+    }
+
     @Test void oldSurfaceSchemaIsRejectedWhileTerrainAndNewEditsRemainReusable() throws Exception {
         var terrain=PredictionDiskCache.Key.terrain(0,0,0);
         var surface=PredictionDiskCache.Key.surface(0,0,3);

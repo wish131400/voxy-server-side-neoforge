@@ -116,6 +116,30 @@ class PredictionSpriteTableTest {
         }
     }
 
+    @Test void staticFireCopiesTransparentFirstFrameAndResetsOnReload() throws Exception {
+        for (int kind = 0; kind < 2; kind++) {
+            NativeImage image = new NativeImage(16, 32, false);
+            image.fillRect(0, 0, 16, 16, kind == 0 ? 0xFF2090FF : 0xFFFFE050);
+            image.fillRect(0, 16, 16, 16, 0xFF00FF00);
+            image.setPixelRGBA(0, 0, 0);
+            try (var contents = new SpriteContents(ResourceLocation.withDefaultNamespace("block/test_fire_" + kind),
+                    new FrameSize(16,16),image,ResourceMetadata.EMPTY)) {
+                int row = VssLodSpriteTable.registerStaticFire(new Sprite(contents,0),kind);
+                assertTrue(VssLodSpriteTable.isCutout(row));
+                var field = VssLodSpriteTable.class.getDeclaredField("STATIC_FIRE");
+                field.setAccessible(true);
+                var snapshots = (java.util.Map<Integer,int[]>) field.get(null);
+                assertEquals(0,snapshots.get(kind)[0]);
+                assertEquals(kind == 0 ? 0xFF2090FF : 0xFFFFE050,snapshots.get(kind)[1]);
+                image.setPixelRGBA(1,0,0xFF00FF00);
+                assertNotEquals(0xFF00FF00,snapshots.get(kind)[1],"animation cannot modify the baked snapshot");
+            }
+        }
+        VssLodSpriteTable.close();
+        var field = VssLodSpriteTable.class.getDeclaredField("STATIC_FIRE"); field.setAccessible(true);
+        assertTrue(((java.util.Map<?,?>)field.get(null)).isEmpty());
+    }
+
     private static SpriteContents contents(String name, int abgr) {
         NativeImage image = new NativeImage(16, 16, false);
         image.fillRect(0, 0, 16, 16, abgr);

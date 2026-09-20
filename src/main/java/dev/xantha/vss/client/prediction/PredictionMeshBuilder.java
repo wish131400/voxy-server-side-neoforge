@@ -262,6 +262,9 @@ public final class PredictionMeshBuilder {
         int[] columnBlendColors = columnBlend ? materialColors : null;
         var fluidOcclusion = new PredictionFluidOcclusion(vegetation, cellAxis, stepBlocks, samples);
         var surfaceEdits = new PredictionSurfaceEdits(vegetation, cellAxis, stepBlocks, cornerHeights);
+        var interiorPlants = vegetation == null ? null : vegetation.withoutExteriorEnvelope();
+        var interiorEdits = new PredictionInteriorEdits(samples, vegetation, baseX, baseZ, stepBlocks, gridSize);
+        int[] terrainEnds = new int[cellCount];
         for (int z = 0; z < cellAxis; z++) {
             for (int x = 0; x < cellAxis; x++) {
                 int cell = z * cellAxis + x;
@@ -283,7 +286,9 @@ public final class PredictionMeshBuilder {
                 // north-west column; the other three corners belong to the
                 // neighbouring cells, so a dense grid emits every column
                 // exactly once.
-                if (surfaceEdits.affects(cell)) {
+                if (s00.volume() != null) {
+                    addVolume(terrain, samples, x, z, stepBlocks, gridSize, false, interiorEdits);
+                } else if (surfaceEdits.affects(cell)) {
                     addEditedGround(terrain, samples, cornerHeights, materialColors, surfaceEdits,
                             x, z, stepBlocks, gridSize, seaLevel);
                 } else {
@@ -299,30 +304,34 @@ public final class PredictionMeshBuilder {
                 // twice (once here, once by the owner tile).  The higher side
                 // of each seam emits the wall exactly once; the opposite case
                 // is covered by the neighbouring tile's own column wall.
-                if (x == cellAxis - 1 && !surfaceEdits.affects(cell)) {
+                if (x == cellAxis - 1 && s00.volume() == null && !surfaceEdits.affects(cell)) {
                     emitColumnWall(terrain, samples, cornerHeights, x + 1, z, stepBlocks, gridSize,
                             cornerHeights[index(x + 1, z, gridSize)],
                             materialColors == null ? 0 : materialColors[index(x + 1, z, gridSize)],
                             seaLevel, -1, 0);
                 }
-                if (z == cellAxis - 1 && !surfaceEdits.affects(cell)) {
+                if (z == cellAxis - 1 && s00.volume() == null && !surfaceEdits.affects(cell)) {
                     emitColumnWall(terrain, samples, cornerHeights, x, z + 1, stepBlocks, gridSize,
                             cornerHeights[index(x, z + 1, gridSize)],
                             materialColors == null ? 0 : materialColors[index(x, z + 1, gridSize)],
                             seaLevel, 0, -1);
                 }
-                // Interior caps use confirmed occupancy only; structure hints
-                // cannot provide geometry for buildings or cave decorations.
+                terrainEnds[cell] = terrain.vertexCount();
+                // Features after this offset never participate in boundary replacement.
+                terrain.beginCell(vegetation != null && !vegetation.blocks().isEmpty());
                 int foliageTint = foliageColors == null
                         ? 0 : foliageColors[index(x, z, gridSize)];
                 if (vegetation != null) {
-                    addPlacedVegetation(terrain, vegetation, cell, h00, foliageTint, surfaceEdits);
+                    boolean interior = s00.volume() != null;
+                    addPlacedVegetation(terrain, interior ? interiorPlants : vegetation,
+                            cell, interior ? Integer.MIN_VALUE : h00, foliageTint, surfaceEdits, interior);
                 }
                 var representative = simpleCells.get(cell);
                 if (representative != null) addSimpleVegetation(terrain, representative, foliageTint);
 
                 boolean fluid = s00.hasFluid();
                 waterOffsets[cell] = water.vertexCount();
+                if (s00.volume() != null) addVolume(water, samples, x, z, stepBlocks, gridSize, true, interiorEdits);
                 if (vegetation != null) {
                     int tint = waterColors == null ? 0 : waterColors[index(x, z, gridSize)];
                     addPlacedFluids(water, vegetation, cell, tint == 0 ? fluidColor : tint);
@@ -350,10 +359,12 @@ public final class PredictionMeshBuilder {
                 cellCounts[cell] = terrain.vertexCount() - cellOffsets[cell];
             }
         }
-        return new PredictionMesh(terrain.positions(), terrain.normals(), terrain.colors(),
+        PredictionMesh result = new PredictionMesh(terrain.positions(), terrain.normals(), terrain.colors(),
                 water.positions(), water.normals(), water.colors(), waterCells,
                 terrain.vertexCount(), water.vertexCount(), cellCount,
                 cellOffsets, cellCounts, waterOffsets, waterCounts, cellAxis, stepBlocks);
+        result.terrainEnds = terrainEnds;
+        return result;
     }
 
     private static int terrainHeight(ClientColumnSample sample, int seaLevel) {
@@ -378,7 +389,7 @@ public final class PredictionMeshBuilder {
             for (int x = 1; x < gridSize - 1; x++) {
                 int center = index(x, z, gridSize);
                 ClientColumnSample sample = samples[center];
-                if (sample.captured() || sample.surfaceOnly() || !sample.hasSurface() || sample.fluid() != 0
+                if (sample.volume() != null || sample.captured() || sample.surfaceOnly() || !sample.hasSurface() || sample.fluid() != 0
                         || sample.floating() || sample.hasLowerSpan()) continue;
                 int cursor = 0;
                 for (int dz = -1; dz <= 1; dz++) {
@@ -795,8 +806,8 @@ public final class PredictionMeshBuilder {
     }
 
     private static void addPlacedVegetation(VertexAccumulator out, PredictionVegetation.Tile tile,
-                                            int cell, int surfaceY, int foliageTint, PredictionSurfaceEdits edits) {
-        for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> edits.floor(x, z, surfaceY))) {
+                                            int cell, int surfaceY, int foliageTint, PredictionSurfaceEdits edits, boolean interior) {
+        for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> interior ? Integer.MIN_VALUE : edits.floor(x, z, surfaceY), interior)) {
             int direction = face.direction();
             int color = PredictionMaterialPalette.colorForState(face.state(),
                     direction == 0 ? 0xFF65934A : 0xFF888888, foliageTint, direction);
@@ -804,6 +815,8 @@ public final class PredictionMeshBuilder {
             if (direction == 0) {
                 addFeatureTop(out, face.x(), face.z(), face.top(), 1, 1,
                         material, material, material, material);
+            } else if (direction == 5) {
+                addFeatureBottom(out, face.x(), face.z(), face.bottom(), 1, 1, material);
             } else if (direction <= 2) {
                 addFeatureZ(out, face.x(), face.z() + (direction == 2 ? 1 : 0), face.bottom(),
                         1, face.top() - face.bottom(), material, material, material, material,
@@ -818,7 +831,7 @@ public final class PredictionMeshBuilder {
             int x = voxel.x(), z = voxel.z(), size = voxel.size();
             if (!PredictionVegetation.renderable(voxel.state())) continue;
             if (PredictionVegetation.mergeable(voxel.state(), size)) continue;
-            int floor = edits.floor(x, z, surfaceY);
+            int floor = interior ? Integer.MIN_VALUE : edits.floor(x, z, surfaceY);
             int bottom = Math.max(floor, voxel.y());
             int top = voxel.y() + size;
             if (bottom >= top) continue;
@@ -833,7 +846,9 @@ public final class PredictionMeshBuilder {
                 }
                 continue;
             }
-            int color = PredictionMaterialPalette.colorForState(state, 0xFF65934A, foliageTint);
+            int color = PredictionVegetation.fire(state) ? VssLodSpriteTable.fireColor(state)
+                    : PredictionMaterialPalette.colorForState(state, 0xFF65934A, foliageTint,
+                            PredictionVegetation.solid(state) ? 0 : 1);
             if (!PredictionVegetation.solid(state)) {
                 int plant = packSprite(color, spriteOf(state, 1));
                 // This is the packed format's cross-plane marker, not a
@@ -858,6 +873,8 @@ public final class PredictionMeshBuilder {
                 int roof = packSprite(color, spriteOf(state, 0));
                 if (shape.maxY < size || !tile.occupied(x, top, z))
                     addFeatureTop(out, x0, z0, y1, x1 - x0, z1 - z0, roof, roof, roof, roof);
+                if (interior && (shape.minY > 0 || !tile.occupied(x, voxel.y() - 1, z)))
+                    addFeatureBottom(out, x0, z0, y0, x1 - x0, z1 - z0, packSprite(color, spriteOf(state, 5)));
                 for (int face = 1; face <= 4; face++) {
                     int dx = face == 3 ? -size : face == 4 ? size : 0;
                     int dz = face == 1 ? -size : face == 2 ? size : 0;
@@ -897,6 +914,74 @@ public final class PredictionMeshBuilder {
                 x, y, z + step, normal, ceiling);
     }
 
+    /** Emit only actual run boundaries. Never connect a roof to a floor across an air gap. */
+    private static void addVolume(VertexAccumulator out, ClientColumnSample[] samples,
+                                  int x, int z, int step, int grid, boolean fluids, PredictionInteriorEdits edits) {
+        int px = x * step, pz = z * step;
+        if (edits.affects(px, pz, step)) {
+            for (int dz = 0; dz < step; dz++) for (int dx = 0; dx < step; dx++)
+                addVolumeColumn(out, px + dx, pz + dz, 1, fluids, edits);
+        } else addVolumeColumn(out, px, pz, step, fluids, edits);
+    }
+
+    private static void addVolumeColumn(VertexAccumulator out, int px, int pz, int step,
+                                        boolean fluids, PredictionInteriorEdits edits) {
+        var volume = edits.column(px, pz, false);
+        if (volume == null) return;
+        var occupied = edits.column(px, pz, true);
+        for (int i = 0; i < volume.size(); i++) {
+            if ((volume.fluid(i) != 0) != fluids) continue;
+            int bottom = volume.bottom(i), top = volume.top(i), block = volume.block(i);
+            var state = net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+            int color = packSprite(PredictionMaterialPalette.colorForIndex(block, 0xff804030),
+                    VssLodSpriteTable.indexForBlock(block));
+            if (!occupied.occupied(top, !fluids)) {
+                if (fluids) addFluidRectangle(out, 0, top - FLUID_SURFACE_DROP,
+                        new PredictionFluidOcclusion.Rect(px, pz, px + step, pz + step),
+                        fluidSurfaceColor(volume.fluid(i), 0xffd9572b), volume.fluid(i), 1);
+                else addFeatureTop(out, px, pz, top, step, step, color, color, color, color);
+            }
+            if (!fluids && !occupied.occupied(bottom - 1, true)) {
+                int underside = packSprite(PredictionMaterialPalette.colorForState(state, 0xff804030, 0, 5), spriteOf(state, 5));
+                addFeatureBottom(out, px, pz, bottom, step, step, underside);
+            }
+            for (int direction = 0; direction < 4; direction++) {
+                int dx = direction == 0 ? -1 : direction == 1 ? 1 : 0;
+                int dz = direction == 2 ? -1 : direction == 3 ? 1 : 0;
+                var neighbor = edits.column(px + dx * step, pz + dz * step, true);
+                if (neighbor == null) continue; // Unknown is not evidence of an empty column.
+                int cursor = bottom;
+                for (int j = 0; j < neighbor.size() && cursor < top; j++) {
+                    if (!fluids && neighbor.fluid(j) != 0) continue;
+                    int lo = neighbor.bottom(j), hi = neighbor.top(j);
+                    if (hi <= cursor) continue;
+                    if (lo >= top) break;
+                    if (lo > cursor) volumeWall(out, px, pz, step, cursor, Math.min(top, lo), state, dx, dz, volume.fluid(i));
+                    cursor = Math.max(cursor, hi);
+                }
+                if (cursor < top) volumeWall(out, px, pz, step, cursor, top, state, dx, dz, volume.fluid(i));
+            }
+        }
+    }
+
+    private static void volumeWall(VertexAccumulator out, int x, int z, int step, int bottom, int top,
+                                   net.minecraft.world.level.block.state.BlockState state, int dx, int dz, int fluid) {
+        if (fluid != 0) {
+            addFluidRectangle(out, dx != 0 ? 1 : 2,
+                    dx != 0 ? x + (dx > 0 ? step : 0) : z + (dz > 0 ? step : 0),
+                    new PredictionFluidOcclusion.Rect(dx != 0 ? z : x, bottom,
+                            (dx != 0 ? z : x) + step, top - FLUID_SURFACE_DROP),
+                    fluidSurfaceColor(fluid, 0xffd9572b), fluid, dx + dz);
+            return;
+        }
+        int face = wallFace(dx, dz);
+        int color = packSprite(PredictionMaterialPalette.colorForState(state, 0xff804030, 0, face), spriteOf(state, face));
+        if (dx != 0) addFeatureX(out, x + (dx > 0 ? step : 0), z, bottom, step, top - bottom,
+                color, color, color, color, dx);
+        else addFeatureZ(out, x, z + (dz > 0 ? step : 0), bottom, step, top - bottom,
+                color, color, color, color, dz);
+    }
+
     private static void addSimpleVegetation(VertexAccumulator out, PredictionSimpleVegetation.Form form, int tint) {
         float x = form.x(), z = form.z(), y = form.y();
         if (form.tree() == null) {
@@ -911,6 +996,11 @@ public final class PredictionMeshBuilder {
         }
         simpleBox(out, x, z, y, 1, form.height() - 2, form.tree().log(), tint);
         simpleBox(out, x - 2, z - 2, y + form.height() - 3, 4, 3, form.tree().leaves(), tint);
+        if (form.tree().ground() != null) {
+            int bottom = packSprite(PredictionMaterialPalette.colorForState(form.tree().leaves(), 0xff888888, tint, 5),
+                    spriteOf(form.tree().leaves(), 5));
+            addFeatureBottom(out, x - 2, z - 2, y + form.height() - 3, 4, 4, bottom);
+        }
     }
 
     private static void simpleBox(VertexAccumulator out, float x, float z, float y, float width, float height,
@@ -949,6 +1039,15 @@ public final class PredictionMeshBuilder {
                 x + width, y, z + depth, n, c2);
         out.triangle(x, y, z, n, c0, x + width, y, z + depth, n, c2,
                 x, y, z + depth, n, c3);
+    }
+
+    private static void addFeatureBottom(VertexAccumulator out, float x, float z, float y,
+                                         float width, float depth, int color) {
+        float[] normal = {0, -1, 0};
+        out.triangle(x, y, z, normal, color, x + width, y, z, normal, color,
+                x + width, y, z + depth, normal, color);
+        out.triangle(x, y, z, normal, color, x + width, y, z + depth, normal, color,
+                x, y, z + depth, normal, color);
     }
 
     private static void addFeatureZ(VertexAccumulator out, float x, float z, float y,

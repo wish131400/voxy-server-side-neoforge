@@ -28,6 +28,15 @@ impl Surface {
         colors: &ClimateColors,
         mut biome: impl FnMut(Pos) -> Result<(&'b str, &'b Biome)>,
     ) -> Result<()> {
+        self.apply_retained(job, column, palette, x, z, neighbours, colors, &mut biome, true)
+    }
+
+    /// Full retained columns must visit every cave floor and ceiling.
+    pub(crate) fn apply_retained<'b>(
+        &self, job: &mut Job<'_>, column: &mut ExteriorColumn, palette: &Palette,
+        x: i32, z: i32, neighbours: [i32; 4], colors: &ClimateColors,
+        mut biome: impl FnMut(Pos) -> Result<(&'b str, &'b Biome)>, exterior: bool,
+    ) -> Result<()> {
         let graph = &job.terrain.graph;
         let depth = self.depth(graph, x, z);
         let secondary = graph.noise(self.secondary, x as f64, 0., z as f64);
@@ -85,7 +94,7 @@ impl Surface {
             if output_floor.is_none() && !palette.is_air(result) && !palette.fluid(result) {
                 output_floor = Some(y + 1);
             }
-            if output_floor.is_some_and(|top| y <= top - 7) {
+            if exterior && output_floor.is_some_and(|top| y <= top - 7) {
                 break;
             }
         }

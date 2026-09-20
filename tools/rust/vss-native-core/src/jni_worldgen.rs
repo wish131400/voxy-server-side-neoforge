@@ -1,4 +1,4 @@
-//! ABI 5: separate declaration and handle namespace from
+//! ABI 6: separate declaration and handle namespace from
 //! the noise probe. No raw Java pointer can become a world/volume handle.
 use crate::{
     backend::World,
@@ -191,7 +191,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     _e: JNIEnv,
     _c: JClass,
 ) -> jint {
-    5
+    6
 }
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_create(
@@ -399,6 +399,65 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
             }
             for block in col.blocks {
                 data.extend_from_slice(&w.base_ids[block as usize].to_le_bytes());
+            }
+        }
+        put(&mut e, &out, &data)?;
+        Ok(count)
+    });
+    match result {
+        Ok(n) => n,
+        Err(err) => {
+            fail(&mut e, err);
+            -1
+        }
+    }
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_interiorColumns(
+    mut e: JNIEnv,
+    _c: JClass,
+    id: jlong,
+    points: JByteBuffer,
+    out: JByteBuffer,
+    count: jint,
+) -> jint {
+    let result = guarded(|| {
+        if !(0..=64).contains(&count) {
+            return Err("column batch count out of range".into());
+        }
+        let w = world(id)?;
+        let stride = 16 + w.terrain.height as usize * 4;
+        let input = buffer(&mut e, &points, count as usize * 8, false)?;
+        buffer(&mut e, &out, count as usize * stride, true)?;
+        let input = if count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(input, count as usize * 8) }
+        };
+        let mut data = Vec::with_capacity(count as usize * stride);
+        for row in input.chunks_exact(8) {
+            let x = i32::from_le_bytes(row[..4].try_into().unwrap());
+            let z = i32::from_le_bytes(row[4..].try_into().unwrap());
+            let col = w.interior_column(x, z)?;
+            let mut surface = w.terrain.min_y;
+            let mut floor = w.terrain.min_y;
+            let mut fluid = i32::MIN;
+            for (i, &block) in col.iter().enumerate() {
+                if w.palette.is_air(block) { continue; }
+                let top = w.terrain.min_y + i as i32 + 1;
+                surface = top;
+                if w.palette.fluid(block) { fluid = top; } else { floor = top; }
+            }
+            for v in [
+                surface,
+                floor,
+                fluid,
+                w.terrain.height,
+            ] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+            for block in col.iter() {
+                data.extend_from_slice(&block.to_le_bytes());
             }
         }
         put(&mut e, &out, &data)?;
@@ -785,10 +844,10 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     mut e: JNIEnv, _c: JClass, id: jlong, x: jint, z: jint, display: jint,
 ) -> jlong {
     let result = guarded(|| {
-        if !(0..=1).contains(&display) { return Err("invalid decoration policy".into()); }
+        if !(0..=2).contains(&display) { return Err("invalid decoration policy".into()); }
         let slot = Slot::acquire()?;
         let owner = world(id)?;
-        let volume = owner.decoration_proxy(x, z, display == 1)?;
+        let volume = if display == 2 { owner.interior_proxy(x, z)? } else { owner.decoration_proxy(x, z, display == 1)? };
         let handle = IDS.fetch_add(1, Ordering::Relaxed);
         if handle <= 0 { return Err("handle space exhausted".into()); }
         volumes().lock().map_err(|_| "volume lock")?.insert(handle,

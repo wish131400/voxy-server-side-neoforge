@@ -80,6 +80,23 @@ class PredictionLodSeamsTest {
         assertTrue(cache.update(List.of(surface(fine))).isEmpty(), "removed neighbors leave no stale seams");
     }
 
+    @Test void tallSeamRemainsVisibleAboveItsOwningTerrain() {
+        var low = surface(tile(-1, -1, 2, 64));
+        var high = surface(tile(0, -1, 4, 160));
+        var patches = new PredictionLodSeams().update(List.of(low, high));
+        assertEquals(1, patches.size());
+        var patch = patches.get(0);
+        assertSame(low.tile(), patch.surface().tile());
+        assertTrue(patch.bounds().minY <= 64 && patch.bounds().maxY >= 160);
+        var camera = new net.minecraft.world.phys.Vec3(-256, 128, -64);
+        var frustum = new net.minecraft.client.renderer.culling.Frustum(
+                new org.joml.Matrix4f().rotateY((float) Math.PI / 2),
+                new org.joml.Matrix4f().perspective((float) Math.toRadians(7), 1.7F, .1F, 8192));
+        frustum.prepare(camera.x, camera.y, camera.z);
+        assertFalse(frustum.isVisible(new PredictionRenderGeometry.Entry(low.tile()).culling()));
+        assertTrue(frustum.isVisible(patch.bounds()), "visible cliff must survive terrain-only culling");
+    }
+
     @Test void equalHeightBoundariesNeedNoExtraGeometry() {
         assertTrue(new PredictionLodSeams().update(List.of(surface(tile(-1, -1, 2, 64)),
                 surface(tile(0, -1, 8, 64)))).isEmpty());
@@ -97,8 +114,10 @@ class PredictionLodSeamsTest {
         var inputs = new ArrayList<>(List.of(surface(tile(-1, -1, 2, 64)), surface(tile(0, -1, 4, 96))));
         var cache = new PredictionLodSeams();
         var initial = cache.update(inputs).getFirst().mesh();
+        byte[] mask = cache.boundaryMask(inputs.getFirst().tile().key());
         inputs.add(surface(tile(100, 100, 16, 80)));
         assertSame(initial, cache.update(inputs).getFirst().mesh());
+        assertSame(mask, cache.boundaryMask(inputs.getFirst().tile().key()), "unrelated uploads do not rebuild boundary masks");
         cache.clear();
         assertNotSame(initial, cache.update(inputs).getFirst().mesh());
     }
@@ -169,6 +188,64 @@ class PredictionLodSeamsTest {
                 + ",warmMs=" + warmNanos / 1e6 + ",coldMs=" + coldNanos / 1e6);
     }
 
+    @Test void cameraRotationCullsDrawsWithoutRebuildingResidentBoundaries() {
+        var surfaces = new ArrayList<PredictionLodSeams.Surface>();
+        var tiles = new HashMap<PredictionTileKey, PredictionTile>();
+        for (int z = -4; z <= 4; z++) for (int x = -4; x <= 4; x++) {
+            var tile = wetTile(x, z, 2, ((x + z) & 1) == 0 ? 96 : 64, 0, 80);
+            tiles.put(tile.key(), tile);
+            surfaces.add(surface(tile));
+        }
+        var geometry = new PredictionRenderGeometry();
+        geometry.update(new PredictionTileManager.RenderSnapshot(Level.OVERWORLD,
+                VssLodLayout.of(4096, 6, true, false), tiles, Map.of()));
+        var camera = new net.minecraft.world.phys.Vec3(0, 100, 0);
+        var resident = geometry.visible(camera, null, 4096);
+        var stable = new PredictionLodSeams();
+        var old = new PredictionLodSeams();
+        var initial = stable.update(surfaces);
+        var masks = new HashMap<PredictionTileKey, byte[]>();
+        tiles.keySet().forEach(key -> masks.put(key, stable.boundaryMask(key)));
+        var bean = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        long thread = Thread.currentThread().getId();
+        long[] nanos = new long[2], bytes = new long[2];
+        Set<PredictionTileKey> firstVisible = null;
+        boolean changed = false;
+        for (int frame = -12; frame < 60; frame++) {
+            var frustum = new net.minecraft.client.renderer.culling.Frustum(
+                    new org.joml.Matrix4f().rotateX(.2F).rotateY(frame * .17F),
+                    new org.joml.Matrix4f().perspective((float) Math.toRadians(70), 1.7F, .1F, 8192));
+            frustum.prepare(camera.x, camera.y, camera.z);
+            var visible = surfaces.stream().filter(s -> geometry.inFrustum(s.tile().key(), frustum)).toList();
+            var keys = new HashSet<PredictionTileKey>();
+            visible.forEach(s -> keys.add(s.tile().key()));
+            if (firstVisible == null) firstVisible = keys;
+            else changed |= !firstVisible.equals(keys);
+            for (int mode : new int[]{0, 1}) {
+                long allocated = bean.getThreadAllocatedBytes(thread), start = System.nanoTime();
+                if (mode == 0) old.update(visible);
+                else {
+                    assertSame(resident, geometry.visible(camera, null, 4096));
+                    assertSame(initial, stable.update(surfaces));
+                }
+                if (frame >= 0) {
+                    nanos[mode] += System.nanoTime() - start;
+                    bytes[mode] += bean.getThreadAllocatedBytes(thread) - allocated;
+                }
+            }
+        }
+        assertTrue(changed, "the turn must change actual draw visibility");
+        tiles.keySet().forEach(key -> assertSame(masks.get(key), stable.boundaryMask(key)));
+        assertTrue(bytes[1] < bytes[0] / 10, "stationary topology must not allocate boundary meshes on turns");
+        var replacement = wetTile(0, 0, 2, 112, 0, 80);
+        surfaces.removeIf(s -> s.tile().key().equals(replacement.key()));
+        surfaces.add(surface(replacement));
+        assertNotSame(initial, stable.update(surfaces), "real mesh changes still rebuild boundaries immediately");
+        System.out.printf(Locale.ROOT,
+                "RESIDENT_TURN_REPLAY tiles=81 frames=60 oldMs=%.3f stableMs=%.3f oldMiB=%.3f stableMiB=%.3f%n",
+                nanos[0] / 1e6, nanos[1] / 1e6, bytes[0] / 1048576D, bytes[1] / 1048576D);
+    }
+
     @Test void seamSummaryBytesAreChargedToTheOwningTile() {
         var tile = tile(0, 0, 2, 64);
         long payload = tile.mesh().gpuPayload().retainedHeapBytes();
@@ -196,24 +273,78 @@ class PredictionLodSeamsTest {
         }
     }
 
-    @Test void existingVisibleCliffFacesAreNotDrawnAgainByStitches() {
+    @Test void existingCliffFacesAreReplacedByCurrentHeightDifference() {
         for (int margin : new int[]{64, 80}) {
             var fine = wetTile(-1, -1, 2, 96, 0, margin);
             var coarse = wetTile(0, -1, 4, 64, 0, 64);
             var patches = new PredictionLodSeams().update(List.of(surface(fine), surface(coarse)));
-            assertEquals(64 * 2 * (margin - 64D), patches.stream().mapToDouble(p -> area(p.mesh())).sum(),
-                    "stitches should fill only the missing vertical interval, never coplanar existing walls");
+            assertEquals(64 * 2 * 32D, patches.stream().mapToDouble(p -> area(p.mesh())).sum(),
+                    "selected seams replace stale margin walls instead of drawing both");
         }
     }
 
-    @Test void negativeFacingMarginWallsAlsoKeepTheirExistingGeometry() {
+    @Test void negativeFacingMarginWallsAreReplacedByCurrentHeightDifference() {
         var fine = wetTile(-1, -1, 2, 32, 63, 50);
         var coarse = wetTile(0, -1, 4, 50, 63, 50);
-        assertTrue(new PredictionLodSeams().update(List.of(surface(fine), surface(coarse))).isEmpty(),
-                "the fine tile already owns the inward wall emitted by its higher margin sample");
+        assertEquals(64 * 2 * 18D, new PredictionLodSeams().update(List.of(surface(fine), surface(coarse)))
+                .stream().mapToDouble(p -> area(p.mesh())).sum(),
+                "the inward margin wall is replaced by the current neighbour seam");
     }
 
-    private static PredictionTile wetTile(int tx, int tz, int step, int height, int water, int eastMargin) {
+    @Test void staleTallMarginIsReplacedAndReturnsImmediatelyWhenNeighbourLeaves() {
+        var fine = wetTile(-1, 0, 2, 64, 0, 180);
+        var neighbor = tile(0, 0, 4, 68);
+        var seams = new PredictionLodSeams();
+        var patches = seams.update(List.of(surface(fine), surface(neighbor)));
+        assertEquals(128 * 4D, patches.stream().mapToDouble(p -> area(p.mesh())).sum());
+        byte[] mask = seams.boundaryMask(fine.key());
+        for (int z = 0; z < 64; z++) {
+            int cell = z * 64 + 63;
+            assertTrue(PredictionBoundaryWalls.replaced(mask, cell, 64, 2, 128, true));
+        }
+        seams.update(List.of(surface(fine)));
+        assertFalse(PredictionBoundaryWalls.replaced(seams.boundaryMask(fine.key()), 63, 64, 2, 128, true),
+                "missing neighbour restores existing fallback without a time window");
+        seams.update(List.of(surface(fine), surface(neighbor)));
+        assertTrue(PredictionBoundaryWalls.replaced(seams.boundaryMask(fine.key()), 63, 64, 2, 128, true));
+    }
+
+    @Test void incompleteMixedResolutionEdgeKeepsFallbackAndInvalidatesCachedMask() {
+        var coarse = surface(wetTile(-1, 0, 4, 64, 0, 180));
+        var fine = surface(tile(0, 0, 2, 68));
+        var seams = new PredictionLodSeams();
+        seams.update(List.of(coarse, fine));
+        assertTrue(PredictionBoundaryWalls.replaced(seams.boundaryMask(coarse.tile().key()), 63, 64, 4, 256, true));
+        boolean[] partial = fine.allowed().clone();
+        partial[0] = false; // Midpoint at z=2 is still present, but z=0..2 is missing.
+        var incomplete = new PredictionLodSeams.Surface(fine.tile(), partial);
+        seams.update(List.of(coarse, incomplete));
+        assertFalse(PredictionBoundaryWalls.replaced(seams.boundaryMask(coarse.tile().key()), 63, 64, 4, 256, true));
+        assertTrue(PredictionBoundaryWalls.replaced(seams.boundaryMask(coarse.tile().key()), 127, 64, 4, 256, true));
+        seams.update(List.of(coarse, fine));
+        assertTrue(PredictionBoundaryWalls.replaced(seams.boundaryMask(coarse.tile().key()), 63, 64, 4, 256, true));
+    }
+
+    @Test void groundProvenanceNeverMarksPlacedBlockFaces() {
+        var low = PredictionSimpleVegetationTest.sample(64);
+        var high = PredictionSimpleVegetationTest.sample(128);
+        var vegetation = PredictionVegetation.Tile.of(Map.of(new net.minecraft.core.BlockPos(0, 150, 0),
+                net.minecraft.world.level.block.Blocks.STONE.defaultBlockState()), 0, 0, 1, 1, 1);
+        var mesh = PredictionMeshBuilder.build(new ClientColumnSample[]{low, high, low, high}, null,
+                63, 0, 1, 2, true, null, null, null, 0, 0, vegetation).packed();
+        int ground = 0, features = 0;
+        for (int q = 0; q < mesh.quadCount(); q++) {
+            if (mesh.terrainWall(q)) ground++;
+            if (mesh.y(q, 0) >= 150 && mesh.y(q, 2) >= 150) {
+                features++;
+                assertFalse(mesh.terrainWall(q), "placed block must retain independent provenance");
+            }
+        }
+        assertTrue(ground > 0);
+        assertTrue(features > 0);
+    }
+
+    static PredictionTile wetTile(int tx, int tz, int step, int height, int water, int eastMargin) {
         int[] heights = new int[65 * 65]; Arrays.fill(heights, height);
         var samples = new ClientColumnSample[heights.length];
         for (int z = 0; z < 65; z++) for (int x = 0; x < 65; x++) {

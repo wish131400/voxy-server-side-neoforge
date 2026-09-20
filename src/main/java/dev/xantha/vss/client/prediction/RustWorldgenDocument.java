@@ -194,7 +194,7 @@ final class RustWorldgenDocument {
                     "defaults", defaults, "properties", properties,
                     "tags", state.getTags().map(t -> t.location().toString()).sorted().toList(),
                     "air", state.isAir(), "fluid", !state.getFluidState().isEmpty(),
-                    "motion_blocking", state.blocksMotion(), "double_plant", block instanceof DoublePlantBlock,
+                    "motion_blocking", state.blocksMotion(), "double_plant", block instanceof DoublePlantBlock, "replaceable", state.canBeReplaced(),
                     "support_faces",supportFaces(state),"shape_update",shapeUpdate(block))));
         }
         return blocks;

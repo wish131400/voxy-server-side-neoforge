@@ -57,7 +57,8 @@ record PredictionCacheStorage(Path base, Path legacyBase) {
                 + (sampler instanceof RustTerrainSampler nativeSampler ? ":" + nativeSampler.cacheAlgorithm() : "")
                 // Old FTF Java full grids could contain unmarked point estimates
                 // selected by spacing. They cannot be trusted as exact-stage data.
-                + (sampler instanceof FreeTerraForgedTerrainSampler ? ":java-stage-exact-r2" : "");
+                + (sampler instanceof FreeTerraForgedTerrainSampler ? ":java-stage-exact-r2" : "")
+                + (sampler.interiorTerrain() ? ":interior-columns-r3-structures" : "");
         return base.resolve(profile.dimension().getNamespace()).resolve(profile.dimension().getPath())
                 .resolve(digest(input.getBytes(StandardCharsets.UTF_8)) + "-" + digest(profile.generatorData()));
     }

@@ -18,7 +18,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** Compressed generation results. IO runs on builders or the serial commit worker, never on the render thread. */
 final class PredictionDiskCache implements AutoCloseable {
-    private static final int MAGIC = 0x56535044, SCHEMA = 2;
+    private static final int MAGIC = 0x56535044, SCHEMA = 4;
     private static final int MAX_COLUMNS = 66 * 66, MAX_BLOCKS = 262_144;
     private static final ExecutorService COMMITS = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "vss-prediction-disk");
@@ -41,7 +41,7 @@ final class PredictionDiskCache implements AutoCloseable {
     }
     // Schema 3 includes surface features from their actual decoration stages.
     // Old empty/vegetation-only surface entries must regenerate; terrain stays reusable.
-    private static int schema(Key key) { return key.kind == 1 ? 3 : SCHEMA; }
+    private static int schema(Key key) { return SCHEMA; }
     final class Lease implements AutoCloseable {
         final Key key;
         final Entry entry;
@@ -72,6 +72,82 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<BlockState, String> encodedStates = new LinkedHashMap<>(64, .75F, true);
     private final LongAdder stateDecodes = new LongAdder();
     private final java.util.concurrent.atomic.AtomicBoolean loggedError = new java.util.concurrent.atomic.AtomicBoolean();
+    private final Map<Key, Integer> terrainHints = new LinkedHashMap<>(256, .75F, true);
+    private final ArrayDeque<Key> probeQueue = new ArrayDeque<>();
+    private boolean probing;
+
+    /** Header-only batch lookup; hints never replace the validated read or its lease. */
+    void probeTerrain(Collection<Key> candidates) {
+        synchronized (shared) {
+            if (closed || shared.owner != this) return;
+            probeQueue.clear();
+            int count = 0;
+            for (Key key : candidates) {
+                if (key.kind == 0 && !terrainHints.containsKey(key)) probeQueue.add(key);
+                if (++count >= 32768) break;
+            }
+            probeNextBatch();
+        }
+    }
+
+    private void probeNextBatch() {
+        List<Lease> batch = new ArrayList<>();
+        synchronized (shared) {
+            if (closed || shared.owner != this || probing) return;
+            while (!probeQueue.isEmpty()) {
+                Key key = probeQueue.removeFirst();
+                if (key.kind != 0 || terrainHints.containsKey(key) || shared.invalidations.containsKey(key)) continue;
+                batch.add(lease(key));
+                if (batch.size() == 128) break;
+            }
+            if (batch.isEmpty()) return;
+            probing = true;
+        }
+        COMMITS.execute(() -> {
+            try {
+                for (Lease lease : batch) try (lease) {
+                    int axis = 0;
+                    if (lease.valid() && lease.readable) {
+                        try (var input = new DataInputStream(new InflaterInputStream(
+                                new BufferedInputStream(Files.newInputStream(file(lease.key)))))) {
+                            int magic = input.readInt(), version = input.readInt();
+                            if (magic == MAGIC && version >= 1 && version <= SCHEMA && input.readLong() == fingerprint
+                                    && input.readInt() == 0 && input.readInt() == lease.key.x
+                                    && input.readInt() == lease.key.z && input.readInt() == lease.key.detail) {
+                                int count = input.readInt(), candidate = (int) Math.sqrt(count) - 2;
+                                if (candidate > 0 && candidate <= 64 && (candidate & (candidate - 1)) == 0
+                                        && (candidate + 2) * (candidate + 2) == count) axis = candidate;
+                            }
+                        } catch (IOException | RuntimeException ignored) { }
+                    }
+                    synchronized (shared) {
+                        if (lease.valid() && lease.readable) rememberTerrain(lease.key, axis);
+                    }
+                }
+            } finally {
+                synchronized (shared) {
+                    probing = false;
+                    // Yield between batches to writes/invalidations, without waiting for a planner tick.
+                    probeNextBatch();
+                }
+            }
+        });
+    }
+
+    int cachedTerrainAxis(Key key) {
+        synchronized (shared) {
+            return closed || shared.owner != this || shared.invalidations.containsKey(key)
+                    ? 0 : terrainHints.getOrDefault(key, 0);
+        }
+    }
+
+    void forgetTerrain(Key key) { synchronized (shared) { rememberTerrain(key, 0); } }
+
+    private void rememberTerrain(Key key, int axis) {
+        if (closed || shared.owner != this) return;
+        terrainHints.put(key, axis);
+        while (terrainHints.size() > 32768) terrainHints.remove(terrainHints.keySet().iterator().next());
+    }
 
     PredictionDiskCache(Path root, long fingerprint) {
         this.root = root.toAbsolutePath().normalize();
@@ -124,8 +200,20 @@ final class PredictionDiskCache implements AutoCloseable {
                 int structure = input.readInt(), tree = input.readInt(), density = input.readInt(), height = input.readInt();
                 int fluid = input.readInt(), flags = input.readInt(), ground = input.readInt();
                 int under = palette[index(input.readInt(), palette.length)], deep = palette[index(input.readInt(), palette.length)];
+                int bottom = input.readInt(), lowerTop = input.readInt(), lowerBottom = input.readInt(), floor = input.readInt();
+                PredictionColumnVolume volume = null;
+                if (version >= 3 && input.readBoolean()) {
+                    int runs = bounded(input.readInt(), PredictionColumnVolume.MAX_RUNS);
+                    int[] intervals = new int[runs * 4];
+                    for (int r = 0; r < intervals.length; r += 4) {
+                        intervals[r] = input.readInt(); intervals[r + 1] = input.readInt();
+                        intervals[r + 2] = palette[index(input.readInt(), palette.length)];
+                        intervals[r + 3] = input.readUnsignedByte();
+                    }
+                    volume = new PredictionColumnVolume(intervals);
+                }
                 samples[i] = new ClientColumnSample(y, fluidY, biome, top, structure, tree, density, height, fluid, flags,
-                        ground, under, deep, input.readInt(), input.readInt(), input.readInt(), input.readInt());
+                        ground, under, deep, bottom, lowerTop, lowerBottom, floor, volume);
             }
             long colors = Long.MIN_VALUE;
             int[] surface = null, foliage = null, water = null;
@@ -147,10 +235,15 @@ final class PredictionDiskCache implements AutoCloseable {
     boolean writeTerrain(Lease lease, TerrainData terrain) {
         ClientColumnSample[] samples = terrain.samples();
         if (samples.length > MAX_COLUMNS) return false;
-        return write(lease, output -> {
+        boolean volumes = java.util.Arrays.stream(samples).anyMatch(sample -> sample.volume() != null);
+        return write(lease, volumes ? 3 : 2, output -> {
             Map<Integer, Integer> palette = new LinkedHashMap<>();
             for (var sample : samples) for (int block : new int[]{sample.topBlockIndex(), sample.underBlockIndex(), sample.deepBlockIndex()}) {
                 palette.computeIfAbsent(block, ignored -> palette.size());
+            }
+            for (var sample : samples) if (sample.volume() != null) {
+                for (int i = 0; i < sample.volume().size(); i++)
+                    palette.computeIfAbsent(sample.volume().block(i), ignored -> palette.size());
             }
             output.writeInt(samples.length);
             output.writeInt(palette.size());
@@ -163,6 +256,15 @@ final class PredictionDiskCache implements AutoCloseable {
                 output.writeInt(sample.fluid()); output.writeInt(sample.flags()); output.writeInt(sample.groundFeatureKind());
                 output.writeInt(palette.get(sample.underBlockIndex())); output.writeInt(palette.get(sample.deepBlockIndex()));
                 output.writeInt(sample.surfaceBottom()); output.writeInt(sample.lowerTop()); output.writeInt(sample.lowerBottom()); output.writeInt(sample.spanFloor());
+                var volume = sample.volume();
+                if (volumes) output.writeBoolean(volume != null);
+                if (volume != null) {
+                    output.writeInt(volume.size());
+                    for (int i = 0; i < volume.size(); i++) {
+                        output.writeInt(volume.bottom(i)); output.writeInt(volume.top(i));
+                        output.writeInt(palette.get(volume.block(i))); output.writeByte(volume.fluid(i));
+                    }
+                }
             }
             output.writeLong(terrain.colorFingerprint());
             boolean colors=terrain.colorsMatch(terrain.colorFingerprint());
@@ -174,6 +276,13 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     Map<BlockPos, BlockState> readSurface(Lease lease) {
+        SurfaceData data = readSurfaceData(lease);
+        return data == null ? null : data.blocks();
+    }
+
+    record SurfaceData(Map<BlockPos, BlockState> blocks, boolean canonical) { }
+
+    SurfaceData readSurfaceData(Lease lease) {
         return read(lease, (input, version) -> {
             int count = bounded(input.readInt(), MAX_BLOCKS);
             int paletteSize = bounded(input.readInt(), MAX_BLOCKS);
@@ -184,13 +293,17 @@ final class PredictionDiskCache implements AutoCloseable {
                 BlockPos pos = new BlockPos(input.readInt(), input.readInt(), input.readInt());
                 blocks.put(pos, palette[index(input.readInt(), palette.length)]);
             }
-            return Map.copyOf(blocks);
+            return new SurfaceData(Map.copyOf(blocks), version >= 4);
         });
     }
 
     boolean writeSurface(Lease lease, Map<BlockPos, BlockState> blocks) {
+        return writeSurface(lease, blocks, false);
+    }
+
+    boolean writeSurface(Lease lease, Map<BlockPos, BlockState> blocks, boolean canonical) {
         if (blocks.size() > MAX_BLOCKS) return false;
-        return write(lease, output -> {
+        return write(lease, canonical ? 4 : 3, output -> {
             Map<BlockState, Integer> palette = new LinkedHashMap<>();
             blocks.values().forEach(state -> palette.computeIfAbsent(state, ignored -> palette.size()));
             output.writeInt(blocks.size()); output.writeInt(palette.size());
@@ -230,10 +343,13 @@ final class PredictionDiskCache implements AutoCloseable {
     private <T> T read(Lease lease, Decoder<T> decoder) {
         if (!lease.readable || !lease.valid()) { missStale.increment(); misses.increment(); return null; }
         Path file = file(lease.key);
-        try (var input = new DataInputStream(new InflaterInputStream(new BufferedInputStream(Files.newInputStream(file))))) {
+        // Buffer decompressed bytes too: DataInputStream.readInt otherwise
+        // enters the inflater once per byte for every column field.
+        try (var input = new DataInputStream(new BufferedInputStream(
+                new InflaterInputStream(new BufferedInputStream(Files.newInputStream(file))), 32 * 1024))) {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
-            if ((version != schema(lease.key) && !(lease.key.kind == 0 && version == 1)) || input.readLong() != fingerprint
+            if ((version != schema(lease.key) && version != 3 && !(lease.key.kind == 0 && (version == 1 || version == 2))) || input.readLong() != fingerprint
                     || input.readInt() != lease.key.kind || input.readInt() != lease.key.x || input.readInt() != lease.key.z
                     || input.readInt() != lease.key.detail) { missIdentity.increment(); throw new IOException("cache identity mismatch"); }
             T result = decoder.read(input, version);
@@ -252,14 +368,21 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     private boolean write(Lease lease, Encoder encoder) {
+        return write(lease, schema(lease.key), encoder);
+    }
+
+    private boolean write(Lease lease, int version, Encoder encoder) {
         if (!lease.valid() || Thread.currentThread().isInterrupted()) return false;
         Path temporary = null;
         try {
             Path target = file(lease.key);
             Files.createDirectories(target.getParent());
             temporary = Files.createTempFile(target.getParent(), "pending-", ".tmp");
-            try (var output = new DataOutputStream(new DeflaterOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary))))) {
-                output.writeInt(MAGIC); output.writeInt(schema(lease.key)); output.writeLong(fingerprint);
+            // Batch primitive writes before crossing into zlib, without changing
+            // the on-disk schema or retaining a whole decoded tile in the IO queue.
+            try (var output = new DataOutputStream(new BufferedOutputStream(
+                    new DeflaterOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary))), 32 * 1024))) {
+                output.writeInt(MAGIC); output.writeInt(version); output.writeLong(fingerprint);
                 output.writeInt(lease.key.kind); output.writeInt(lease.key.x); output.writeInt(lease.key.z); output.writeInt(lease.key.detail);
                 encoder.write(output);
             }
@@ -276,6 +399,7 @@ final class PredictionDiskCache implements AutoCloseable {
                         try { Files.move(completed, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE); }
                         catch (AtomicMoveNotSupportedException unsupported) { Files.move(completed, target, StandardCopyOption.REPLACE_EXISTING); }
                         writes.increment();
+                        synchronized (shared) { terrainHints.remove(lease.key); }
                         return true;
                     } finally { Files.deleteIfExists(completed); }
                 });
@@ -296,6 +420,7 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (shared) {
             if (closed || shared.owner != this) return;
             for (Key key : keys) {
+                terrainHints.remove(key);
                 Entry entry = shared.active.remove(key);
                 if (entry != null) entry.valid = false;
                 shared.invalidations.put(key, ++shared.revision);
@@ -341,7 +466,10 @@ final class PredictionDiskCache implements AutoCloseable {
         // into neighbors. Invalidate every source whose bounded reads overlap.
         for (int z = chunkZ - 2; z <= chunkZ + 2; z++) for (int x = chunkX - 2; x <= chunkX + 2; x++) {
             // Bit 2 separates reusable visual trees from exact feature replay.
-            for (int settings = 0; settings < 32; settings++) keys.add(Key.surface(x, z, settings));
+            for (int settings = 0; settings < 32; settings++) {
+                keys.add(Key.surface(x, z, settings));
+                keys.add(Key.surface(x, z, settings | 96));
+            }
         }
         return keys;
     }
@@ -387,6 +515,8 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (decodedStates) { decodedStates.clear(); }
         synchronized (encodedStates) { encodedStates.clear(); }
         synchronized (shared) {
+            terrainHints.clear();
+            probeQueue.clear();
             if (shared.owner == this) {
                 shared.active.values().forEach(entry -> entry.valid = false);
                 shared.active.clear();

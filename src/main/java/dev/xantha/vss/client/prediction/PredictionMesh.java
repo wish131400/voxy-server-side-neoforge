@@ -25,6 +25,8 @@ public final class PredictionMesh {
     final int[] waterCounts;
     private final int cellAxis;
     final int spacingBlocks;
+    /** Worker-only end of ground geometry, before vegetation and structure faces. */
+    int[] terrainEnds;
     /** Worker-side quad view, released after preparing a compact published mesh. */
     private volatile PredictionQuadMesh packed;
     private volatile PredictionPackedMesh gpuPayload;
@@ -32,6 +34,7 @@ public final class PredictionMesh {
     private float[] morph;
     /** Set once by the publishing worker after lossless sample interning. */
     int retainedSampleObjects = -1;
+    long retainedVolumeBytes;
     void morph(float[] field) { morph = field; }
 
     /** Worker-only packing, completed before this mesh enters render residency. */
@@ -154,6 +157,7 @@ public final class PredictionMesh {
     long retainedHeapBytes() {
         long floats = (long) positions.length + normals.length + waterPositions.length + waterNormals.length;
         long ints = (long) colors.length + waterColors.length
+                + (terrainEnds == null ? 0 : terrainEnds.length)
                 + (cellOffsets == null ? 0 : cellOffsets.length)
                 + (cellCounts == null ? 0 : cellCounts.length)
                 + (waterOffsets == null ? 0 : waterOffsets.length)

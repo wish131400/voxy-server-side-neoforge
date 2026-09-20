@@ -242,16 +242,16 @@ final class PredictionVanillaMask {
             upload.put((byte) (state == 0 ? 0 : 255));
         }
         upload.flip();
-        GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
         GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
         GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
         GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
         GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
         GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL12.GL_TEXTURE_WRAP_R, GL12.GL_CLAMP_TO_EDGE);
-        GL12.glTexImage3D(GL12.GL_TEXTURE_3D, 0, GL30.GL_R8,
-                Math.max(1, sizeXZ), Math.max(1, sizeY), Math.max(1, sizeXZ),
-                0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE,
-                states.length == 0 ? null : upload);
-        GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 4);
+        try (var unpack = PredictionPixelUnpack.begin()) {
+            GL12.glTexImage3D(GL12.GL_TEXTURE_3D, 0, GL30.GL_R8,
+                    Math.max(1, sizeXZ), Math.max(1, sizeY), Math.max(1, sizeXZ),
+                    0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE,
+                    states.length == 0 ? null : upload);
+        }
     }
 }

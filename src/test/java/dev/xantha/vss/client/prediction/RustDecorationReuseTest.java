@@ -91,8 +91,8 @@ class RustDecorationReuseTest {
 
     @Test void pagedNativeProxyRejectsInvalidPolicyAndRetainsStructureEdits() throws Exception {
         try (var sampler=sampler()) {
-            assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.decorationProxy(sampler.handle(),0,0,2));
-            for(int policy=0;policy<2;policy++) {
+            assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.decorationProxy(sampler.handle(),0,0,3));
+            for(int policy=0;policy<3;policy++) {
                 long volume=RustWorldgenBackend.decorationProxy(sampler.handle(),0,0,policy);
                 try {
                     var buffer=java.nio.ByteBuffer.allocateDirect(16).order(java.nio.ByteOrder.LITTLE_ENDIAN);

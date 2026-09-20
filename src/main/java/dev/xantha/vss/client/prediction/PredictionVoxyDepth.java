@@ -18,11 +18,14 @@ public final class PredictionVoxyDepth {
             Object fb = pipeline.getClass().getField("fb").get(pipeline);
             Object texture = fb.getClass().getMethod("getDepthTex").invoke(fb);
             Class<?> type = viewport.getClass();
+            Object properties = pipeline.getClass().getField("properties").get(pipeline);
+            boolean zeroToOne = (boolean) properties.getClass().getMethod("isZero2One").invoke(properties);
+            boolean reverseZ = (boolean) properties.getClass().getMethod("isReverseZ").invoke(properties);
             frame = new Frame((int) texture.getClass().getField("id").get(texture), targetFramebuffer,
                     type.getField("width").getInt(viewport), type.getField("height").getInt(viewport),
                     new Vec3(type.getField("cameraX").getDouble(viewport),
                             type.getField("cameraY").getDouble(viewport), type.getField("cameraZ").getDouble(viewport)),
-                    new Matrix4f((Matrix4f) type.getField("MVP").get(viewport)).invert());
+                    new Matrix4f((Matrix4f) type.getField("MVP").get(viewport)).invert(), zeroToOne, reverseZ);
         } catch (ReflectiveOperationException | RuntimeException failure) {
             frame = null;
             if (!loggedFailure && VSSClientConfig.CONFIG.debugLogging) {
@@ -41,5 +44,10 @@ public final class PredictionVoxyDepth {
                 && value.camera().distanceToSqr(camera) < 1e-8 ? value : null;
     }
 
-    record Frame(int texture, int framebuffer, int width, int height, Vec3 camera, Matrix4f inverseMvp) { }
+    record Frame(int texture, int framebuffer, int width, int height, Vec3 camera, Matrix4f inverseMvp,
+                 boolean zeroToOne, boolean reverseZ) {
+        Frame(int texture, int framebuffer, int width, int height, Vec3 camera, Matrix4f inverseMvp) {
+            this(texture, framebuffer, width, height, camera, inverseMvp, false, false);
+        }
+    }
 }

@@ -21,7 +21,7 @@ record PredictionWorkView(double x, double y, double z, double dx, double dy, do
         if (PredictionWorkOrder.scoped(key, layout, focus)) return true;
         double vertical = Math.max(0, Math.max(minY - y, y - maxY));
         double near = PredictionWorkOrder.distanceSquared(key, layout, x, z) + vertical * vertical;
-        double fine = PredictionDetailBands.fineRadius(layout.maxDistanceBlocks());
+        double fine = PredictionDetailBands.fineRadius(layout.maxDistanceBlocks(), key.dimension());
         if (near <= fine * fine) return true;
         double span = layout.tileBlocks(key.lod());
         double px = (key.tileX() + .5) * span - x;

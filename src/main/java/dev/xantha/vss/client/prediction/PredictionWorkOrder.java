@@ -5,6 +5,7 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 /** Camera-independent surface eligibility and bounded, near-first work bands. */
 final class PredictionWorkOrder {
     static final int SCOPED_RADIUS_BLOCKS = 64 * 16;
+    static final int SCOPED_SURFACE_RADIUS_BLOCKS = 16 * 16;
     static final int INITIAL_CELL_AXIS = 16;
     static final int PREVIEW_CELL_AXIS = 32;
     private static final int WORK_BAND_BLOCKS = 64;
@@ -59,11 +60,22 @@ final class PredictionWorkOrder {
     static VssLodFocus surfaceFocus(VssLodFocus focus) {
         // Expensive one-block decoration is a bounded patch in the telescope.
         // Its terrain refinement may cover the wider projected field of view.
-        return focus == null ? null : new VssLodFocus(focus.x(), focus.z(), SCOPED_RADIUS_BLOCKS, focus.pixelsPerBlock());
+        return focus == null ? null : new VssLodFocus(focus.x(), focus.z(),
+                Math.min(focus.radius(), SCOPED_SURFACE_RADIUS_BLOCKS), focus.pixelsPerBlock());
+    }
+
+    private static VssLodFocus terrainFocus(VssLodFocus focus) {
+        return focus == null ? null : new VssLodFocus(focus.x(), focus.z(),
+                Math.min(focus.radius(), SCOPED_RADIUS_BLOCKS), focus.pixelsPerBlock());
+    }
+
+    static int detailBuildLimit(int workers, boolean previews, boolean scoping) {
+        int limit = previews ? Math.max(1, workers - 1) : workers;
+        return scoping ? Math.min(limit, Math.max(1, Math.min(3, workers / 2))) : limit;
     }
 
     static boolean scoped(PredictionTileKey key, VssLodLayout layout, VssLodFocus focus) {
-        VssLodFocus patch = surfaceFocus(focus);
+        VssLodFocus patch = terrainFocus(focus);
         int span = layout.tileBlocks(key.lod());
         return patch != null && patch.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
                 (key.tileX() + 1D) * span, (key.tileZ() + 1D) * span);
@@ -89,7 +101,7 @@ final class PredictionWorkOrder {
                         int residentAxis, boolean surface, VssLodFocus focus) {
         // Medium terrain precedes final terrain and plants at every distance.
         int band = Math.min(65535, (int) (Math.sqrt(distanceSquared) / WORK_BAND_BLOCKS));
-        VssLodFocus patch = surfaceFocus(focus);
+        VssLodFocus patch = terrainFocus(focus);
         int span = layout.tileBlocks(key.lod());
         if (patch != null && patch.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
                 (key.tileX() + 1D) * span, (key.tileZ() + 1D) * span)) {
@@ -103,7 +115,7 @@ final class PredictionWorkOrder {
     static double orderingDistance(PredictionTileKey key, VssLodLayout layout,
                                    double x, double z, VssLodFocus focus) {
         double nearby = distanceSquared(key, layout, x, z);
-        VssLodFocus patch = surfaceFocus(focus);
+        VssLodFocus patch = terrainFocus(focus);
         if (nearby >= 256D * 256 && patch != null
                 && distanceSquared(key, layout, patch.x(), patch.z()) <= patch.radius() * patch.radius()) {
             return distanceSquared(key, layout, patch.x(), patch.z());

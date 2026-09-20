@@ -1,6 +1,6 @@
 # Voxy Server Side NeoForge
 
-[0.3.1 更新日志](CHANGELOG.md)
+[0.3.2 更新日志](CHANGELOG.md)
 
 Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
@@ -10,12 +10,12 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.3.1-neoforge-1.21.1` |
+| VSS | `0.3.2-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
 
-当前版本为 `0.3.1-neoforge-1.21.1`，输出文件为 `lib/vss-0.3.1-neoforge-1.21.1.jar`。配置结构和网络协议使用独立的内部版本标记。
+当前版本为 `0.3.2-neoforge-1.21.1`，输出文件为 `lib/vss-0.3.2-neoforge-1.21.1.jar`。配置结构和网络协议使用独立的内部版本标记。0.3.2 的世界生成档案改用分片传输，NeoForge 协议由 46 升至 47，服务端与所有 VSS 客户端需要一起更新。
 
 客户端和服务端必须安装协议一致的 VSS；更新时请使用同一次构建的 JAR，不要仅凭模组版本号判断两端兼容。
 
@@ -50,7 +50,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能默认开启，可用 `enablePrediction` 关闭。
 
-预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），普通精细地形距离由 `predictionFineDistanceBlocks` 控制（默认 512 方块）。最外层 10% 不强制锁定粗 LOD，仍按屏幕像素误差及可用预算渐进细化。近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系与地表规则，植被和结构保留 Java 上下文及兼容回退。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
+预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），普通精细地形距离由 `predictionFineDistanceBlocks` 控制（默认 512 方块）。最外层 10% 不强制锁定粗 LOD，仍按屏幕像素误差及可用预算渐进细化。近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系、地表规则与装饰放置，未支持的装饰保留 Java 回退；建筑结构沿用 Minecraft 的 Java 布局与模板处理器，并与两种地形后端共享虚拟区块。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
 
 生物群系快照支持 TerraBlender 区域和 Blueprint 切片的嵌套组合，Java 与 Rust 都保留内部区域选择，避免石岸被预测为玄武岩悬崖。缺少必要快照时不启用该维度预测；生成快照变化后会使用独立的本地缓存。
 

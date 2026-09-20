@@ -370,6 +370,31 @@ class PredictionVegetationTest {
         }
     }
 
+    @Test void compareCanonicalSurfaceRestoreWithRepeatedRepair() {
+        var source = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
+        var generated = new PredictionVegetation(source, null, true);
+        var grids = new java.util.ArrayList<Map<BlockPos,BlockState>>();
+        for (int x=0;x<32;x++) grids.add(generated.chunk(x,7));
+        long[][] times = new long[2][7];
+        try (var disk = new PredictionDiskCache(diskDirectory,77)) {
+            for (int x=0;x<32;x++) try (var lease=disk.lease(PredictionDiskCache.Key.surface(x,7,31))) {
+                assertTrue(disk.writeSurface(lease,grids.get(x),true));
+            }
+            for (int round=-2;round<7;round++) for (int mode : round%2==0 ? new int[]{0,1} : new int[]{1,0}) {
+                long start=System.nanoTime();
+                for (int x=0;x<32;x++) try (var lease=disk.lease(PredictionDiskCache.Key.surface(x,7,31))) {
+                    var blocks=disk.readSurfaceData(lease).blocks();
+                    if (mode==0) blocks=PredictionLeafStates.settle(PredictionBamboo.normalize(blocks));
+                    assertEquals(grids.get(x),blocks);
+                }
+                if (round>=0) times[mode][round]=System.nanoTime()-start;
+            }
+        }
+        for (var series:times) java.util.Arrays.sort(series);
+        System.out.printf(java.util.Locale.ROOT,"SURFACE_RESTORE chunks=32 blocks=%d repeatedRepairMs=%.3f canonicalMs=%.3f speedup=%.3f%n",
+                grids.stream().mapToInt(Map::size).sum(),times[0][3]/1e6,times[1][3]/1e6,(double)times[0][3]/times[1][3]);
+    }
+
     @Test
     void captureRefreshKeepsCachedDecorationAndWorldEditsStillInvalidateIt() throws Exception {
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
@@ -428,7 +453,7 @@ class PredictionVegetationTest {
             @Override RegistryAccess decorationAccess() { return RegistryAccess.EMPTY; }
         };
         var budget = new PredictionMemoryBudget(176L * PredictionMemoryBudget.MIB, 0,
-                () -> Long.MAX_VALUE, System::nanoTime);
+                () -> Long.MAX_VALUE, System::nanoTime, 1);
         try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD, delayed, budget)) {
             // Give the single worker enough turns to establish medium terrain
             // beyond the immediate ground before a bounded decoration turn.
@@ -460,10 +485,14 @@ class PredictionVegetationTest {
         config.predictionTrees = false;
         config.predictionStructures = false;
         var budget = new PredictionMemoryBudget(176L * PredictionMemoryBudget.MIB, 0,
-                () -> Long.MAX_VALUE, System::nanoTime);
+                () -> Long.MAX_VALUE, System::nanoTime, 1);
         try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD,
                 sampler(48271, Blocks.GRASS_BLOCK, List.of(tree())), budget)) {
-            for (int cycle = 0; cycle < 150 && !budget.exhausted(); cycle++) {
+            // Compacted terrain retains fewer bytes; a fixed number of planner
+            // turns no longer guarantees pressure. Wait for the actual budget
+            // condition while keeping a bounded test deadline.
+            long fillDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+            while (!budget.exhausted() && System.nanoTime() < fillDeadline) {
                 for (int tick = 0; tick < 5; tick++) manager.tick(32, 176, 32, 1300, null, 128);
                 awaitManager(manager);
             }

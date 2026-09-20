@@ -56,9 +56,20 @@ public class WaterLayerAgent {
 
   int programId=(int)field(gp.getClass(),gp,"id");
   Class<?> gl20=cl.loadClass("org.lwjgl.opengl.GL20C");
-  for(String name:new String[]{"ModelViewMat","ProjMat","MainDepthPlanes","VoxyDistanceNumerator","VoxyDistanceDenominator"}){
+  for(String name:new String[]{"ModelViewMat","ProjMat","MainDepthPlanes","VoxyDistanceNumerator","VoxyDistanceDenominator","VoxyDepthAvailable","RealRenderDistance","HorizonDistance","VssPredictionFog","VssPredictionFogColor"}){
    int loc=(int)gl20.getMethod("glGetUniformLocation",int.class,CharSequence.class).invoke(null,programId,name);
    float[] vals=new float[16];gl20.getMethod("glGetUniformfv",int.class,int.class,float[].class).invoke(null,programId,loc,vals);meta.append(name).append('=').append(Arrays.toString(vals)).append('\n');
+  }
+  for(int id=1;id<1024;id++) {
+   if(!(boolean)gl20.getMethod("glIsProgram",int.class).invoke(null,id))continue;
+   int fog=(int)gl20.getMethod("glGetUniformLocation",int.class,CharSequence.class).invoke(null,id,"VssPredictionFogEnabled");
+   if(fog<0)continue;
+   meta.append("FOG_PROGRAM=").append(id).append('\n');
+   for(String name:new String[]{"VssPredictionFogEnabled","VssPredictionFog","VssPredictionFogColor","fogParams","fogColor","fogIntensity","invProjMat","projMat","colourTex"}){
+    int loc=(int)gl20.getMethod("glGetUniformLocation",int.class,CharSequence.class).invoke(null,id,name);
+    if(loc<0)continue;
+    float[] vals=new float[16];gl20.getMethod("glGetUniformfv",int.class,int.class,float[].class).invoke(null,id,loc,vals);meta.append(name).append('=').append(Arrays.toString(vals)).append('\n');
+   }
   }
   Files.writeString(p.resolve("meta.txt"),meta);
  }

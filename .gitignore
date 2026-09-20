@@ -44,5 +44,7 @@ out/
 __pycache__/
 *.py[cod]
 /tools/prediction/*.md
+# Ad-hoc local GL inspection; the bounded rendercapture command is the supported diagnostic.
+/tools/prediction/VoxyPipelineSnapshot.java
 /tools/rust/*_20[0-9][0-9]-*.md
 /docs/PORT_*_SYNC_20[0-9][0-9]-*.md

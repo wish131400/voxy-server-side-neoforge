@@ -6,6 +6,45 @@ import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.Test;
 
 class PredictionRenderWorkTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
+    @Test void narrowViewSortKeepsAllSeamNeighborsAndMatchesFullSort() {
+        var layout=VssLodLayout.of(8192,6,true,false);
+        var tiles=new LinkedHashMap<PredictionTileManager.PredictionTileKey,PredictionTileManager.PredictionTile>();
+        for(int x=-35;x<35;x++) for(int z=-35;z<35;z++) {
+            var tile=PredictionCoverageWorkTest.tile(x,z,0,layout);tiles.put(tile.key(),tile);
+        }
+        var snapshot=new PredictionTileManager.RenderSnapshot(Level.OVERWORLD,layout,tiles,Map.of());
+        var old=new PredictionRenderGeometry();old.update(snapshot);
+        var current=new PredictionRenderGeometry();current.update(snapshot);
+        long[][] times=new long[2][30];
+        int submitted=0;
+        for(int frame=-30;frame<30;frame++) {
+            var camera=new Vec3(frame*.13,100,frame*.31);
+            var frustum=new net.minecraft.client.renderer.culling.Frustum(new org.joml.Matrix4f(),
+                    new org.joml.Matrix4f().perspective((float)Math.toRadians(7),1.7F,.1F,8192));
+            frustum.prepare(camera.x,camera.y,camera.z);
+            List<PredictionTileManager.PredictionTileKey> expected=null,actual=null;
+            for(int mode:frame%2==0?new int[]{0,1}:new int[]{1,0}) {
+                long start=System.nanoTime();
+                var residents=mode==0?old.visible(camera,null,8192):current.resident(camera,8192);
+                var visible=new ArrayList<PredictionRenderGeometry.Visible>();
+                for(var item:residents) if(frustum.isVisible(item.geometry().culling())) visible.add(item);
+                if(mode==1) visible.sort(Comparator.comparingDouble(PredictionRenderGeometry.Visible::distance));
+                long elapsed=System.nanoTime()-start;
+                assertEquals(4900,residents.size(),"offscreen surfaces must still be available for seams");
+                var keys=visible.stream().map(item->item.geometry().tile().key()).toList();
+                if(mode==0) expected=keys; else actual=keys;
+                if(frame>=0) times[mode][frame]=elapsed;
+            }
+            assertEquals(expected,actual);
+            submitted=actual.size();
+            assertTrue(submitted>0 && submitted<4900/4);
+        }
+        for(var values:times) Arrays.sort(values);
+        System.out.printf(Locale.ROOT,"NARROW_SORT resident=4900 submitted=%d previousMedianMs=%.3f currentMedianMs=%.3f (cull/sort only)%n",
+                submitted,times[0][15]/1e6,times[1][15]/1e6);
+    }
     @Test void allFaceMasksKeepTheExactOrderedIndexSequence() {
         var random=new Random(921);
         for(int sample=0;sample<100;sample++) {

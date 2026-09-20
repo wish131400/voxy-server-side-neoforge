@@ -22,11 +22,173 @@ class PredictionProgressiveLoadingTest {
 
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
+    @org.junit.jupiter.api.io.TempDir java.nio.file.Path cacheDirectory;
+
+    @Test void fineCacheRestoresWithoutParentOrSamplingAndCorruptionDoesNotGenerate() throws Exception {
+        var config = VSSClientConfig.CONFIG;
+        int distance = config.predictionDistanceBlocks;
+        boolean trees = config.predictionTrees, structures = config.predictionStructures;
+        config.predictionDistanceBlocks = 4096; config.predictionTrees = false; config.predictionStructures = false;
+        try {
+            for (boolean corrupt : new boolean[]{false,true}) {
+                var path = cacheDirectory.resolve(Boolean.toString(corrupt));
+                var tileKey = key(0,0);
+                var diskKey = PredictionDiskCache.Key.terrain(0,0,0);
+                var grid = new ClientColumnSample[66 * 66]; java.util.Arrays.fill(grid,ground());
+                try (var disk = new PredictionDiskCache(path,123); var lease = disk.lease(diskKey)) {
+                    assertTrue(disk.writeTerrain(lease,grid));
+                }
+                var sampled = new java.util.concurrent.atomic.AtomicInteger();
+                var sampler = new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+                    @Override public ClientColumnSample sample(int x,int z) { sampled.incrementAndGet(); return ground(); }
+                    @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
+                };
+                var budget = new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2);
+                var disk = new PredictionDiskCache(path,123);
+                disk.probeTerrain(java.util.List.of(diskKey)); disk.flush();
+                assertEquals(64,disk.cachedTerrainAxis(diskKey));
+                if (corrupt) java.nio.file.Files.write(disk.file(diskKey),new byte[]{0,1,2});
+                try (var manager = new PredictionTileManager(Level.OVERWORLD,sampler,budget,disk)) {
+                    var desired = PredictionTileManager.class.getDeclaredField("desiredKeys"); desired.setAccessible(true);
+                    desired.set(manager,new java.util.HashSet<>(Set.of(tileKey)));
+                    var enqueue = PredictionTileManager.class.getDeclaredMethod("enqueue",
+                            PredictionTileManager.PredictionTileKey.class,int.class,int.class,boolean.class,boolean.class);
+                    enqueue.setAccessible(true); enqueue.invoke(manager,tileKey,0,0,false,true);
+                    long deadline = System.nanoTime()+TimeUnit.SECONDS.toNanos(8);
+                    while (manager.pendingCount()>0 && System.nanoTime()<deadline) Thread.sleep(10);
+                    assertEquals(0,manager.pendingCount());
+                    assertEquals(0,sampled.get(),"cache-only jobs must never fall through to generation");
+                    if (corrupt) {
+                        assertTrue(manager.readyTiles().isEmpty());
+                        assertEquals(0,disk.cachedTerrainAxis(diskKey));
+                    } else {
+                        assertEquals(1,manager.readyTiles().size(),manager.surfaceDiagnostics());
+                        assertEquals(64,manager.readyTiles().iterator().next().cellAxis());
+                        assertNotNull(manager.readyTiles().iterator().next().mesh().gpuPayload());
+                    }
+                }
+            }
+        } finally {
+            config.predictionDistanceBlocks=distance; config.predictionTrees=trees; config.predictionStructures=structures;
+        }
+    }
+
     @Test void nearbyGroundWaitsForMediumCoverageThenResumes() throws Exception {
         verifyLocalProgress(new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
             @Override public ClientColumnSample sample(int x, int z) { return ground(); }
             @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return ground(); }
         }, false);
+    }
+
+    @Test void cachedRestoreKeepsTwoSlotsAndRefillsWithoutPlannerTicks() throws Exception {
+        var config=VSSClientConfig.CONFIG;
+        boolean trees=config.predictionTrees, structures=config.predictionStructures;
+        config.predictionTrees=false; config.predictionStructures=false;
+        var gate=new CountDownLatch(1);
+        var entered=new CountDownLatch(2);
+        ThreadPoolExecutor executor=null;
+        try {
+            var disk=new PredictionDiskCache(cacheDirectory,123);
+            var keys=new java.util.ArrayList<PredictionTileManager.PredictionTileKey>();
+            var grid=new ClientColumnSample[66*66]; java.util.Arrays.fill(grid,ground());
+            for (int x=0;x<8;x++) {
+                keys.add(key(x,0));
+                try (var lease=disk.lease(PredictionDiskCache.Key.terrain(x,0,0))) {
+                    assertTrue(disk.writeTerrain(lease,grid));
+                }
+            }
+            disk.probeTerrain(keys.stream().map(k->PredictionDiskCache.Key.terrain(k.tileX(),k.tileZ(),k.lod())).toList());
+            disk.flush();
+            var sampler=new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+                @Override public ClientColumnSample sample(int x,int z) { throw new AssertionError("unexpected sampling"); }
+                @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
+            };
+            var budget=new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2);
+            try (var manager=new PredictionTileManager(Level.OVERWORLD,sampler,budget,disk)) {
+                var field=PredictionTileManager.class.getDeclaredField("executor"); field.setAccessible(true);
+                executor=(ThreadPoolExecutor)field.get(manager);
+                for (int i=0;i<2;i++) executor.execute(()->{
+                    entered.countDown();
+                    try { gate.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                });
+                assertTrue(entered.await(5,TimeUnit.SECONDS));
+                field=PredictionTileManager.class.getDeclaredField("desiredKeys"); field.setAccessible(true);
+                ((Set<PredictionTileManager.PredictionTileKey>)field.get(manager)).addAll(keys);
+                field=PredictionTileManager.class.getDeclaredField("cacheCandidates"); field.setAccessible(true);
+                ((java.util.ArrayDeque<PredictionTileManager.PredictionTileKey>)field.get(manager)).addAll(keys);
+                var restore=PredictionTileManager.class.getDeclaredMethod("restoreCached",int.class,int.class);
+                restore.setAccessible(true); restore.invoke(manager,0,0);
+                assertEquals(2,manager.pendingCount(),"restoration must not queue the entire warm world");
+                gate.countDown();
+                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+                while ((manager.readyTiles().size()<8 || manager.pendingCount()>0) && System.nanoTime()<deadline) Thread.sleep(5);
+                assertEquals(8,manager.readyTiles().size(),manager.surfaceDiagnostics());
+                assertEquals(0,manager.failedTileCount());
+            }
+        } finally {
+            gate.countDown();
+            config.predictionTrees=trees; config.predictionStructures=structures;
+            if (executor!=null) assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));
+        }
+    }
+
+    @Test void telescopeQueueStaysBoundedAndRefillsWithoutPlannerTicks() throws Exception {
+        var config=VSSClientConfig.CONFIG;
+        boolean trees=config.predictionTrees, structures=config.predictionStructures;
+        config.predictionTrees=false; config.predictionStructures=false;
+        var gate=new CountDownLatch(1);
+        ThreadPoolExecutor executor=null;
+        try {
+            int workers=Math.min(8,PredictionMemoryBudget.workerCount(Runtime.getRuntime().availableProcessors()));
+            int limit=PredictionWorkOrder.detailBuildLimit(workers,false,true);
+            var entered=new CountDownLatch(limit);
+            var first=ThreadLocal.withInitial(()->true);
+            var sampler=new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+                @Override public ClientColumnSample sample(int x,int z) {
+                    if (first.get()) {
+                        first.set(false); entered.countDown();
+                        try { gate.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    }
+                    return ground();
+                }
+                @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
+            };
+            var budget=new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,8);
+            try (var manager=new PredictionTileManager(Level.OVERWORLD,sampler,budget,null)) {
+                var field=PredictionTileManager.class.getDeclaredField("executor"); field.setAccessible(true);
+                executor=(ThreadPoolExecutor)field.get(manager);
+                field=PredictionTileManager.class.getDeclaredField("buildFocus"); field.setAccessible(true);
+                field.set(manager,new VssLodFocus(256,0,1024,10000));
+                var keys=new java.util.ArrayList<PredictionTileManager.PredictionTileKey>();
+                for (int i=0;i<8;i++) keys.add(key(i,0));
+                field=PredictionTileManager.class.getDeclaredField("desiredKeys"); field.setAccessible(true);
+                ((Set<PredictionTileManager.PredictionTileKey>)field.get(manager)).addAll(keys);
+                field=PredictionTileManager.class.getDeclaredField("ready"); field.setAccessible(true);
+                var ready=(java.util.Map<PredictionTileManager.PredictionTileKey,PredictionTileManager.PredictionTile>)field.get(manager);
+                var layout=VssLodLayout.of(4096,6,true,true);
+                for (int i=0;i<4;i++) {
+                    var parent=PredictionCoverageWorkTest.tile(i,0,1,layout); ready.put(parent.key(),parent);
+                }
+                var request=Class.forName(PredictionTileManager.class.getName()+"$BuildRequest")
+                        .getDeclaredConstructor(PredictionTileManager.PredictionTileKey.class,boolean.class,int.class,double.class);
+                request.setAccessible(true);
+                field=PredictionTileManager.class.getDeclaredField("scopeCandidates"); field.setAccessible(true);
+                var candidates=(java.util.ArrayDeque<Object>)field.get(manager);
+                for (var key:keys) candidates.add(request.newInstance(key,false,1000,0D));
+                var refill=PredictionTileManager.class.getDeclaredMethod("refillScope",int.class,int.class);
+                refill.setAccessible(true); refill.invoke(manager,0,0);
+                assertTrue(entered.await(5,TimeUnit.SECONDS),manager.surfaceDiagnostics());
+                assertEquals(limit,manager.pendingCount(),"scope work must not flood all worker slots");
+                gate.countDown();
+                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(15);
+                while ((!ready.keySet().containsAll(keys) || manager.pendingCount()>0) && System.nanoTime()<deadline) Thread.sleep(5);
+                assertTrue(ready.keySet().containsAll(keys),"all targets refill without another planner tick: "+manager.surfaceDiagnostics());
+                assertEquals(0,manager.failedTileCount());
+            }
+        } finally {
+            gate.countDown(); config.predictionTrees=trees; config.predictionStructures=structures;
+            if (executor!=null) assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));
+        }
     }
 
     @Test void sharedWorkContentionReleasesWorkersAndRetriesWithoutFailureBackoff() throws Exception {

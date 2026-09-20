@@ -239,16 +239,7 @@ public final class ClientPredictionState {
             return null;
         }
         VssLodFocus look = current.focus();
-        // Retain sub-block jitter without freezing a nearby target an entire
-        // tile away from the crosshair. Residency handles coverage stability.
-        VssLodFocus previous = lastFocus;
-        if (previous != null
-                && Math.hypot(previous.x() - look.x(), previous.z() - look.z()) < 0.125D
-                && Math.abs(previous.radius() - look.radius()) < 32.0D
-                && Math.abs(previous.pixelsPerBlock() - look.pixelsPerBlock()) < 16.0D) {
-            return previous;
-        }
-        return look;
+        return VssLodFocus.stabilize(lastFocus, look);
     }
 
     private static volatile ViewFocus viewFocus;

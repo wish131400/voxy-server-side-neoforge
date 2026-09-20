@@ -14,6 +14,27 @@ class PredictionUploadHandoffTest {
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     private static final VssLodLayout LAYOUT = VssLodLayout.of(65536, 6, true, true);
 
+    @Test void uploadCandidatesDrainAndRefreshForReplacementAndReset() {
+        var state = new PredictionRenderResidency();
+        var a = PredictionLodSeamsTest.tile(0, 0, 2, 64);
+        var b = PredictionLodSeamsTest.tile(1, 0, 2, 64);
+        var initial = source(Map.of(a.key(), a, b.key(), b));
+        state.retain(initial);
+        assertEquals(2, state.pendingUploads(initial).size());
+        state.uploaded(a);
+        assertEquals(java.util.List.of(b), state.pendingUploads(initial));
+        state.uploaded(b);
+        assertTrue(state.pendingUploads(initial).isEmpty());
+        var replacement = PredictionLodSeamsTest.tile(0, 0, 2, 96);
+        var next = source(Map.of(a.key(), replacement, b.key(), b));
+        state.retain(next);
+        assertEquals(java.util.List.of(replacement), state.pendingUploads(next));
+        assertSame(a, state.snapshot(next).tiles().get(a.key()), "old mesh survives until its replacement uploads");
+        state.clear();
+        state.retain(next);
+        assertEquals(2, state.pendingUploads(next).size());
+    }
+
     @Test void frameBudgetKeepsCoarseCoverageUntilEachChildHasActuallyUploaded() {
         var state = new PredictionRenderResidency();
         var root = tile(0, 0, 1, 1);
@@ -71,6 +92,47 @@ class PredictionUploadHandoffTest {
         state.retain(replacement);
         assertSame(parent, state.snapshot(replacement).coveringTile(0, 0, 0));
         assertFalse(state.snapshot(replacement).tiles().containsKey(child.key()));
+    }
+
+    @Test void shrinkingHorizonPreservesUploadedNearbyDetailAndInvalidatesOwnership() {
+        var state = new PredictionRenderResidency();
+        var near = tile(1, 0, 0, 1);
+        var far = tile(200, 0, 0, 2);
+        var root = tile(0, 0, 10, 3);
+        var initial = source(Map.of(near.key(), near, far.key(), far, root.key(), root));
+        state.retain(initial);
+        state.uploaded(near);
+        state.uploaded(far);
+        state.uploaded(root);
+        var before = state.snapshot(initial);
+        var smaller = new RenderSnapshot(Level.OVERWORLD, VssLodLayout.of(4096, 6, true, true),
+                Map.of(near.key(), near), Map.of());
+        state.retain(smaller);
+        assertTrue(state.contains(near), "no second upload or blank frame for unchanged nearby geometry");
+        assertFalse(state.contains(far));
+        assertFalse(state.contains(root));
+        var after = state.snapshot(smaller);
+        assertEquals(smaller.layout(), after.layout());
+        assertTrue(after.epoch(near.key()) > before.epoch(near.key()), "layout-dependent masks must be recalculated");
+        assertEquals(3, before.tiles().size(), "old frame remains immutable");
+
+        state.retain(initial);
+        assertTrue(state.contains(near), "expansion also reuses existing GPU payloads");
+        assertFalse(state.contains(far), "retired tiles still need a real upload");
+    }
+
+    @Test void shrinkingHorizonDoesNotPinEvictedGpuDetailBehindAnUnuploadedParent() {
+        var state = new PredictionRenderResidency();
+        var child = tile(70, 0, 0, 1);
+        var initial = source(Map.of(child.key(), child));
+        state.retain(initial);
+        state.uploaded(child);
+        // This large parent intersects the new radius, but the old child does not.
+        var parent = tile(1, 0, 6, 2);
+        var smaller = new RenderSnapshot(Level.OVERWORLD, VssLodLayout.of(4096, 6, true, true),
+                Map.of(parent.key(), parent), Map.of());
+        state.retain(smaller);
+        assertFalse(state.contains(child), "out-of-range geometry must release even before fallback uploads");
     }
 
     @Test void uploadBudgetsLimitTimeAndBytesButAllowOneOversizedTileToProgress() {

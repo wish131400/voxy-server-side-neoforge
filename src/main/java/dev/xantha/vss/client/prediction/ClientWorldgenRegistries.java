@@ -348,6 +348,8 @@ final class ClientWorldgenRegistries {
                 // RegistryOps fall back to the client's own registry.
                 disabledCustom.add(registry.key());
                 snapshotRegistries.remove(registry.key());
+                if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
+                    dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry disabled: " + registry.key() + ": " + exception);
             }
         }
     }
@@ -366,6 +368,8 @@ final class ClientWorldgenRegistries {
                 // unbound even when this registry's own values decoded successfully.
                 disabledCustom.add(registry.key());
                 snapshotRegistries.remove(registry.key());
+                if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
+                    dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry has unresolved references: " + registry.key() + ": " + exception);
             }
         }
     }

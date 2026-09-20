@@ -180,6 +180,7 @@ pub struct SurfaceColumn {
 mod exterior;
 mod display;
 mod tint;
+mod interior;
 struct ColumnCache {
     values: HashMap<(i32, i32), Arc<Vec<SurfaceColumn>>>,
     order: std::collections::VecDeque<(i32, i32)>,
@@ -199,6 +200,7 @@ pub struct World {
     pub schedule: Option<Schedule>,
     adjustments: HashMap<(i32, i32), crate::beard::Beard>,
     columns: Mutex<ColumnCache>,
+    interior_columns: Mutex<(HashMap<(i32, i32), Arc<Vec<StateId>>>, std::collections::VecDeque<(i32, i32)>)>,
     /// Chunks served by assembling already-cached exact points instead of
     /// running `surface_region`. Diagnostic only.
     reused_chunk_builds: std::sync::atomic::AtomicU64,
@@ -333,6 +335,7 @@ impl World {
             reused_chunk_builds: std::sync::atomic::AtomicU64::new(0),
             neighbour_tops: Mutex::new(HashMap::new()),
             surface_work: Mutex::new(std::collections::VecDeque::new()),
+            interior_columns: Mutex::new((HashMap::new(), std::collections::VecDeque::new())),
             display_columns: Mutex::new(display::DisplayColumns::new(65536)),
             display_queries: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             decoration_queries: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),

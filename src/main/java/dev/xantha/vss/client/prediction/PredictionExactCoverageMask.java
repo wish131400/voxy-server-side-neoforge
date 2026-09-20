@@ -51,16 +51,14 @@ final class PredictionExactCoverageMask {
                 var bytes = MemoryUtil.memAlloc(current.columns().length);
                 try {
                     bytes.put(current.columns()).flip();
-                    int alignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
-                    GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
-                    try {
+                    try (var unpack = PredictionPixelUnpack.begin()) {
                         if (allocatedSize != current.size()) {
                             GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_R8, current.size(), current.size(),
                                     0, GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, bytes);
                             allocatedSize = current.size();
                         } else GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, current.size(), current.size(),
                                 GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, bytes);
-                    } finally { GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, alignment); }
+                    }
                 } finally { MemoryUtil.memFree(bytes); }
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
                 GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);

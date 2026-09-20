@@ -155,6 +155,10 @@ public final class PredictionIrisBridge {
             // its depth copy. The translucent hook also runs on deferred packs.
             if (!translucent) call(pipeline, "setupAndBindOpaque", viewport);
             Object framebuffer = field(pipeline, translucent ? "fbTranslucent" : "fb");
+            if (PredictionRenderCapture.active()) {
+                PredictionRenderCapture.prediction(translucent ? "water-before" : "opaque-before",
+                        GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING));
+            }
             int texture = (int) field(call(framebuffer, "getDepthTex"), "id");
             int w = (int) field(viewport, "width");
             int h = (int) field(viewport, "height");
@@ -195,6 +199,7 @@ public final class PredictionIrisBridge {
                     GL11.glGetInteger(GL11.GL_DEPTH_FUNC), w, h,
                     GL11.glGetInteger(GL45.GL_CLIP_DEPTH_MODE) == GL45.GL_ZERO_TO_ONE,
                     translucent, materialIds, imageBindings), meshSnapshot, framePlan, viewport, frameId);
+            PredictionRenderCapture.current(translucent ? "water-after" : "opaque-after");
         }
 
         void snapshotDepth(int source, int w, int h) {

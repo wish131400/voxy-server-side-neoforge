@@ -15,6 +15,10 @@ final class PredictionVegetationRuns {
     private PredictionVegetationRuns() { }
 
     static List<Face> faces(PredictionVegetation.Tile tile, int cell, IntBinaryOperator floor) {
+        return faces(tile, cell, floor, false);
+    }
+
+    static List<Face> faces(PredictionVegetation.Tile tile, int cell, IntBinaryOperator floor, boolean bottoms) {
         List<Face> faces = new ArrayList<>();
         Map<Key, Integer> last = new HashMap<>();
         // Tile cells are sorted by Y, so a run can only grow into its immediate next block.
@@ -22,6 +26,8 @@ final class PredictionVegetationRuns {
             if (!PredictionVegetation.mergeable(voxel.state(), voxel.size())) continue;
             int x = voxel.x(), z = voxel.z(), y = voxel.y();
             if (y < floor.applyAsInt(x, z)) continue;
+            if (bottoms && !tile.occupied(x, y - 1, z))
+                faces.add(new Face(x, z, y, y + 1, 5, voxel.state()));
             if (tile.exteriorFaceVisible(voxel, 0) && !tile.occupied(x, y + 1, z))
                 faces.add(new Face(x, z, y, y + 1, 0, voxel.state()));
             for (int direction = 1; direction <= 4; direction++) {

@@ -116,7 +116,7 @@ final class PredictionLodPlanner {
         int centerTileZ = Math.floorDiv((int) Math.floor(cameraZ), topBlocks);
         int reach = layout.maxDistanceBlocks() / topBlocks + 2;
         java.util.Map<PredictionTileManager.PredictionTileKey, RuntimeNode> leaves = new java.util.HashMap<>();
-        double localFineRadius = PredictionDetailBands.fineRadius(layout.maxDistanceBlocks());
+        double localFineRadius = PredictionDetailBands.fineRadius(layout.maxDistanceBlocks(), dimension);
         var candidates = new java.util.PriorityQueue<RuntimeNode>(
                 Comparator.comparingInt((RuntimeNode node) -> node.distanceSquared() <= 256D * 256 ? 0
                         : node.scopedDetail() ? 1

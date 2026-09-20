@@ -15,6 +15,7 @@ public final class PredictionQuadMesh {
     public static final int TOP = 0;
     public static final int WATER_TOP = 1;
     private static final int LOD_TEXTURE_SCALE = 0x40;
+    private static final int TERRAIN_WALL = 0x80;
 
     private final float[] positions;
     private final float[] normals;
@@ -338,6 +339,7 @@ public final class PredictionQuadMesh {
         }
         int group = water ? VssLodFaceGroup.ofFluidNormal(nx, ny, nz)
                 : VssLodFaceGroup.ofNormal(nx, ny, nz);
+        if (!water && mesh.terrainEnds != null && source < mesh.terrainEnds[cell]) group |= TERRAIN_WALL;
         WallKey key = new WallKey(rounded(y0), rounded(y2),
                 Float.floatToRawIntBits(nx), Float.floatToRawIntBits(ny),
                 Float.floatToRawIntBits(nz), colors[0], colors[1], colors[2],
@@ -450,6 +452,10 @@ public final class PredictionQuadMesh {
 
     boolean usesLodTextureScale(int quad) {
         return (groups[quad] & LOD_TEXTURE_SCALE) != 0;
+    }
+
+    boolean terrainWall(int quad) {
+        return (groups[quad] & TERRAIN_WALL) != 0;
     }
 
     /** Cell index used by non-merged geometry at coverage boundaries. */

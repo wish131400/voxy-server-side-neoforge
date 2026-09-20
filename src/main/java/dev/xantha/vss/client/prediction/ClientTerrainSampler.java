@@ -218,6 +218,30 @@ public class ClientTerrainSampler {
         return profile;
     }
 
+    /** Ceiling worlds need occupancy throughout the column, not an exterior heightfield. */
+    boolean interiorTerrain() {
+        return profile.dimension().equals(net.minecraft.world.level.Level.NETHER.location());
+    }
+
+    int interiorMinY() { return floorY; }
+
+    ClientColumnSample resolveInterior(ClientColumnSample sample, int x, int z) {
+        return surfaceMaterials == null ? sample : surfaceMaterials.resolveInterior(sample, x, z, this::surfaceY);
+    }
+
+    ClientColumnSample sampleInterior(int x, int z) {
+        if (generator == null || finalDensity == null) throw new IllegalStateException("No interior density backend");
+        var registry = net.minecraft.core.registries.BuiltInRegistries.BLOCK;
+        // Minecraft's interpolated density column; no chunk, structures or decoration generation.
+        var column = generator.getBaseColumn(x, z, heights, randomState);
+        return resolveInterior(PredictionColumnVolume.sample(floorY, ceilingY - floorY + 1,
+                y -> column.getBlock(y).isAir() ? -1 : registry.getId(column.getBlock(y).getBlock()),
+                block -> {
+                    var state = registry.byId(block).defaultBlockState();
+                    return state.getFluidState().isEmpty() ? 0 : state.is(Blocks.LAVA) ? 2 : 1;
+                }).asSample(), x, z);
+    }
+
     /** Returns a stable surface estimate in absolute block coordinates. */
     public int surfaceY(int blockX, int blockZ) {
         if (customSurface != null) {

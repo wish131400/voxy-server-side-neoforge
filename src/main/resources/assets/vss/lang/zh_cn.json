@@ -1,4 +1,7 @@
 {
+  "vss.command.render_capture.started": "VSS：关闭聊天并保持异常部位在画面内，3 秒后采集一帧；采集瞬间可能短暂停顿。",
+  "vss.command.render_capture.done": "VSS 渲染诊断已保存：%s",
+  "vss.command.render_capture.failed": "VSS 渲染诊断失败：%s",
   "vss.config.server.title": "VSS 本机配置",
   "vss.config.server.note": "只修改本机客户端/单人内置服务端；专用服务器请在服务器上用 /vss 或配置文件。",
   "vss.config.server.enabled": "启用服务端远景",

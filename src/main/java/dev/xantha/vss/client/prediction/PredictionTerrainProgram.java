@@ -60,6 +60,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private float boundSpacing = Float.NaN;
     private int boundCellAxis = -1, boundAverage = -1;
     private boolean morphActive;
+    private int boundaryReplacement = -1;
 
     private PredictionTerrainProgram() {
         this(TERRAIN_VERTEX, TERRAIN_FRAGMENT);
@@ -158,6 +159,18 @@ final class PredictionTerrainProgram implements AutoCloseable {
         GL20.glUniform1f(horizonDistance, blocks);
     }
 
+    void setBoundaryReplacement(boolean enabled) {
+        int value = enabled ? 1 : 0;
+        if (boundaryReplacement != value) {
+            GL20.glUniform1i(program.uniform("ReplaceBoundaryWalls"), value);
+            boundaryReplacement = value;
+        }
+    }
+
+    void setRealRenderDistance(float blocks) {
+        GL20.glUniform1f(program.uniform("RealRenderDistance"), blocks);
+    }
+
     void bindExactCoverage(PredictionExactCoverageMask mask, ClientLevel level,
                            net.minecraft.world.phys.Vec3 camera, int radius) {
         mask.bind(level, camera, radius, exactCoverage, exactCoverageGrid);
@@ -238,6 +251,9 @@ final class PredictionTerrainProgram implements AutoCloseable {
     void bindVoxyDepth(PredictionVoxyDepth.Frame frame, Matrix4f mainMvp) {
         GL20.glUniform1i(program.uniform("VoxyDepthAvailable"), frame == null ? 0 : 1);
         if (frame == null) return;
+        // The borrowed texture keeps Voxy's clip convention, independently of Minecraft.
+        GL20.glUniform3f(program.uniform("VoxyDepthTransform"), frame.zeroToOne() ? 1 : 2,
+                frame.zeroToOne() ? 0 : -1, frame.reverseZ() ? 1 : -1);
         PredictionGlState.activeTexture(GL13.GL_TEXTURE5);
         PredictionGlState.bindTexture(frame.texture());
         org.lwjgl.opengl.GL11.glBindTexture(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, frame.texture());
@@ -317,6 +333,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             flat out vec3 vFaceNormal;
             flat out float vSurfaceVisible;
             flat out uint vRealBoundary;
+            flat out uint vTerrainWall;
 
             // One packed quad spans three RGBA32UI texels: texel A holds the
             // x/z words, texel B the y words, attributes and tint, and texel C
@@ -360,6 +377,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 uint attr = texelB.z;
                 vCell = texelC.x;
                 vRealBoundary = (texelC.y >> 25u) & 3u;
+                vTerrainWall = (texelC.y >> 27u) & 1u;
                 vCellLocal = (texelC.y & 0x01000000u) == 0u ? 1.0 : 0.0;
                 bool fineCoordinates = (attr & (1u << 20)) != 0u;
                 uint fluid = (attr >> 22) & 3u;
@@ -410,12 +428,14 @@ final class PredictionTerrainProgram implements AutoCloseable {
              relative = local + TileOffset;
                 vDistance = length(relative.xz);
                 vSprite = float(sprite);
-                vMaterialValid = UseAverage == 0 && sprite > 0u && int(sprite) < textureSize(SpriteTable, 0).x ? 1 : 0;
+                vMaterialValid = (UseAverage == 0 || (attr & (1u << 27)) != 0u)
+                        && sprite > 0u && int(sprite) < textureSize(SpriteTable, 0).x ? 1 : 0;
                 vMaterialAverage = vec4(1.0);
                 vMaterialRect = vec4(0.0);
                 if (vMaterialValid != 0) {
                     vMaterialAverage = texelFetch(SpriteTable, ivec2(int(sprite), 1), 0);
                     vMaterialRect = texelFetch(SpriteTable, ivec2(int(sprite), 0), 0);
+                    if (UseAverage != 0 && vMaterialRect.x >= 0.0) vMaterialValid = 0;
                 }
                 uint cornerColor = corner == 0 ? texelB.w
                         : corner == 1 ? texelC.y : corner == 2 ? texelC.z : texelC.w;
@@ -424,7 +444,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                         float((cornerColor >> 16) & 255u) / 255.0,
                         float((cornerColor >> 8) & 255u) / 255.0,
                         float(cornerColor & 255u) / 255.0,
-                        DirectionalTint[face]);
+                        vMaterialValid != 0 && vMaterialRect.x < 0.0 ? 1.0 : DirectionalTint[face]);
                 vCutout = (attr & (1u << 26)) != 0u ? 1.0 : 0.0;
                 vWater = float(fluid);
                 gl_Position = ProjMat * ModelViewMat * vec4(relative, 1.0);
@@ -466,10 +486,13 @@ final class PredictionTerrainProgram implements AutoCloseable {
             uniform sampler2D ExactCoverage;
             uniform vec3 ExactCoverageGrid; // camera-relative origin X/Z and column count
             uniform float HorizonDistance;
+            uniform float RealRenderDistance;
+            uniform bool ReplaceBoundaryWalls;
             """ + PredictionFogBridge.GLSL + """
             #ifndef VSS_IRIS
             uniform sampler2D VoxyDepth;
             uniform bool VoxyDepthAvailable;
+            uniform vec3 VoxyDepthTransform; // window-to-clip scale, bias, direction toward near
             uniform vec4 VoxyDistanceNumerator;
             uniform vec4 VoxyDistanceDenominator;
             #endif
@@ -500,6 +523,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             flat in vec3 vFaceNormal;
             flat in float vSurfaceVisible;
             flat in uint vRealBoundary;
+            flat in uint vTerrainWall;
              in vec2 tileUv;
              in vec2 localXZ;
              in vec3 relative;
@@ -545,6 +569,12 @@ final class PredictionTerrainProgram implements AutoCloseable {
                  // coverage. Readiness alone never removes a prediction tile;
                  // missing real pixels retain their fallback this frame.
                  vec3 realPosition = ViewOrigin + (relative - ViewOrigin) * (realDistance / predictedDistance);
+                 // Cached columns are not proof of visibility beyond the renderer's range.
+                 if (RealRenderDistance >= 0.0 && (dot(relative.xz, relative.xz) > RealRenderDistance * RealRenderDistance
+                         || dot(realPosition.xz, realPosition.xz) > RealRenderDistance * RealRenderDistance)) return false;
+                 // A different mountain along the same ray must not erase foreground terrain.
+                 vec2 separation = abs(realPosition.xz - relative.xz);
+                 if (max(separation.x, separation.y) > min(64.0, max(32.0, Spacing * 2.0))) return false;
                  if (hasRealColumn(relative.xz) && hasRealColumn(realPosition.xz)) return true;
                  return all(greaterThanEqual(relative.xz, RealCoverageBounds.xy))
                          && all(lessThan(relative.xz, RealCoverageBounds.zw))
@@ -577,10 +607,19 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // must stay on the owning column, including at the tile edge.
                 if (vCoverageAxis == 1u) cell.x = sourceCell.x;
                 if (vCoverageAxis == 2u) cell.y = sourceCell.y;
-                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis
-                        || cell.y >= CellAxis
-                        || texelFetch(Yield, cell, 0).r < 0.5) {
-                    discard;
+                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis || cell.y >= CellAxis) discard;
+                float ownership = texelFetch(Yield, cell, 0).r;
+                if (ownership < 0.5) discard;
+                // Only worker-tagged ground walls can be replaced by a current seam.
+                if (ReplaceBoundaryWalls && vTerrainWall != 0u && vWater < 0.5 && vCutout < 0.5 && vModelUv < 0.5
+                        && vRealBoundary == 0u && vCoverageAxis != 0u && dot(vFaceNormal, vFaceNormal) > 0.5) {
+                    int flags = int(round(ownership * 255.0));
+                    bool xNormal = vCoverageAxis == 1u;
+                    float plane = xNormal ? localXZ.x : localXZ.y;
+                    float origin = float(xNormal ? cell.x : cell.y) * Spacing;
+                    int edge = abs(plane - origin) < 0.01 ? (xNormal ? 0 : 2)
+                            : abs(plane - origin - Spacing) < 0.01 ? (xNormal ? 1 : 3) : -1;
+                    if (edge >= 0 && (flags & (1 << edge)) != 0) discard;
                 }
                 // Compare in the main target's depth space. Equal/quantized
                 // depths belong to Voxy; a closer prediction still occludes
@@ -622,7 +661,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                     float raw = texelFetch(VoxyDepth, ivec2(gl_FragCoord.xy), 0).r;
                     if (raw > 0.0 && raw < 1.0) {
                         vec2 uv = gl_FragCoord.xy / vec2(textureSize(VoxyDepth, 0));
-                        vec4 clip = vec4(uv * 2.0 - 1.0, raw * 2.0 - 1.0, 1.0);
+                        vec4 clip = vec4(uv * 2.0 - 1.0, raw * VoxyDepthTransform.x + VoxyDepthTransform.y, 1.0);
                         float denominator = dot(VoxyDistanceDenominator, clip);
                         if (abs(denominator) > 1e-10) {
                             realDistance = dot(VoxyDistanceNumerator, clip) / denominator;
@@ -635,7 +674,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
                             // percentage that would hide a distinct riverbed.
                             if (originalVoxyDepth && vWater > 0.5) {
                                 vec4 nearClip = clip;
-                                nearClip.z = max(-1.0, clip.z - 4.0 / 16777215.0);
+                                nearClip.z = clamp(clip.z + VoxyDepthTransform.z * VoxyDepthTransform.x
+                                        * 2.0 / 16777215.0, VoxyDepthTransform.y, 1.0);
                                 float nearDenominator = dot(VoxyDistanceDenominator, nearClip);
                                 if (abs(nearDenominator) > 1e-10) {
                                     float nearDistance = dot(VoxyDistanceNumerator, nearClip) / nearDenominator;
@@ -701,7 +741,13 @@ final class PredictionTerrainProgram implements AutoCloseable {
                     materialTint = tintRatio;
                     vec4 rect = vMaterialRect;
                     vec2 size = rect.zw - rect.xy;
-                    if (detailWeight > 0.0
+                    if (rect.x < 0.0) {
+                        ivec2 pixel = ivec2(clamp(fract(tileUv) * 16.0, vec2(0.0), vec2(15.0)));
+                        albedo = texelFetch(SpriteTable, ivec2(pixel.x, 4 + int(rect.y) * 16 + pixel.y), 0);
+                        if (albedo.a < 0.1) discard;
+                        materialTint = vec3(1.0);
+                        lightmap = vec3(1.0);
+                    } else if (detailWeight > 0.0
                             && size.x > 0.0 && size.y > 0.0) {
                         vec2 uv = spriteUv(rect.xy, rect.zw, tileUv, uvDx, uvDy);
                         materialUv = uv;
@@ -725,7 +771,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 uint face = abs(vFaceNormal.y) > 0.5 ? 1u : abs(vFaceNormal.x) > 0.5
                         ? (vFaceNormal.x > 0.0 ? 5u : 4u) : (vFaceNormal.z > 0.0 ? 3u : 2u);
                 uint customId = VssMaterialIds[clamp(int(vSprite), 0, 255)];
-                vec2 lm = lava ? vec2(248.0/256.0) : vec2(8.0/256.0, (vSkyLight * 16.0 + 8.0)/256.0);
+                vec2 lm = lava || (vMaterialValid != 0 && vMaterialRect.x < 0.0)
+                        ? vec2(248.0/256.0) : vec2(8.0/256.0, (vSkyLight * 16.0 + 8.0)/256.0);
                 albedo.a = max(albedo.a, OpaqueAlpha);
                 albedo.rgb /= max(materialTint, vec3(0.004));
                 voxy_emitFragment(VoxyFragmentParameters(albedo, floor(tileUv), materialUv,

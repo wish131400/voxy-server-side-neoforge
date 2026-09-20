@@ -22,7 +22,17 @@ public record ClientColumnSample(
         int surfaceBottom,
         int lowerTop,
         int lowerBottom,
-        int spanFloor) {
+        int spanFloor,
+        PredictionColumnVolume volume) {
+
+    public ClientColumnSample(int surfaceY, int fluidY, int biomeIndex, int topBlockIndex,
+            int structureIndex, int treeKind, int treeDensity, int treeHeight, int fluid, int flags,
+            int groundFeatureKind, int underBlockIndex, int deepBlockIndex, int surfaceBottom,
+            int lowerTop, int lowerBottom, int spanFloor) {
+        this(surfaceY, fluidY, biomeIndex, topBlockIndex, structureIndex, treeKind, treeDensity,
+                treeHeight, fluid, flags, groundFeatureKind, underBlockIndex, deepBlockIndex,
+                surfaceBottom, lowerTop, lowerBottom, spanFloor, null);
+    }
 
     public static final int NO_SPAN = Short.MIN_VALUE;
     public static final int NO_BLOCK = 0xFFFF;
@@ -55,7 +65,7 @@ public record ClientColumnSample(
     ClientColumnSample withoutVegetationHints() {
         return new ClientColumnSample(surfaceY, fluidY, biomeIndex, topBlockIndex,
                 structureIndex, 0, 0, 0, fluid, flags & ~FLAG_TREE_HERE, 0,
-                underBlockIndex, deepBlockIndex, surfaceBottom, lowerTop, lowerBottom, spanFloor);
+                underBlockIndex, deepBlockIndex, surfaceBottom, lowerTop, lowerBottom, spanFloor, volume);
     }
 
     public boolean hasLowerSpan() {

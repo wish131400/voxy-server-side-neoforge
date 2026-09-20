@@ -89,8 +89,10 @@ final class PredictionRenderTarget implements AutoCloseable {
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12Compat.CLAMP_TO_EDGE);
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12Compat.CLAMP_TO_EDGE);
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL14Compat.TEXTURE_COMPARE_MODE, GL11.GL_NONE);
-        GlStateManager._texImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_DEPTH_COMPONENT32F,
-                width, height, 0, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, null);
+        try (var unpack = PredictionPixelUnpack.begin()) {
+            GlStateManager._texImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_DEPTH_COMPONENT32F,
+                    width, height, 0, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, null);
+        }
         GlStateManager._bindTexture(0);
 
         GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);

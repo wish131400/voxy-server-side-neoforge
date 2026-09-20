@@ -40,8 +40,12 @@ final class PredictionRenderGeometry {
     private List<Visible> entries=List.of();
     private Map<PredictionTileManager.PredictionTileKey,Visible> cached=Map.of();
     private final ArrayList<Visible> visible=new ArrayList<>();
+    private Vec3 residentCamera;
+    private double residentHorizon;
+    private boolean residentSorted;
     void update(PredictionTileManager.RenderSnapshot snapshot) {
         if(previous==snapshot) return;
+        residentCamera = null;
         var next=new HashMap<PredictionTileManager.PredictionTileKey,Visible>();
         var ordered=new ArrayList<Visible>(snapshot.tiles().size());
         for(var tile:snapshot.tiles().values()) {
@@ -52,6 +56,14 @@ final class PredictionRenderGeometry {
         cached=next;entries=ordered;previous=snapshot;
     }
     List<Visible> visible(Vec3 camera,Frustum frustum,double horizon) {
+        return visible(camera, frustum, horizon, true);
+    }
+    List<Visible> resident(Vec3 camera, double horizon) { return visible(camera, null, horizon, false); }
+    private List<Visible> visible(Vec3 camera,Frustum frustum,double horizon,boolean sorted) {
+        if (frustum == null && camera.equals(residentCamera) && horizon == residentHorizon && sorted == residentSorted) return visible;
+        residentCamera = frustum == null ? camera : null;
+        residentHorizon = horizon;
+        residentSorted = sorted;
         visible.clear();
         for(var item:entries) {
             var entry=item.geometry();
@@ -61,8 +73,12 @@ final class PredictionRenderGeometry {
             if(payload!=null && payload.downFaces()) item.faces |= 1 << VssLodFaceGroup.HORIZONTAL;
             visible.add(item);
         }
-        visible.sort(Comparator.comparingDouble(Visible::distance));
+        if (sorted) visible.sort(Comparator.comparingDouble(Visible::distance));
         return visible;
     }
-    void clear(){previous=null;entries=List.of();cached=Map.of();visible.clear();}
+    boolean inFrustum(PredictionTileManager.PredictionTileKey key, Frustum frustum) {
+        var entry = cached.get(key);
+        return entry != null && (frustum == null || frustum.isVisible(entry.geometry().culling()));
+    }
+    void clear(){previous=null;residentCamera=null;entries=List.of();cached=Map.of();visible.clear();}
 }

@@ -50,6 +50,14 @@ and native display vegetation share the same column records. Query statistics
 are reported on demand rather than printed per feature. Final plant caches use
 a separate policy bit; exact terrain caches remain unchanged.
 
+ABI 6 adds `interiorColumns` and decoration policy 2 (complete lazy interior
+columns). Nether surfaces evaluate every solid run, and supported cave features
+share native edits with the Java compatibility stream. `columns` retains its
+uncoated density semantics. Block definitions now carry default-state
+replaceability for huge-fungus placement; absent metadata causes Java fallback
+instead of guessing. See `docs/nether-end-prediction.md` for support limits and
+the paired surface/decoration/structure fixtures.
+
 Cross compilation from Windows uses Rust target standard libraries and pinned
 Zig 0.13.0 / cargo-zigbuild 0.23.4, through `build-cross-platform.ps1 -Package`.
 Install the tools with `python -m pip install --target build/cross-tools ziglang==0.13.0 cargo-zigbuild==0.23.4`.

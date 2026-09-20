@@ -31,6 +31,24 @@ final class PredictionGpuTile implements AutoCloseable {
     private PredictionPackedMesh packed;
     private boolean[] coverage;
     private boolean[] publishedCoverage;
+    private byte[] boundaryCoverage;
+
+    int updateBoundaryCoverage(byte[] mask) {
+        if (mask == null || packed == null) return 0;
+        if (Arrays.equals(boundaryCoverage, mask)) { boundaryCoverage = mask; return 0; }
+        var bytes = MemoryUtil.memAlloc(mask.length);
+        try (var unpack = PredictionPixelUnpack.begin()) {
+            bytes.put(mask).flip();
+            PredictionGlState.bindTexture(yieldTexture);
+            GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, packed.cellAxis(), packed.cellAxis(),
+                    GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, bytes);
+            boundaryCoverage = mask;
+        } finally {
+            PredictionGlState.bindTexture(0);
+            MemoryUtil.memFree(bytes);
+        }
+        return mask.length;
+    }
 
     /** Renderer-only contract: published ownership arrays are never mutated. */
     int updatePublishedCoverage(boolean[] allowed) {
@@ -100,9 +118,7 @@ final class PredictionGpuTile implements AutoCloseable {
         }
         int axis = packed.cellAxis();
         ByteBuffer pixels = MemoryUtil.memAlloc(axis * axis);
-        int alignment = GL11.glGetInteger(GL11.GL_UNPACK_ALIGNMENT);
-        GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, 1);
-        try {
+        try (var unpack = PredictionPixelUnpack.begin()) {
             for (int cell = 0; cell < axis * axis; cell++) {
                 pixels.put((byte) (allowed[cell] ? 255 : 0));
             }
@@ -131,9 +147,9 @@ final class PredictionGpuTile implements AutoCloseable {
             }
             PredictionGlState.bindTexture(0);
             coverage = allowed.clone();
+            boundaryCoverage = null;
             return axis * axis;
         } finally {
-            GL11.glPixelStorei(GL11.GL_UNPACK_ALIGNMENT, alignment);
             MemoryUtil.memFree(pixels);
         }
     }
@@ -218,6 +234,7 @@ final class PredictionGpuTile implements AutoCloseable {
         packed = null;
         coverage = null;
         publishedCoverage = null;
+        boundaryCoverage = null;
         meshRevision = Long.MIN_VALUE;
     }
 

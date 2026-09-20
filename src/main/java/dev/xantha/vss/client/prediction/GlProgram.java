@@ -43,7 +43,12 @@ final class GlProgram implements AutoCloseable {
     }
 
     int uniform(String name) {
-        return uniforms.computeIfAbsent(name, key -> GlStateManager._glGetUniformLocation(id, key));
+        Integer location = uniforms.get(name);
+        if (location == null) {
+            location = GlStateManager._glGetUniformLocation(id, name);
+            uniforms.put(name, location);
+        }
+        return location;
     }
 
     void use() {

@@ -15,13 +15,20 @@ final class PredictionDetailBands {
                 dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionFineDistanceBlocks)));
     }
 
+    static int fineRadius(int horizon, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {
+        int normal = fineRadius(horizon);
+        // End islands begin beyond a wide void. Expand detail, not the horizon or worker pool.
+        return dimension.equals(net.minecraft.world.level.Level.END)
+                ? Math.min(horizon, Math.min(4096, normal + normal / 2)) : normal;
+    }
+
     static int cellAxis(PredictionTileKey key, VssLodLayout layout, double x, double y, double z,
                         VssLodFocus focus, double pixelsPerBlock, double minY, double maxY) {
         if (PredictionWorkOrder.scoped(key, layout, focus)) return 64;
         double vertical = Math.max(0, Math.max(minY - y, y - maxY));
         int span = layout.tileBlocks(key.lod());
         double horizontal = Math.hypot((key.tileX() + .5) * span - x, (key.tileZ() + .5) * span - z);
-        if (Math.hypot(horizontal, vertical) < fineRadius(layout.maxDistanceBlocks())) return 64;
+        if (Math.hypot(horizontal, vertical) < fineRadius(layout.maxDistanceBlocks(), key.dimension())) return 64;
         double distance = Math.sqrt(PredictionWorkOrder.distanceSquared(key, layout, x, z) + vertical * vertical);
         double projected = VssLodProjection.projectedSize(span, Math.max(1, distance), pixelsPerBlock);
         return projectedCellAxis(projected, layout.pixelThreshold() / VssLodLayout.TILE_QUADS);
@@ -43,7 +50,7 @@ final class PredictionDetailBands {
         // Assign boundary tiles by their centres. Using the closest corner
         // would let a large middle-band tile swallow the entire outer ring.
         double distance = Math.hypot((key.tileX() + .5) * span - x, (key.tileZ() + .5) * span - z);
-        return cellAxis(distance, layout.maxDistanceBlocks());
+        return distance < fineRadius(layout.maxDistanceBlocks(), key.dimension()) ? 64 : 32;
     }
 
     static boolean needsBandSplit(double minDistance, double maxDistance, int span, int horizon) {

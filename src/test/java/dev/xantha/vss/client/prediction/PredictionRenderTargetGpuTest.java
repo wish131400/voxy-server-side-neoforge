@@ -187,7 +187,9 @@ class PredictionRenderTargetGpuTest {
                 verifyIrisState();
                 verifyAsynchronousTimings();
                 verifyCoverageTextureReuse();
+                verifyForeignPixelUnpackState();
                 verifyPublishedCoverageAndSeamBatch();
+                verifyIncrementalScene();
                 verifySharedVoxyFog(vao);
             } finally {
                 glDeleteVertexArrays(vao);
@@ -408,6 +410,7 @@ class PredictionRenderTargetGpuTest {
             }
             verifyClosedCliffDuringTransition(terrain, target, main, buffers, textures, iris);
             verifyMixedLodSeams(terrain, target, main, buffers, textures, iris);
+            verifyReplacedMargin(terrain, target, main, buffers, textures, iris);
             verifyRealBoundarySeams(terrain, target, main, buffers, textures, iris);
             verifyUnverifiedCliffAndConfirmedCave(terrain, target, main, buffers, textures, iris);
             verifyWideTerrainEdge(terrain, target, main, buffers, iris);
@@ -490,6 +493,17 @@ class PredictionRenderTargetGpuTest {
                 glDrawArrays(GL_TRIANGLES, 0, 3);
                 ByteBuffer color = BufferUtils.createByteBuffer(4); glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, color);
                 assertEquals(166, color.get(0) & 255, 1, "the configured prediction horizon still fades into fog");
+                for (int realDistance : new int[]{8608, 2048, 8608}) {
+                    var fog = VssLodFog.shared(4096, realDistance, 512, true);
+                    PredictionFogBridge.bind(glGetInteger(GL_CURRENT_PROGRAM), fog.shaderStart(), fog.shaderEnd(),
+                            512, fog.aerialDensity(), new float[]{.65F,.75F,.9F,1});
+                    glUniform3f(program.uniform("SurfacePoint"), 5000, -4700, 0);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, color);
+                    if (realDistance > 4096) assertTrue((color.get(0) & 255) < 130,
+                            "Voxy beyond prediction must retain visible terrain color when its view is enlarged");
+                    else assertEquals(166, color.get(0) & 255, 1, "fog must follow the reduced display range");
+                }
                 System.out.println("PASS: shared normal Voxy/prediction fog at heights 0/4700/20000, horizon fade and original Voxy fallback");
             } finally {
                 target.destroyBuffers(); com.mojang.blaze3d.platform.TextureUtil.releaseTextureId(texture);
@@ -542,6 +556,7 @@ class PredictionRenderTargetGpuTest {
 
     private static void verifyReadyColumnHandoff(PredictionTerrainProgram terrain, TextureTarget target,
                                                 TextureTarget main, int[] buffers, boolean iris) {
+        terrain.setRealRenderDistance(65536);
         int y = 32768 + 96 * 4;
         int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
                 1, 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
@@ -578,6 +593,12 @@ class PredictionRenderTargetGpuTest {
                 terrain.setRealCoverage(-10000, -10000, 10000, 10000);
                 assertEquals(0, terrainPixels().get(center) & 255,
                         "ready real ground must win a 32-block height disagreement from above; Iris=" + iris + " height=" + height);
+                terrain.setRealRenderDistance(0);
+                assertTrue((terrainPixels().get(center) & 255) > 100,
+                        "shrinking the real render distance immediately restores fallback despite old coverage");
+                terrain.setRealRenderDistance(65536);
+                assertEquals(0, terrainPixels().get(center) & 255,
+                        "restoring displayed real coverage takes ownership without a settling window");
                 terrain.setRealCoverage(5000, 5000, 6000, 6000);
                 assertTrue((terrainPixels().get(center) & 255) > 100, "outside the ready frontier prediction stays visible");
                 glUniform3f(exactGrid, -1024, -1024, 128);
@@ -612,6 +633,10 @@ class PredictionRenderTargetGpuTest {
                 glClearDepth(iris ? 1.0 / (height + 4000) : VssLodProjection.distanceToVanillaDepth(height + 4000, projection));
                 glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
                 assertTrue((terrainPixels().get(center) & 255) > 100, "unrelated distant real columns cannot erase foreground prediction");
+                terrain.setRealCoverage(-100000, -100000, 100000, 100000);
+                glUniform3f(exactGrid, -1024, -1024, 128);
+                assertTrue((terrainPixels().get(center) & 255) > 100,
+                        "even two stored columns must not let a distant mountain erase foreground prediction");
                 glUniform3f(exactGrid, 0, 0, 0);
             }
         } finally { terrain.setRealCoverage(0, 0, 0, 0); glUniform3f(exactGrid, 0, 0, 0); glDeleteTextures(exactTexture); }
@@ -626,13 +651,15 @@ class PredictionRenderTargetGpuTest {
         glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, water, GL_STATIC_DRAW);
         int originalDepth = texture(5, GL_R32F, 64, 64, GL_RED, new float[4096]);
         try {
+            for (boolean zeroToOne : new boolean[]{false, true}) for (boolean reverseZ : new boolean[]{false, true})
             for (float fov : new float[]{70, 7, 1}) for (float height : new float[]{65.6F, 68.1F, 128, 181.07F, 4700, 4701.37F, 8191.3F})
                     for (double pitch : height < 200 ? new double[]{Math.PI / 2 - .013, fov < 10 ? .1 : .7}
                             : new double[]{Math.PI / 2 - .013}) {
                 var vanilla = new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, 320);
                 var projection = VssLodProjection.of(vanilla);
                 var view = new Matrix4f().lookAlong(0, (float) -Math.sin(pitch), (float) -Math.cos(pitch), 0, 1, 0);
-                var voxyMvp = new Matrix4f().perspective((float) Math.toRadians(fov), 1, 16, 131072).mul(view);
+                var voxyMvp = new Matrix4f().perspective((float) Math.toRadians(fov), 1,
+                        reverseZ ? 131072 : 16, reverseZ ? 16 : 131072, zeroToOne).mul(view);
                 var mainMvp = new org.joml.Matrix4d(vanilla).mul(new org.joml.Matrix4d(view));
                 var inverse = new org.joml.Matrix4d(voxyMvp).invert();
                 terrain.setCamera(view, projection.matrix()); terrain.setTile(-8192, -height, -8192, 16384, 1, false);
@@ -644,7 +671,7 @@ class PredictionRenderTargetGpuTest {
                         var ray = inverse.transformProject(new org.joml.Vector3d((px + .5) / 32 - 1, (py + .5) / 32 - 1, 0));
                         ray.mul((64 - height - below) / ray.y);
                         var clip = new org.joml.Matrix4d(voxyMvp).transformProject(new org.joml.Vector3d(ray));
-                        depths[py * 64 + px] = (float) (Math.rint((clip.z * .5 + .5) * 16777215) / 16777215);
+                        depths[py * 64 + px] = (float) (Math.rint((zeroToOne ? clip.z : clip.z * .5 + .5) * 16777215) / 16777215);
                         var mainClip = mainMvp.transformProject(new org.joml.Vector3d(ray));
                         // Match Voxy's final far clamp, but retain actual depth
                         // inside vanilla's range instead of forcing every case
@@ -659,13 +686,14 @@ class PredictionRenderTargetGpuTest {
                     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, mainDepths);
                     target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
                     terrain.bindVoxyDepth(new PredictionVoxyDepth.Frame(originalDepth, 0, 64, 64,
-                            net.minecraft.world.phys.Vec3.ZERO, new Matrix4f(voxyMvp).invert()), new Matrix4f(vanilla).mul(view));
+                            net.minecraft.world.phys.Vec3.ZERO, new Matrix4f(voxyMvp).invert(), zeroToOne, reverseZ), new Matrix4f(vanilla).mul(view));
                     ByteBuffer pixels = terrainPixels();
                     if (height == 4700 && fov == 70 && below == 0) saveHandoffPixels(fluid ? "high-water" : "seabed", pixels);
                     int visible = 0;
                     for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++)
                         if ((pixels.get((py * 64 + px) * 4) & 255) > 50) visible++;
-                    System.out.println("PLANAR_HANDOFF fluid=" + fluid + " fov=" + fov + " height=" + height + " pitch=" + pitch + " realBelow=" + below + " visible=" + visible + "/2304");
+                    System.out.println("PLANAR_HANDOFF fluid=" + fluid + " zeroToOne=" + zeroToOne + " reverseZ=" + reverseZ
+                            + " fov=" + fov + " height=" + height + " pitch=" + pitch + " realBelow=" + below + " visible=" + visible + "/2304");
                     if (below == 0) assertEquals(0, visible, "coincident Voxy surface must win every pixel; fluid=" + fluid);
                     else assertEquals(2304, visible, "a distinct background surface must not erase foreground prediction; fluid=" + fluid);
                 }
@@ -746,10 +774,12 @@ class PredictionRenderTargetGpuTest {
         try {
         for (float fov : new float[]{70, 7}) {
             for (float farPlane : new float[]{256, 1024}) {
+            for (boolean zeroToOne : new boolean[]{false, true}) for (boolean reverseZ : new boolean[]{false, true}) {
                 var vanilla = new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, farPlane);
                 var projection = VssLodProjection.of(vanilla);
                 var view = new Matrix4f().lookAlong(0, -1, 0, 0, 0, -1);
-                var voxyProjection = new Matrix4f().perspective((float) Math.toRadians(fov), 1, 16, 131072);
+                var voxyProjection = new Matrix4f().perspective((float) Math.toRadians(fov), 1,
+                        reverseZ ? 131072 : 16, reverseZ ? 16 : 131072, zeroToOne);
                 terrain.setCamera(view, projection.matrix());
                 terrain.setTile(-256, -(96 + 2048), -256, 512, 1, false);
                 main.bindWrite(true);
@@ -758,29 +788,30 @@ class PredictionRenderTargetGpuTest {
                 target.bindWrite(true);
                 terrain.bindMainDepth(main.getDepthTextureId(), projection);
                 int center = (32 * 64 + 32) * 4;
-                for (int realDistance : new int[]{8192, 2048, 1536}) {
+                for (int realDistance : new int[]{8192, 3000, 2048, 1536}) {
                     float[] depths = new float[64 * 64];
-                    java.util.Arrays.fill(depths, (float) VssLodProjection.distanceToVanillaDepth(
-                            realDistance, VssLodProjection.of(voxyProjection)));
+                    float ndc = -voxyProjection.m22() + voxyProjection.m32() / realDistance;
+                    java.util.Arrays.fill(depths, zeroToOne ? ndc : ndc * .5F + .5F);
                     RenderSystem.activeTexture(GL_TEXTURE5);
                     glBindTexture(GL_TEXTURE_2D, originalDepth);
                     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_RED, GL_FLOAT, depths);
                     terrain.bindVoxyDepth(new PredictionVoxyDepth.Frame(originalDepth, 0, 64, 64,
-                                    net.minecraft.world.phys.Vec3.ZERO, new Matrix4f(voxyProjection).mul(view).invert()),
+                                    net.minecraft.world.phys.Vec3.ZERO, new Matrix4f(voxyProjection).mul(view).invert(), zeroToOne, reverseZ),
                             new Matrix4f(vanilla).mul(view));
                     int red = terrainPixels().get(center) & 255;
                     if (realDistance > 2048) assertTrue(red > 100,
-                        "prediction at 2048 blocks must cover Voxy at 8192 despite clamped main depth; far="
-                                + farPlane + ", FOV=" + fov);
+                        "prediction at 2048 must cover Voxy at " + realDistance + "; zeroToOne=" + zeroToOne
+                                + ", reverseZ=" + reverseZ + ", far=" + farPlane + ", FOV=" + fov);
                     else assertEquals(0, red, "closer or coincident real Voxy must retain ownership beyond vanilla far plane");
                 }
+            }
             }
         }
         } finally {
             terrain.bindVoxyDepth(null, new Matrix4f());
             com.mojang.blaze3d.platform.TextureUtil.releaseTextureId(originalDepth);
         }
-        System.out.println("PASS: original Voxy depth orders 1536/2048/8192-block surfaces beyond vanilla far=256/1024, FOV=70/7");
+        System.out.println("PASS: original Voxy depth orders 1536/2048/3000/8192-block surfaces, both clip ranges and depth directions, far=256/1024, FOV=70/7");
     }
 
     private static void verifyClosedCliffDuringTransition(PredictionTerrainProgram terrain,
@@ -912,6 +943,52 @@ class PredictionRenderTargetGpuTest {
         System.out.println("PASS: mixed 2/4-block LOD seam reproduces sky leak before stitching and closes it at FOV=70/7 (Iris=" + iris + ")");
     }
 
+    private static void verifyReplacedMargin(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, int[] textures, boolean iris) {
+        var fine = PredictionLodSeamsTest.wetTile(-1, -1, 2, 64, 0, 180);
+        var neighbor = PredictionLodSeamsTest.tile(0, -1, 4, 68);
+        var surface = PredictionLodSeamsTest.surface(fine);
+        var surfaces = java.util.List.of(surface, PredictionLodSeamsTest.surface(neighbor));
+        var seams = new PredictionLodSeams();
+        for (float fov : new float[]{70, 7}) {
+            var projection = VssLodProjection.of(new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, 65536));
+            terrain.setCamera(new Matrix4f().lookAlong(1, 0, 0, 0, 1, 0), projection.matrix());
+            if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+            main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+            target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+            RenderSystem.enableDepthTest(); RenderSystem.depthFunc(GL_GEQUAL); RenderSystem.depthMask(true);
+            var pixel = BufferUtils.createByteBuffer(4);
+            for (int phase = 0; phase < 4; phase++) {
+                seams.update(phase % 2 == 0 ? java.util.List.of(surface) : surfaces);
+                glClearColor(1, 0, 0, 1); glClearDepth(0); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                drawSeamFixture(terrain, surface, fine.mesh().gpuPayload(), buffers[2], -40, seams.boundaryMask(fine.key()));
+                glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+                if (phase % 2 == 0) assertTrue((pixel.get(1) & 255) > 20, "missing neighbor retains original margin");
+                else assertEquals(0, pixel.get(1) & 255, "current neighbor removes stale tall margin; Iris=" + iris);
+                saveSeamPixels("margin-phase-" + phase, iris, fov);
+            }
+            // Identical geometry without ground provenance represents a feature wall.
+            int[] featureWords = fine.mesh().gpuPayload().quads().clone();
+            for (int i = 9; i < featureWords.length; i += 12) featureWords[i] &= ~(1 << 27);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            drawSeamFixture(terrain, surface, PredictionPackedMesh.terrainRecords(featureWords, 64), buffers[2], -40, seams.boundaryMask(fine.key()));
+            glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            assertTrue((pixel.get(1) & 255) > 20, "feature walls must survive boundary replacement");
+            terrain.setCamera(new Matrix4f().lookAlong(40, -38, 0, 0, 1, 0), projection.matrix());
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            for (var current : surfaces) drawSeamFixture(terrain, current, current.tile().mesh().gpuPayload(), buffers[2], -40, seams.boundaryMask(current.tile().key()));
+            for (var patch : seams.update(surfaces)) drawSeamFixture(terrain, patch.surface(), patch.mesh(), buffers[2]);
+            glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+            assertTrue((pixel.get(1) & 255) > 20, "replacement seam retains true four-block cliff");
+        }
+        terrain.setBoundaryReplacement(false);
+        RenderSystem.disableDepthTest();
+        RenderSystem.activeTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_BUFFER, textures[4]);
+        RenderSystem.activeTexture(GL_TEXTURE3); RenderSystem.bindTexture(textures[3]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 1, 1, 0, GL_RED, GL_FLOAT, new float[]{1});
+        System.out.println("PASS: stale margin removed, fallback restored immediately, feature wall preserved, true cliff closed (Iris=" + iris + ")");
+    }
+
     private static void verifyRealBoundarySeams(PredictionTerrainProgram terrain, TextureTarget target,
             TextureTarget main, int[] buffers, int[] textures, boolean iris) {
         int program = glGetInteger(GL_CURRENT_PROGRAM);
@@ -971,10 +1048,17 @@ class PredictionRenderTargetGpuTest {
 
     private static void drawSeamFixture(PredictionTerrainProgram terrain, PredictionLodSeams.Surface surface,
             PredictionPackedMesh mesh, int elementBuffer, int eyeX) {
+        drawSeamFixture(terrain, surface, mesh, elementBuffer, eyeX, null);
+    }
+
+    private static void drawSeamFixture(PredictionTerrainProgram terrain, PredictionLodSeams.Surface surface,
+            PredictionPackedMesh mesh, int elementBuffer, int eyeX, byte[] boundary) {
         var tile = surface.tile();
         try (var gpu = new PredictionGpuTile(tile.key())) {
             RenderSystem.activeTexture(GL_TEXTURE3);
             gpu.ensureSeams(mesh); gpu.updateCoverage(surface.allowed()); gpu.bindQuad(4); gpu.bindYield(3);
+            terrain.setBoundaryReplacement(boundary != null);
+            if (boundary != null) { gpu.updateBoundaryCoverage(boundary); gpu.bindYield(3); }
             terrain.setTile(tile.baseBlockX() - eyeX, -104, tile.baseBlockZ() + 64, tile.spacingBlocks(), 64, true);
             int[] elements = new int[mesh.quadCount() * 6];
             int[] corners = {0, 1, 2, 0, 2, 3};
@@ -1174,6 +1258,31 @@ class PredictionRenderTargetGpuTest {
                     "flower stem must be below the petals; direction="+direction+"; Iris="+iris);
         }
         System.out.println("PASS: production flower has petals above stem from both sides (Iris="+iris+")");
+        // Reuse the production cross flags; static fire must retain alpha even in average mode.
+        for (int kind = 0; kind < 2; kind++) {
+            float[] table = new float[16 * 36 * 4];
+            table[4] = -1; table[5] = kind; table[6] = 16; table[7] = 16;
+            for (int c=0;c<4;c++) table[16*4+4+c] = 1;
+            for (int y=0;y<16;y++) for (int x=0;x<16;x++) {
+                int at=((4+kind*16+y)*16+x)*4;
+                table[at]=kind==0 ? 1 : .2F;
+                table[at+1]=.5F; table[at+2]=kind==0 ? .1F : 1;
+                table[at+3]=y<8 ? 1 : 0;
+            }
+            RenderSystem.activeTexture(GL_TEXTURE2); RenderSystem.bindTexture(textures[2]);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA32F,16,36,0,GL_RGBA,GL_FLOAT,table);
+            for (boolean average : new boolean[]{false,true}) {
+                terrain.setTile(-.5F,-64.5F,1.5F,1,1,average);
+                var pixels=terrainPixels(2);
+                int top=(38*64+32)*4,bottom=(25*64+32)*4;
+                int r=pixels.get(top)&255,b=pixels.get(top+2)&255;
+                assertTrue(kind==0 ? r>200 && b<60 : b>200 && r<90,
+                        "static fire keeps its orange/blue color; Iris="+iris+",average="+average+",kind="+kind);
+                assertEquals(0,pixels.get(bottom)&255,"transparent fire pixel must reveal background");
+                assertEquals(0,pixels.get(bottom+2)&255);
+            }
+        }
+        System.out.println("PASS: static fire colors and alpha in textured/average modes (Iris="+iris+")");
     }
 
     private static void verifyWaterAndBakedUvs(PredictionTerrainProgram terrain, TextureTarget target,
@@ -1319,6 +1428,59 @@ class PredictionRenderTargetGpuTest {
         System.out.println("PASS: asynchronous GPU timestamps, external query coexistence, bounded ring and cleanup");
     }
 
+    @SuppressWarnings("unchecked")
+    private static void verifyIncrementalScene() {
+        PredictionRenderer.resetOcclusion();
+        try {
+            var field=PredictionRenderer.class.getDeclaredField("gpuTiles");field.setAccessible(true);
+            var gpu=(java.util.Map<PredictionTileManager.PredictionTileKey,PredictionGpuTile>)field.get(null);
+            var a=PredictionLodSeamsTest.tile(-1,-2,1,64);
+            var b=PredictionLodSeamsTest.tile(0,-2,1,67);
+            for(var tile:java.util.List.of(a,b)) { var resident=new PredictionGpuTile(tile.key());resident.ensureMesh(tile);gpu.put(tile.key(),resident); }
+            var layout=VssLodLayout.of(4096,6,true,true);
+            var initial=new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,layout,
+                    java.util.Map.of(a.key(),a,b.key(),b),java.util.Map.of());
+            var residentState=new PredictionRenderResidency();residentState.retain(initial);
+            residentState.uploaded(a);residentState.uploaded(b);initial=residentState.snapshot(initial);
+            var scene=new PredictionRenderer.Scene();
+            var camera=new net.minecraft.world.phys.Vec3(0,100,0);
+            var view=new PredictionRenderer.CoverageView(0,0,1300,null);
+            var matrix=new Matrix4f();
+            var first=scene.prepare(initial,residentState.drainChanges(),view,camera,4096,32,matrix,matrix,null);
+            assertEquals(2,first.stream().filter(draw->!draw.seam()).count());
+            assertTrue(first.stream().anyMatch(PredictionRenderer.Draw::seam));
+            long world=scene.worldVisits(),visibility=scene.visibilityVisits();
+            for(int frame=0;frame<120;frame++) assertSame(first,
+                    scene.prepare(initial,java.util.Set.of(),view,camera,4096,32,matrix,matrix,null));
+            assertEquals(world,scene.worldVisits());assertEquals(visibility,scene.visibilityVisits());
+            var oldA=first.stream().filter(draw->!draw.seam() && draw.tile()==a).findFirst().orElseThrow();
+            var replacement=PredictionLodSeamsTest.tile(0,-2,1,69);gpu.get(b.key()).ensureMesh(replacement);
+            var next=new PredictionTileManager.RenderSnapshot(initial.dimension(),layout,
+                    java.util.Map.of(a.key(),a,b.key(),replacement),java.util.Map.of(b.key(),1L));
+            residentState.retain(next);residentState.uploaded(replacement);next=residentState.snapshot(next);
+            var updated=scene.prepare(next,residentState.drainChanges(),view,camera,4096,32,matrix,matrix,null);
+            assertEquals(world+1,scene.worldVisits(),"one uploaded tile updates one terrain entry");
+            assertSame(oldA,updated.stream().filter(draw->!draw.seam() && draw.tile()==a).findFirst().orElseThrow());
+            assertTrue(updated.stream().anyMatch(draw->draw.tile()==replacement));
+            long after=scene.worldVisits();
+            var turned=scene.prepare(next,java.util.Set.of(),view,camera,4096,32,new Matrix4f().rotateY(.5F),matrix,null);
+            assertSame(updated,turned,"a turn that keeps membership retains existing Draw objects and list");
+            assertEquals(after,scene.worldVisits(),"rotation must not revisit ownership or seams");
+            scene.clear();assertTrue(scene.prepare(new PredictionTileManager.RenderSnapshot(initial.dimension(),layout,
+                    java.util.Map.of(),java.util.Map.of()),java.util.Set.of(),view,camera,4096,32,matrix,matrix,null).isEmpty());
+            assertEquals(GL_NO_ERROR,glGetError());
+            System.out.println("PASS: production incremental scene, 120 stable frames without world/visibility traversal, local upload and rotation reuse");
+        } catch(ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        finally {
+            PredictionRenderer.resetOcclusion();
+            try {
+                var drain=PredictionRenderer.class.getDeclaredMethod("drainRetiredTiles");drain.setAccessible(true);
+                for(int i=0;i<8;i++) drain.invoke(null);
+            } catch(ReflectiveOperationException failure) { throw new AssertionError(failure); }
+            RenderSystem.activeTexture(GL_TEXTURE0);
+        }
+    }
+
     private static void verifyPublishedCoverageAndSeamBatch() {
         try (var gpu = new PredictionGpuTile(null)) {
             gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], 4));
@@ -1383,6 +1545,57 @@ class PredictionRenderTargetGpuTest {
         }
         RenderSystem.activeTexture(GL_TEXTURE0);
         System.out.println("PASS: coverage R8 storage reuse, changed ownership pixels and resize");
+    }
+
+    private static void verifyForeignPixelUnpackState() {
+        int[] parameters = {GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_IMAGE_HEIGHT,
+                GL_UNPACK_SKIP_PIXELS, GL_UNPACK_SKIP_ROWS, GL_UNPACK_SKIP_IMAGES,
+                GL_UNPACK_SWAP_BYTES, GL_UNPACK_LSB_FIRST};
+        int[] values = {8, 257, 263, 3, 5, 7, 1, 1};
+        int[] previous = java.util.Arrays.stream(parameters).map(org.lwjgl.opengl.GL11::glGetInteger).toArray();
+        int previousBuffer = glGetInteger(GL_PIXEL_UNPACK_BUFFER_BINDING);
+        int pbo = glGenBuffers();
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, 64L, GL_STATIC_DRAW);
+        for (int i = 0; i < parameters.length; i++) glPixelStorei(parameters[i], values[i]);
+        try (var gpu = new PredictionGpuTile(null)) {
+            for (int axis : new int[]{4, 8}) {
+                gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], axis));
+                boolean[] allowed = new boolean[axis * axis];
+                java.util.Arrays.fill(allowed, true);
+                allowed[0] = false;
+                gpu.updateCoverage(allowed);
+                byte[] boundary = new byte[allowed.length];
+                java.util.Arrays.fill(boundary, (byte) 131);
+                boundary[0] = 0;
+                gpu.updateBoundaryCoverage(boundary);
+                assertEquals(pbo, glGetInteger(GL_PIXEL_UNPACK_BUFFER_BINDING));
+                for (int i = 0; i < parameters.length; i++) assertEquals(values[i], glGetInteger(parameters[i]));
+                gpu.bindYield(3);
+                var pixels = BufferUtils.createByteBuffer(boundary.length);
+                glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
+                byte[] actual = new byte[boundary.length]; pixels.get(actual);
+                assertArrayEquals(boundary, actual, "hostile unpack state must not distort or overread CPU uploads");
+                assertEquals(GL_NO_ERROR, glGetError());
+            }
+            assertThrows(IllegalStateException.class, () -> {
+                try (var outer = PredictionPixelUnpack.begin()) {
+                    try (var nested = PredictionPixelUnpack.begin()) {
+                        assertEquals(0, glGetInteger(GL_PIXEL_UNPACK_BUFFER_BINDING));
+                    }
+                    assertEquals(0, glGetInteger(GL_UNPACK_ROW_LENGTH));
+                    throw new IllegalStateException("failed upload");
+                }
+            });
+            assertEquals(pbo, glGetInteger(GL_PIXEL_UNPACK_BUFFER_BINDING));
+            for (int i = 0; i < parameters.length; i++) assertEquals(values[i], glGetInteger(parameters[i]));
+        } finally {
+            for (int i = 0; i < parameters.length; i++) glPixelStorei(parameters[i], previous[i]);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, previousBuffer);
+            glDeleteBuffers(pbo);
+            RenderSystem.activeTexture(GL_TEXTURE0);
+        }
+        System.out.println("PASS: CPU texture uploads isolate foreign PBO, strides, skips and byte order; nested/error restore");
     }
 
     private static void verifyEntityTextureAfterNativePass() {

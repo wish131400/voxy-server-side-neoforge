@@ -1,4 +1,7 @@
 {
+  "vss.command.render_capture.started": "VSS: close chat and keep the affected area in view. One frame will be captured after 3 seconds; this diagnostic may briefly pause rendering.",
+  "vss.command.render_capture.done": "VSS render capture saved: %s",
+  "vss.command.render_capture.failed": "VSS render capture failed: %s",
   "vss.config.server.title": "VSS Local Config",
   "vss.config.server.note": "Changes this local client/single-player integrated server only. Dedicated servers should use /vss or the server config file.",
   "vss.config.server.enabled": "Enable server LODs",

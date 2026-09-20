@@ -17,6 +17,9 @@ import org.junit.jupiter.api.Test;
  * an ancestor keeps the region covered.
  */
 class PredictionPinningTest {
+    // Registry keys on Forge 1.20.1 require bootstrap even when this class
+    // runs before the cache tests in a freshly started test JVM.
+    static { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     private static final ResourceKey<Level> DIMENSION = ResourceKey.create(
             net.minecraft.core.registries.Registries.DIMENSION,
             ResourceLocation.withDefaultNamespace("overworld"));
@@ -84,6 +87,20 @@ class PredictionPinningTest {
                 Set.of(stale), Set.of(), DIMENSION, LAYOUT, 0, 0));
         // And the fully-authoritative guard must treat it as unknown, not
         // throw (covered through shouldRetirePinned's early exit above).
+    }
+
+    @Test
+    void explicitDistanceReductionDropsFarTilesWithoutAncestorsOrPersistence() {
+        var layout = VssLodLayout.of(4096, 6, true, false);
+        assertTrue(PredictionTileManager.retireAfterDistanceReduction(key(100, 0, 0), Set.of(), layout, 0, 0));
+        assertTrue(PredictionTileManager.retireAfterDistanceReduction(key(-101, 0, 0), Set.of(), layout, 0, 0));
+        assertTrue(PredictionTileManager.retireAfterDistanceReduction(key(0, 0, 10), Set.of(), layout, 0, 0));
+        assertFalse(PredictionTileManager.retireAfterDistanceReduction(key(1, 1, 0), Set.of(), layout, 0, 0));
+        assertFalse(PredictionTileManager.retireAfterDistanceReduction(key(63, 0, 0), Set.of(), layout, 0, 0),
+                "tiles intersecting the new horizon still cover its edge");
+        var desired = key(65, 0, 0);
+        assertFalse(PredictionTileManager.retireAfterDistanceReduction(desired, Set.of(desired), layout, 0, 0),
+                "retain any coverage explicitly required by the new planner");
     }
 
     @Test

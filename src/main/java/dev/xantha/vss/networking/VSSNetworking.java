@@ -15,6 +15,7 @@ import dev.xantha.vss.networking.payloads.ServerIdentityS2CPayload;
 import dev.xantha.vss.networking.payloads.SessionConfigS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
+import dev.xantha.vss.networking.payloads.WorldgenProfileFragmentS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.networking.server.ServerIdentityConfigurationTask;
 import java.lang.reflect.InvocationTargetException;
@@ -57,6 +58,8 @@ public final class VSSNetworking {
         registrar.playToClient(FarPlayersS2CPayload.TYPE, FarPlayersS2CPayload.STREAM_CODEC, VSSNetworking::handleFarPlayers);
         registrar.playToClient(HandshakeRequestS2CPayload.TYPE, HandshakeRequestS2CPayload.STREAM_CODEC, VSSNetworking::handleHandshakeRequest);
         registrar.playToClient(WorldgenProfileS2CPayload.TYPE, WorldgenProfileS2CPayload.STREAM_CODEC, VSSNetworking::handleWorldgenProfile);
+        registrar.playToClient(WorldgenProfileFragmentS2CPayload.TYPE, WorldgenProfileFragmentS2CPayload.STREAM_CODEC,
+                VSSNetworking::handleWorldgenFragment);
     }
 
     public static void registerConfigurationTasks(RegisterConfigurationTasksEvent event) {
@@ -71,7 +74,11 @@ public final class VSSNetworking {
         if (trySendToIntegratedHost(player, payload)) {
             return;
         }
-        PacketDistributor.sendToPlayer(player, payload);
+        if (payload instanceof WorldgenProfileS2CPayload profile) {
+            WorldgenProfileTransfer.send(profile, part -> PacketDistributor.sendToPlayer(player, part));
+        } else {
+            PacketDistributor.sendToPlayer(player, payload);
+        }
     }
 
     private static boolean trySendToIntegratedHost(ServerPlayer player, CustomPacketPayload payload) {
@@ -112,6 +119,10 @@ public final class VSSNetworking {
 
     private static void handleWorldgenProfile(WorldgenProfileS2CPayload payload, IPayloadContext context) {
         invokeClientHandler("handleWorldgenProfile", new Class<?>[] {WorldgenProfileS2CPayload.class}, payload);
+    }
+
+    private static void handleWorldgenFragment(WorldgenProfileFragmentS2CPayload payload, IPayloadContext context) {
+        invokeClientHandler("handleWorldgenFragment", new Class<?>[] {WorldgenProfileFragmentS2CPayload.class}, payload);
     }
 
     private static void handleServerIdentity(ServerIdentityS2CPayload payload, IPayloadContext context) {

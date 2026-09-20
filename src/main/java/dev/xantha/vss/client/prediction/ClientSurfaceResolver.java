@@ -61,6 +61,58 @@ final class ClientSurfaceResolver {
         return resolve(sample, x, z, terrain, true);
     }
 
+    /** Evaluate every solid run, including cave floors and ceilings, against the synced rules. */
+    ClientColumnSample resolveInterior(ClientColumnSample sample, int x, int z,
+                                       ClientTerrainSampler.TerrainFunction terrain) {
+        var volume = sample.volume();
+        if (volume == null || volume.size() == 0) return sample;
+        try {
+            Worker worker = workers.get();
+            if (worker == null || worker.columns >= 4096) {
+                worker = new Worker(false);
+                workers.set(worker);
+            }
+            worker.columns++; worker.x = x; worker.z = z; worker.terrain = terrain;
+            Access.UPDATE_XZ.invokeExact(worker.context, x, z);
+            int min = volume.minY(), height = volume.maxY() - min;
+            int[] blocks = new int[height];
+            java.util.Arrays.fill(blocks, -1); // Volume sampling uses negative IDs for implicit air.
+            int defaultBlock = BuiltInRegistries.BLOCK.getId(generator.generatorSettings().value().defaultBlock().getBlock());
+            int water = Integer.MIN_VALUE, above = 0;
+            for (int i = volume.size() - 1; i >= 0; i--) {
+                if (i + 1 < volume.size() && volume.top(i) < volume.bottom(i + 1)) {
+                    water = Integer.MIN_VALUE; above = 0;
+                }
+                int bottom = volume.bottom(i), top = volume.top(i);
+                if (volume.fluid(i) != 0) {
+                    if (water == Integer.MIN_VALUE) water = top;
+                    java.util.Arrays.fill(blocks, bottom - min, top - min, volume.block(i));
+                    continue;
+                }
+                int solidBottom = bottom;
+                for (int j = i - 1; j >= 0 && volume.top(j) == solidBottom && volume.fluid(j) == 0; j--)
+                    solidBottom = volume.bottom(j);
+                for (int y = top - 1; y >= bottom; y--) {
+                    if ((y & 15) == 0 && Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+                    int block = volume.block(i);
+                    above++;
+                    if (block == defaultBlock) {
+                        Access.UPDATE_Y.invokeExact(worker.context, above, y - solidBottom + 1, water, x, y, z);
+                        BlockState state = (BlockState) Access.APPLY.invokeExact(worker.rule, x, y, z);
+                        if (state != null) block = state.isAir() ? -1
+                                : BuiltInRegistries.BLOCK.getId(state.getBlock());
+                    }
+                    blocks[y - min] = block;
+                }
+            }
+            return PredictionColumnVolume.sample(min, height, y -> blocks[y - min], block -> {
+                var state = BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+                return state.getFluidState().isEmpty() ? 0 : state.is(net.minecraft.world.level.block.Blocks.LAVA) ? 2 : 1;
+            }).asSample();
+        } catch (RuntimeException | Error failure) { throw failure; }
+        catch (Throwable failure) { throw new IllegalStateException("Minecraft interior surface rules failed", failure); }
+    }
+
     private ClientColumnSample resolve(ClientColumnSample sample, int x, int z,
                                 ClientTerrainSampler.TerrainFunction terrain, boolean preview) {
         try {

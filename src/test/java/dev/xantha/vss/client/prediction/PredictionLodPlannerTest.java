@@ -11,6 +11,8 @@ import net.minecraft.world.level.Level;
 import org.junit.jupiter.api.Test;
 
 class PredictionLodPlannerTest {
+    @org.junit.jupiter.api.BeforeAll
+    static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     private static final ResourceKey<Level> DIMENSION = ResourceKey.create(
             net.minecraft.core.registries.Registries.DIMENSION,
             ResourceLocation.withDefaultNamespace("overworld"));
