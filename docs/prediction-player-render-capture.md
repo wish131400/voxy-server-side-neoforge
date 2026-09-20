@@ -1,6 +1,8 @@
 # Player model / shader interaction: bounded frame capture
 
-This implements the diagnostic stage of the ETF/EMF/Fresh Animations player investigation. It does **not** claim to fix the reported model transparency. The supplied video establishes that parts of the player show terrain-like imagery with prediction and shaders, while disabling prediction or shaders restores the player. Static source inspection and isolated GPU tests have not identified the exact faulty draw in that player's pack.
+Status update (2026-09-21): the user confirmed that the reported player transparency was not a VSS issue. It is no longer tracked as a known VSS defect, and no VSS fix is claimed for it. The bounded capture tool remains available for diagnosing rendering problems.
+
+The following records the diagnostic work originally prompted by the ETF/EMF/Fresh Animations player report. The supplied video and initial reports described parts of the player showing terrain-like imagery with prediction and shaders, with changes when prediction or shaders were disabled. Those observations did not establish VSS as the cause. Static source inspection and isolated GPU tests did not identify the exact faulty draw in that player's pack; the investigation notes below preserve the diagnostic method rather than a pending repair commitment.
 
 ## Capture an affected frame
 
