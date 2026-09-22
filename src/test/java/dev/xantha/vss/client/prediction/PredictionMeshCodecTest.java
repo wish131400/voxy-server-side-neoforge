@@ -9,6 +9,13 @@ import org.junit.jupiter.api.io.TempDir;
 class PredictionMeshCodecTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap(){ClientTerrainSamplerTest.bootstrapMinecraft();}
+    @AfterEach void awaitAsyncRegionCloseBeforeTempDirectoryCleanup() throws Exception {
+        // Runtime close is deliberately asynchronous; Windows cannot delete an open region file.
+        var field = PredictionDiskCache.class.getDeclaredField("COMMITS");
+        field.setAccessible(true);
+        var commits = (java.util.concurrent.ExecutorService) field.get(null);
+        commits.submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+    }
     static PredictionMesh fixture() { return fixture(16); }
     static PredictionMesh fixture(int axis) {
         int grid = axis + 2;
