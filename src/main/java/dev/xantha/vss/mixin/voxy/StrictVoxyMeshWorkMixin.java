@@ -1,5 +1,6 @@
 package dev.xantha.vss.mixin.voxy;
 
+import dev.xantha.vss.compat.RoxyRenderPatchBridge;
 import dev.xantha.vss.compat.StrictLodVisibility;
 import dev.xantha.vss.compat.StrictVoxyPipeline;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -35,11 +36,23 @@ public abstract class StrictVoxyMeshWorkMixin implements StrictVoxyPipeline.Sour
         return task;
     }
 
+    // Voxy as loaded through Roxy on NeoForge has its result publication rewritten to
+    // RoxyVoxyRenderPatch.acceptIfCurrent(Consumer, Object), so the plain Consumer.accept
+    // redirect below finds no targets there. Both redirects are therefore optional; exactly
+    // one of them matches depending on the loader environment.
     @Redirect(method = "processJob", at = @At(value = "INVOKE",
-            target = "Ljava/util/function/Consumer;accept(Ljava/lang/Object;)V"), require = 2)
+            target = "Ljava/util/function/Consumer;accept(Ljava/lang/Object;)V"), require = 0, remap = false)
     private void vss$result(Consumer<Object> consumer, Object mesh) {
         ((StrictVoxyPipeline.Mesh) mesh).vss$work(vss$current.get());
         consumer.accept(mesh);
+    }
+
+    @Redirect(method = "processJob", at = @At(value = "INVOKE",
+            target = "Lnet/rasanovum/roxy/patch/RoxyVoxyRenderPatch;acceptIfCurrent(Ljava/util/function/Consumer;Ljava/lang/Object;)V"),
+            require = 0, remap = false)
+    private void vss$resultRoxy(Consumer<Object> consumer, Object mesh) {
+        ((StrictVoxyPipeline.Mesh) mesh).vss$work(vss$current.get());
+        RoxyRenderPatchBridge.acceptIfCurrent(consumer, mesh);
     }
 
     @Inject(method = "processJob", at = @At("RETURN"), require = 1)
