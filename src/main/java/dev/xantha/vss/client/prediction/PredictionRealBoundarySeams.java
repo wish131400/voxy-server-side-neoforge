@@ -138,7 +138,7 @@ final class PredictionRealBoundarySeams {
         if (!realHigher) index.subtractWalls(gaps, surface, x + tile.baseBlockX(), z + tile.baseBlockZ(), 1, nx, nz);
         for (var gap : gaps) {
             PredictionLodSeams.band(words, tile, cell, x, z, x + (nz != 0 ? 1 : 0), z + (nx != 0 ? 1 : 0),
-                    Math.min(top, gap.top()), Math.max(gap.bottom(), top - 1), nx, nz, block, face, tint, sample);
+                    Math.min(top, gap.top()), Math.max(gap.bottom(), top - 1), nx, nz, block, face, tint, sample, true);
             PredictionLodSeams.band(words, tile, cell, x, z, x + (nz != 0 ? 1 : 0), z + (nx != 0 ? 1 : 0),
                     Math.min(top - 1, gap.top()), Math.max(gap.bottom(), top - 2), nx, nz, under, face, tint, sample);
             PredictionLodSeams.band(words, tile, cell, x, z, x + (nz != 0 ? 1 : 0), z + (nx != 0 ? 1 : 0),

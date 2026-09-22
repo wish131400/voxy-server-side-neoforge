@@ -147,6 +147,25 @@ class PredictionSpriteTableTest {
                 new FrameSize(16, 16), image, ResourceMetadata.EMPTY);
     }
 
+    @Test void persistedMaterialSurvivesDifferentRowOrderAndPreservesModelUvsAndBlock() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        try(var contents=contents("stone",0xff808080);var other=contents("dirt",0xff404040)) {
+            var sprite=new Sprite(contents,0);
+            int block=net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(net.minecraft.world.level.block.Blocks.STONE);
+            var quad=new net.minecraft.client.renderer.block.model.BakedQuad(new int[32],-1,net.minecraft.core.Direction.UP,sprite,false);
+            int row=VssLodSpriteTable.registerModelFace(quad,block);
+            float[] uv=VssLodSpriteTable.modelUvs(row);
+            var bytes=new java.io.ByteArrayOutputStream();
+            VssLodSpriteTable.writeMaterial(new java.io.DataOutputStream(bytes),row);
+            VssLodSpriteTable.close();VssLodSpriteTable.registerSprite(new Sprite(other,16));
+            int restored=VssLodSpriteTable.readMaterial(new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray())),name->sprite);
+            assertNotEquals(row,restored);assertArrayEquals(uv,VssLodSpriteTable.modelUvs(restored));
+            assertEquals(block,VssLodSpriteTable.materialBlocks()[restored]);assertFalse(VssLodSpriteTable.modelShade(restored));
+            assertThrows(java.io.IOException.class,()->VssLodSpriteTable.readMaterial(
+                    new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray())),name->null));
+        }
+    }
+
     private static class Sprite extends TextureAtlasSprite {
         Sprite(SpriteContents contents, int x) {
             super(TextureAtlas.LOCATION_BLOCKS, contents, 256, 256, x, 0);

@@ -18,6 +18,19 @@ class PredictionFirstCoverageTest {
     private static final DimensionProfile PROFILE = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
             42L, -64, 384, "noise", "minecraft:overworld", 123L);
     @TempDir Path directory;
+    private int previousDistance;
+
+    @org.junit.jupiter.api.BeforeEach void setLayoutFixture() {
+        previousDistance = VSSClientConfig.CONFIG.predictionDistanceBlocks;
+        // These scheduler scenarios use 8192-block root tiles and coordinate gates.
+        // Do not inherit a developer's on-disk config or another test's settings.
+        VSSClientConfig.CONFIG.predictionDistanceBlocks = 8192;
+    }
+
+    @org.junit.jupiter.api.AfterEach void restoreLayoutFixture() {
+        VSSClientConfig.CONFIG.predictionDistanceBlocks = previousDistance;
+    }
+
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
     @Test void presenceCheckTracksPublicationAndCloseWithoutBuildingASnapshot() throws Exception {

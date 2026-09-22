@@ -61,6 +61,11 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private int boundCellAxis = -1, boundAverage = -1;
     private boolean morphActive;
     private int boundaryReplacement = -1;
+    private final int batchEnabled;
+    private final int quadBase;
+    void setQuadBase(int offset) { GL20.glUniform1i(quadBase, offset); }
+    boolean supportsBatch() { return batchEnabled >= 0; }
+    void batch(boolean enabled) { if (batchEnabled >= 0) GL20.glUniform1i(batchEnabled, enabled ? 1 : 0); }
 
     private PredictionTerrainProgram() {
         this(TERRAIN_VERTEX, TERRAIN_FRAGMENT);
@@ -69,6 +74,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private PredictionTerrainProgram(String vertex, String fragment) {
         this.program = GlProgram.link("vss_prediction_terrain",
                 vertex, fragment);
+        this.batchEnabled = program.uniform("BatchEnabled");
+        this.quadBase = program.uniform("QuadBaseTexel");
         this.modelView = program.uniform("ModelViewMat");
         this.projection = program.uniform("ProjMat");
         this.viewOrigin = program.uniform("ViewOrigin");
@@ -110,6 +117,44 @@ final class PredictionTerrainProgram implements AutoCloseable {
 
     static PredictionTerrainProgram create() {
         return new PredictionTerrainProgram();
+    }
+
+    static PredictionTerrainProgram createBatch() {
+        return new PredictionTerrainProgram(batchVertex(TERRAIN_VERTEX), batchFragment(TERRAIN_FRAGMENT));
+    }
+
+    private static final String BATCH_RECORDS = """
+            uniform bool BatchEnabled;
+            struct BatchRecord { vec4 offsetSpacing; ivec4 data; vec4 morph; ivec4 flags; };
+            layout(std430,binding=7) readonly buffer BatchRecords { BatchRecord records[]; };
+            """;
+    private static String batchUniform(String source, String type, String name, String value) {
+        return source.replaceAll("\\b" + name + "\\b", "Vss" + name)
+                .replace("uniform " + type + " Vss" + name + ";", "uniform " + type + " " + name
+                        + ";\n#define Vss" + name + " (BatchEnabled ? " + value + " : " + name + ")");
+    }
+    static String batchVertex(String source) {
+        source = source.replace("#version 150", "#version 460 core")
+                .replace("uniform usamplerBuffer QuadPayload;", BATCH_RECORDS + "\nflat out int BatchSlot;\nuniform usamplerBuffer QuadPayload;");
+        source = batchUniform(source, "vec3", "TileOffset", "records[gl_BaseInstance].offsetSpacing.xyz");
+        source = batchUniform(source, "float", "Spacing", "records[gl_BaseInstance].offsetSpacing.w");
+        source = batchUniform(source, "int", "CellAxis", "records[gl_BaseInstance].data.x");
+        source = batchUniform(source, "int", "UseAverage", "records[gl_BaseInstance].data.y");
+        source = batchUniform(source, "vec2", "TerrainMorph", "records[gl_BaseInstance].morph.xy");
+        source = batchUniform(source, "vec2", "MorphBounds", "records[gl_BaseInstance].morph.zw");
+        source = batchUniform(source, "int", "QuadBaseTexel", "records[gl_BaseInstance].data.z");
+        return source.replace("int quad = gl_VertexID >> 2;", "BatchSlot=gl_BaseInstance;\nint quad = gl_VertexID >> 2;");
+    }
+    static String batchFragment(String source) {
+        source = source.replace("#version 150", "#version 460 core")
+                .replace("uniform sampler2D Yield;", BATCH_RECORDS + "\nflat in int BatchSlot;\nuniform usamplerBuffer QuadPayload;\nuniform sampler2D Yield;");
+        source = batchUniform(source, "float", "Spacing", "records[BatchSlot].offsetSpacing.w");
+        source = batchUniform(source, "int", "CellAxis", "records[BatchSlot].data.x");
+        source = batchUniform(source, "int", "UseAverage", "records[BatchSlot].data.y");
+        source = batchUniform(source, "bool", "ReplaceBoundaryWalls", "(records[BatchSlot].flags.x != 0)");
+        return source.replace("texelFetch(Yield, cell, 0).r",
+                "(BatchEnabled ? float(texelFetch(QuadPayload, (records[BatchSlot].data.w + cell.y * VssCellAxis + cell.x) / 4)"
+                + "[(records[BatchSlot].data.w + cell.y * VssCellAxis + cell.x) % 4]) / 255.0 : texelFetch(Yield, cell, 0).r)");
     }
 
     static PredictionTerrainProgram createIris(String taa, java.util.function.UnaryOperator<String> patch) {
@@ -304,6 +349,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private static final String TERRAIN_VERTEX = """
             #version 150
             uniform usamplerBuffer QuadPayload;
+            uniform int QuadBaseTexel;
             uniform vec2 TerrainMorph;
             uniform vec2 MorphBounds;
             uniform sampler2D SpriteTable;
@@ -358,7 +404,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 int axis = CellAxis + 1;
                 p = clamp(p, ivec2(0), ivec2(CellAxis));
                 int i = p.y * axis + p.x;
-                uvec4 value = texelFetch(QuadPayload, int(TerrainMorph.x) + i / 4);
+                uvec4 value = texelFetch(QuadPayload, QuadBaseTexel + int(TerrainMorph.x) + i / 4);
                 return float(int(value[i % 4])) / 256.0;
             }
             float terrainDelta(vec2 xz) {
@@ -371,9 +417,9 @@ final class PredictionTerrainProgram implements AutoCloseable {
             void main() {
                 int quad = gl_VertexID >> 2;
                 int corner = gl_VertexID & 3;
-                uvec4 texelA = texelFetch(QuadPayload, quad * 3);
-                uvec4 texelB = texelFetch(QuadPayload, quad * 3 + 1);
-                uvec4 texelC = texelFetch(QuadPayload, quad * 3 + 2);
+                uvec4 texelA = texelFetch(QuadPayload, QuadBaseTexel + quad * 3);
+                uvec4 texelB = texelFetch(QuadPayload, QuadBaseTexel + quad * 3 + 1);
+                uvec4 texelC = texelFetch(QuadPayload, QuadBaseTexel + quad * 3 + 2);
                 uint attr = texelB.z;
                 vCell = texelC.x;
                 vRealBoundary = (texelC.y >> 25u) & 3u;

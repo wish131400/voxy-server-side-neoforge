@@ -633,21 +633,16 @@ public final class PredictionMeshBuilder {
         var exposed = PredictionWallEvidence.exposed(sample, neighborSample, height, neighbour, step);
         if (exposed.isEmpty()) return;
         int surfaceColor = color;
-        // Preserve each stratum's material. Only grass approximates the
-        // vanilla tinted rim with a gradient into its dirt side.
-        int topBlock = PredictionMaterialPalette.groundBlock(sample);
-        boolean grass = topBlock == PredictionMaterialPalette.grassBlockIndex();
         int underBlock = PredictionMaterialPalette.wallUnderBlock(sample);
         int deepBlock = PredictionMaterialPalette.wallDeepBlock(sample);
         int face = wallFace(nx, nz);
-        int topColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
-                topBlock, surfaceColor, face), topBlock, face);
-        int topBandBottom = grass ? withSideSprite(PredictionMaterialPalette.colorForIndex(
-                underBlock, surfaceColor, face),
-                topBlock, face) : topColor;
+        var topState = PredictionMaterialPalette.groundSideState(sample);
+        int topColor = packSprite(PredictionMaterialPalette.colorForState(topState, surfaceColor, 0, face),
+                VssLodSpriteTable.indexForState(topState, face));
         int underColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
-                underBlock, surfaceColor, face),
-                underBlock, face);
+                underBlock, surfaceColor, face), underBlock, face);
+        // Use the same selected sprite and average at both ends of the band.
+        int topBandBottom = topColor;
         int deepColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
                 deepBlock, surfaceColor, face),
                 deepBlock, face);

@@ -228,7 +228,7 @@ final class PredictionLodSeams {
         int middle = Math.max(bottom, top - 1), low = Math.max(bottom, top - 2);
         for (HeightSpan gap : gaps) {
             band(words, tile, cell, ax, az, bx, bz, Math.min(top, gap.top()), Math.max(middle, gap.bottom()),
-                    normalX, normalZ, topBlock, face, tint, sample);
+                    normalX, normalZ, topBlock, face, tint, sample, true);
             band(words, tile, cell, ax, az, bx, bz, Math.min(middle, gap.top()), Math.max(low, gap.bottom()),
                     normalX, normalZ, under, face, tint, sample);
             band(words, tile, cell, ax, az, bx, bz, Math.min(low, gap.top()), Math.max(bottom, gap.bottom()),
@@ -238,12 +238,21 @@ final class PredictionLodSeams {
 
     static void band(IntArrayList out, PredictionTile tile, int cell, int ax, int az, int bx, int bz,
                              int top, int bottom, int nx, int nz, int block, int face, int tint, ClientColumnSample sample) {
+        band(out, tile, cell, ax, az, bx, bz, top, bottom, nx, nz, block, face, tint, sample, false);
+    }
+
+    static void band(IntArrayList out, PredictionTile tile, int cell, int ax, int az, int bx, int bz,
+            int top, int bottom, int nx, int nz, int block, int face, int tint, ClientColumnSample sample,
+            boolean groundBand) {
         if (bottom >= top) return;
         int shift = 0;
         while ((tile.spanBlocks() >> shift) > 65535) shift++;
-        int sprite = block == ClientColumnSample.NO_BLOCK ? 0 : VssLodSpriteTable.sideIndexForBlock(block, face);
+        var state = groundBand ? PredictionMaterialPalette.groundSideState(sample) : null;
+        int sprite = groundBand ? VssLodSpriteTable.indexForState(state, face)
+                : block == ClientColumnSample.NO_BLOCK ? 0 : VssLodSpriteTable.sideIndexForBlock(block, face);
         if (sprite == VssLodSpriteTable.FLAT) sprite = 0;
-        int color = PredictionMaterialPalette.colorForIndex(block, tint, face) & 0xFFFFFF;
+        int color = (groundBand ? PredictionMaterialPalette.colorForState(state, tint, 0, face)
+                : PredictionMaterialPalette.colorForIndex(block, tint, face)) & 0xFFFFFF;
         int attr = sprite | shift << PredictionPackedMesh.XZ_SHIFT_BITS
                 | (nx != 0 ? 1 : 2) << PredictionPackedMesh.FLAGS_AXIS_SHIFT;
         if (nx > 0 || nz > 0) attr |= PredictionPackedMesh.FLAG_FACE_POSITIVE;

@@ -1832,7 +1832,14 @@ public final class PredictionTileManager implements AutoCloseable {
                             PredictionMaterialPalette.colorFor(samples[i], simple.forestTints()[i]),
                             samples[i].surfaceY(), sampler.seaLevel(), false, false);
                 }
-                PredictionMesh mesh = PredictionVegetation.meshWithinBudget(plants,
+                // Key the finished geometry by the actual immutable inputs, including captured edits,
+                // decoration, current colours and resources. View masks and morphs are deliberately excluded.
+                byte[] meshIdentity = diskLease == null ? null : PredictionMeshCodec.signature(
+                        PredictionMeshResources.ready(), samples, materialColors, foliageColors, waterColors,
+                        sampler.seaLevel(), sampler.fluidColor(), stepBlocks, tileLayout.trees(), plants, simple);
+                PredictionMesh mesh = diskLease == null ? null : diskCache.readMesh(diskLease, meshIdentity, cellAxis);
+                boolean finishedMeshHit = mesh != null;
+                if (mesh == null) mesh = PredictionVegetation.meshWithinBudget(plants,
                         tileLayout.tileBlocks(key.lod()), stepBlocks, meshPlants -> PredictionMeshBuilder.build(samples, materialColors,
                         sampler.seaLevel(), sampler.fluidColor(), stepBlocks, gridSize,
                         tileLayout.trees(), sampler.featureStamps(), foliageColors, waterColors,
@@ -1863,9 +1870,11 @@ public final class PredictionTileManager implements AutoCloseable {
                     mesh.morph(PredictionMorph.field(completed, parent));
                 }
                 mesh.prepareGpuPayload(completed);
+                if (VSSClientConfig.CONFIG.predictionCompressMeshes) mesh.gpuPayload().prepareStorage();
                 packingNanos.add(System.nanoTime() - packStarted);
                 if (publishTile(completed, reservation, revision, captureEpoch, surface, stored && diskLease.valid(), PredictionRelief.of(completed))) {
                     reservation = null;
+                    if (!finishedMeshHit && stored && diskLease.valid()) diskCache.writeMeshLater(diskLease, meshIdentity, mesh);
                     if (!surface && cellAxis >= PredictionWorkOrder.PREVIEW_CELL_AXIS
                             && (terrainLeaves.contains(key) || mediumCoverage.frontier().contains(key))
                             && (resident == null || resident.cellAxis() < PredictionWorkOrder.PREVIEW_CELL_AXIS)) {

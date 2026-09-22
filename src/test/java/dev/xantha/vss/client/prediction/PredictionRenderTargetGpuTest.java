@@ -17,6 +17,9 @@ import org.lwjgl.opengl.GL;
 /** Opt-in hidden-context test of the production target, including its GL state transitions. */
 @EnabledIfSystemProperty(named = "vss.gpuTests", matches = "true")
 class PredictionRenderTargetGpuTest {
+    private static TextureTarget instanceBackup;
+    private static PredictionTerrainProgram instanceProgram;
+    private static int instanceComparisons;
     @Test
     void depthOrderSurvivesFluidsFrameResetAndResize() {
         assertTrue(glfwInit());
@@ -183,9 +186,14 @@ class PredictionRenderTargetGpuTest {
                 System.out.println("PASS: 16 production target cases; foreground prediction covers distant real depth, real depth wins ties, gap fill, fluids, subsequent geometry occlusion, walking projection, frame reset and resize");
                 verifySurfaceRendering(vao, false);
                 verifySurfaceRendering(vao, true);
+                PredictionInstanceExperiment.enabled = true;
+                verifySurfaceRendering(vao, false);
+                verifySurfaceRendering(vao, true);
+                PredictionInstanceExperiment.enabled = false;
                 verifyIrisPrograms();
                 verifyIrisState();
                 verifyAsynchronousTimings();
+                verifyQuadPoolPayloadAndEmptyMesh();
                 verifyCoverageTextureReuse();
                 verifyForeignPixelUnpackState();
                 verifyPublishedCoverageAndSeamBatch();
@@ -253,9 +261,10 @@ class PredictionRenderTargetGpuTest {
     private static void verifySurfaceRendering(int vao, boolean iris) {
         TextureTarget target = new TextureTarget(64, 64, true, false);
         TextureTarget main = new TextureTarget(64, 64, true, false);
+        instanceBackup = new TextureTarget(64, 64, true, false);
         int[] textures = new int[7];
         int[] buffers = new int[3];
-        try (PredictionTerrainProgram terrain = iris ? PredictionTerrainProgram.createIris(
+        try (PredictionTerrainProgram terrain = iris ? PredictionInstanceExperiment.createIris(
                 "vec2 vssTaaShift(){return vec2(0.0);}", source -> source + """
                     layout(location=0) out vec4 color;
                     uniform bool VssTestLightmap;
@@ -263,7 +272,10 @@ class PredictionRenderTargetGpuTest {
                         color = p.sampledColour * p.tinting;
                         if (VssTestLightmap) color.rgb *= (p.lightMap.y * 256.0 - 8.0) / 240.0;
                     }
-                    """) : PredictionTerrainProgram.create()) {
+                    """) : PredictionInstanceExperiment.create()) {
+            instanceProgram = PredictionInstanceExperiment.enabled ? terrain : null;
+            terrain.use();
+            if (instanceProgram != null) PredictionInstanceExperiment.bind();
             target.bindWrite(true);
             RenderSystem.disableDepthTest();
             RenderSystem.disableCull();
@@ -421,12 +433,16 @@ class PredictionRenderTargetGpuTest {
                 verifyIrisTransparentHandoff(terrain, target, main, buffers);
             }
             if (!iris) verifyWaterMaskBoundary(terrain, target, main, buffers, textures);
+            if (instanceProgram != null) benchmarkProductionSubmission(terrain, PredictionPackedMesh.terrainRecords(roof, 1), iris);
             assertEquals(GL_NO_ERROR, glGetError());
+            if (instanceProgram != null) System.out.println("INSTANCE_EXPERIMENT comparisons=" + instanceComparisons + " color+depth=identical Iris=" + iris);
             System.out.println("PASS: production surface shader (Iris=" + iris + "): real/prediction occlusion, above/below terrain, moving cameras, 70/7 degree FOV, atlas binding, compiled-air rejection, closed cliffs and exact 65536-block tile edges");
         } finally {
             for (int buffer : buffers) if (buffer != 0) glDeleteBuffers(buffer);
             for (int texture : textures) if (texture != 0)
                 com.mojang.blaze3d.platform.TextureUtil.releaseTextureId(texture);
+            instanceProgram = null;
+            instanceBackup.destroyBuffers(); instanceBackup = null;
             target.destroyBuffers();
             main.destroyBuffers();
             RenderSystem.activeTexture(GL_TEXTURE0);
@@ -890,6 +906,10 @@ class PredictionRenderTargetGpuTest {
         int changedPixels=0;
         for (float morph : new float[]{.5F, 1}) {
             terrain.setMorph(packed,morph);
+            for (int mask = 1; mask < 32; mask++) {
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                compareInstanceDraw(packed.drawRanges(false, mask));
+            }
             ByteBuffer transition = terrainPixels(packed.quadCount());
             int exposed = 0, solid = 0;
             for (int y = 12; y < 52; y++) for (int x = 12; x < 52; x++) {
@@ -1067,7 +1087,7 @@ class PredictionRenderTargetGpuTest {
             int[] corners = {0, 1, 2, 0, 2, 3};
             for (int q = 0; q < mesh.quadCount(); q++) for (int c = 0; c < 6; c++) elements[q * 6 + c] = q * 4 + corners[c];
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementBuffer); glBufferData(GL_ELEMENT_ARRAY_BUFFER, elements, GL_STATIC_DRAW);
-            glDrawElements(GL_TRIANGLES, elements.length, GL_UNSIGNED_INT, 0L);
+            compareInstanceDraw(new PredictionDrawRanges(new int[]{0}, new int[]{mesh.quadCount()}, 1));
         }
     }
 
@@ -1484,6 +1504,31 @@ class PredictionRenderTargetGpuTest {
         }
     }
 
+    private static void verifyQuadPoolPayloadAndEmptyMesh() {
+        PredictionQuadBufferPool.SHARED.close();
+        try (var gpu = new PredictionGpuTile(null)) {
+            int oldBuffer = 0;
+            for (int i = 0; i < 6; i++) {
+                var mesh = PredictionPackedMesh.terrainRecords(new int[12 * (i == 4 ? 1 : 64)], 2);
+                mesh.morph(new float[]{i, -i, .25F, -.5F, 0,0,0,0,0}, -10, 10);
+                gpu.ensureSeams(mesh); gpu.bindQuad(4);
+                int buffer = glGetTexLevelParameteri(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_BUFFER_DATA_STORE_BINDING);
+                glBindBuffer(GL_TEXTURE_BUFFER, buffer);
+                int[] words = new int[12];
+                glGetBufferSubData(GL_TEXTURE_BUFFER, mesh.quads().length*4L, words);
+                assertEquals(i*256, words[0]); assertEquals(-i*256, words[1]);
+                assertEquals(64, words[2]); assertEquals(-128, words[3]);
+                assertEquals(0, words[11]);
+                assertTrue(glGetBufferParameteri(GL_TEXTURE_BUFFER,GL_BUFFER_SIZE)<=mesh.uploadBytes()+256);
+                oldBuffer=buffer; glFinish();
+            }
+            gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0],2));
+            assertFalse(gpu.drawable()); assertFalse(glIsBuffer(oldBuffer));
+        } finally { PredictionQuadBufferPool.SHARED.close(); RenderSystem.activeTexture(GL_TEXTURE0); }
+        assertEquals(GL_NO_ERROR,glGetError());
+        System.out.println("POOL_GPU morph-only updates, packed bytes, resize and empty mesh retirement verified");
+    }
+
     private static void verifyPublishedCoverageAndSeamBatch() {
         try (var gpu = new PredictionGpuTile(null)) {
             gpu.ensureSeams(PredictionPackedMesh.terrainRecords(new int[0], 4));
@@ -1788,6 +1833,70 @@ class PredictionRenderTargetGpuTest {
         System.out.println("PASS: Iris water/lava/ice ties, independent depth rounding, shallow beds and high-altitude/spyglass views");
     }
 
+    private static void benchmarkProductionSubmission(PredictionTerrainProgram terrain, PredictionPackedMesh mesh, boolean iris) {
+        int query = glGenQueries(), element = glGetInteger(GL_ELEMENT_ARRAY_BUFFER_BINDING);
+        int[] repeated = new int[12 * 4096];
+        for (int i=0;i<4096;i++) System.arraycopy(mesh.quads(),(i%mesh.quadCount())*12,repeated,i*12,12);
+        var large = PredictionPackedMesh.terrainRecords(repeated, mesh.cellAxis());
+        try (var gpuTile = new PredictionGpuTile(null)) {
+            gpuTile.ensureSeams(large); gpuTile.bindQuad(4);
+            int[] indices = new int[4096*6];
+            for(int i=0;i<4096;i++) for(int c=0;c<6;c++) indices[i*6+c]=i*4+new int[]{0,1,2,0,2,3}[c];
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER,indices,GL_STATIC_DRAW);
+            // Measure vertex/driver cost independently from repeatedly filling the same pixels.
+            glEnable(GL_RASTERIZER_DISCARD);
+            for (int mask : new int[]{31, 21}) {
+                var ranges = new PredictionDrawRanges(new int[]{0,800,1600,2400,3200},new int[]{800,800,800,800,896},mask);
+                long[][] cpu = new long[2][21], gpu = new long[2][21];
+                for (int round = -8; round < 21; round++) for (int order = 0; order < 2; order++) {
+                    int mode = Math.floorMod(round + order, 2);
+                    PredictionInstanceExperiment.indexed(); glFinish();
+                    glBeginQuery(GL_TIME_ELAPSED, query); long start = System.nanoTime();
+                    for (int i = 0; i < 128; i++) {
+                        if (mode == 0) PredictionRenderer.submitRanges(ranges);
+                        else PredictionInstanceExperiment.submit(ranges);
+                    }
+                    long elapsed = System.nanoTime() - start; glEndQuery(GL_TIME_ELAPSED); glFinish();
+                    long gpuElapsed = glGetQueryObjectui64(query, GL_QUERY_RESULT);
+                    if (round >= 0) { cpu[mode][round] = elapsed; gpu[mode][round] = gpuElapsed; }
+                }
+                for (var a : cpu) java.util.Arrays.sort(a);
+                for (var a : gpu) java.util.Arrays.sort(a);
+                System.out.printf(java.util.Locale.ROOT,
+                        "TERRAIN_INSTANCE_EXPERIMENT Iris=%s draws=128 quadsPerDraw=%d ranges=%d CPU_indexed_ms=%.3f CPU_instance_ms=%.3f GPU_indexed_ms=%.3f GPU_instance_ms=%.3f (vertex-only repeated mesh; not game FPS)%n",
+                        iris, ranges.quads, ranges.first.length, cpu[0][10]/1e6,cpu[1][10]/1e6,gpu[0][10]/1e6,gpu[1][10]/1e6);
+            }
+        } finally { glDisable(GL_RASTERIZER_DISCARD); glDeleteQueries(query); PredictionInstanceExperiment.indexed(); }
+    }
+
+    private static void compareInstanceDraw(PredictionDrawRanges ranges) {
+        if (instanceProgram == null) { PredictionRenderer.submitRanges(ranges); return; }
+        int read = glGetInteger(GL_READ_FRAMEBUFFER_BINDING), draw = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, draw);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, instanceBackup.frameBufferId);
+        glBlitFramebuffer(0,0,64,64,0,0,64,64,GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, draw);
+        PredictionInstanceExperiment.indexed();
+        PredictionRenderer.submitRanges(ranges);
+        var reference = BufferUtils.createByteBuffer(64*64*4);
+        glReadPixels(0,0,64,64,GL_RGBA,GL_UNSIGNED_BYTE,reference);
+        var referenceDepth = BufferUtils.createFloatBuffer(64*64);
+        glReadPixels(0,0,64,64,GL_DEPTH_COMPONENT,GL_FLOAT,referenceDepth);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, instanceBackup.frameBufferId);
+        glBlitFramebuffer(0,0,64,64,0,0,64,64,GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, draw);
+        PredictionInstanceExperiment.submit(ranges);
+        var actual = BufferUtils.createByteBuffer(64*64*4);
+        glReadPixels(0,0,64,64,GL_RGBA,GL_UNSIGNED_BYTE,actual);
+        var actualDepth = BufferUtils.createFloatBuffer(64*64);
+        glReadPixels(0,0,64,64,GL_DEPTH_COMPONENT,GL_FLOAT,actualDepth);
+        assertEquals(reference, actual, "production instance colors must match indexed reference");
+        assertEquals(referenceDepth, actualDepth, "production instance depth must match indexed reference");
+        instanceComparisons++;
+        PredictionInstanceExperiment.indexed();
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
+    }
+
     private static ByteBuffer terrainPixels() {
         return terrainPixels(1);
     }
@@ -1795,7 +1904,7 @@ class PredictionRenderTargetGpuTest {
     private static ByteBuffer terrainPixels(int quads) {
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        glDrawElements(GL_TRIANGLES, quads * 6, GL_UNSIGNED_INT, 0L);
+        compareInstanceDraw(new PredictionDrawRanges(new int[]{0}, new int[]{quads}, 1));
         ByteBuffer pixels = BufferUtils.createByteBuffer(64 * 64 * 4);
         glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         return pixels;

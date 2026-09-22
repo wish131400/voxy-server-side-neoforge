@@ -19,6 +19,7 @@
     "client.IrisPredictionCaptureMixin",
     "client.IrisPredictionShaderCaptureMixin",
     "client.SpyglassOverlayTimingMixin",
+    "client.PredictionPauseLimitMixin",
     "client.FreeTerraForgedPredictionFiltersMixin",
     "client.ClientPacketListenerServerIdentityMixin",
     "client.ClientLevelFarPlayerLeaveEventMixin",

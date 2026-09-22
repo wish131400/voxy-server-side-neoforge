@@ -48,6 +48,10 @@ public class VSSClientConfig extends JsonConfig {
     public boolean predictionFog = true;
     /** Screen-size-aware world edge filtering; shader packs own their postprocessing. */
     public boolean predictionAntialiasing = true;
+    /** True singleplayer pause only; zero disables the pause cap. */
+    public int predictionPausedFps = 30;
+    /** Losslessly compress published CPU mesh copies; GPU geometry is unchanged. */
+    public boolean predictionCompressMeshes = true;
     public boolean debugLogging = false;
 
     @Override
@@ -86,6 +90,8 @@ public class VSSClientConfig extends JsonConfig {
         help.put("predictionSupersample", "是否在最近两个 LOD 层级使用超采样；默认 false。");
         help.put("predictionFog", "是否使用独立的远景雾；默认 true。");
         help.put("predictionAntialiasing", "无光影时按屏幕细节大小过滤远景锯齿，覆盖真实区块、Voxy 和预测；默认 true。近处与望远镜细节保留，光影开启时自动交给光影处理。");
+        help.put("predictionCompressMeshes", "无损压缩预测网格的 CPU 副本以降低内存；默认 true。优先 Zstd，不可用时使用 Java LZ4；恢复在后台执行，影响新加载网格。关闭后重进世界可对比。");
+        help.put("predictionPausedFps", "预测开启时，单人游戏真正暂停后的帧率上限；默认 30，0 关闭；保留更低的原有上限，恢复游戏立即解除。多人游戏菜单不受影响。");
         help.put("debugLogging", "是否输出客户端 VSS 调试日志；默认 false。");
         return help;
     }
@@ -108,6 +114,7 @@ public class VSSClientConfig extends JsonConfig {
                 MIN_PREDICTION_DISTANCE_BLOCKS, MAX_PREDICTION_DISTANCE_BLOCKS);
         predictionSurfaceDistanceBlocks = clamp(predictionSurfaceDistanceBlocks, 128, 2048);
         predictionFineDistanceBlocks = clamp(predictionFineDistanceBlocks, 256, 4096);
+        predictionPausedFps = clamp(predictionPausedFps, 0, 260);
         predictionBackgroundWorkers = clamp(predictionBackgroundWorkers, 1, 4);
         if (performanceTier == null) performanceTier = "medium";
         performanceTier = performanceTier.toLowerCase(java.util.Locale.ROOT);

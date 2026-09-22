@@ -1,0 +1,16 @@
+// Usage: gradlew test -I tools/prediction/mesh-compression-benchmark.gradle -PvssMeshCorpus=<export directory>
+// Optionally add -PvssMeshZstdJar=<zstd-jni jar> to exercise the native optional codec.
+gradle.projectsEvaluated {
+ allprojects {
+  tasks.withType(Test).configureEach {
+   include '**/PredictionMeshCompressionBenchmark.class'
+   include '**/PredictionMeshCompressionTest.class'
+   if (providers.gradleProperty('vssMeshZstdJar').isPresent()) {
+    classpath = sourceSets.test.runtimeClasspath + files(providers.gradleProperty('vssMeshZstdJar').get())
+   }
+   systemProperty 'vss.meshCorpus', providers.gradleProperty('vssMeshCorpus').get()
+   outputs.upToDateWhen { false }
+   testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+  }
+ }
+}

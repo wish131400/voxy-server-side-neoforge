@@ -42,6 +42,7 @@ final class PredictionDiskCache implements AutoCloseable {
     record Key(int kind, int x, int z, int detail) {
         static Key terrain(int x, int z, int lod) { return new Key(0, x, z, lod); }
         static Key surface(int x, int z, int settings) { return new Key(1, x, z, settings); }
+        static Key mesh(Key terrain) { return new Key(2, terrain.x, terrain.z, terrain.detail); }
     }
     // Schema 3 includes surface features from their actual decoration stages.
     // Old empty/vegetation-only surface entries must regenerate; terrain stays reusable.
@@ -75,6 +76,49 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<String, BlockState> decodedStates = new LinkedHashMap<>(64, .75F, true);
     private final Map<BlockState, String> encodedStates = new LinkedHashMap<>(64, .75F, true);
     private final LongAdder stateDecodes = new LongAdder();
+    private final LongAdder meshHits = new LongAdder(), meshMisses = new LongAdder(), meshWrites = new LongAdder();
+    private static final java.util.concurrent.atomic.AtomicLong MESH_QUEUED = new java.util.concurrent.atomic.AtomicLong();
+    private static final ThreadPoolExecutor MESH_WRITES = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(2), task -> {
+                Thread thread = new Thread(task, "vss-finished-mesh-disk"); thread.setDaemon(true);
+                thread.setPriority(Thread.NORM_PRIORITY - 1); return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
+
+    PredictionMesh readMesh(Lease terrain, byte[] identity, int axis) {
+        if (identity == null || !terrain.valid() || !terrain.readable) return null;
+        try (var lease = lease(Key.mesh(terrain.key))) {
+            var mesh = read(lease, (input, version) -> {
+                int length = bounded(input.readInt(), PredictionMeshCodec.MAX_BYTES);
+                byte[] bytes = input.readNBytes(length);
+                if (bytes.length != length) throw new EOFException("mesh payload");
+                return PredictionMeshCodec.decode(bytes, identity, axis);
+            });
+            if (!terrain.valid()) return null;
+            if (mesh == null) meshMisses.increment(); else meshHits.increment();
+            return mesh;
+        }
+    }
+
+    /** Bounded detached bytes only; never retain a tile/vegetation graph in an IO queue. */
+    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh) {
+        if (identity == null || !terrain.valid() || MESH_WRITES.getQueue().remainingCapacity() == 0) return;
+        byte[] bytes;
+        try { bytes = PredictionMeshCodec.encode(mesh, identity); }
+        catch (IOException | RuntimeException unavailable) { return; }
+        if (MESH_QUEUED.addAndGet(bytes.length) > 32L * 1024 * 1024) { MESH_QUEUED.addAndGet(-bytes.length); return; }
+        Lease owned;
+        synchronized (shared) {
+            if (!terrain.valid()) { MESH_QUEUED.addAndGet(-bytes.length); return; }
+            owned = lease(Key.mesh(terrain.key));
+        }
+        try {
+            MESH_WRITES.execute(() -> {
+                try (owned) {
+                    if (write(owned, output -> { output.writeInt(bytes.length); output.write(bytes); })) meshWrites.increment();
+                } finally { MESH_QUEUED.addAndGet(-bytes.length); }
+            });
+        } catch (RejectedExecutionException busy) { owned.close(); MESH_QUEUED.addAndGet(-bytes.length); }
+    }
     private final java.util.concurrent.atomic.AtomicBoolean loggedError = new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Key, Integer> terrainHints = new LinkedHashMap<>(256, .75F, true);
     private final ArrayDeque<Key> probeQueue = new ArrayDeque<>();
@@ -387,12 +431,13 @@ final class PredictionDiskCache implements AutoCloseable {
             temporary = Files.createTempFile(target.getParent(), "pending-", ".tmp");
             // Batch primitive writes before crossing into zlib, without changing
             // the on-disk schema or retaining a whole decoded tile in the IO queue.
+            var compressor = new java.util.zip.Deflater(lease.key.kind == 2 ? 1 : java.util.zip.Deflater.DEFAULT_COMPRESSION);
             try (var output = new DataOutputStream(new BufferedOutputStream(
-                    new DeflaterOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary))), 32 * 1024))) {
+                    new DeflaterOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)), compressor), 32 * 1024))) {
                 output.writeInt(MAGIC); output.writeInt(version); output.writeLong(fingerprint);
                 output.writeInt(lease.key.kind); output.writeInt(lease.key.x); output.writeInt(lease.key.z); output.writeInt(lease.key.detail);
                 encoder.write(output);
-            }
+            } finally { compressor.end(); }
             Path completed = temporary;
             // Only a path is queued. The potentially large sample/block map is
             // never retained in an asynchronous write queue.
@@ -426,7 +471,9 @@ final class PredictionDiskCache implements AutoCloseable {
     void invalidate(Collection<Key> keys) {
         synchronized (shared) {
             if (closed || shared.owner != this) return;
-            for (Key key : keys) {
+            var expanded = new HashSet<>(keys);
+            for (Key key : keys) if (key.kind == 0) expanded.add(Key.mesh(key));
+            for (Key key : expanded) {
                 terrainHints.remove(key);
                 Entry entry = shared.active.remove(key);
                 if (entry != null) entry.valid = false;
@@ -536,6 +583,8 @@ final class PredictionDiskCache implements AutoCloseable {
         return shared.regions.legacy(key);
     }
     String diagnostics() { return "disk={hits=" + hits.sum() + ",misses=" + misses.sum() + ",writes=" + writes.sum()
+            + ",meshHits=" + meshHits.sum() + ",meshMisses=" + meshMisses.sum() + ",meshWrites=" + meshWrites.sum()
+            + ",meshQueuedBytes=" + MESH_QUEUED.get()
             + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"
             // Why the misses happened. `absent` is the healthy case (nothing
             // written yet); `identity`/`corrupt` mean a stored entry was
@@ -545,6 +594,11 @@ final class PredictionDiskCache implements AutoCloseable {
             + ",raced=" + missRaced.sum() + "}"; }
     Path root() { return root; }
     long hits() { return hits.sum(); }
+    void flushMeshes() {
+        try { MESH_WRITES.submit(() -> { }).get(); }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        catch (ExecutionException failure) { error(failure); }
+    }
     void flush() {
         try { COMMITS.submit(() -> { }).get(); }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }

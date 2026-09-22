@@ -19,6 +19,40 @@ final class PredictionSeamMesh {
     // Along-plane endpoints retain their original float bits; heights are already integral.
     private final int[] walls;
 
+    void materialRows(java.util.BitSet rows) {
+        for (int color : topColors) { int row = color >>> 24; if (row > 0 && row < 255) rows.set(row); }
+    }
+    void remapMaterials(int[] rows) throws java.io.IOException {
+        for (int i = 0; i < topColors.length; i++) {
+            int row = topColors[i] >>> 24;
+            if (rows[row] < 0) throw new java.io.IOException("unresolved seam material");
+            topColors[i] = (topColors[i] & 0xffffff) | rows[row] << 24;
+        }
+    }
+
+    void writeCache(java.io.DataOutputStream out) throws java.io.IOException {
+        PredictionMeshCodec.floats(out, topY); PredictionMeshCodec.ints(out, topColors);
+        out.writeInt(tops.length); for (boolean value : tops) out.writeBoolean(value);
+        out.writeInt(planes.length); for (long value : planes) out.writeLong(value);
+        PredictionMeshCodec.ints(out, offsets); PredictionMeshCodec.ints(out, walls);
+    }
+
+    PredictionSeamMesh(java.nio.ByteBuffer in, int axis) throws java.io.IOException {
+        topY = PredictionMeshCodec.floats(in); topColors = PredictionMeshCodec.ints(in);
+        int n = PredictionMeshCodec.count(in, 1); tops = new boolean[n];
+        for (int i = 0; i < n; i++) tops[i] = in.get() != 0;
+        n = PredictionMeshCodec.count(in, 8); planes = new long[n];
+        in.asLongBuffer().get(planes); in.position(in.position() + n * 8);
+        offsets = PredictionMeshCodec.ints(in); walls = PredictionMeshCodec.ints(in);
+        if (topY.length != axis * axis || topColors.length != topY.length || tops.length != topY.length
+                || offsets.length != planes.length + 1 || walls.length % WALL_WORDS != 0
+                || offsets[0] != 0 || offsets[offsets.length - 1] != walls.length / WALL_WORDS)
+            throw new java.io.IOException("invalid seam dimensions");
+        for (float y : topY) if (!Float.isFinite(y)) throw new java.io.IOException("invalid seam height");
+        for (int i = 1; i < offsets.length; i++) if (offsets[i] < offsets[i-1]) throw new java.io.IOException("invalid seam offsets");
+        for (int i = 1; i < planes.length; i++) if (planes[i] <= planes[i-1]) throw new java.io.IOException("invalid seam planes");
+    }
+
     PredictionSeamMesh(PredictionQuadMesh source) {
         int cells = source.cellAxis() * source.cellAxis();
         topY = new float[cells]; topColors = new int[cells]; tops = new boolean[cells];

@@ -84,6 +84,7 @@ public final class PredictionRenderer {
     private static int sharedVertexArray = -1;
     private static int sharedIndexBuffer = -1;
     private static int sharedIndexQuads;
+    private static volatile boolean resetQuadPool;
 
     private static final Map<PredictionTileManager.PredictionTileKey, PredictionGpuTile> gpuTiles =
             new ConcurrentHashMap<>();
@@ -295,13 +296,19 @@ public final class PredictionRenderer {
                             .thenComparingInt(tile -> -tile.key().lod())
                             .thenComparingDouble(tile -> PredictionWorkOrder.orderingDistance(tile.key(), uploadLayout,
                                     camera.x, camera.z, uploadFocus)));
+                    int coldRequests = 0;
                     for (var tile : uploads) {
                         if (renderResidency.contains(tile) || tile.mesh().gpuPayload() == null) continue;
                         long bytes = tile.mesh().gpuPayload().uploadBytes();
                         if (!uploadBudget.allows(bytes)) break;
+                        if (!tile.mesh().gpuPayload().uploadReady()) {
+                            if (++coldRequests >= 4) break;
+                            continue;
+                        }
                         long start = System.nanoTime();
                         var gpu = gpuTiles.computeIfAbsent(tile.key(), PredictionGpuTile::new);
                         if (gpu.ensureMesh(tile)) meshUploads.incrementAndGet();
+                        if (!gpu.hasMesh(tile)) continue;
                         uploadBudget.record(bytes, System.nanoTime() - start);
                         PredictionRenderTimings.end(PredictionRenderTimings.Stage.UPLOAD, prepareStart == 0 ? 0 : start);
                         renderResidency.uploaded(tile);
@@ -810,8 +817,27 @@ public final class PredictionRenderer {
                                    List<Draw> draws, Vec3 camera,
                                    VssLodProjection.MatrixData projection, boolean water) {
         int previousAtlasSampler = GL30.glGetIntegeri(org.lwjgl.opengl.GL33.GL_SAMPLER_BINDING, 0);
-        try { return drawNormalPass(minecraft, event, draws, camera, projection, water); }
-        finally { org.lwjgl.opengl.GL33.glBindSampler(0, previousAtlasSampler); }
+        PredictionTerrainProgram original = program;
+        try {
+            if (!batchProgramBroken && PredictionTerrainArena.supported() && batchWorthwhile(draws, water)) {
+                try { if (batchProgram == null) batchProgram = PredictionTerrainProgram.createBatch(); }
+                catch (RuntimeException unavailable) { batchProgramBroken = true; }
+                if (batchProgram != null) { program = batchProgram; program.use(); }
+            }
+            return drawNormalPass(minecraft, event, draws, camera, projection, water);
+        } finally { program = original; org.lwjgl.opengl.GL33.glBindSampler(0, previousAtlasSampler); }
+    }
+
+    /** Single-range calls are already cheap; avoid command assembly when it cannot amortize. */
+    static boolean batchWorthwhile(List<Draw> draws, boolean water) {
+        int tiles = 0, ranges = 0;
+        for (Draw draw : draws) {
+            var packed = draw.gpu().packed(); if (packed == null) continue;
+            var plan = packed.drawRanges(water, draw.faces()); if (plan.quads == 0) continue;
+            if (draw.gpu().arenaSlice() == null) return false;
+            tiles++; ranges += plan.first.length;
+        }
+        return tiles >= 64 && ranges >= tiles + tiles / 4;
     }
 
     private static long drawNormalPass(Minecraft minecraft, Frame event,
@@ -842,6 +868,12 @@ public final class PredictionRenderer {
         bindSharedIndices(maxQuads);
         long calls = 0L;
         long quads = 0L;
+        boolean batch = program.supportsBatch();
+        if (batch) {
+            if (indirectBatch == null) indirectBatch = new PredictionIndirectBatch();
+            indirectBatch.begin(program);
+        }
+        long frameTime = System.nanoTime();
         try {
             PredictionGlState.depthMask(!water);
             program.setOpaqueAlpha(water ? 0.0F : 1.0F);
@@ -857,7 +889,11 @@ public final class PredictionRenderer {
                 if (packed == null) continue;
                 var ranges=packed.drawRanges(water,draw.faces());
                 if(ranges.quads==0) continue;
-                draw.gpu().bindQuad(4);
+                if (batch && indirectBatch.add(draw, ranges, camera, water, useAverage, frameTime)) {
+                    quads += ranges.quads;
+                    continue;
+                }
+                draw.gpu().bindTerrain(program);
                 draw.gpu().bindYield(3);
                 program.setTile((float) (draw.tile().baseBlockX() - camera.x), (float) -camera.y,
                         (float) (draw.tile().baseBlockZ() - camera.z), draw.tile().spacingBlocks(),
@@ -868,9 +904,10 @@ public final class PredictionRenderer {
                 calls++;
                 quads+=ranges.quads;
             }
+        } finally {
+            if (batch) calls += indirectBatch.end();
             PredictionGlState.depthMask(true);
             PredictionGlState.disableBlend();
-        } finally {
             GL30.glBindVertexArray(0);
             PredictionVanillaMask.unbind(6);
             PredictionGlState.activeTexture(GL13.GL_TEXTURE5);
@@ -902,7 +939,7 @@ public final class PredictionRenderer {
             if (packed == null) continue;
             var ranges=packed.drawRanges(water,draw.faces());
             if(ranges.quads==0) continue;
-            draw.gpu().bindQuad(4);
+            draw.gpu().bindTerrain(program);
             draw.gpu().bindYield(3);
             program.setTile((float) (draw.tile().baseBlockX() - camera.x), (float) -camera.y,
                     (float) (draw.tile().baseBlockZ() - camera.z), draw.tile().spacingBlocks(),
@@ -1070,6 +1107,9 @@ public final class PredictionRenderer {
                 + ",coverageSkipped=" + skippedCoverage.get()
                 + ",authoritativeSkipped=" + skippedAuthoritative.get()
                 + ",meshUploads=" + meshUploads.get()
+                + ",meshRestore={" + PredictionMeshRestore.diagnostics() + "}"
+                + "," + PredictionQuadBufferPool.SHARED.diagnostics()
+                + "," + PredictionTerrainArena.SHARED.diagnostics()
                 + ",drawCalls=" + drawCalls.get()
                 + ",multiDrawCalls=" + groupedDrawCalls.get()
                 + ",quads=" + submittedQuads.get()
@@ -1088,6 +1128,7 @@ public final class PredictionRenderer {
     /** Drops all GPU caches; called on world change and resource reload. */
     public static void resetOcclusion() {
         resetEdgeFilter = true;
+        resetQuadPool = true;
         deferredWater = null;
         planGeneration.incrementAndGet();
         PredictionRenderTimings.reset();
@@ -1095,6 +1136,7 @@ public final class PredictionRenderer {
         viewRay = null;
         PredictionVoxyDepth.clear();
         renderResidency.clear();
+        PredictionMeshRestore.clear();
         scene.clear();
         uploadBudget.clear();
         vanillaMask.invalidate();
@@ -1106,8 +1148,14 @@ public final class PredictionRenderer {
     }
 
     private static final java.util.Queue<PredictionGpuTile> retiredTiles = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static PredictionIndirectBatch indirectBatch;
+    private static PredictionTerrainProgram batchProgram;
+    private static boolean batchProgramBroken;
 
     private static void drainRetiredTiles() {
+        if (resetQuadPool) { PredictionQuadBufferPool.SHARED.close(); resetQuadPool = false; }
+        PredictionQuadBufferPool.SHARED.trim();
+        if (PredictionTerrainArena.supported()) PredictionTerrainArena.SHARED.reap();
         long until = System.nanoTime() + 1_000_000L;
         for (int i = 0; i < 8; i++) {
             PredictionGpuTile tile = retiredTiles.poll();

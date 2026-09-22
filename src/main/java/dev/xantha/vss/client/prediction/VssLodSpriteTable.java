@@ -62,6 +62,7 @@ final class VssLodSpriteTable {
      * fluid textures and inherit water's translucency from the texture's
      * own alpha channel.
      */
+    private static final Map<Long, Boolean> TINT_BY_STATE_FACE = new java.util.concurrent.ConcurrentHashMap<>();
     private static final Map<Long, Integer> INDEX_BY_STATE_FACE = new java.util.concurrent.ConcurrentHashMap<>();
     private static final int[] FLUID_SPRITES = new int[4];
     private static final List<float[]> RECTS = new ArrayList<>();
@@ -170,6 +171,8 @@ final class VssLodSpriteTable {
 
     /** Populate CPU appearances before the first mesh worker is scheduled. */
     static void prepare() {
+        if (!broken && dev.xantha.vss.config.VSSClientConfig.CONFIG.rememberTerrain)
+            PredictionMeshResources.prepare(Minecraft.getInstance().getResourceManager());
         if (runtimeReady || broken) return;
         runtimeReady = true;
         seedRepresentativeBlocks();
@@ -184,12 +187,14 @@ final class VssLodSpriteTable {
             return false;
         }
         atlasToken = token;
+        PredictionMeshResources.reset();
         synchronized (VssLodSpriteTable.class) {
             runtimeReady = false;
             INDEX_BY_BLOCK.clear();
             SIDE_INDEX_BY_BLOCK.clear();
             SIDE_INDEX_BY_FACE_BLOCK.clear();
             INDEX_BY_STATE_FACE.clear();
+            TINT_BY_STATE_FACE.clear();
             INDEX_BY_SPRITE.clear();
             java.util.Arrays.fill(FLUID_SPRITES, 0);
             RECTS.clear();
@@ -504,20 +509,14 @@ final class VssLodSpriteTable {
             if (direction != null) {
                 var quads = model.getQuads(state, direction,
                         net.minecraft.util.RandomSource.create(42L));
-                if (quads != null && !quads.isEmpty()
-                        && quads.get(0).getSprite() != null) {
-                    sprite = quads.get(0).getSprite();
-                }
+                if (!quads.isEmpty()) sprite = selectedFace(state, face, quads.get(0));
                 // Some custom models put all geometry in the unculled list;
                 // use it before falling back to the particle icon, exactly as
                 // the does for an empty directional layer.
                 if (sprite == null) {
                     var unculled = model.getQuads(state, null,
                             net.minecraft.util.RandomSource.create(42L));
-                    if (unculled != null && !unculled.isEmpty()
-                            && unculled.get(0).getSprite() != null) {
-                        sprite = unculled.get(0).getSprite();
-                    }
+                    if (!unculled.isEmpty()) sprite = selectedFace(state, face, unculled.get(0));
                 }
             }
             if (sprite == null) {
@@ -569,6 +568,19 @@ final class VssLodSpriteTable {
         return row;
     }
 
+    /** Tint belongs to the selected model face, not to the block's colour provider. */
+    static TextureAtlasSprite selectedFace(net.minecraft.world.level.block.state.BlockState state, int face,
+            net.minecraft.client.renderer.block.model.BakedQuad quad) {
+        TINT_BY_STATE_FACE.put(((long) Block.getId(state) << 3) | (face & 7), quad.isTinted());
+        return quad.getSprite();
+    }
+
+    static boolean faceUsesTint(net.minecraft.world.level.block.state.BlockState state, int face) {
+        indexForState(state, face);
+        // Particle-only/custom-model fallback retains the previous colour-provider behaviour.
+        return TINT_BY_STATE_FACE.getOrDefault(((long) Block.getId(state) << 3) | (face & 7), true);
+    }
+
     /** Preserve each baked face's UV rectangle and rotation, not its particle icon. */
     static synchronized int registerModelFace(net.minecraft.client.renderer.block.model.BakedQuad quad, int blockId) {
         TextureAtlasSprite sprite = quad.getSprite();
@@ -580,6 +592,10 @@ final class VssLodSpriteTable {
             uv.add((Float.intBitsToFloat(vertices[corner * stride + 5]) - sprite.getV0()) / (sprite.getV1() - sprite.getV0()));
         }
         ModelUvKey key = new ModelUvKey(sprite.contents().name(), List.copyOf(uv), quad.isShade(), blockId);
+        return registerModel(sprite, key);
+    }
+
+    private static int registerModel(TextureAtlasSprite sprite, ModelUvKey key) {
         Integer existing = MODEL_ROWS.get(key);
         if (existing != null) return existing;
         if (RECTS.size() >= MAX_SPRITES) return FLAT;
@@ -587,16 +603,59 @@ final class VssLodSpriteTable {
         AVERAGES.add(averageOf(sprite));
         CUTOUTS.add(hasTransparency(sprite));
         float[] coords = new float[8];
-        for (int i = 0; i < 8; i++) coords[i] = uv.get(i);
+        for (int i = 0; i < 8; i++) coords[i] = key.uv().get(i);
         MODEL_UVS.add(coords);
         int row = RECTS.size();
         MODEL_ROWS.put(key, row);
-        MODEL_BLOCKS.put(row, blockId);
+        MODEL_BLOCKS.put(row, key.blockId());
         materialRevision++;
         byte[] flags = modelFlags.clone();
-        flags[row] = (byte) (quad.isShade() ? 1 : 3);
+        flags[row] = (byte) (key.shade() ? 1 : 3);
         modelFlags = flags;
         dirty = true;
+        return row;
+    }
+
+    /** Stable material descriptors; persisted packed words never depend on a previous session's row order. */
+    static synchronized void writeMaterial(java.io.DataOutputStream out, int row) throws java.io.IOException {
+        ModelUvKey model = null; ResourceLocation name = null;
+        for (var e : MODEL_ROWS.entrySet()) if (e.getValue() == row) { model = e.getKey(); name = model.sprite(); break; }
+        if (name == null) for (var e : INDEX_BY_SPRITE.entrySet()) if (e.getValue() == row) { name = e.getKey(); break; }
+        if (name == null) throw new java.io.IOException("unresolved mesh material");
+        out.writeUTF(name.toString()); out.writeBoolean(model != null);
+        if (model != null) {
+            out.writeInt(model.blockId()); out.writeBoolean(model.shade());
+            for (float uv : model.uv()) out.writeFloat(uv);
+        }
+        float[] rect = RECTS.get(row - 1);
+        out.writeInt(rect[0] < 0 ? (int) rect[1] : -1);
+        out.writeInt(materialBlocks()[row]);
+    }
+
+    static synchronized int readMaterial(java.io.DataInputStream in) throws java.io.IOException {
+        return readMaterial(in, name -> Minecraft.getInstance().getModelManager().getAtlas(TextureAtlas.LOCATION_BLOCKS).getSprite(name));
+    }
+
+    static synchronized int readMaterial(java.io.DataInputStream in,
+            java.util.function.Function<ResourceLocation, TextureAtlasSprite> atlas) throws java.io.IOException {
+        ResourceLocation name = ResourceLocation.tryParse(in.readUTF());
+        if (name == null) throw new java.io.IOException("mesh material name");
+        boolean model = in.readBoolean(); ModelUvKey key = null;
+        if (model) {
+            int block = in.readInt(); boolean shade = in.readBoolean();
+            if (block < 0 || block >= BuiltInRegistries.BLOCK.size()) throw new java.io.IOException("mesh material block");
+            var uv = new ArrayList<Float>(8);
+            for (int i = 0; i < 8; i++) { float value = in.readFloat(); if (!Float.isFinite(value)) throw new java.io.IOException("mesh UV"); uv.add(value); }
+            key = new ModelUvKey(name, List.copyOf(uv), shade, block);
+        }
+        int fire = in.readInt(); if (fire < -1 || fire > 1) throw new java.io.IOException("mesh fire kind");
+        int representative = in.readInt();
+        if (representative < -1 || representative >= BuiltInRegistries.BLOCK.size()) throw new java.io.IOException("mesh representative block");
+        var sprite = atlas.apply(name);
+        if (sprite == null || !sprite.contents().name().equals(name)) throw new java.io.IOException("mesh sprite missing");
+        int row = model ? registerModel(sprite, key) : fire >= 0 ? registerStaticFire(sprite, fire) : registerSprite(sprite);
+        if (row == FLAT) throw new java.io.IOException("mesh material table full");
+        if (representative >= 0 && !MODEL_BLOCKS.containsKey(row)) { MODEL_BLOCKS.put(row, representative); materialRevision++; }
         return row;
     }
 
@@ -786,6 +845,7 @@ final class VssLodSpriteTable {
             SIDE_INDEX_BY_BLOCK.clear();
             SIDE_INDEX_BY_FACE_BLOCK.clear();
             INDEX_BY_STATE_FACE.clear();
+            TINT_BY_STATE_FACE.clear();
             INDEX_BY_SPRITE.clear();
             java.util.Arrays.fill(FLUID_SPRITES, 0);
             RECTS.clear();

@@ -82,11 +82,45 @@ final class PredictionPackedMesh {
     private int morphMinY, morphMaxY;
     void morph(float[] field, int minY, int maxY) { morph=field; morphMinY=minY; morphMaxY=maxY; }
     float[] morph() { return morph; }
-    long uploadBytes() { return (long)quads.length*4 + (morph == null ? 0 : (morph.length+3)/4*16L); }
-    long retainedHeapBytes() { return 4096L + quads.length * 4L + (morph == null ? 0L : morph.length * 4L); }
+    long uploadBytes() { return quadBytes() + (morph == null ? 0 : (morph.length+3)/4*16L); }
+    long retainedHeapBytes() {
+        var blob = compressed;
+        return 4096L + (blob == null ? quadBytes() : blob.bytes().length) + (morph == null ? 0L : morph.length * 4L);
+    }
+    long quadBytes() { return wordCount * 4L; }
     int morphMinY() { return morphMinY; }
     int morphMaxY() { return morphMaxY; }
-    private final int[] quads;
+    private volatile int[] quads;
+    private final int wordCount;
+    private volatile PredictionMeshCompression.Blob compressed;
+    private static final java.util.concurrent.Semaphore COMPRESSORS = new java.util.concurrent.Semaphore(2);
+
+    /** Publishing worker only. At most two bounded compression workspaces; busy builders keep raw words. */
+    void prepareStorage() {
+        int[] source = quads;
+        if (compressed != null || source == null || !COMPRESSORS.tryAcquire()) return;
+        try {
+            var blob = PredictionMeshCompression.compress(source);
+            if (blob == null) return;
+            compressed = blob;
+            PredictionMeshRestore.stage(this, source);
+            quads = null;
+        } finally { COMPRESSORS.release(); }
+    }
+    boolean compressed() { return compressed != null; }
+    int[] uploadWords() {
+        int[] words = quads;
+        if (words != null) return words;
+        words = PredictionMeshRestore.peek(this);
+        if (words == null) PredictionMeshRestore.request(this);
+        return words;
+    }
+    boolean uploadReady() { return uploadWords() != null; }
+    void uploaded() { PredictionMeshRestore.uploaded(this); }
+    int[] restoreWords() {
+        int[] words = quads;
+        return words != null ? words : compressed.restore();
+    }
     private final int cellAxis;
     private final int terrainQuadCount;
     private final int spriteQuadCount;
@@ -105,11 +139,12 @@ final class PredictionPackedMesh {
         return result;
     }
 
-    private PredictionPackedMesh(int[] quads, int cellAxis,
+    PredictionPackedMesh(int[] quads, int cellAxis,
                                  int terrainQuadCount, int[] terrainFirst, int[] terrainCount,
                                  int[] waterFirst, int[] waterCount, boolean downFaces,
                                  int spriteQuadCount) {
         this.quads = quads;
+        this.wordCount = quads.length;
         this.cellAxis = cellAxis;
         this.terrainQuadCount = terrainQuadCount;
         this.terrainRangeFirst = terrainFirst;
@@ -121,7 +156,7 @@ final class PredictionPackedMesh {
     }
 
     int quadCount() {
-        return quads.length / STRIDE_INTS;
+        return wordCount / STRIDE_INTS;
     }
 
     int terrainQuadCount() {
@@ -136,8 +171,12 @@ final class PredictionPackedMesh {
         return cellAxis;
     }
 
+    /** Worker-only full read (disk persistence/tests); render upload must use uploadWords(). */
     int[] quads() {
-        return quads;
+        int[] words = quads;
+        if (words != null) return words;
+        words = PredictionMeshRestore.peek(this);
+        return words != null ? words : restoreWords();
     }
 
     boolean downFaces() {

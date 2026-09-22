@@ -6,7 +6,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL31;
 import org.lwjgl.system.MemoryUtil;
@@ -23,7 +22,6 @@ import org.lwjgl.system.MemoryUtil;
  */
 final class PredictionGpuTile implements AutoCloseable {
     /** Four unsigned words per texel: one packed quad spans three texels. */
-    private static final int INTERNAL_RGBA32UI = 0x8D70;
     private static final int TEXTURE_BUFFER = 0x8C2A;
 
     private final PredictionTileManager.PredictionTileKey key;
@@ -42,6 +40,11 @@ final class PredictionGpuTile implements AutoCloseable {
             PredictionGlState.bindTexture(yieldTexture);
             GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, 0, 0, packed.cellAxis(), packed.cellAxis(),
                     GL11.GL_RED, GL11.GL_UNSIGNED_BYTE, bytes);
+            if (arenaSlice != null) {
+                int[] values = new int[mask.length];
+                for (int i = 0; i < mask.length; i++) values[i] = mask[i] & 255;
+                PredictionTerrainArena.SHARED.mask(arenaSlice, values);
+            }
             boundaryCoverage = mask;
         } finally {
             PredictionGlState.bindTexture(0);
@@ -60,8 +63,9 @@ final class PredictionGpuTile implements AutoCloseable {
     private long uploadedAt;
     float morphAmount(long now) { return packed == null || packed.morph() == null ? 0 : PredictionMorph.amount(now-uploadedAt); }
 
-    private int quadBuffer = -1;
-    private int quadTexture = -1;
+    private PredictionQuadBufferPool.Allocation quadAllocation;
+    private PredictionTerrainArena.Slice arenaSlice;
+    PredictionTerrainArena.Slice arenaSlice() { return arenaSlice; }
     private int yieldTexture = -1;
     private int yieldAxis;
 
@@ -86,11 +90,13 @@ final class PredictionGpuTile implements AutoCloseable {
         if (packed != null && meshRevision == tile.revision()) return false;
         PredictionPackedMesh next = tile.mesh().gpuPayload();
         if (next == null) return false;
+        int[] words = next.uploadWords();
+        if (words == null) return false;
         // The upload helper retires the previous GPU resources itself;
         // deleting after creation would free the freshly uploaded payload.
-        if (next.quadCount() > 0) {
-            ensureQuadBuffer(next.quads(), next.morph());
-        }
+        if (next.quadCount() > 0) ensureQuadBuffer(words, next.morph(), next.cellAxis());
+        else closeQuads();
+        next.uploaded();
         packed = next;
         meshRevision = tile.revision();
         uploadedAt = System.nanoTime();
@@ -101,10 +107,15 @@ final class PredictionGpuTile implements AutoCloseable {
         return true;
     }
 
+    boolean hasMesh(PredictionTileManager.PredictionTile tile) {
+        return packed == tile.mesh().gpuPayload() && meshRevision == tile.revision();
+    }
+
     long ensureSeams(PredictionPackedMesh next) {
         if (packed == next) return 0;
-        boolean changed = packed == null || !Arrays.equals(packed.quads(), next.quads());
-        if (changed) ensureQuadBuffer(next.quads(), next.morph());
+        boolean changed = packed == null || !Arrays.equals(packed.quads(), next.quads())
+                || !Arrays.equals(packed.morph(), next.morph());
+        if (changed) ensureQuadBuffer(next.quads(), next.morph(), next.cellAxis());
         packed = next;
         return changed ? next.uploadBytes() : 0;
     }
@@ -147,6 +158,11 @@ final class PredictionGpuTile implements AutoCloseable {
             }
             PredictionGlState.bindTexture(0);
             coverage = allowed.clone();
+            if (arenaSlice != null) {
+                int[] values = new int[allowed.length];
+                for (int i = 0; i < allowed.length; i++) values[i] = allowed[i] ? 255 : 0;
+                PredictionTerrainArena.SHARED.mask(arenaSlice, values);
+            }
             boundaryCoverage = null;
             return axis * axis;
         } finally {
@@ -154,35 +170,31 @@ final class PredictionGpuTile implements AutoCloseable {
         }
     }
 
-    private void ensureQuadBuffer(int[] quads, float[] morph) {
-        closeQuads();
-        quadBuffer = GL15.glGenBuffers();
-        GL15.glBindBuffer(TEXTURE_BUFFER, quadBuffer);
-        // OpenGL reads the texture-buffer words in native byte order.  The
-        // default ByteBuffer order is BIG_ENDIAN even on Windows, which
-        // reverses every packed x/z/y word and turns normal quads into the
-        // long green streaks seen in-world.
+    private void ensureQuadBuffer(int[] quads, float[] morph, int axis) {
+        if (quads.length == 0) { closeQuads(); return; }
         int extra = morph == null ? 0 : (morph.length + 3) / 4 * 4;
-        ByteBuffer data = MemoryUtil.memAlloc((quads.length + extra) * 4)
-                .order(ByteOrder.nativeOrder());
-        writeQuadPayload(data, quads);
-        if (morph != null) {
-            for (float value : morph) data.putInt(Math.round(value * 256));
-            for (int i=morph.length;i<extra;i++) data.putInt(0);
-        }
-        data.flip();
-        GL31.glBufferData(TEXTURE_BUFFER, data, GL31.GL_STATIC_DRAW);
-        MemoryUtil.memFree(data);
-        GL15.glBindBuffer(TEXTURE_BUFFER, 0);
-        quadTexture = TextureUtil.generateTextureId();
-        // A texture id's target is fixed by its FIRST bind.  Attaching the
-        // payload through the GL_TEXTURE_BUFFER target here is what makes
-        // every later bindQuad() legal — binding these ids through the 2D
-        // target first made every GL_TEXTURE_BUFFER bind fail with
-        // INVALID_OPERATION and the whole terrain pass draw nothing.
-        GL31.glBindTexture(TEXTURE_BUFFER, quadTexture);
-        GL31.glTexBuffer(TEXTURE_BUFFER, INTERNAL_RGBA32UI, quadBuffer);
-        GL31.glBindTexture(TEXTURE_BUFFER, 0);
+        ByteBuffer data = MemoryUtil.memAlloc((quads.length + extra) * 4).order(ByteOrder.nativeOrder());
+        try {
+            writeQuadPayload(data, quads);
+            if (morph != null) {
+                for (float value : morph) data.putInt(Math.round(value * 256));
+                for (int i = morph.length; i < extra; i++) data.putInt(0);
+            }
+            data.flip();
+            // Keep the old allocation valid if allocation/upload fails. The pool only
+            // overwrites spare storage whose fence has completed, never this live mesh.
+            var nextArena = PredictionTerrainArena.SHARED.upload(data, axis * axis);
+            var next = nextArena == null ? PredictionQuadBufferPool.SHARED.upload(data) : null;
+            var previous = quadAllocation;
+            var oldArena = arenaSlice;
+            quadAllocation = next;
+            arenaSlice = nextArena;
+            coverage = null;
+            publishedCoverage = null;
+            boundaryCoverage = null;
+            PredictionQuadBufferPool.SHARED.retire(previous);
+            PredictionTerrainArena.SHARED.retire(oldArena);
+        } finally { MemoryUtil.memFree(data); }
     }
 
     static void writeQuadPayload(ByteBuffer data, int[] quads) {
@@ -192,7 +204,12 @@ final class PredictionGpuTile implements AutoCloseable {
     }
 
     void bindQuad(int unit) {
-        bind(unit, quadTexture, TEXTURE_BUFFER);
+        bind(unit, arenaSlice != null ? arenaSlice.texture : quadAllocation == null ? -1 : quadAllocation.texture, TEXTURE_BUFFER);
+    }
+
+    void bindTerrain(PredictionTerrainProgram program) {
+        if (arenaSlice == null) { bindQuad(4); program.setQuadBase(0); }
+        else { bind(4, arenaSlice.page.texture, TEXTURE_BUFFER); program.setQuadBase(arenaSlice.offset / 16); }
     }
 
     void bindYield(int unit) {
@@ -239,14 +256,11 @@ final class PredictionGpuTile implements AutoCloseable {
     }
 
     private void closeQuads() {
-        if (quadTexture != -1) {
-            TextureUtil.releaseTextureId(quadTexture);
-            quadTexture = -1;
-        }
-        if (quadBuffer != -1) {
-            GL15.glDeleteBuffers(quadBuffer);
-            quadBuffer = -1;
-        }
+        // Evictions and distance reduction release storage instead of filling the pool.
+        PredictionQuadBufferPool.SHARED.discard(quadAllocation);
+        quadAllocation = null;
+        PredictionTerrainArena.SHARED.retire(arenaSlice);
+        arenaSlice = null;
     }
 
     private static final class GL12Compat {

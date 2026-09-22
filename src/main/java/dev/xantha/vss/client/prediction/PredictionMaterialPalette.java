@@ -184,7 +184,7 @@ public final class PredictionMaterialPalette {
         if (state == null) return fallback;
         int id = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(state.getBlock());
         int average = VssLodSpriteTable.averageForState(state, face);
-        int tint = tintForBlock(id, biomeTint);
+        int tint = VssLodSpriteTable.faceUsesTint(state, face) ? tintForBlock(id, biomeTint) : 0;
         return average == 0 ? colorForBlockId(id, fallback, biomeTint, face)
                 : 0xFF000000 | (tint == 0 ? average : multiply(average, tint));
     }
@@ -251,6 +251,17 @@ public final class PredictionMaterialPalette {
             return grassBlockIndex();
         }
         return block;
+    }
+
+    /** Snow changes only the exposed ground block, never the deeper wall strata. */
+    static BlockState groundSideState(ClientColumnSample sample) {
+        int block = groundBlock(sample);
+        if (block < 0 || block == ClientColumnSample.NO_BLOCK) return null;
+        BlockState state = BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+        var snowy = net.minecraft.world.level.block.SnowyDirtBlock.SNOWY;
+        if (sample.hasSurface() && sample.snow() && !sample.hasFluid() && state.hasProperty(snowy))
+            state = state.setValue(snowy, true);
+        return state;
     }
 
     static int wallUnderBlock(ClientColumnSample sample) {

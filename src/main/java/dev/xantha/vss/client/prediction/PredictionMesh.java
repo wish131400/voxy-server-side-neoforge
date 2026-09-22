@@ -35,7 +35,19 @@ public final class PredictionMesh {
     /** Set once by the publishing worker after lossless sample interning. */
     int retainedSampleObjects = -1;
     long retainedVolumeBytes;
-    void morph(float[] field) { morph = field; }
+    void morph(float[] field) {
+        morph = field;
+        if (gpuPayload != null) gpuPayload.morph(field, gpuPayload.morphMinY(), gpuPayload.morphMaxY());
+    }
+
+    static PredictionMesh restored(int vertices, int waterVertices, PredictionPackedMesh payload, PredictionSeamMesh seams) {
+        int axis = payload.cellAxis();
+        var mesh = new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
+                new int[0], new boolean[0], vertices, waterVertices, axis * axis, null, null, null, null, axis);
+        mesh.gpuPayload = payload;
+        mesh.seamMesh = seams;
+        return mesh;
+    }
 
     /** Worker-only packing, completed before this mesh enters render residency. */
     void prepareGpuPayload(PredictionTileManager.PredictionTile tile) {
@@ -146,6 +158,7 @@ public final class PredictionMesh {
 
     /** Worker-only handoff retaining packed rendering and counts, without triangle access. */
     PredictionMesh compactForRendering() {
+        if (gpuPayload != null) return this;
         PredictionQuadMesh quads = packed();
         PredictionMesh compact = new PredictionMesh(new float[0], new float[0], new int[0],
                 new float[0], new float[0], new int[0], new boolean[0],

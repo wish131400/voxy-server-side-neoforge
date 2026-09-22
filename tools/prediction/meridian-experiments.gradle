@@ -1,0 +1,11 @@
+// Isolated experiment classes only; avoid forking all test classes for discovery.
+allprojects {
+    tasks.withType(Test).configureEach {
+        include "**/${providers.gradleProperty('vssExperiment').get()}.class"
+        forkEvery = 1
+        maxParallelForks = 1
+        outputs.upToDateWhen { false }
+        systemProperty 'vss.gpuTests', 'true'
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

@@ -43,3 +43,42 @@ supported by the present source-only assessment. No Vulkan code was added.
 - https://github.com/xCollateral/VulkanMod/blob/dev/src/main/resources/fabric.mod.json
 - VSS PredictionRenderer, PredictionRenderTarget, PredictionIrisBridge,
   PredictionTerrainProgram and StrictVoxyContractTest.
+
+## FP64 follow-up (2026-09-22)
+
+Vulkan compute does not add FP64 execution units or increase their throughput.
+`shaderFloat64` is an optional device feature permitting 64-bit shader types,
+not a performance guarantee. A GPU kernel limited by double-precision arithmetic
+does not escape that limit by moving from OpenGL/OpenCL/CUDA to Vulkan. Different
+compilers, batching and scheduling can change results, but require measurement.
+
+Current VSS density evaluation runs on CPU in Java/Rust (`density.rs` uses f64;
+`terrain.rs` branches on density > 0). No Vulkan terrain backend is active.
+Therefore low GPU utilization is not evidence of GPU FP64 saturation in current
+VSS, and this review does not establish that CPU prediction is FP64-throughput
+limited. Cache access, graph dispatch, branches and mod callbacks also contribute.
+
+A compute-only backend could batch supported density graphs and return results
+to the existing CPU mesh pipeline without replacing the OpenGL renderer. It would
+still need graph lowering, exact random/noise semantics, double support checks,
+float operation/rounding controls, asynchronous transfer, GPU workload budgeting
+and Java/Rust fallback. FP64 alone does not guarantee Java-identical output:
+contraction/FMA, operation order and floor/threshold behavior must be verified.
+
+Using FP32 for initial classification and recomputing uncertain samples on CPU
+is a separate mixed-precision research direction. A fixed epsilon near zero
+is not a general correctness proof; conservative propagated error bounds and
+all affected decisions (noise range branches, material/fluid/biome thresholds)
+would be needed. Unsupported mod nodes require fallback. Large absolute world
+coordinates lose low bits in FP32; local coordinates alone do not reproduce the
+complete noise algorithm. No FP32 substitution was made here.
+
+Conclusion: Vulkan compute might accelerate supported workloads through GPU
+parallelism, but cannot be advertised as a solution to insufficient hardware
+FP64 throughput. No speedup measurement or Vulkan implementation is claimed.
+The implemented work in this iteration stays in OpenGL: bounded fenced buffer
+reuse. Exact packed-quad instancing was prototyped and checked for equivalent
+pixels/depth, but retained only in tests after larger meshes increased GPU cost.
+
+Specification source checked:
+https://github.com/KhronosGroup/Vulkan-Docs/blob/main/chapters/features.adoc#features-shaderFloat64
