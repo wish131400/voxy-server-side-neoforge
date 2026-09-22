@@ -189,10 +189,13 @@ class PredictionMeshMemoryTest {
                         new PredictionFeatureStampCache(), null, null, 0, 0, vegetation));
         var bounded = PredictionVegetation.boundedTile(blocks, 0, 0, 64, 1, 1);
         assertFalse(bounded.cells().isEmpty(), "budgeted forest must retain vegetation");
-        var mesh = PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, true,
-                null, null, null, 0, 0, bounded);
-        assertTrue(mesh.vertexCount() > 64 * 64 * 6);
-        assertTrue(mesh.vertexCount() < 262_144, "forest simplification must preserve terrain within the cap");
+        assertEquals(blocks,bounded.blocks(),"the cap must not be met by deleting lower disconnected layers");
+        // This adversarial field contains 16,384 isolated cubes. Its exact
+        // faces cannot fit the fixed budget; keep the coarse tile through the
+        // existing geometry-limit gate instead of silently erasing geometry.
+        assertThrows(PredictionMemoryBudget.MeshLimitException.class, () ->
+                PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, true,
+                        null, null, null, 0, 0, bounded));
     }
 
     private static PredictionTileManager.PredictionTile tile(PredictionMesh mesh, int spacing) {

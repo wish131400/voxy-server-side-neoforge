@@ -12,7 +12,7 @@ import org.lwjgl.system.MemoryUtil;
 
 /**
  * Render-thread GPU cache for one prediction tile, The packed-quad LOD approach style: the
- * mesh lives in a texture buffer of packed 48-byte quads that the vertex
+ * mesh lives in a texture buffer of losslessly packed quads that the vertex
  * program expands from {@code gl_VertexID}, and the exact-coverage yield
  * is a tiny R8 cell mask.
  *
@@ -27,6 +27,8 @@ final class PredictionGpuTile implements AutoCloseable {
     private final PredictionTileManager.PredictionTileKey key;
     private long meshRevision = Long.MIN_VALUE;
     private PredictionPackedMesh packed;
+    private int uploadedPaletteBase;
+    int paletteBaseTexel() { return uploadedPaletteBase; }
     private boolean[] coverage;
     private boolean[] publishedCoverage;
     private byte[] boundaryCoverage;
@@ -98,6 +100,7 @@ final class PredictionGpuTile implements AutoCloseable {
         else closeQuads();
         next.uploaded();
         packed = next;
+        uploadedPaletteBase = next.paletteBaseTexel();
         meshRevision = tile.revision();
         uploadedAt = System.nanoTime();
         // The mesh changed shape; force the coverage mask to re-upload even
@@ -115,9 +118,14 @@ final class PredictionGpuTile implements AutoCloseable {
         if (packed == next) return 0;
         boolean changed = packed == null || !Arrays.equals(packed.quads(), next.quads())
                 || !Arrays.equals(packed.morph(), next.morph());
-        if (changed) ensureQuadBuffer(next.quads(), next.morph(), next.cellAxis());
+        if (changed || uploadedPaletteBase != 0) {
+            ensureQuadBuffer(next.quads(), next.morph(), next.cellAxis());
+            changed = true;
+        }
+        // Seam records are uploaded in canonical form, even when a caller supplied a compact mesh.
+        uploadedPaletteBase = 0;
         packed = next;
-        return changed ? next.uploadBytes() : 0;
+        return changed ? next.quadBytes() + (next.morph() == null ? 0 : (next.morph().length + 3) / 4 * 16L) : 0;
     }
 
     /** Uploads the exact-coverage cell mask when it changed. */
@@ -208,6 +216,7 @@ final class PredictionGpuTile implements AutoCloseable {
     }
 
     void bindTerrain(PredictionTerrainProgram program) {
+        program.setPaletteBase(uploadedPaletteBase);
         if (arenaSlice == null) { bindQuad(4); program.setQuadBase(0); }
         else { bind(4, arenaSlice.page.texture, TEXTURE_BUFFER); program.setQuadBase(arenaSlice.offset / 16); }
     }
@@ -249,6 +258,7 @@ final class PredictionGpuTile implements AutoCloseable {
             yieldAxis = 0;
         }
         packed = null;
+        uploadedPaletteBase = 0;
         coverage = null;
         publishedCoverage = null;
         boundaryCoverage = null;

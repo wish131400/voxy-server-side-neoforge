@@ -286,7 +286,7 @@ public final class PredictionMeshBuilder {
                 // north-west column; the other three corners belong to the
                 // neighbouring cells, so a dense grid emits every column
                 // exactly once.
-                if (s00.volume() != null) {
+                if (PredictionExteriorColumns.interiorVolume(s00)) {
                     addVolume(terrain, samples, x, z, stepBlocks, gridSize, false, interiorEdits);
                 } else if (surfaceEdits.affects(cell)) {
                     addEditedGround(terrain, samples, cornerHeights, materialColors, surfaceEdits,
@@ -304,13 +304,13 @@ public final class PredictionMeshBuilder {
                 // twice (once here, once by the owner tile).  The higher side
                 // of each seam emits the wall exactly once; the opposite case
                 // is covered by the neighbouring tile's own column wall.
-                if (x == cellAxis - 1 && s00.volume() == null && !surfaceEdits.affects(cell)) {
+                if (x == cellAxis - 1 && !PredictionExteriorColumns.interiorVolume(s00) && !surfaceEdits.affects(cell)) {
                     emitColumnWall(terrain, samples, cornerHeights, x + 1, z, stepBlocks, gridSize,
                             cornerHeights[index(x + 1, z, gridSize)],
                             materialColors == null ? 0 : materialColors[index(x + 1, z, gridSize)],
                             seaLevel, -1, 0);
                 }
-                if (z == cellAxis - 1 && s00.volume() == null && !surfaceEdits.affects(cell)) {
+                if (z == cellAxis - 1 && !PredictionExteriorColumns.interiorVolume(s00) && !surfaceEdits.affects(cell)) {
                     emitColumnWall(terrain, samples, cornerHeights, x, z + 1, stepBlocks, gridSize,
                             cornerHeights[index(x, z + 1, gridSize)],
                             materialColors == null ? 0 : materialColors[index(x, z + 1, gridSize)],
@@ -322,7 +322,7 @@ public final class PredictionMeshBuilder {
                 int foliageTint = foliageColors == null
                         ? 0 : foliageColors[index(x, z, gridSize)];
                 if (vegetation != null) {
-                    boolean interior = s00.volume() != null;
+                    boolean interior = PredictionExteriorColumns.interiorVolume(s00);
                     addPlacedVegetation(terrain, interior ? interiorPlants : vegetation,
                             cell, interior ? Integer.MIN_VALUE : h00, foliageTint, surfaceEdits, interior);
                 }
@@ -331,7 +331,7 @@ public final class PredictionMeshBuilder {
 
                 boolean fluid = s00.hasFluid();
                 waterOffsets[cell] = water.vertexCount();
-                if (s00.volume() != null) addVolume(water, samples, x, z, stepBlocks, gridSize, true, interiorEdits);
+                if (PredictionExteriorColumns.interiorVolume(s00)) addVolume(water, samples, x, z, stepBlocks, gridSize, true, interiorEdits);
                 if (vegetation != null) {
                     int tint = waterColors == null ? 0 : waterColors[index(x, z, gridSize)];
                     addPlacedFluids(water, vegetation, cell, tint == 0 ? fluidColor : tint);
@@ -761,14 +761,23 @@ public final class PredictionMeshBuilder {
                     + Math.clamp(Math.floorDiv(px, step), 0, grid - 1);
             var s = samples[source];
             int original = heights[source], y = edits.floor(px, pz, original), i = z * axis + x;
+            var originalProfile = PredictionExteriorColumns.profiled(s) ? s.volume() : null;
+            // Surface cuts may only lower the connected uppermost solid run.
+            // A placement on a lower ledge is not a cut through the suspended roof.
+            // Equality also removes the entire top run: capture would reject the
+            // now-air anchor and turn the remaining profile into a solid heightfield.
+            if (originalProfile != null && y < original
+                    && y <= originalProfile.bottom(originalProfile.size() - 1)) y = original;
             int color = colors == null ? 0 : colors[source];
             if (y < original) {
-                int block = original - y < 4 ? s.underBlockIndex() : s.deepBlockIndex();
-                if (block == ClientColumnSample.NO_BLOCK) block = PredictionMaterialPalette.dirtIndex();
+                int block = original - y < 4 ? PredictionMaterialPalette.wallUnderBlock(s)
+                        : PredictionMaterialPalette.wallDeepBlock(s);
                 s = new ClientColumnSample(y, s.fluidY(), s.biomeIndex(), block, 0, 0, 0, 0,
                         s.fluid(), s.flags() & ~(ClientColumnSample.FLAG_TREE_HERE | ClientColumnSample.FLAG_SNOW),
                         0, s.underBlockIndex(), s.deepBlockIndex(), ClientColumnSample.NO_SPAN,
                         ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
+                if (originalProfile != null) s = PredictionExteriorColumns.capture(s,
+                        originalProfile.minY(), samples[source].spanFloor(), height -> originalProfile.occupied(height, false));
                 color = PredictionMaterialPalette.colorForIndex(block, color, 0);
             }
             local[i] = s; ys[i] = y; cs[i] = color;
@@ -778,6 +787,7 @@ public final class PredictionMeshBuilder {
             for (int z = 1; z <= step; z++) for (int x = 1; x <= step; x++) {
                 int i = z * axis + x;
                 addColumnBlock(out, local, ys, x, z, 1, axis, ys[i], cs[i], seaLevel, null);
+                addCaveInterior(out, local[i], x, z, 1, seaLevel);
                 if (cx == grid - 2 && x == step)
                     emitColumnWall(out, local, ys, x + 1, z, 1, axis, ys[i + 1], cs[i + 1], seaLevel, -1, 0);
                 if (cz == grid - 2 && z == step)
@@ -901,6 +911,20 @@ public final class PredictionMeshBuilder {
     private static void addCaveInterior(VertexAccumulator out, ClientColumnSample sample,
                                         int x, int z, int step, int seaLevel) {
         if (!PredictionWallEvidence.hasInterior(sample, step)) return;
+        if (PredictionExteriorColumns.profiled(sample)) {
+            var volume = sample.volume();
+            int block = PredictionMaterialPalette.wallDeepBlock(sample);
+            int base = PredictionMaterialPalette.colorForIndex(block, 0xff888888);
+            int color = packSprite(base, VssLodSpriteTable.indexForBlock(block));
+            for (int i = 0; i < volume.size(); i++) {
+                int bottom = volume.bottom(i), top = volume.top(i);
+                if (top < sample.surfaceY() && !volume.occupied(top, false))
+                    addFeatureTop(out, x, z, top, step, step, color, color, color, color);
+                if (bottom > sample.spanFloor() && !volume.occupied(bottom - 1, false))
+                    addFeatureBottom(out, x, z, bottom, step, step, color);
+            }
+            return;
+        }
         int block = PredictionMaterialPalette.wallDeepBlock(sample);
         int base = PredictionMaterialPalette.colorForIndex(block, 0xff888888);
         int floor = packSprite(PredictionLighting.shade(base, sample.lowerTop(), seaLevel, true, false),

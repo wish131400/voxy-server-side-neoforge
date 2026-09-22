@@ -9,6 +9,7 @@ import net.minecraft.world.level.material.Fluids;
 final class MinecraftColumnTerrainSampler extends ClientTerrainSampler {
     private final LinkedHashMap<Long, Column> columns = new LinkedHashMap<>(256, 0.75f, true);
     private final LevelHeightAccessor heights;
+    private final ThreadLocal<LastColumn> lastColumn = ThreadLocal.withInitial(LastColumn::new);
 
     MinecraftColumnTerrainSampler(ClientTerrainSampler source) {
         super(source, null);
@@ -18,9 +19,13 @@ final class MinecraftColumnTerrainSampler extends ClientTerrainSampler {
     private Column column(int x, int z) {
         if (Thread.currentThread().isInterrupted()) throw new CancellationException();
         long key = (long) x << 32 | z & 0xffffffffL;
+        // Surface height and material resolution commonly ask for the same
+        // column consecutively. Keep the shared LRU, but avoid locking it twice.
+        var last = lastColumn.get();
+        if (last.column != null && last.key == key) return last.column;
         synchronized (columns) {
             var cached = columns.get(key);
-            if (cached != null) return cached;
+            if (cached != null) { last.key=key; last.column=cached; return cached; }
         }
         var probe = new ExteriorProbe(generatorContext().generatorSettings().value().noiseSettings()
                 .clampToHeightAccessor(heights));
@@ -40,6 +45,7 @@ final class MinecraftColumnTerrainSampler extends ClientTerrainSampler {
             columns.put(key, result);
             while (columns.size() > 4096) columns.remove(columns.keySet().iterator().next());
         }
+        last.key=key; last.column=result;
         return result;
     }
 
@@ -76,6 +82,7 @@ final class MinecraftColumnTerrainSampler extends ClientTerrainSampler {
     }
 
     private record Column(int floor, int fluidY, int fluid) { }
+    private static final class LastColumn { long key; Column column; }
 
     private static final class ExteriorProbe implements java.util.function.Predicate<net.minecraft.world.level.block.state.BlockState> {
         private int y, fluidY, fluid;

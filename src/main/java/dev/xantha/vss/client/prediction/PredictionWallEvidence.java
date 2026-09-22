@@ -18,6 +18,7 @@ final class PredictionWallEvidence {
     private PredictionWallEvidence() { }
 
     static boolean hasInterior(ClientColumnSample s) {
+        if (PredictionExteriorColumns.profiled(s)) return true;
         return s != null && s.captured() && s.hasSurface()
                 && (s.flags() & (CHECKED | CAPTURED_OCCUPANCY)) == (CHECKED | CAPTURED_OCCUPANCY)
                 && s.floating() && s.hasLowerSpan()
@@ -26,6 +27,7 @@ final class PredictionWallEvidence {
     }
 
     static boolean hasInterior(ClientColumnSample s, int spacing) {
+        if (PredictionExteriorColumns.profiled(s)) return spacing <= PredictionExteriorColumns.spacing(s);
         return spacing == 1 && hasInterior(s);
     }
 
@@ -57,6 +59,11 @@ final class PredictionWallEvidence {
 
     static List<PredictionLodSeams.HeightSpan> intervals(ClientColumnSample s, int bottom, int top, int spacing) {
         var result = new ArrayList<PredictionLodSeams.HeightSpan>(2);
+        if (PredictionExteriorColumns.profiled(s) && hasInterior(s, spacing)) {
+            var v = s.volume();
+            for (int i = 0; i < v.size(); i++) add(result, Math.max(bottom, v.bottom(i)), Math.min(top, v.top(i)));
+            return result;
+        }
         // One captured block column cannot describe an entire coarse cell.
         // Subtract only the bounded first air gap; strata below the second
         // solid run were not recorded and must retain the solid fallback.
@@ -77,13 +84,19 @@ final class PredictionWallEvidence {
 
     static List<PredictionLodSeams.HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
                                                       int height, int neighborHeight, int spacing) {
-        int bottom = hasInterior(neighbor, spacing) ? Math.min(neighborHeight, neighbor.lowerTop()) : neighborHeight;
+        return exposed(sample, neighbor, height, neighborHeight, spacing, spacing);
+    }
+
+    static List<PredictionLodSeams.HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
+                                                      int height, int neighborHeight, int spacing, int neighborSpacing) {
+        int bottom = hasInterior(neighbor, neighborSpacing)
+                ? Math.min(neighborHeight, floor(neighbor)) : neighborHeight;
         if (height <= bottom) return List.of();
         var result = intervals(sample, bottom, height, spacing);
-        if (!hasInterior(neighbor, spacing)) return result;
+        if (!hasInterior(neighbor, neighborSpacing)) return result;
         // A cave exposes rock below its neighbor's top as well as above it.
         // Subtract the neighbor's solid spans, leaving shared air untouched.
-        for (var solid : intervals(neighbor, bottom, Math.min(height, neighborHeight), spacing)) {
+        for (var solid : intervals(neighbor, bottom, Math.min(height, neighborHeight), neighborSpacing)) {
             var remaining = new ArrayList<PredictionLodSeams.HeightSpan>(3);
             for (var span : result) {
                 if (solid.top() <= span.bottom() || solid.bottom() >= span.top()) remaining.add(span);
@@ -95,6 +108,10 @@ final class PredictionWallEvidence {
             result = remaining;
         }
         return result;
+    }
+
+    static int floor(ClientColumnSample s) {
+        return PredictionExteriorColumns.profiled(s) ? s.spanFloor() : s.lowerTop();
     }
 
     static int enrich(ClientColumnSample[] samples, int grid, int step, int baseX, int baseZ, ClientTerrainSampler sampler) {

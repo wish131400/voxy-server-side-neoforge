@@ -224,6 +224,16 @@ public final class VSSVoxyOptionsIntegration {
                             "HIGH",
                             VSSVoxyOptionsIntegration::saveClientConfig)));
 
+            if (canEditLocalServerConfig()) {
+                invokeByName(predictionPage, "addOptionGroup", sodium08Group(
+                        configBuilder, "vss.voxy_options.group.server",
+                        sodium08BooleanOption(configBuilder, "prediction_sync", "vss.voxy_options.prediction_sync",
+                                "vss.voxy_options.prediction_sync.tooltip", "HIGH", true,
+                                value -> VSSServerConfig.CONFIG.enablePredictionSync = value,
+                                () -> VSSServerConfig.CONFIG.enablePredictionSync,
+                                VSSVoxyOptionsIntegration::saveServerConfig)));
+            }
+
             invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.prediction_detail",
@@ -314,17 +324,8 @@ public final class VSSVoxyOptionsIntegration {
                             true,
                             value -> VSSServerConfig.CONFIG.enableChunkGeneration = value,
                             () -> VSSServerConfig.CONFIG.enableChunkGeneration,
-                            VSSVoxyOptionsIntegration::saveServerConfig),
-                    sodium08BooleanOption(
-                            configBuilder,
-                            "prediction_sync",
-                            "vss.voxy_options.prediction_sync",
-                            "vss.voxy_options.prediction_sync.tooltip",
-                            "HIGH",
-                            true,
-                            value -> VSSServerConfig.CONFIG.enablePredictionSync = value,
-                            () -> VSSServerConfig.CONFIG.enablePredictionSync,
                             VSSVoxyOptionsIntegration::saveServerConfig)));
+
 
                 invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
@@ -699,14 +700,8 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.generation.tooltip",
                             "HIGH",
                             (VSSServerConfig config, Boolean value) -> config.enableChunkGeneration = value,
-                            config -> config.enableChunkGeneration),
-                    oldBooleanOption(
-                            serverStorage,
-                            "vss.voxy_options.prediction_sync",
-                            "vss.voxy_options.prediction_sync.tooltip",
-                            "HIGH",
-                            (VSSServerConfig config, Boolean value) -> config.enablePredictionSync = value,
-                            config -> config.enablePredictionSync)));
+                            config -> config.enableChunkGeneration)));
+
 
                 groups.add(oldGroup(
                     oldBooleanOption(
@@ -894,6 +889,14 @@ public final class VSSVoxyOptionsIntegration {
                             (VSSClientConfig config, dev.xantha.vss.client.prediction.PredictionPerformanceProfile value) ->
                                     config.performanceTier = value.configName(),
                             config -> dev.xantha.vss.client.prediction.PredictionPerformanceProfile.fromName(config.performanceTier))));
+
+            if (canEditLocalServerConfig()) {
+                Object serverStorage = oldStorage(VSSServerConfig.CONFIG, VSSVoxyOptionsIntegration::saveServerConfig);
+                groups.add(oldGroup(oldBooleanOption(serverStorage,
+                        "vss.voxy_options.prediction_sync", "vss.voxy_options.prediction_sync.tooltip", "HIGH",
+                        (VSSServerConfig config, Boolean value) -> config.enablePredictionSync = value,
+                        config -> config.enablePredictionSync)));
+            }
 
             groups.add(oldGroup(
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",

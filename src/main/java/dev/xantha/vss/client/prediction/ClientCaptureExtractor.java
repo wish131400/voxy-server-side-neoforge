@@ -135,10 +135,16 @@ final class ClientCaptureExtractor {
                 lowerTop,
                 lowerBottom,
                 spanFloor);
-        return PredictionWallEvidence.inspectCaptured(captured, minY, y -> {
+        captured = PredictionWallEvidence.inspectCaptured(captured, minY, y -> {
             BlockState state = access.state(x, y, z);
             // Material selection is narrower than occupancy. Ores, mod blocks
             // and liquids must never be mistaken for an empty cave entrance.
+            return state == null || !state.isAir();
+        });
+        // Interior dimensions must still request their complete volumetric sample.
+        if (sampler.interiorTerrain()) return captured;
+        return PredictionExteriorColumns.capture(captured, minY, sampler.seaLevel() - 16, y -> {
+            BlockState state = access.state(x, y, z);
             return state == null || !state.isAir();
         });
     }

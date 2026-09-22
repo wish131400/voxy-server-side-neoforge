@@ -661,41 +661,11 @@ final class PredictionVegetation {
         }
 
         Tile withExteriorEnvelope() {
-            var tops = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
-            tops.defaultReturnValue(Integer.MIN_VALUE);
-            blocks.forEach((p, state) -> {
-                if (mergeable(state, 1)) {
-                    long key = columnKey(p.getX() - baseX, p.getZ() - baseZ);
-                    tops.put(key, Math.max(tops.get(key), p.getY()));
-                }
-            });
-            var floors = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap(tops.size());
-            floors.defaultReturnValue(Integer.MIN_VALUE);
-            var cursor = new BlockPos.MutableBlockPos();
-            for (var entry : tops.long2IntEntrySet()) {
-                long key = entry.getLongKey();
-                int x = (int) (key >> 32) + baseX, z = (int) key + baseZ, bottom = entry.getIntValue();
-                BlockState below;
-                while ((below = blocks.get(cursor.set(x, bottom - 1, z))) != null && mergeable(below, 1)) bottom--;
-                floors.put(key, bottom);
-            }
-            return new Tile(cells, blocks, baseX, baseZ, 1, maxY,
-                    it.unimi.dsi.fastutil.longs.Long2IntMaps.unmodifiable(tops),
-                    it.unimi.dsi.fastutil.longs.Long2IntMaps.unmodifiable(floors));
+            // A highest-leaf envelope cannot represent separated spruce/acacia
+            // layers. Exact neighbor occupancy and face runs already remove
+            // hidden faces without deleting lower crowns or exposed trunks.
+            return withoutExteriorEnvelope();
         }
-
-        boolean exteriorFaceVisible(Voxel voxel, int direction) {
-            if (exteriorTops.isEmpty() || !mergeable(voxel.state(), voxel.size())) return true;
-            if (voxel.y() < exteriorFloors.get(columnKey(voxel.x(), voxel.z()))) return false;
-            int dx = direction == 3 ? -1 : direction == 4 ? 1 : 0;
-            int dz = direction == 1 ? -1 : direction == 2 ? 1 : 0;
-            int top = exteriorTops.getOrDefault(columnKey(voxel.x() + dx, voxel.z() + dz), Integer.MIN_VALUE);
-            // Keep existing roof/outer faces; never move a leaf or fill an air
-            // cell. Hidden internal canopy layers are optional far-view detail.
-            return direction == 0 ? voxel.y() >= top : voxel.y() > top;
-        }
-
-        private static long columnKey(int x, int z) { return (long) x << 32 | z & 0xffffffffL; }
 
         static Tile of(Map<BlockPos, BlockState> blocks, int baseX, int baseZ, int span,
                        int spacing, int voxelSize) {

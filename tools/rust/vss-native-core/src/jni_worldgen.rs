@@ -413,6 +413,28 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     }
 }
 #[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_exteriorFootprint(
+    mut e: JNIEnv, _c: JClass, id: jlong, x: jint, z: jint, step: jint,
+    bottom: jint, top: jint, out: JByteBuffer,
+) -> jint {
+    let result = guarded(|| {
+        let w = world(id)?;
+        w.check_active()?;
+        if bottom < w.terrain.min_y || top > w.terrain.min_y + w.terrain.height || bottom >= top {
+            return Err("exterior footprint height bounds".into());
+        }
+        buffer(&mut e, &out, (top - bottom) as usize, true)?;
+        // Nonstandard default-air worlds need the original state-ID mapping,
+        // including ore replacements. Java keeps that exact fallback.
+        if w.palette.is_air(w.base_ids[crate::terrain::Substance::Default as usize]) { return Ok(-2); }
+        match w.terrain.exterior_footprint(x, z, step, bottom, top)? {
+            Some(data) => { w.check_active()?; put(&mut e, &out, &data)?; Ok(data.len() as jint) }
+            None => Ok(0),
+        }
+    });
+    match result { Ok(n) => n, Err(err) => { fail(&mut e, err); -1 } }
+}
+#[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_interiorColumns(
     mut e: JNIEnv,
     _c: JClass,

@@ -34,7 +34,7 @@ final class PredictionMeshRestore {
     }
     static synchronized void request(PredictionPackedMesh mesh) {
         if (READY.containsKey(mesh) || PENDING.contains(mesh)) return;
-        long bytes = mesh.quadBytes();
+        long bytes = mesh.storageBytes();
         if (bytes > LIMIT_BYTES - pendingBytes) return;
         long generation = epoch;
         PENDING.add(mesh); pendingBytes += bytes;
@@ -42,7 +42,7 @@ final class PredictionMeshRestore {
             WORKER.execute(() -> {
                 try {
                     synchronized (PredictionMeshRestore.class) { if (generation != epoch) return; }
-                    int[] words = mesh.restoreWords();
+                    int[] words = mesh.restoreUploadWords();
                     synchronized (PredictionMeshRestore.class) { if (generation == epoch) stage(mesh, words); }
                 } catch (RuntimeException failure) {
                     dev.xantha.vss.common.VSSLogger.error("VSS mesh restore failed", failure);

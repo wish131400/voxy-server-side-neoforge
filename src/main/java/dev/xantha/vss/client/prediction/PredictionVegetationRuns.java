@@ -28,12 +28,12 @@ final class PredictionVegetationRuns {
             if (y < floor.applyAsInt(x, z)) continue;
             if (bottoms && !tile.occupied(x, y - 1, z))
                 faces.add(new Face(x, z, y, y + 1, 5, voxel.state()));
-            if (tile.exteriorFaceVisible(voxel, 0) && !tile.occupied(x, y + 1, z))
+            if (!tile.occupied(x, y + 1, z))
                 faces.add(new Face(x, z, y, y + 1, 0, voxel.state()));
             for (int direction = 1; direction <= 4; direction++) {
                 int dx = direction == 3 ? -1 : direction == 4 ? 1 : 0;
                 int dz = direction == 1 ? -1 : direction == 2 ? 1 : 0;
-                if (!tile.exteriorFaceVisible(voxel, direction) || tile.occupied(x + dx, y, z + dz)) continue;
+                if (tile.occupied(x + dx, y, z + dz)) continue;
                 var key = new Key(x, z, direction, voxel.state());
                 Integer index = last.get(key);
                 if (index != null && faces.get(index).top() == y) {

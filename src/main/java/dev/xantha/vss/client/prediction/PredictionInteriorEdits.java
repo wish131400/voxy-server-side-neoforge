@@ -17,7 +17,7 @@ final class PredictionInteriorEdits {
     PredictionInteriorEdits(ClientColumnSample[] samples, PredictionVegetation.Tile tile,
                             int baseX, int baseZ, int spacing, int grid) {
         this.samples = samples; this.spacing = spacing; this.grid = grid;
-        if (tile == null || samples.length == 0 || samples[0].volume() == null) return;
+        if (tile == null || samples.length == 0 || !PredictionExteriorColumns.interiorVolume(samples[0])) return;
         tile.blocks().forEach((p, state) -> edits.computeIfAbsent(key(p.getX() - baseX, p.getZ() - baseZ),
                 ignored -> new HashMap<>()).put(p.getY(), state));
     }

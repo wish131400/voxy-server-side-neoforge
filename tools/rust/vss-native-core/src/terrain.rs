@@ -279,6 +279,51 @@ impl Terrain {
     pub fn base_column(&self, x: i32, z: i32) -> Result<Column> {
         self.job(x, z, true)?.column(x, z)
     }
+    /// Exact air proof for a coarse exterior cell. Stateful graphs keep their
+    /// full descending columns, including ore evaluation and fresh cache scope.
+    pub fn exterior_footprint(&self, x: i32, z: i32, step: i32, bottom: i32, top: i32) -> Result<Option<Vec<u8>>> {
+        if ![1, 2, 4].contains(&step) || bottom < self.min_y || top > self.min_y + self.height || bottom >= top
+            || x < -30_000_000 || z < -30_000_000 || x > 30_000_000 - step || z > 30_000_000 - step {
+            return Err("exterior footprint bounds".into());
+        }
+        let ordered = self.graph.requires_complete_column_order();
+        let mut occupied = vec![0; (top - bottom) as usize];
+        let mut missing = occupied.len();
+        let mut job = None;
+        let mut scope = None;
+        for dz in 0..step { for dx in 0..step {
+            let (xx, zz) = (x + dx, z + dz);
+            if ordered {
+                let column = self.base_column(xx, zz)?;
+                if dx == 0 && dz == 0 && column.blocks[(top - 1 - self.min_y) as usize] == Substance::Air {
+                    return Ok(None);
+                }
+                for y in bottom..top {
+                    let i = (y - bottom) as usize;
+                    if occupied[i] == 0 && column.blocks[(y - self.min_y) as usize] != Substance::Air {
+                        occupied[i] = 1; missing -= 1;
+                    }
+                }
+            } else {
+                let cell = (xx.div_euclid(self.cell_width), zz.div_euclid(self.cell_width));
+                if scope != Some(cell) {
+                    job = Some(self.job(xx, zz, true)?);
+                    scope = Some(cell);
+                }
+                let job = job.as_mut().unwrap();
+                for y in (bottom..top).rev() {
+                    let i = (y - bottom) as usize;
+                    // One solid block proves this height in the union forever.
+                    if occupied[i] != 0 { continue; }
+                    let solid = job.base_substance([xx, y, zz]) != Substance::Air;
+                    if dx == 0 && dz == 0 && y == top - 1 && !solid { return Ok(None); }
+                    if solid { occupied[i] = 1; missing -= 1; }
+                }
+            }
+            if missing == 0 { return Ok(Some(occupied)); }
+        }}
+        Ok(Some(occupied))
+    }
     fn global(&self, y: i32) -> Fluid {
         if y < (-54).min(self.sea_level) {
             Fluid {
@@ -858,7 +903,7 @@ impl Job<'_> {
         q
     }
 
-    pub fn block(&mut self, p: [i32; 3]) -> Substance {
+    fn base_substance(&mut self, p: [i32; 3]) -> Substance {
         crate::prof::hit(&crate::prof::SURFACE.block_calls);
         let t = self.terrain;
         {
@@ -875,10 +920,14 @@ impl Job<'_> {
                 .unwrap_or_else(|| self.compute(t.final_density, p, Mode::Cell))
                 + self.beard.map_or(self.scratch.beard, |b| b.compute(p))
         };
-        let state = {
+        {
             let _prof = crate::prof::Scope::new(&crate::prof::SURFACE.block_substance);
             self.substance(p, d)
-        };
+        }
+    }
+    pub fn block(&mut self, p: [i32; 3]) -> Substance {
+        let state = self.base_substance(p);
+        let t = self.terrain;
         if state != Substance::Default || !t.ores {
             return state;
         }
@@ -1188,6 +1237,51 @@ mod fluid_bound_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/worldgen");
         serde_json::from_str(&std::fs::read_to_string(root.join(name)).unwrap()).unwrap()
+    }
+
+    fn verify_exterior(t: &Terrain) {
+        for (x,z) in [(-49,33),(-4,-4),(0,0),(127,-65)] {
+            for step in [1,2,4] {
+                let roof = t.base_column(x,z).unwrap().surface_height;
+                // A true roof, a deliberately wrong roof, and aquifer depth.
+                for (bottom,top) in [(t.min_y,roof), (t.min_y,t.min_y+t.height),
+                    (t.min_y.max(roof-90),roof), (t.min_y,(t.min_y+40).min(t.min_y+t.height))] {
+                    if top<=bottom { continue; }
+                    let mut reference=vec![0;(top-bottom) as usize];
+                    let anchor=t.base_column(x,z).unwrap();
+                    let expected=if anchor.blocks[(top-1-t.min_y) as usize]==Substance::Air { None } else {
+                        for dz in 0..step { for dx in 0..step {
+                            let col=t.base_column(x+dx,z+dz).unwrap();
+                            for y in bottom..top {
+                                reference[(y-bottom) as usize] |= u8::from(col.blocks[(y-t.min_y) as usize]!=Substance::Air);
+                            }
+                        }}
+                        Some(reference)
+                    };
+                    assert_eq!(t.exterior_footprint(x,z,step,bottom,top).unwrap(),expected,
+                        "footprint {x},{z} step {step} range {bottom}..{top}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exterior_union_matches_full_columns_in_every_dimension_and_negative_cell_crossings() {
+        for file in ["overworld.json","amplified.json","nether.json","end.json"] {
+            verify_exterior(&Terrain::from_document(917,&fixture(file)).unwrap());
+        }
+    }
+
+    #[test]
+    fn exterior_union_preserves_thin_layers_and_stateful_fallback() {
+        for wrapper in ["minecraft:cache_once","minecraft:cache_2d","minecraft:flat_cache"] {
+            let mut d=fixture("overworld.json");
+            d["settings"]["noise_router"]["final_density"]=json!({"type":wrapper,"argument":{
+                "type":"minecraft:range_choice",
+                "input":{"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":-64.,"to_value":320.},
+                "min_inclusive":89,"max_exclusive":90,"when_in_range":1.,"when_out_of_range":-1.}});
+            verify_exterior(&Terrain::from_document(0,&d).unwrap());
+        }
     }
 
     #[test]

@@ -56,6 +56,8 @@ public class ClientTerrainSampler {
     // as NoiseChunk itself is a reusable FunctionContext.
     private final ThreadLocal<MutablePoint> points = ThreadLocal.withInitial(MutablePoint::new);
     private volatile PredictionBiomeCache previewBiomes;
+    private boolean cacheExactHeights;
+    private final ThreadLocal<PredictionHeightCache> exactHeights = ThreadLocal.withInitial(PredictionHeightCache::new);
 
     @FunctionalInterface
     public interface TerrainFunction {
@@ -144,6 +146,7 @@ public class ClientTerrainSampler {
         this.finalDensity = source.finalDensity;
         this.initialDensity = source.initialDensity;
         this.initialDensityIsConstant = source.initialDensityIsConstant;
+        this.cacheExactHeights = source.cacheExactHeights;
         this.lavaOcean = source.lavaOcean;
         this.biomeSource = source.biomeSource;
         this.climate = source.climate;
@@ -185,6 +188,9 @@ public class ClientTerrainSampler {
                 router.finalDensity(), router.initialDensityWithoutJaggedness());
         this.finalDensity = roots[0];
         this.initialDensity = roots[1];
+        var rawProperties = new PredictionRawDensity();
+        this.cacheExactHeights = !"off".equals(System.getProperty("vss.javaHeightCache"))
+                && rawProperties.inspect(finalDensity).pure() && rawProperties.inspect(initialDensity).pure();
         this.initialDensityIsConstant = initialDensity.minValue() == initialDensity.maxValue();
         this.lavaOcean = generator.generatorSettings().value().defaultFluid().is(Blocks.LAVA);
         this.biomeSource = generator.getBiomeSource();
@@ -224,6 +230,45 @@ public class ClientTerrainSampler {
     }
 
     int interiorMinY() { return floorY; }
+
+    PredictionColumnVolume exteriorColumn(int x, int z) {
+        if (generatorContext() == null || randomStateContext() == null || customSurface != null) return null;
+        var column = generatorContext().getBaseColumn(x, z, heights, randomStateContext());
+        int rock = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(Blocks.STONE);
+        return PredictionColumnVolume.sample(floorY, ceilingY - floorY + 1,
+                y -> column.getBlock(y).isAir() ? -1 : rock, ignored -> 0);
+    }
+
+    private volatile PredictionJavaExterior exteriorSampler;
+    private PredictionJavaExterior exteriorSampler() {
+        var result=exteriorSampler;
+        if(result==null)synchronized(this){
+            result=exteriorSampler;
+            if(result==null)exteriorSampler=result=new PredictionJavaExterior(generator,randomState,heights);
+        }
+        return result;
+    }
+
+    /** Exact union over the whole coarse footprint; null means the anchor roof is untrusted. */
+    boolean[] exteriorFootprint(int x, int z, int step, int bottom, int top,
+                                java.util.function.BooleanSupplier valid) {
+        if (top <= bottom) return null;
+        if (generator != null && randomState != null && customSurface == null)
+            return exteriorSampler().sample(x,z,step,bottom,top,valid);
+        boolean[] occupied = new boolean[top - bottom];
+        int missing = occupied.length;
+        for (int dz = 0; dz < step; dz++) for (int dx = 0; dx < step; dx++) {
+            if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted())
+                throw new java.util.concurrent.CancellationException();
+            var column = exteriorColumn(x + dx, z + dz);
+            if (column == null || dx == 0 && dz == 0 && !column.occupied(top - 1, false)) return null;
+            for (int r = 0; r < column.size(); r++)
+                for (int y = Math.max(bottom, column.bottom(r)); y < Math.min(top, column.top(r)); y++)
+                    if (!occupied[y - bottom]) { occupied[y - bottom] = true; missing--; }
+            if (missing == 0) return occupied;
+        }
+        return occupied;
+    }
 
     ClientColumnSample resolveInterior(ClientColumnSample sample, int x, int z) {
         return surfaceMaterials == null ? sample : surfaceMaterials.resolveInterior(sample, x, z, this::surfaceY);
@@ -587,6 +632,17 @@ public class ClientTerrainSampler {
      * march and binary boundary refinement. This avoids constructing a chunk
      * for every LOD sample while evaluating Minecraft's real final density. */
     int densitySurfaceY(int blockX, int blockZ) {
+        if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+        if (!cacheExactHeights) return computeDensitySurfaceY(blockX, blockZ);
+        var cache = exactHeights.get();
+        int found = cache.get(blockX, blockZ);
+        if (found != Integer.MIN_VALUE) return found;
+        int result = computeDensitySurfaceY(blockX, blockZ);
+        cache.put(blockX, blockZ, result);
+        return result;
+    }
+
+    private int computeDensitySurfaceY(int blockX, int blockZ) {
         if (initialDensityIsConstant) {
             return fullMarch(blockX, blockZ);
         }

@@ -17,7 +17,7 @@ final class PredictionSeamMesh {
     private final long[] planes;
     private final int[] offsets;
     // Along-plane endpoints retain their original float bits; heights are already integral.
-    private final int[] walls;
+    private final PredictionSeamWalls walls;
 
     void materialRows(java.util.BitSet rows) {
         for (int color : topColors) { int row = color >>> 24; if (row > 0 && row < 255) rows.set(row); }
@@ -34,7 +34,7 @@ final class PredictionSeamMesh {
         PredictionMeshCodec.floats(out, topY); PredictionMeshCodec.ints(out, topColors);
         out.writeInt(tops.length); for (boolean value : tops) out.writeBoolean(value);
         out.writeInt(planes.length); for (long value : planes) out.writeLong(value);
-        PredictionMeshCodec.ints(out, offsets); PredictionMeshCodec.ints(out, walls);
+        PredictionMeshCodec.ints(out, offsets); walls.writeCache(out);
     }
 
     PredictionSeamMesh(java.nio.ByteBuffer in, int axis) throws java.io.IOException {
@@ -43,14 +43,15 @@ final class PredictionSeamMesh {
         for (int i = 0; i < n; i++) tops[i] = in.get() != 0;
         n = PredictionMeshCodec.count(in, 8); planes = new long[n];
         in.asLongBuffer().get(planes); in.position(in.position() + n * 8);
-        offsets = PredictionMeshCodec.ints(in); walls = PredictionMeshCodec.ints(in);
+        offsets = PredictionMeshCodec.ints(in); int[] wallWords = PredictionMeshCodec.ints(in);
         if (topY.length != axis * axis || topColors.length != topY.length || tops.length != topY.length
-                || offsets.length != planes.length + 1 || walls.length % WALL_WORDS != 0
-                || offsets[0] != 0 || offsets[offsets.length - 1] != walls.length / WALL_WORDS)
+                || offsets.length != planes.length + 1 || wallWords.length % WALL_WORDS != 0
+                || offsets[0] != 0 || offsets[offsets.length - 1] != wallWords.length / WALL_WORDS)
             throw new java.io.IOException("invalid seam dimensions");
         for (float y : topY) if (!Float.isFinite(y)) throw new java.io.IOException("invalid seam height");
         for (int i = 1; i < offsets.length; i++) if (offsets[i] < offsets[i-1]) throw new java.io.IOException("invalid seam offsets");
         for (int i = 1; i < planes.length; i++) if (planes[i] <= planes[i-1]) throw new java.io.IOException("invalid seam planes");
+        walls = PredictionSeamWalls.encode(wallWords);
     }
 
     PredictionSeamMesh(PredictionQuadMesh source) {
@@ -76,7 +77,7 @@ final class PredictionSeamMesh {
             offsets[i + 1] = offsets[i] + cursors.get(planes[i]);
             cursors.put(planes[i], offsets[i]);
         }
-        walls = new int[total * WALL_WORDS];
+        int[] walls = new int[total * WALL_WORDS];
         for (int q = 0; q < source.quadCount(); q++) {
             long plane = opaquePlane(source, q);
             if (plane == Long.MIN_VALUE) continue;
@@ -92,6 +93,7 @@ final class PredictionSeamMesh {
                     | (source.coverageUsesLocalPosition(q) ? LOCAL_COVERAGE : 0)
                     | (source.terrainWall(q) ? TERRAIN_WALL : 0);
         }
+        this.walls = PredictionSeamWalls.encode(walls);
         BUILDS.increment();
     }
 
@@ -120,7 +122,7 @@ final class PredictionSeamMesh {
     static long builds() { return BUILDS.sum(); }
     long retainedHeapBytes() {
         return 256L + tops.length + topY.length * 4L + topColors.length * 4L
-                + planes.length * 8L + offsets.length * 4L + walls.length * 4L;
+                + planes.length * 8L + offsets.length * 4L + walls.retainedHeapBytes();
     }
 
     void subtract(List<PredictionLodSeams.HeightSpan> gaps, PredictionLodSeams.Surface surface,
@@ -135,19 +137,27 @@ final class PredictionSeamMesh {
         int plane = Arrays.binarySearch(planes, planeKey(nx != 0 ? lx : lz, nx, nz));
         if (plane < 0) return;
         int start = nx != 0 ? lz : lx;
-        for (int candidate = offsets[plane]; candidate < offsets[plane + 1]; candidate++) {
-            int at = candidate * WALL_WORDS;
-            if (Float.intBitsToFloat(walls[at]) > start || Float.intBitsToFloat(walls[at + 1]) < start + length) continue;
-            int owner = walls[at + 4] >> 2;
-            if ((walls[at + 4] & LOCAL_COVERAGE) != 0) {
+        // Resolve the layout once per plane query; avoid repeated record multiplications/accessors.
+        int stride = walls.stride(), base = walls.heightBase();
+        int[] records = walls.words(), endpoints = walls.endpoints();
+        for (int at = offsets[plane] * stride, end = offsets[plane + 1] * stride; at < end; at += stride) {
+            int first = endpoints == null ? records[at] : endpoints[records[at] & 65535];
+            if (Float.intBitsToFloat(first) > start) continue;
+            int last = endpoints == null ? records[at + 1] : endpoints[records[at] >>> 16];
+            if (Float.intBitsToFloat(last) < start + length) continue;
+            int flags = records[at + stride - 1];
+            int owner = flags >> 2;
+            if ((flags & LOCAL_COVERAGE) != 0) {
                 int along = Math.floorDiv(start + length / 2, tile.spacingBlocks());
                 owner = nx != 0 ? along * tile.cellAxis() + owner % tile.cellAxis()
                         : owner / tile.cellAxis() * tile.cellAxis() + along;
             }
             if (owner < 0 || owner >= surface.allowed().length || !surface.allowed()[owner]) continue;
-            if ((walls[at + 4] & TERRAIN_WALL) != 0 && PredictionBoundaryWalls.replaced(replaced, owner, tile.cellAxis(), tile.spacingBlocks(),
+            if ((flags & TERRAIN_WALL) != 0 && PredictionBoundaryWalls.replaced(replaced, owner, tile.cellAxis(), tile.spacingBlocks(),
                     nx != 0 ? lx : lz, nx != 0)) continue;
-            int bottom = walls[at + 2], top = walls[at + 3];
+            int bottom, top;
+            if (stride == 5) { bottom = records[at + 2]; top = records[at + 3]; }
+            else { int heights = records[at + stride - 2]; bottom = base + (heights & 65535); top = base + (heights >>> 16); }
             for (int i = gaps.size() - 1; i >= 0; i--) {
                 var gap = gaps.get(i);
                 if (top <= gap.bottom() || bottom >= gap.top()) continue;

@@ -1124,10 +1124,10 @@ class PredictionRenderTargetGpuTest {
         glBindTexture(GL_TEXTURE_BUFFER, textures[4]);
         RenderSystem.activeTexture(GL_TEXTURE3);
         RenderSystem.bindTexture(textures[3]);
-        for (int mode = 0; mode < 5; mode++) {
+        for (int mode = 0; mode < 7; mode++) {
             terrain.setCamera(new Matrix4f().lookAlong(1, 0, 0, 0, 1, 0), projection.matrix());
             RenderSystem.activeTexture(GL_TEXTURE3); RenderSystem.bindTexture(textures[3]);
-            boolean cave = mode == 3;
+            boolean cave = mode == 3 || mode >= 5;
             int step = mode >= 3 ? 1 : 16, axis = 32 / step, grid = axis + 1;
             var coverage = new float[axis * axis]; java.util.Arrays.fill(coverage,1);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, axis, axis, 0, GL_RED, GL_FLOAT, coverage);
@@ -1138,10 +1138,18 @@ class PredictionRenderTargetGpuTest {
                 samples[i] = mode >= 2 ? PredictionWallEvidence.inspectCaptured(
                         PredictionCaveInteriorTest.captured(height), -64, y -> y >= 105 || y < 65)
                         : mode == 1 ? PredictionWallEvidence.inspect(sample, -64, y -> y >= 105 || y < 65) : sample;
+                if (mode >= 5 && height == 120)
+                    samples[i] = PredictionExteriorColumnsTest.profiled(120,
+                            PredictionExteriorColumnsTest.runs(-64,65,105,110,115,120),1);
                 if (mode == 4 && i % grid >= 24)
                     samples[i] = PredictionWallEvidence.inspectCaptured(PredictionCaveInteriorTest.captured(120), -64, y -> true);
             }
-            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, step, grid, false).compactForRendering();
+            var snow = new java.util.HashMap<net.minecraft.core.BlockPos, net.minecraft.world.level.block.state.BlockState>();
+            if (mode == 6) for (int z=0; z<32; z++) for (int x=16; x<32; x++)
+                snow.put(new net.minecraft.core.BlockPos(x,64,z),net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState());
+            var decoration = PredictionVegetation.Tile.of(snow,0,0,32,step,1);
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, step, grid, false,
+                    null,null,null,0,0,decoration).compactForRendering();
             var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                     net.minecraft.world.level.Level.OVERWORLD, 0, 0, 4), new int[0], new int[0], samples, mesh,
                     new PredictionDepthBound(64, 120), 0, 1, axis, step);
@@ -1159,7 +1167,7 @@ class PredictionRenderTargetGpuTest {
             int light = (pixels.get(center)&255)+(pixels.get(center+1)&255)+(pixels.get(center+2)&255);
             if (cave) assertEquals(0, light, "confirmed cave must remain open; Iris=" + iris);
             else assertTrue(light > 30, "cliff must stay closed; mode=" + mode + "; Iris=" + iris);
-            saveSeamPixels(cave ? "confirmed-cave-open" : "cliff-closed-mode-" + mode, iris, 55);
+            saveSeamPixels(cave ? "confirmed-cave-open-mode-" + mode : "cliff-closed-mode-" + mode, iris, 55);
             if (cave) {
                 // Look from inside the known gap, independently at its floor
                 // and ceiling. Neither surface may replace foreground real LOD.
@@ -1172,7 +1180,7 @@ class PredictionRenderTargetGpuTest {
                     var interior = terrainPixels(packed.quadCount());
                     int interiorLight = (interior.get(center)&255)+(interior.get(center+1)&255)+(interior.get(center+2)&255);
                     assertTrue(interiorLight > 30, "missing cave " + (direction < 0 ? "floor" : "ceiling") + "; Iris=" + iris);
-                    saveSeamPixels(direction < 0 ? "cave-interior-floor" : "cave-interior-ceiling", iris, 55);
+                    saveSeamPixels((direction < 0 ? "cave-interior-floor-mode-" : "cave-interior-ceiling-mode-") + mode, iris, 55);
                     main.bindWrite(true);
                     glClearDepth(iris ? 1.0 / 4 : VssLodProjection.distanceToVanillaDepth(4, projection));
                     glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);

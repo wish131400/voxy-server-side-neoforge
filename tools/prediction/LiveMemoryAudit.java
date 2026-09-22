@@ -66,6 +66,10 @@ public class LiveMemoryAudit {
                             tiles++; estimated+=((Number)call(tile,"retainedHeapBytes")).longValue();
                             Object mesh=call(tile,"mesh"), packed=get(mesh,"packed"), payload=get(mesh,"gpuPayload"), seams=get(mesh,"seamMesh");
                             for(Object o:new Object[]{tile,mesh,packed,payload,seams}) arrays(inst,o,seen,sizes);
+                            if (seams != null) {
+                                Object walls=get(seams,"walls");
+                                if(walls!=null && !walls.getClass().isArray()) arrays(inst,walls,seen,sizes);
+                            }
                             Object[] samples=(Object[])call(tile,"samples"); sampleRefs+=samples.length;
                             if(sampleSize==0) for(Object s:samples) if(s!=null) {sampleSize=inst.getObjectSize(s); break;}
                         }

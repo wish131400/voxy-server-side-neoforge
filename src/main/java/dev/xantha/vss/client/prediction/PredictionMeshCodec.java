@@ -8,9 +8,9 @@ import net.minecraft.world.level.block.Block;
 
 /** Lossless finished geometry, independent of view-dependent masks and parent morphs. */
 final class PredictionMeshCodec {
-    // Face tint flags and snowy side states changed; rebuild old finished geometry.
+    // Rebuild walls where a surface replacement consumed the complete suspended roof.
     // Terrain and decoration sample caches remain valid.
-    static final int VERSION = 3, MAX_BYTES = 16 * 1024 * 1024;
+    static final int VERSION = 7, MAX_BYTES = 16 * 1024 * 1024;
 
     static byte[] signature(byte[] resources, ClientColumnSample[] samples, int[] colors, int[] foliage,
                             int[] water, int sea, int fluid, int step, boolean trees,

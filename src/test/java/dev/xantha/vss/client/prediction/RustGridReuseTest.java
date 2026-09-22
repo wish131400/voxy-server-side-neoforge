@@ -4,6 +4,33 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class RustGridReuseTest {
+    @Test void exteriorFootprintJniValidatesBeforeWritingAndHonorsCancellation() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var doc=LithostitchedNativeTest.document();
+        long world=RustWorldgenBackend.create(917,0,doc.toString());
+        var output=java.nio.ByteBuffer.allocateDirect(384).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        try {
+            output.putInt(0,12345);
+            assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.exteriorFootprint(world,0,0,3,-64,80,output));
+            assertEquals(12345,output.getInt(0));
+            assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.exteriorFootprint(world,0,0,4,-65,80,output));
+            assertEquals(12345,output.getInt(0));
+            var input=java.nio.ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            var column=java.nio.ByteBuffer.allocateDirect(16+384*4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            input.putInt(0,-3).putInt(4,-3);
+            assertEquals(1,RustWorldgenBackend.columns(world,input,column,1));
+            int top=column.getInt(0);
+            assertTrue(top>-64);
+            assertEquals(top+64,RustWorldgenBackend.exteriorFootprint(world,-3,-3,4,-64,top,output));
+            assertEquals(1,output.get(top+63));
+            RustWorldgenBackend.cancel(world);
+            output.putInt(0,12345);
+            assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.exteriorFootprint(world,0,0,4,-64,80,output));
+            assertEquals(12345,output.getInt(0));
+        } finally { RustWorldgenBackend.close(world); }
+    }
+
     @Test void displayRecordsNeverBecomeExactDecorationInput() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         assertTrue(RustTerrainSampler.available());

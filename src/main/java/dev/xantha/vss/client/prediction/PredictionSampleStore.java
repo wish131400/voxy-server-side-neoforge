@@ -17,7 +17,7 @@ import java.util.Map;
 /** Persistent Persistent column sample store owned by VSS. */
 public final class PredictionSampleStore implements AutoCloseable {
     // V3 separates authoritative captures from obsolete vegetation hints.
-    private static final int MAGIC = 0x56535333;
+    private static final int MAGIC = 0x56535334, LEGACY_MAGIC = 0x56535333;
     private static final int MAX_ENTRIES = 262_144;
     private final Path file;
     private static final java.util.concurrent.ConcurrentMap<Path, Slot> OWNERS =
@@ -65,11 +65,12 @@ public final class PredictionSampleStore implements AutoCloseable {
     private void load() {
         if (!Files.isRegularFile(file)) return;
         try (DataInputStream input = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
-            if (input.readInt() != MAGIC || input.readLong() != fingerprint) return;
+            int magic = input.readInt();
+            if ((magic != MAGIC && magic != LEGACY_MAGIC) || input.readLong() != fingerprint) return;
             int count = Math.min(MAX_ENTRIES, Math.max(0, input.readInt()));
             for (int i = 0; i < count; i++) {
                 long key = input.readLong();
-                entries.put(key, readSample(input));
+                entries.put(key, readSample(input, magic == MAGIC));
             }
         } catch (EOFException ignored) {
             entries.clear();
@@ -79,13 +80,23 @@ public final class PredictionSampleStore implements AutoCloseable {
         }
     }
 
-    private static ClientColumnSample readSample(DataInputStream input) throws IOException {
-        return new ClientColumnSample(
+    private static ClientColumnSample readSample(DataInputStream input, boolean volumes) throws IOException {
+        var sample = new ClientColumnSample(
                 input.readInt(), input.readInt(), input.readInt(), input.readInt(),
                 input.readInt(), input.readInt(), input.readInt(), input.readInt(),
                 input.readInt(), input.readInt(), input.readInt(), input.readInt(),
                 input.readInt(), input.readInt(), input.readInt(), input.readInt(),
                 input.readInt());
+        if (!volumes) return sample;
+        int count = input.readInt();
+        if (count < -1 || count > PredictionColumnVolume.MAX_RUNS) throw new IOException("Invalid column volume");
+        if (count < 0) return sample;
+        int[] words = new int[count * 4];
+        for (int i = 0; i < words.length; i++) words[i] = input.readInt();
+        return new ClientColumnSample(sample.surfaceY(),sample.fluidY(),sample.biomeIndex(),sample.topBlockIndex(),
+                sample.structureIndex(),sample.treeKind(),sample.treeDensity(),sample.treeHeight(),sample.fluid(),sample.flags(),
+                sample.groundFeatureKind(),sample.underBlockIndex(),sample.deepBlockIndex(),sample.surfaceBottom(),
+                sample.lowerTop(),sample.lowerBottom(),sample.spanFloor(),new PredictionColumnVolume(words));
     }
 
     private static void writeSample(DataOutputStream output, ClientColumnSample sample)
@@ -107,6 +118,12 @@ public final class PredictionSampleStore implements AutoCloseable {
         output.writeInt(sample.lowerTop());
         output.writeInt(sample.lowerBottom());
         output.writeInt(sample.spanFloor());
+        var volume = sample.volume();
+        output.writeInt(volume == null ? -1 : volume.size());
+        if (volume != null) for (int i = 0; i < volume.size(); i++) {
+            output.writeInt(volume.bottom(i)); output.writeInt(volume.top(i));
+            output.writeInt(volume.block(i)); output.writeInt(volume.fluid(i));
+        }
     }
 
     public synchronized void flush() {

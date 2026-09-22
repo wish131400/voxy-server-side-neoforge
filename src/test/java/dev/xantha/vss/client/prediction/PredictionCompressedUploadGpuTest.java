@@ -19,11 +19,14 @@ class PredictionCompressedUploadGpuTest {
         try {
             glfwMakeContextCurrent(window);GL.createCapabilities();RenderSystem.initRenderThread();
             ClientTerrainSamplerTest.bootstrapMinecraft();
-            for (boolean fallback : new boolean[]{false, true}) {
+            for (boolean compact : new boolean[]{false, true}) for (boolean fallback : new boolean[]{false, true}) {
             System.setProperty("vss.disableIndirect", Boolean.toString(fallback));
             var mesh = PredictionMeshCodecTest.fixture(64);var payload = mesh.gpuPayload();
             assertTrue(payload.quadBytes() >= PredictionMeshCompression.MIN_BYTES);
-            int[] original = payload.quads().clone();payload.prepareStorage();assertTrue(payload.compressed());
+            int[] canonical = payload.quads().clone();
+            if (compact) { payload.prepareGpuStorage(); assertTrue(payload.paletteBaseTexel() > 0); }
+            int[] original = payload.uploadWords().clone();
+            assertArrayEquals(canonical, payload.quads());payload.prepareStorage();assertTrue(payload.compressed());
             int n = (mesh.cellAxis()+1)*(mesh.cellAxis()+1);
             var key = new PredictionTileManager.PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD,0,0,0);
             var tile = new PredictionTileManager.PredictionTile(key,new int[n],new int[n],new ClientColumnSample[n],mesh,

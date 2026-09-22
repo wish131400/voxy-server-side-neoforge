@@ -16,12 +16,12 @@ public record PredictionDepthBound(int minY, int maxY) {
         int max = Integer.MIN_VALUE;
         for (ClientColumnSample sample : samples) {
             if (sample == null) continue;
-            if (sample.volume() != null) {
+            if (PredictionExteriorColumns.interiorVolume(sample)) {
                 min = Math.min(min, sample.volume().minY());
                 max = Math.max(max, sample.volume().maxY());
             }
             min = Math.min(min, sample.surfaceY());
-            if (PredictionWallEvidence.hasInterior(sample)) min = Math.min(min, sample.lowerTop());
+            if (PredictionWallEvidence.hasInterior(sample)) min = Math.min(min, PredictionWallEvidence.floor(sample));
             max = Math.max(max, sample.surfaceY());
             if (sample.hasFluid()) max = Math.max(max, sample.fluidY());
             if (sample.treeHeight() > 0) max = Math.max(max, sample.surfaceY() + sample.treeHeight());

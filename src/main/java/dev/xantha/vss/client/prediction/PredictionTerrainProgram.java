@@ -63,7 +63,9 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private int boundaryReplacement = -1;
     private final int batchEnabled;
     private final int quadBase;
+    private final int paletteBase;
     void setQuadBase(int offset) { GL20.glUniform1i(quadBase, offset); }
+    void setPaletteBase(int offset) { GL20.glUniform1i(paletteBase, offset); }
     boolean supportsBatch() { return batchEnabled >= 0; }
     void batch(boolean enabled) { if (batchEnabled >= 0) GL20.glUniform1i(batchEnabled, enabled ? 1 : 0); }
 
@@ -76,6 +78,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 vertex, fragment);
         this.batchEnabled = program.uniform("BatchEnabled");
         this.quadBase = program.uniform("QuadBaseTexel");
+        this.paletteBase = program.uniform("PaletteBaseTexel");
         this.modelView = program.uniform("ModelViewMat");
         this.projection = program.uniform("ProjMat");
         this.viewOrigin = program.uniform("ViewOrigin");
@@ -143,6 +146,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
         source = batchUniform(source, "vec2", "TerrainMorph", "records[gl_BaseInstance].morph.xy");
         source = batchUniform(source, "vec2", "MorphBounds", "records[gl_BaseInstance].morph.zw");
         source = batchUniform(source, "int", "QuadBaseTexel", "records[gl_BaseInstance].data.z");
+        source = batchUniform(source, "int", "PaletteBaseTexel", "records[gl_BaseInstance].flags.y");
         return source.replace("int quad = gl_VertexID >> 2;", "BatchSlot=gl_BaseInstance;\nint quad = gl_VertexID >> 2;");
     }
     static String batchFragment(String source) {
@@ -262,7 +266,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             return;
         }
         morphActive = true;
-        GL20.glUniform2f(morph, mesh.quadCount() * 3, amount);
+        GL20.glUniform2f(morph, mesh.morphBaseTexel(), amount);
         GL20.glUniform2f(morphBounds, mesh.morphMinY(), mesh.morphMaxY());
     }
 
@@ -350,6 +354,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             #version 150
             uniform usamplerBuffer QuadPayload;
             uniform int QuadBaseTexel;
+            uniform int PaletteBaseTexel;
             uniform vec2 TerrainMorph;
             uniform vec2 MorphBounds;
             uniform sampler2D SpriteTable;
@@ -417,9 +422,17 @@ final class PredictionTerrainProgram implements AutoCloseable {
             void main() {
                 int quad = gl_VertexID >> 2;
                 int corner = gl_VertexID & 3;
-                uvec4 texelA = texelFetch(QuadPayload, QuadBaseTexel + quad * 3);
-                uvec4 texelB = texelFetch(QuadPayload, QuadBaseTexel + quad * 3 + 1);
-                uvec4 texelC = texelFetch(QuadPayload, QuadBaseTexel + quad * 3 + 2);
+                int recordBase = QuadBaseTexel + quad * (PaletteBaseTexel > 0 ? 2 : 3);
+                uvec4 texelA = texelFetch(QuadPayload, recordBase);
+                uvec4 texelB = texelFetch(QuadPayload, recordBase + 1);
+                uvec4 texelC;
+                if (PaletteBaseTexel > 0) {
+                    uvec4 colors = texelFetch(QuadPayload, QuadBaseTexel + PaletteBaseTexel + int(texelB.w >> 16u));
+                    texelC = uvec4(texelB.w & 65535u, colors.yzw);
+                    texelB.w = colors.x;
+                } else {
+                    texelC = texelFetch(QuadPayload, recordBase + 2);
+                }
                 uint attr = texelB.z;
                 vCell = texelC.x;
                 vRealBoundary = (texelC.y >> 25u) & 3u;

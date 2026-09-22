@@ -338,6 +338,44 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
     @Override public ClientColumnSample sampleSurface(int x, int z) { return sample(x, z); }
+    @Override PredictionColumnVolume exteriorColumn(int x, int z) {
+        // Occupancy needs no biome/surface-rule pass or four neighboring surface queries.
+        ByteBuffer input = positions.get(), output = wallColumn.get();
+        input.putInt(0, x).putInt(4, z);
+        if (RustWorldgenBackend.columns(handle(), input, output, 1) != 1)
+            throw new IllegalStateException("Incomplete native exterior column");
+        int min = context.interiorMinY(), height = output.getInt(12);
+        if (height < 1 || height > profile().height()) throw new IllegalStateException("Exterior column height mismatch");
+        int rock = PredictionMaterialPalette.stoneIndex();
+        return PredictionColumnVolume.sample(min, height,
+                y -> states[output.getInt(16 + (y - min) * 4)].isAir() ? -1 : rock, ignored -> 0);
+    }
+    private volatile boolean legacyExteriorBackend;
+    @Override boolean[] exteriorFootprint(int x, int z, int step, int bottom, int top,
+                                          java.util.function.BooleanSupplier valid) {
+        if (top <= bottom) return null;
+        if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted())
+            throw new java.util.concurrent.CancellationException();
+        if (legacyExteriorBackend) return super.exteriorFootprint(x, z, step, bottom, top, valid);
+        ByteBuffer output = wallColumn.get();
+        final int count;
+        try { count = RustWorldgenBackend.exteriorFootprint(handle(), x, z, step, bottom, top, output); }
+        catch (UnsatisfiedLinkError oldLibrary) {
+            legacyExteriorBackend = true;
+            return super.exteriorFootprint(x, z, step, bottom, top, valid);
+        }
+        if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted())
+            throw new java.util.concurrent.CancellationException();
+        if (count == -2) {
+            legacyExteriorBackend = true;
+            return super.exteriorFootprint(x, z, step, bottom, top, valid);
+        }
+        if (count == 0) return null;
+        if (count != top - bottom) throw new IllegalStateException("Exterior footprint height mismatch");
+        boolean[] occupied = new boolean[count];
+        for (int i = 0; i < count; i++) occupied[i] = output.get(i) != 0;
+        return occupied;
+    }
     @Override ClientColumnSample sampleInterior(int x, int z) {
         ByteBuffer input = positions.get(), output = wallColumn.get();
         input.putInt(0, x).putInt(4, z);

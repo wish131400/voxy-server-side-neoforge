@@ -46,8 +46,8 @@ final class PredictionBoundaryWalls {
     private static boolean exterior(PredictionLodSeams.Surface surface, int cell) {
         var tile = surface.tile();
         var sample = tile.samples()[PredictionGpuTile.sampleIndexForCell(cell, tile.cellAxis())];
-        return sample != null && sample.hasSurface() && sample.volume() == null
-                && !PredictionWallEvidence.hasInterior(sample, tile.spacingBlocks()) && tile.mesh().seamMesh().hasTop(cell);
+        return sample != null && sample.hasSurface() && !PredictionExteriorColumns.interiorVolume(sample)
+                && (PredictionExteriorColumns.profiled(sample) || !PredictionWallEvidence.hasInterior(sample, tile.spacingBlocks())) && tile.mesh().seamMesh().hasTop(cell);
     }
 
     static boolean replaced(byte[] mask, int cell, int axis, int step, int plane, boolean xNormal) {

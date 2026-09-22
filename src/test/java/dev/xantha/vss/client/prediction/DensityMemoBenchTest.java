@@ -40,7 +40,7 @@ class DensityMemoBenchTest {
         access = new RegistryAccess.ImmutableRegistryAccess(List.of(biomes.freeze()));
     }
 
-    private static ClientTerrainSampler sampler(JsonObject doc, long seed) {
+    static ClientTerrainSampler sampler(JsonObject doc, long seed) {
         var ops = lookup.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
         var settings = net.minecraft.world.level.levelgen.NoiseGeneratorSettings.DIRECT_CODEC
                 .parse(ops, doc.get("settings")).getOrThrow();
@@ -121,11 +121,14 @@ class DensityMemoBenchTest {
     @Test
     void memoPreservesHeightsAndItsCostIsMeasured() throws Exception {
         var doc = LithostitchedNativeTest.document();
+        // This benchmark isolates density evaluation, not repeated height hits.
+        System.setProperty("vss.javaHeightCache", "off");
         try {
             compare("dense8x8", doc, denseGrid(-40, 56));
             compare("sparse8x8", doc, sparseGrid(-1024, -1024));
         } finally {
             System.clearProperty("vss.densityMemo");
+            System.clearProperty("vss.javaHeightCache");
         }
     }
 }

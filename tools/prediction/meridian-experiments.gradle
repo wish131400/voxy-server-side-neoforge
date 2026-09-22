@@ -6,6 +6,12 @@ allprojects {
         maxParallelForks = 1
         outputs.upToDateWhen { false }
         systemProperty 'vss.gpuTests', 'true'
+        if (providers.gradleProperty('vssGpuCorpus').isPresent())
+            systemProperty 'vss.gpuCorpus', providers.gradleProperty('vssGpuCorpus').get()
+        if (providers.gradleProperty('vssSeamCorpus').isPresent())
+            systemProperty 'vss.seamCorpus', providers.gradleProperty('vssSeamCorpus').get()
+        if (providers.gradleProperty('vssMountainDocument').isPresent())
+            systemProperty 'vss.mountainDocument', providers.gradleProperty('vssMountainDocument').get()
         testLogging { showStandardStreams = true; exceptionFormat = 'full' }
     }
 }

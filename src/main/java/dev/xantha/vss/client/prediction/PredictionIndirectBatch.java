@@ -35,8 +35,8 @@ final class PredictionIndirectBatch implements AutoCloseable {
                 .putFloat((float)(draw.tile().baseBlockZ()-camera.z)).putFloat(draw.tile().spacingBlocks());
         records.putInt(packed.cellAxis()).putInt(average?1:0).putInt(slice.offset/16).putInt(slice.maskOffset/4);
         float morph=!water&&!draw.seam()?draw.morph()*draw.gpu().morphAmount(now):0;
-        records.putFloat(packed.quadCount()*3).putFloat(morph).putFloat(packed.morphMinY()).putFloat(packed.morphMaxY());
-        records.putInt(!water&&!draw.seam()?1:0).putInt(0).putInt(0).putInt(0);
+        records.putFloat(packed.morphBaseTexel()).putFloat(morph).putFloat(packed.morphMinY()).putFloat(packed.morphMaxY());
+        records.putInt(!water&&!draw.seam()?1:0).putInt(draw.gpu().paletteBaseTexel()).putInt(0).putInt(0);
         for(int i=0;i<ranges.first.length;i++) {
             draws.putInt(ranges.count[i]*6).putInt(1).putInt(ranges.first[i]*6).putInt(0).putInt(tiles);commands++;
         }

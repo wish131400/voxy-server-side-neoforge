@@ -56,7 +56,8 @@ class PredictionVegetationRunsTest {
             if (y % 3 == 0) blocks.put(new BlockPos(2, y, 1), Blocks.OAK_LOG.defaultBlockState());
         }
         blocks.put(new BlockPos(1, 78, 1), Blocks.BIRCH_LEAVES.defaultBlockState());
-        var tile = PredictionVegetation.boundedTile(blocks, 0, 0, 4, 2, 1);
+        // Force the pressure path: every exposed lower layer must survive too.
+        var tile = PredictionVegetation.boundedTile(blocks, 0, 0, 4, 2, 8).withExteriorEnvelope();
         Set<String> expected = new HashSet<>(), actual = new HashSet<>();
         for (var entry : blocks.entrySet()) {
             BlockPos pos = entry.getKey();
@@ -116,6 +117,27 @@ class PredictionVegetationRunsTest {
                     "packed faces must not bridge the empty space between canopies");
         }
         System.out.println("DENSE_CANOPY blocks=" + blocks.size() + ", vertices=" + mesh.vertexCount());
+    }
+
+    @Test void denseLayeredCrownsRetainLowerTiersWithinMeshBudget() {
+        int span=48, grid=span+1;
+        var blocks=new HashMap<BlockPos,BlockState>();
+        for(int z=0;z<span;z+=6) for(int x=0;x<span;x+=6) {
+            for(int y=64;y<90;y++) blocks.put(new BlockPos(x+2,y,z+2),Blocks.SPRUCE_LOG.defaultBlockState());
+            for(int y=70;y<90;y+=3) for(int dz=0;dz<5;dz++) for(int dx=0;dx<5;dx++)
+                if(dx!=2 || dz!=2) blocks.put(new BlockPos(x+dx,y,z+dz),Blocks.SPRUCE_LEAVES.defaultBlockState());
+        }
+        var tile=PredictionVegetation.boundedTile(blocks,0,0,span,1,8);
+        assertEquals(blocks,tile.blocks());
+        var samples=new ClientColumnSample[grid*grid];
+        java.util.Arrays.fill(samples,PredictionExteriorColumnsTest.surface(64));
+        var mesh=PredictionMeshBuilder.build(samples,null,63,0,1,grid,true,null,null,null,0,0,tile);
+        assertTrue(mesh.vertexCount()<262144,"restored tiers must fit the existing tile limit");
+        Set<Integer> tiers=new HashSet<>();
+        for(int cell:tile.cells().keySet()) for(var face:PredictionVegetationRuns.faces(tile,cell,(x,z)->64))
+            if(face.x()==0 && face.z()==0 && face.direction()==0) tiers.add(face.bottom());
+        assertEquals(Set.of(70,73,76,79,82,85,88),tiers);
+        System.out.println("LAYERED_FOREST blocks="+blocks.size()+" vertices="+mesh.vertexCount());
     }
 
     @Test void adjacentStatesAreNotMergedAcrossDifferentMaterials() {

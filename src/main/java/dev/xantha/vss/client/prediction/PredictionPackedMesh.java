@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Packed quad payload for one prediction tile.
  *
- * <p>Every rendered quad becomes twelve unsigned 32-bit words (48 bytes —
+ * <p>The canonical representation uses twelve unsigned 32-bit words per quad (48 bytes —
  * still substantially smaller than the old per-vertex stream) that the terrain program
  * expands into four vertices from {@code gl_VertexID}, so coverage flips no
  * longer rebuild any vertex data. Layout per quad:</p>
@@ -22,6 +22,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * i9: corner 1 rgb (24) | source-cell coverage (24) | real boundary/lower (25/26) | terrain wall (27) | skylight loss (28-31)
  * i10: corner 2 rgb (24) + skylight loss     i11: corner 3 rgb (24) + skylight loss
  * </pre>
+ *
+ * <p>GPU storage may replace repeated four-corner color/light words with an exact
+ * dictionary; canonical CPU/disk reads retain the layout above.</p>
  *
  * <p>Terrain quads come first, grouped by {@link VssLodFaceGroup} so the
  * renderer can draw each visible face group as one indexed range; water quads
@@ -82,16 +85,29 @@ final class PredictionPackedMesh {
     private int morphMinY, morphMaxY;
     void morph(float[] field, int minY, int maxY) { morph=field; morphMinY=minY; morphMaxY=maxY; }
     float[] morph() { return morph; }
-    long uploadBytes() { return quadBytes() + (morph == null ? 0 : (morph.length+3)/4*16L); }
+    long uploadBytes() { return storageWordCount * 4L + (morph == null ? 0 : (morph.length+3)/4*16L); }
     long retainedHeapBytes() {
         var blob = compressed;
-        return 4096L + (blob == null ? quadBytes() : blob.bytes().length) + (morph == null ? 0L : morph.length * 4L);
+        return 4096L + (blob == null ? storageWordCount * 4L : blob.bytes().length) + (morph == null ? 0L : morph.length * 4L);
     }
     long quadBytes() { return wordCount * 4L; }
     int morphMinY() { return morphMinY; }
     int morphMaxY() { return morphMaxY; }
     private volatile int[] quads;
     private final int wordCount;
+    private int storageWordCount, paletteBaseTexel;
+    int paletteBaseTexel() { return paletteBaseTexel; }
+    int morphBaseTexel() { return storageWordCount / 4; }
+    long storageBytes() { return storageWordCount * 4L; }
+
+    /** Publishing worker only, before CPU compression and before entering any renderer snapshot. */
+    void prepareGpuStorage() {
+        if (paletteBaseTexel != 0 || compressed != null || Boolean.getBoolean("vss.disableCompactGpu")) return;
+        var encoded = PredictionGpuEncoding.encode(quads);
+        quads = encoded.words();
+        storageWordCount = quads.length;
+        paletteBaseTexel = encoded.paletteBaseTexel();
+    }
     private volatile PredictionMeshCompression.Blob compressed;
     private static final java.util.concurrent.Semaphore COMPRESSORS = new java.util.concurrent.Semaphore(2);
 
@@ -117,10 +133,11 @@ final class PredictionPackedMesh {
     }
     boolean uploadReady() { return uploadWords() != null; }
     void uploaded() { PredictionMeshRestore.uploaded(this); }
-    int[] restoreWords() {
+    int[] restoreUploadWords() {
         int[] words = quads;
         return words != null ? words : compressed.restore();
     }
+    int[] restoreWords() { return PredictionGpuEncoding.decode(restoreUploadWords(), paletteBaseTexel, quadCount()); }
     private final int cellAxis;
     private final int terrainQuadCount;
     private final int spriteQuadCount;
@@ -145,6 +162,7 @@ final class PredictionPackedMesh {
                                  int spriteQuadCount) {
         this.quads = quads;
         this.wordCount = quads.length;
+        this.storageWordCount = quads.length;
         this.cellAxis = cellAxis;
         this.terrainQuadCount = terrainQuadCount;
         this.terrainRangeFirst = terrainFirst;
@@ -174,9 +192,9 @@ final class PredictionPackedMesh {
     /** Worker-only full read (disk persistence/tests); render upload must use uploadWords(). */
     int[] quads() {
         int[] words = quads;
-        if (words != null) return words;
-        words = PredictionMeshRestore.peek(this);
-        return words != null ? words : restoreWords();
+        if (words == null) words = PredictionMeshRestore.peek(this);
+        if (words == null) words = restoreUploadWords();
+        return PredictionGpuEncoding.decode(words, paletteBaseTexel, quadCount());
     }
 
     boolean downFaces() {

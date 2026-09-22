@@ -193,8 +193,8 @@ final class PredictionLodSeams {
         int neighborCell = cellAt(neighbor, adjacentX, adjacentZ);
         var ownSample = tile.samples()[PredictionGpuTile.sampleIndexForCell(cell, tile.cellAxis())];
         var otherSample = neighbor.samples()[PredictionGpuTile.sampleIndexForCell(neighborCell, neighbor.cellAxis())];
-        if (ownSample.volume() != null || otherSample.volume() != null) {
-            if (ownSample.volume() != null && otherSample.volume() != null) {
+        if (PredictionExteriorColumns.interiorVolume(ownSample) || PredictionExteriorColumns.interiorVolume(otherSample)) {
+            if (PredictionExteriorColumns.interiorVolume(ownSample) && PredictionExteriorColumns.interiorVolume(otherSample)) {
                 volumeEdge(source, adjacent, index, words, cell, x, z, nx, nz, ownSample, otherSample, true);
                 volumeEdge(source, adjacent, index, words, cell, x, z, nx, nz, otherSample, ownSample, false);
             }
@@ -206,33 +206,43 @@ final class PredictionLodSeams {
         var neighborQuads = neighbor.mesh().seamMesh();
         if (!ownQuads.hasTop(cell) || !neighborQuads.hasTop(neighborCell)) return;
         int ownY = Math.round(ownQuads.topY(cell)), otherY = Math.round(neighborQuads.topY(neighborCell));
-        if (ownY == otherY) return;
-        boolean ownHigher = ownY > otherY;
-        PredictionTile higher = ownHigher ? tile : neighbor;
-        int higherCell = ownHigher ? cell : neighborCell;
+        if (PredictionExteriorColumns.profiled(ownSample) || PredictionExteriorColumns.profiled(otherSample)) {
+            exteriorEdge(source, adjacent, index, words, cell, x, z, nx, nz, ownY, otherY, true);
+            exteriorEdge(source, adjacent, index, words, cell, x, z, nx, nz, otherY, ownY, false);
+        } else if (ownY != otherY) {
+            exteriorEdge(source, adjacent, index, words, cell, x, z, nx, nz,
+                    Math.max(ownY, otherY), Math.min(ownY, otherY), ownY > otherY);
+        }
+    }
+
+    private static void exteriorEdge(Surface source, Surface adjacent, Index index, IntArrayList words,
+            int cell, int x, int z, int nx, int nz, int top, int neighborY, boolean own) {
+        var tile = source.tile();
+        int step = tile.spacingBlocks();
+        var higher = own ? tile : adjacent.tile();
+        var other = own ? adjacent.tile() : tile;
+        int wx = tile.baseBlockX() + x * step, wz = tile.baseBlockZ() + z * step;
+        int neighborCell = cellAt(adjacent.tile(), wx + (nx < 0 ? -1 : nx > 0 ? step : step / 2),
+                wz + (nz < 0 ? -1 : nz > 0 ? step : step / 2));
+        int higherCell = own ? cell : neighborCell, otherCell = own ? neighborCell : cell;
+        var sample = higher.samples()[PredictionGpuTile.sampleIndexForCell(higherCell, higher.cellAxis())];
+        var otherSample = other.samples()[PredictionGpuTile.sampleIndexForCell(otherCell, other.cellAxis())];
         int tint = higher.mesh().seamMesh().topColor(higherCell);
-        ClientColumnSample sample = higher.samples()[PredictionGpuTile.sampleIndexForCell(higherCell, higher.cellAxis())];
-        int normalX = ownHigher ? nx : -nx, normalZ = ownHigher ? nz : -nz;
+        int normalX = own ? nx : -nx, normalZ = own ? nz : -nz;
         int face = normalX > 0 ? 4 : normalX < 0 ? 3 : normalZ > 0 ? 2 : 1;
-        int topBlock = PredictionMaterialPalette.groundBlock(sample);
-        int under = PredictionMaterialPalette.wallUnderBlock(sample);
-        int deep = PredictionMaterialPalette.wallDeepBlock(sample);
-        int top = Math.max(ownY, otherY), bottom = Math.min(ownY, otherY);
         int ax = (x + (nx > 0 ? 1 : 0)) * step, az = (z + (nz > 0 ? 1 : 0)) * step;
         int bx = ax + (nz != 0 ? step : 0), bz = az + (nx != 0 ? step : 0);
-        // Only fill missing wall intervals. Coplanar copies fight for depth.
-        var gaps = new ArrayList<>(PredictionWallEvidence.intervals(sample, bottom, top, higher.spacingBlocks()));
-        int worldX = tile.baseBlockX() + ax, worldZ = tile.baseBlockZ() + az;
-        index.subtractWalls(gaps, source, worldX, worldZ, step, normalX, normalZ);
-        index.subtractWalls(gaps, adjacent, worldX, worldZ, step, normalX, normalZ);
-        int middle = Math.max(bottom, top - 1), low = Math.max(bottom, top - 2);
+        var gaps = new ArrayList<>(PredictionWallEvidence.exposed(sample, otherSample, top, neighborY,
+                higher.spacingBlocks(), other.spacingBlocks()));
+        index.subtractWalls(gaps, source, tile.baseBlockX() + ax, tile.baseBlockZ() + az, step, normalX, normalZ);
+        index.subtractWalls(gaps, adjacent, tile.baseBlockX() + ax, tile.baseBlockZ() + az, step, normalX, normalZ);
         for (HeightSpan gap : gaps) {
-            band(words, tile, cell, ax, az, bx, bz, Math.min(top, gap.top()), Math.max(middle, gap.bottom()),
-                    normalX, normalZ, topBlock, face, tint, sample, true);
-            band(words, tile, cell, ax, az, bx, bz, Math.min(middle, gap.top()), Math.max(low, gap.bottom()),
-                    normalX, normalZ, under, face, tint, sample);
-            band(words, tile, cell, ax, az, bx, bz, Math.min(low, gap.top()), Math.max(bottom, gap.bottom()),
-                    normalX, normalZ, deep, face, tint, sample);
+            band(words, tile, cell, ax, az, bx, bz, Math.min(top, gap.top()), Math.max(top - 1, gap.bottom()),
+                    normalX, normalZ, PredictionMaterialPalette.groundBlock(sample), face, tint, sample, true);
+            band(words, tile, cell, ax, az, bx, bz, Math.min(top - 1, gap.top()), Math.max(top - 2, gap.bottom()),
+                    normalX, normalZ, PredictionMaterialPalette.wallUnderBlock(sample), face, tint, sample);
+            band(words, tile, cell, ax, az, bx, bz, Math.min(top - 2, gap.top()), gap.bottom(),
+                    normalX, normalZ, PredictionMaterialPalette.wallDeepBlock(sample), face, tint, sample);
         }
     }
 

@@ -21,8 +21,8 @@ public class ExportPredictionMeshes {
     var list=entry.getValue();list.sort(Comparator.comparing(Object::toString));
     for(int i=0;i<Math.min(12,list.size());i++) {
      Object tile=list.get(i*list.size()/Math.min(12,list.size()));Object payload=get(call(tile,"mesh"),"gpuPayload");if(payload==null)continue;
-     int[] words=(int[])get(payload,"quads");if(words==null||words.length<16384||words.length>4*1024*1024)continue;
-     long size=words.length*4L;if(total+size>96*1024*1024L)continue;
+     long size=((Number)call(payload,"quadBytes")).longValue();if(size<65536||size>16*1024*1024||total+size>96*1024*1024L)continue;
+     int[] words=(int[])call(payload,"quads");
      byte[] bytes=new byte[(int)size];ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().put(words);
      String name=String.format("mesh-%03d.bin",seq++);Files.write(path.resolve(name),bytes);total+=size;
      csv.append(name).append(',').append(entry.getKey()).append(',').append(size).append(',').append(call(payload,"cellAxis")).append(',').append(call(payload,"terrainQuadCount")).append(',').append(call(payload,"quadCount")).append('\n');

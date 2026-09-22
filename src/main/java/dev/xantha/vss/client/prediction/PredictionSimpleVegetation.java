@@ -110,7 +110,7 @@ final class PredictionSimpleVegetation {
         for (int z = 0; z < axis; z++) for (int x = 0; x < axis; x++) {
             int i = (z + 1) * grid + x + 1, cell = z * axis + x;
             var s = samples[i];
-            if (s.volume() != null) {
+            if (PredictionExteriorColumns.interiorVolume(s)) {
                 if (exact.cell(cell).isEmpty()) addInteriorForms(forms, samples, grid, step, baseX, baseZ,
                         x, z, cell, seed, hints);
                 continue;

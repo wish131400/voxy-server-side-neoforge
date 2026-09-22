@@ -1766,7 +1766,7 @@ public final class PredictionTileManager implements AutoCloseable {
                         // stored separately, so no second density traversal
                         // is needed for the terrain mesh.
                         groundHeights[sampleIndex] = sample.surfaceY();
-                        if (sample.volume() != null) {
+                        if (PredictionExteriorColumns.interiorVolume(sample)) {
                             materialColors[sampleIndex] = PredictionMaterialPalette.colorFor(sample, 0);
                             continue;
                         }
@@ -1796,13 +1796,17 @@ public final class PredictionTileManager implements AutoCloseable {
                         colorTintNanos.add(System.nanoTime() - tintStarted);
                     }
                 }
+                int exteriorUpdates = PredictionExteriorColumns.enrich(samples, gridSize, stepBlocks,
+                        baseBlockX, baseBlockZ, sampler, () -> !closed && !paused
+                                && revision == meshRevision.get() && effectivelyDesired(key)
+                                && captureEpoch == captureEpochs.getOrDefault(key, 0L));
                 // Every published sampling stage survives a restart. In-memory
                 // refinement is monotonic; a restored grid also prevents a
                 // smaller preview from overwriting the best stored result.
                 colorNanos.add(System.nanoTime() - colorStartedNanos);
                 if (captureEpoch != captureEpochs.getOrDefault(key, 0L)) { captureEarlyExits.increment(); return; }
                 long commitStartedNanos = System.nanoTime();
-                boolean stored = diskLease != null && (diskHit && (cachedColors || colorFingerprint == Long.MIN_VALUE)
+                boolean stored = diskLease != null && (diskHit && exteriorUpdates == 0 && (cachedColors || colorFingerprint == Long.MIN_VALUE)
                         || diskCache.writeTerrain(diskLease, new PredictionDiskCache.TerrainData(
                                 samples, colorFingerprint, surfaceTints, foliageColors, waterTints)));
                 commitNanos.add(System.nanoTime() - commitStartedNanos);
@@ -1870,6 +1874,7 @@ public final class PredictionTileManager implements AutoCloseable {
                     mesh.morph(PredictionMorph.field(completed, parent));
                 }
                 mesh.prepareGpuPayload(completed);
+                mesh.gpuPayload().prepareGpuStorage();
                 if (VSSClientConfig.CONFIG.predictionCompressMeshes) mesh.gpuPayload().prepareStorage();
                 packingNanos.add(System.nanoTime() - packStarted);
                 if (publishTile(completed, reservation, revision, captureEpoch, surface, stored && diskLease.valid(), PredictionRelief.of(completed))) {
