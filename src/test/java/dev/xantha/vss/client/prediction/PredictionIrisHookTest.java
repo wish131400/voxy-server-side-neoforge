@@ -11,6 +11,44 @@ import org.objectweb.asm.tree.*;
 class PredictionIrisHookTest {
     @Test
     @EnabledIfSystemProperty(named = "vss.voxyJar", matches = ".+")
+    void translucentHookRunsAfterInstalledRealDrawBeforeStateCleanup() throws Exception {
+        ClassNode renderer = new ClassNode();
+        try (var jar = new JarFile(System.getProperty("vss.voxyJar"));
+             var input = jar.getInputStream(jar.getJarEntry(
+                     "me/cortex/voxy/client/core/rendering/section/backend/mdic/MDICSectionRenderer.class"))) {
+            new ClassReader(input).accept(renderer, 0);
+        }
+        ClassNode mixin = new ClassNode();
+        try (var input = getClass().getResourceAsStream("/dev/xantha/vss/mixin/voxy/VoxyTranslucentPredictionMixin.class")) {
+            new ClassReader(input).accept(mixin, 0);
+        }
+        int matches = 0;
+        for (var method : mixin.methods) {
+            if (method.visibleAnnotations == null) continue;
+            for (var annotation : method.visibleAnnotations) {
+                if (!annotation.desc.endsWith("/Inject;")) continue;
+                var targets = (java.util.List<?>) value(annotation, "method");
+                var at = (AnnotationNode) ((java.util.List<?>) value(annotation, "at")).getFirst();
+                assertEquals("AFTER", ((String[]) value(at, "shift"))[1]);
+                String target = (String) value(at, "target");
+                for (var phase : renderer.methods) {
+                    if (!targets.contains(phase.name + phase.desc)) continue;
+                    boolean setup = false;
+                    for (var instruction : phase.instructions) if (instruction instanceof MethodInsnNode call) {
+                        if (call.name.equals("setupAndBindTranslucent")) setup = true;
+                        if (target.equals("L" + call.owner + ";" + call.name + call.desc)) {
+                            assertTrue(setup, "Iris must bind the intended translucent target first");
+                            matches++;
+                        }
+                    }
+                }
+            }
+        }
+        assertEquals(1, matches, "optional mixin must match exactly one real translucent draw, not its bridge method");
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "vss.voxyJar", matches = ".+")
     void opaqueHookMatchesInstalledPipelineBeforeTranslucentDepthCopy() throws Exception {
         ClassNode pipeline = new ClassNode();
         try (var jar = new JarFile(System.getProperty("vss.voxyJar"));

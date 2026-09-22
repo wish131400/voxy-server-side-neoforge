@@ -168,6 +168,8 @@
   "vss.voxy_options.prediction_trees": "预测树木与草",
   "vss.voxy_options.prediction_trees.tooltip": "在近处地形就绪后生成原版植被；远处只在望远镜目标区域生成。",
   "vss.voxy_options.prediction_structures": "预测地表建筑",
+  "vss.voxy_options.prediction_antialiasing": "远景抗锯齿",
+  "vss.voxy_options.prediction_antialiasing.tooltip": "减轻远处雪坡、树冠和地形细线的锯齿，按屏幕细节大小保留近处和望远镜细节。仅无光影时启用，覆盖真实区块、Voxy 和预测；开光影时交给光影处理。",
   "vss.voxy_options.prediction_structures.tooltip": "从服务端同步的原版模板生成村庄等地表结构；需要服务端支持。",
   "vss.voxy_options.prediction_surface_distance": "地表内容范围",
   "vss.voxy_options.prediction_surface_distance.tooltip": "在已有近处地形外额外细化树木、草和建筑的范围。自动跟随实际覆盖边界；更远处由望远镜触发。"

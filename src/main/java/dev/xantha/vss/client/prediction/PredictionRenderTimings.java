@@ -7,7 +7,7 @@ import org.lwjgl.opengl.GL33;
 
 /** Optional sampled diagnostics. Timestamp pairs coexist with a shader pack's elapsed queries. */
 final class PredictionRenderTimings {
-    enum Stage { PREPARE, COVERAGE, SEAMS, UPLOAD, OPAQUE, WATER, DEPTH_COPY, STATE }
+    enum Stage { PREPARE, COVERAGE, SEAMS, UPLOAD, OPAQUE, WATER, DEPTH_COPY, STATE, ANTIALIAS }
     private static final Stage[] STAGES = Stage.values();
     private static final long[] cpu = new long[STAGES.length], cpuCount = new long[STAGES.length];
     private static final long[] gpu = new long[STAGES.length], gpuCount = new long[STAGES.length];

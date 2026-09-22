@@ -23,6 +23,11 @@ class PredictionProgressiveLoadingTest {
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path cacheDirectory;
+    @org.junit.jupiter.api.AfterEach void awaitBackgroundClose() {
+        // Drain asynchronous region-handle release before JUnit deletes fixtures on Windows.
+        var barrier = new PredictionDiskCache(cacheDirectory,123);
+        barrier.close(); barrier.flush();
+    }
 
     @Test void fineCacheRestoresWithoutParentOrSamplingAndCorruptionDoesNotGenerate() throws Exception {
         var config = VSSClientConfig.CONFIG;
@@ -47,7 +52,7 @@ class PredictionProgressiveLoadingTest {
                 var disk = new PredictionDiskCache(path,123);
                 disk.probeTerrain(java.util.List.of(diskKey)); disk.flush();
                 assertEquals(64,disk.cachedTerrainAxis(diskKey));
-                if (corrupt) java.nio.file.Files.write(disk.file(diskKey),new byte[]{0,1,2});
+                if (corrupt) PredictionCacheTestFiles.corruptPayload(disk,diskKey);
                 try (var manager = new PredictionTileManager(Level.OVERWORLD,sampler,budget,disk)) {
                     var desired = PredictionTileManager.class.getDeclaredField("desiredKeys"); desired.setAccessible(true);
                     desired.set(manager,new java.util.HashSet<>(Set.of(tileKey)));

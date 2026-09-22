@@ -46,6 +46,8 @@ public class VSSClientConfig extends JsonConfig {
     public boolean predictionSupersample = false;
     /** Render the independent LOD fog pass. */
     public boolean predictionFog = true;
+    /** Screen-size-aware world edge filtering; shader packs own their postprocessing. */
+    public boolean predictionAntialiasing = true;
     public boolean debugLogging = false;
 
     @Override
@@ -83,6 +85,7 @@ public class VSSClientConfig extends JsonConfig {
         help.put("rememberTerrain", "是否在客户端压缩保存预测地形、植被及地表建筑，重访时读取并允许释放闲置网格；默认 true。");
         help.put("predictionSupersample", "是否在最近两个 LOD 层级使用超采样；默认 false。");
         help.put("predictionFog", "是否使用独立的远景雾；默认 true。");
+        help.put("predictionAntialiasing", "无光影时按屏幕细节大小过滤远景锯齿，覆盖真实区块、Voxy 和预测；默认 true。近处与望远镜细节保留，光影开启时自动交给光影处理。");
         help.put("debugLogging", "是否输出客户端 VSS 调试日志；默认 false。");
         return help;
     }

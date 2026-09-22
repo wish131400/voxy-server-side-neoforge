@@ -392,6 +392,9 @@ final class PredictionVegetation {
                     if (!data.canonical()) {
                         result = PredictionBamboo.normalize(result);
                         if (treeModels != null) result = PredictionLeafStates.settle(result);
+                    }
+                    if (!data.weatherChecked()) result = restoreWeather(x, z, result);
+                    if (!data.canonical() || !data.weatherChecked()) {
                         diskCache.writeSurface(lease, result, true);
                     }
                 }
@@ -435,6 +438,36 @@ final class PredictionVegetation {
         // Density data is deterministic, but do not keep cached virtual
         // ground assumptions across authoritative updates.
         terrainColumns.clear();
+    }
+
+    private Map<BlockPos, BlockState> restoreWeather(int chunkX, int chunkZ, Map<BlockPos, BlockState> blocks) {
+        int step = GenerationStep.Decoration.TOP_LAYER_MODIFICATION.ordinal();
+        if (step >= featureSteps.size()) return blocks;
+        var features = featureSteps.get(step);
+        if (features.stream().noneMatch(feature -> feature.feature().value().feature()
+                == net.minecraft.world.level.levelgen.feature.Feature.FREEZE_TOP_LAYER)) return blocks;
+        var level = new PredictionDecorationLevel(terrain, context, access, chunkX, chunkZ, terrainColumns);
+        level.restoreSurface(blocks);
+        var origin = new BlockPos(chunkX * 16, terrain.profile().minY(), chunkZ * 16);
+        var random = new WorldgenRandom(new XoroshiroRandomSource(0));
+        long seed = random.setDecorationSeed(terrain.profile().seed(), origin.getX(), origin.getZ());
+        for (int index = 0; index < features.size(); index++) {
+            var feature = features.get(index);
+            if (feature.feature().value().feature() != net.minecraft.world.level.levelgen.feature.Feature.FREEZE_TOP_LAYER
+                    || !belongsToColumn(level, feature, origin)) continue;
+            random.setFeatureSeed(seed, index, step);
+            level.beginFeature();
+            boolean success = false;
+            try {
+                feature.placeWithBiomeCheck(level, context.generatorContext(), random, origin);
+                success = true;
+            } catch (RuntimeException failure) {
+                if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS cached snow upgrade skipped: " + failure);
+            } finally { level.endFeature(success); }
+        }
+        // Keep cached structures, cuts and exact leaf states. Only replay the
+        // bounded weather feature; never rebuild trees, terrain or structures.
+        return Map.copyOf(level.placed());
     }
 
     private Map<BlockPos, BlockState> generate(int chunkX, int chunkZ) {

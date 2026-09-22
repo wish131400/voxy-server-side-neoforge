@@ -42,6 +42,8 @@ import org.lwjgl.system.MemoryUtil;
  */
 public final class PredictionRenderer {
     private static final PredictionRenderTarget predictionTarget = new PredictionRenderTarget();
+    private static final PredictionEdgeFilter edgeFilter = new PredictionEdgeFilter();
+    private static boolean resetEdgeFilter;
     private static final PredictionVanillaMask vanillaMask = new PredictionVanillaMask();
     private static final PredictionExactCoverageMask exactMask = new PredictionExactCoverageMask();
     private static final AtomicLong frameStarts = new AtomicLong();
@@ -119,6 +121,20 @@ public final class PredictionRenderer {
 
     /** Runs the packed-quad pass after vanilla/Voxy cutout terrain. */
     public static void onRenderLevel(RenderLevelStageEvent event) {
+        if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_LEVEL) {
+            boolean active = VSSClientConfig.CONFIG.enablePrediction && VSSClientConfig.CONFIG.predictionAntialiasing
+                    && !programBroken && !PredictionIrisBridge.shadersActive() && normalFogActive();
+            if (resetEdgeFilter || !active) { edgeFilter.close(); resetEdgeFilter = false; }
+            if (active) {
+                long start = PredictionRenderTimings.start();
+                int query = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.ANTIALIAS);
+                try { edgeFilter.render(Minecraft.getInstance().getMainRenderTarget(), event.getProjectionMatrix()); }
+                finally {
+                    PredictionRenderTimings.gpuEnd(query);
+                    PredictionRenderTimings.end(PredictionRenderTimings.Stage.ANTIALIAS, start);
+                }
+            }
+        }
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_CUTOUT_BLOCKS)
             PredictionRenderCapture.terrainComplete();
         if (PredictionRenderCapture.active() && !PredictionIrisBridge.shadersActive()) {
@@ -675,6 +691,8 @@ public final class PredictionRenderer {
         // Keep rasterized depth and the main-depth comparison in agreement.
         program.setCamera(event.modelView(), irisPass == null ? projection.matrix() : event.projection());
         if (irisPass != null) irisPass.bindFrame(event);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
+        PredictionAtlasSampler.bind(atlasId);
         return detail;
     }
 
@@ -791,6 +809,14 @@ public final class PredictionRenderer {
     private static long drawPasses(Minecraft minecraft, Frame event,
                                    List<Draw> draws, Vec3 camera,
                                    VssLodProjection.MatrixData projection, boolean water) {
+        int previousAtlasSampler = GL30.glGetIntegeri(org.lwjgl.opengl.GL33.GL_SAMPLER_BINDING, 0);
+        try { return drawNormalPass(minecraft, event, draws, camera, projection, water); }
+        finally { org.lwjgl.opengl.GL33.glBindSampler(0, previousAtlasSampler); }
+    }
+
+    private static long drawNormalPass(Minecraft minecraft, Frame event,
+                                      List<Draw> draws, Vec3 camera,
+                                      VssLodProjection.MatrixData projection, boolean water) {
         // All tiles in a frame share one validated binding. Worker-side
         // material discovery must not switch fallback modes halfway through a pass.
         boolean useAverage = !bindFrame(minecraft, event, projection, camera);
@@ -1061,6 +1087,7 @@ public final class PredictionRenderer {
 
     /** Drops all GPU caches; called on world change and resource reload. */
     public static void resetOcclusion() {
+        resetEdgeFilter = true;
         deferredWater = null;
         planGeneration.incrementAndGet();
         PredictionRenderTimings.reset();

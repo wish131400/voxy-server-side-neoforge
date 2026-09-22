@@ -21,6 +21,23 @@ public final class PredictionIrisBridge {
     private static final Map<Object, Bridge> BRIDGES = new IdentityHashMap<>();
     private static Method currentPack;
     private static boolean irisLookedUp;
+    // Render-thread only. setupAndBindTranslucent runs BEFORE Voxy's draw,
+    // including deferred packs; keep its exact pipeline/view for the draw tail.
+    private static Object translucentPipeline;
+    private static Object translucentViewport;
+
+    public static void prepareTranslucent(Object pipeline, Object viewport) {
+        translucentPipeline = pipeline;
+        translucentViewport = viewport;
+    }
+
+    public static void finishTranslucent(Object viewport) {
+        Object pipeline = translucentPipeline;
+        boolean matches = translucentViewport == viewport;
+        translucentPipeline = null;
+        translucentViewport = null;
+        if (pipeline != null && matches) render(pipeline, viewport, true);
+    }
 
     public static boolean shadersActive() {
         try {
@@ -61,6 +78,8 @@ public final class PredictionIrisBridge {
     }
 
     static void beginFrame() {
+        translucentPipeline = null;
+        translucentViewport = null;
         for (Bridge bridge : BRIDGES.values()) {
             bridge.framePlan.clear(); bridge.depthView.clear();
         }
@@ -169,10 +188,17 @@ public final class PredictionIrisBridge {
                     new Vec3((double) field(viewport, "cameraX"), (double) field(viewport, "cameraY"),
                             (double) field(viewport, "cameraZ")));
             var level = Minecraft.getInstance().level;
-            // Retain REAL opaque depth for water ownership. A new snapshot
-            // here would include our own terrain and erase shallow water.
-            if (!translucent || depthView.get(viewport, level, null, 0, 0, frameId, w, h, frame) == null) {
+            boolean newView = depthView.get(viewport, level, null, 0, 0, frameId, w, h, frame) == null;
+            if (!translucent || newView) {
                 framePlan.clear();
+                meshSnapshot = level == null ? null : ClientPredictionState.renderSnapshot(level.dimension());
+            }
+            // Opaque ownership uses real opaque depth. The second pass must
+            // see completed Voxy ice/water too, or coincident translucent faces
+            // blend twice. Reuse the same copy texture and prepared mesh plan.
+            // Fluid shader tolerance is 0.02 blocks (not terrain's broad band),
+            // so distinct shallow beds, including our own, remain below water.
+            {
                 long copyStart = PredictionRenderTimings.start();
                 int query = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.DEPTH_COPY);
                 try { snapshotDepth(texture, w, h); }
@@ -181,7 +207,6 @@ public final class PredictionIrisBridge {
                     PredictionRenderTimings.end(PredictionRenderTimings.Stage.DEPTH_COPY, copyStart);
                 }
                 depthView.put(viewport, level, null, 0, 0, frameId, w, h, frame, true);
-                meshSnapshot = level == null ? null : ClientPredictionState.renderSnapshot(level.dimension());
             }
             long revision = VssLodSpriteTable.materialRevision();
             if (materialRevision != revision) {

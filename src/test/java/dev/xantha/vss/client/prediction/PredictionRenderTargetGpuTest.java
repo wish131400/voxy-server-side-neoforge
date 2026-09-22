@@ -416,7 +416,10 @@ class PredictionRenderTargetGpuTest {
             verifyWideTerrainEdge(terrain, target, main, buffers, iris);
             verifyPlantTextureOrientation(terrain, target, main, buffers, textures, iris);
             verifyWaterAndBakedUvs(terrain, target, main, buffers, textures, iris);
-            if (iris) verifyIrisDepthConventions(terrain, target, main, buffers);
+            if (iris) {
+                verifyIrisDepthConventions(terrain, target, main, buffers);
+                verifyIrisTransparentHandoff(terrain, target, main, buffers);
+            }
             if (!iris) verifyWaterMaskBoundary(terrain, target, main, buffers, textures);
             assertEquals(GL_NO_ERROR, glGetError());
             System.out.println("PASS: production surface shader (Iris=" + iris + "): real/prediction occlusion, above/below terrain, moving cameras, 70/7 degree FOV, atlas binding, compiled-air rejection, closed cliffs and exact 65536-block tile edges");
@@ -1739,6 +1742,50 @@ class PredictionRenderTargetGpuTest {
             org.lwjgl.opengl.GL45.glClipControl(org.lwjgl.opengl.GL45.GL_LOWER_LEFT, oldMode);
         }
         System.out.println("PASS: Iris standard/reverse Z and both clip ranges, sky fill and foreground occlusion");
+    }
+
+    private static void verifyIrisTransparentHandoff(PredictionTerrainProgram terrain,
+            TextureTarget target, TextureTarget main, int[] buffers) {
+        int y = 32768;
+        int oldMode = glGetInteger(org.lwjgl.opengl.GL45.GL_CLIP_DEPTH_MODE);
+        RenderSystem.disableDepthTest(); RenderSystem.disableBlend();
+        terrain.use(); terrain.setOpaqueAlpha(0);
+        try {
+            for (int fluid : new int[]{1, 2, 3}) {
+                int[] plane = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                        1 | (fluid << PredictionPackedMesh.FLAGS_FLUID_SHIFT), 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+                glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, plane, GL_STATIC_DRAW);
+                for (boolean zeroToOne : new boolean[]{false, true}) for (boolean reversed : new boolean[]{false, true})
+                for (float height : new float[]{128, 4700, 20000}) for (float fov : new float[]{70, 7}) {
+                    org.lwjgl.opengl.GL45.glClipControl(org.lwjgl.opengl.GL45.GL_LOWER_LEFT,
+                            zeroToOne ? org.lwjgl.opengl.GL45.GL_ZERO_TO_ONE : org.lwjgl.opengl.GL45.GL_NEGATIVE_ONE_TO_ONE);
+                    var projection = new Matrix4f().setPerspective((float) Math.toRadians(fov), 1,
+                            reversed ? 131072 : 16, reversed ? 16 : 131072, zeroToOne);
+                    terrain.setCamera(new Matrix4f().lookAlong(0, -1, 0, 0, 0, -1), projection);
+                    terrain.setTile(-8192, -height, -8192, 16384, 1, true);
+                    terrain.setIrisFrame(new Matrix4f(projection).invert(), 64, 64, zeroToOne, new int[256], reversed ? 0 : 1);
+                    for (float below : new float[]{0, height == 128 ? .125F : height == 20000 ? 16 : 4, 100}) {
+                        var clip = projection.transform(new org.joml.Vector4f(0, 0, -height - below, 1));
+                        float raw = zeroToOne ? clip.z / clip.w : clip.z / clip.w * .5F + .5F;
+                        // Same-plane independent rasterizers disagree by 1-2 depth bins.
+                        if (below == 0) raw += (reversed ? -1 : 1) / 16777215F;
+                        main.bindWrite(true); RenderSystem.depthMask(true);
+                        glClearDepth(raw); glClear(GL_DEPTH_BUFFER_BIT);
+                        target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), VssLodProjection.of(projection));
+                        var pixels = terrainPixels();
+                        int visible = 0;
+                        for (int py = 24; py < 40; py++) for (int px = 24; px < 40; px++)
+                            if ((pixels.get((py * 64 + px) * 4) & 255) > 50) visible++;
+                        assertEquals(below == 0 ? 0 : 256, visible, "Iris completed transparent depth: fluid=" + fluid
+                                + ", zeroToOne=" + zeroToOne + ", reversed=" + reversed + ", height=" + height + ", below=" + below);
+                    }
+                }
+            }
+        } finally {
+            terrain.setOpaqueAlpha(1);
+            org.lwjgl.opengl.GL45.glClipControl(org.lwjgl.opengl.GL45.GL_LOWER_LEFT, oldMode);
+        }
+        System.out.println("PASS: Iris water/lava/ice ties, independent depth rounding, shallow beds and high-altitude/spyglass views");
     }
 
     private static ByteBuffer terrainPixels() {

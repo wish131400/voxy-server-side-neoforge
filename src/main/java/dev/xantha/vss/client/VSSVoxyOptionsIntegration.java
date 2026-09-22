@@ -227,6 +227,10 @@ public final class VSSVoxyOptionsIntegration {
             invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.prediction_detail",
+                    sodium08BooleanOption(configBuilder, "prediction_antialiasing", "vss.voxy_options.prediction_antialiasing",
+                            "vss.voxy_options.prediction_antialiasing.tooltip", "LOW", true,
+                            value -> VSSClientConfig.CONFIG.predictionAntialiasing = value,
+                            () -> VSSClientConfig.CONFIG.predictionAntialiasing, VSSVoxyOptionsIntegration::saveClientConfig),
                     sodium08BooleanOption(configBuilder, "prediction_trees", "vss.voxy_options.prediction_trees",
                             "vss.voxy_options.prediction_trees.tooltip", "HIGH", true,
                             value -> VSSClientConfig.CONFIG.predictionTrees = value,
@@ -895,6 +899,9 @@ public final class VSSVoxyOptionsIntegration {
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",
                             "vss.voxy_options.prediction_trees.tooltip", "HIGH",
                             (VSSClientConfig config, Boolean value) -> config.predictionTrees = value, config -> config.predictionTrees),
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_antialiasing",
+                            "vss.voxy_options.prediction_antialiasing.tooltip", "LOW",
+                            (VSSClientConfig config, Boolean value) -> config.predictionAntialiasing = value, config -> config.predictionAntialiasing),
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_structures",
                             "vss.voxy_options.prediction_structures.tooltip", "HIGH",
                             (VSSClientConfig config, Boolean value) -> config.predictionStructures = value, config -> config.predictionStructures)));

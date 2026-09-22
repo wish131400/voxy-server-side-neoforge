@@ -58,6 +58,67 @@ class PredictionVegetationTest {
     }
 
     @Test
+    void oldCanonicalCanopyGetsSnowWithoutReplayingTrees() throws Exception {
+        var freeze = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(
+                Feature.FREEZE_TOP_LAYER, NoneFeatureConfiguration.INSTANCE)), List.of());
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK,
+                Map.of(GenerationStep.Decoration.TOP_LAYER_MODIFICATION, List.of(freeze)), -0.5F);
+        int settings = (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees ? 1 : 0)
+                | (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionStructures ? 2 : 0) | 28;
+        var key = PredictionDiskCache.Key.surface(0, 0, settings);
+        var leaf = new BlockPos(3, 80, 5);
+        var saved = Map.of(leaf, Blocks.OAK_LEAVES.defaultBlockState(),
+                leaf.below(), Blocks.OAK_LOG.defaultBlockState(), new BlockPos(8, 90, 8), Blocks.STONE_BRICKS.defaultBlockState());
+        try (var cache = new PredictionDiskCache(diskDirectory, 1)) {
+            try (var lease = cache.lease(key)) { assertTrue(cache.writeSurface(lease, saved, true)); }
+            byte[] raw;
+            try (var input = new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(PredictionCacheTestFiles.read(cache, key)))) {
+                raw = input.readAllBytes();
+            }
+            java.nio.ByteBuffer.wrap(raw).putInt(4, 4);
+            var encoded = new java.io.ByteArrayOutputStream();
+            try (var output = new java.util.zip.DeflaterOutputStream(encoded)) { output.write(raw); }
+            PredictionCacheTestFiles.write(cache, key, encoded.toByteArray());
+            try (var lease = cache.lease(key)) { assertFalse(cache.readSurfaceData(lease).weatherChecked()); }
+            var vegetation = new PredictionVegetation(sampler, cache);
+            var restored = vegetation.chunk(0, 0);
+            saved.forEach((pos, state) -> assertEquals(state, restored.get(pos), "cached geometry must survive the upgrade"));
+            assertTrue(restored.get(leaf.above()).is(Blocks.SNOW));
+            assertTrue(vegetation.diagnostics().contains(",chunks=0,blocks=0,"), "upgrade must not replay trees or structures");
+            try (var lease = cache.lease(key)) {
+                assertTrue(cache.readSurfaceData(lease).weatherChecked());
+                assertEquals(restored, cache.readSurface(lease));
+            }
+            assertEquals(restored, new PredictionVegetation(sampler, cache).chunk(0, 0));
+        }
+    }
+
+    @Test
+    void decorationLightSeparatesSkyFromBlockEmission() {
+        var sampler = sampler(1, Blocks.GRASS_BLOCK, List.of());
+        var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, 0, 0);
+        var pos = new BlockPos(1, 80, 1);
+        assertEquals(0, level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, pos));
+        assertEquals(15, level.getBrightness(net.minecraft.world.level.LightLayer.SKY, pos));
+        level.setBlock(pos, Blocks.LAVA.defaultBlockState(), 0, 0);
+        assertEquals(15, level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, pos));
+    }
+
+    @Test
+    void coldTopLayerFeatureCoversCanopyWithoutALightEngine() {
+        var freeze = new PlacedFeature(Holder.direct(new ConfiguredFeature<>(
+                Feature.FREEZE_TOP_LAYER, NoneFeatureConfiguration.INSTANCE)), List.of());
+        var sampler = sampler(48271, Blocks.GRASS_BLOCK, Map.of(
+                GenerationStep.Decoration.VEGETAL_DECORATION, List.of(tree()),
+                GenerationStep.Decoration.TOP_LAYER_MODIFICATION, List.of(freeze)), -0.5F);
+        var vegetation = new PredictionVegetation(sampler);
+        var blocks = vegetation.chunk(0, 0);
+        assertTrue(blocks.entrySet().stream().anyMatch(entry -> entry.getValue().is(Blocks.SNOW)
+                && blocks.getOrDefault(entry.getKey().below(), Blocks.AIR.defaultBlockState()).is(BlockTags.LEAVES)),
+                "the vanilla snow feature must cover the predicted canopy: " + vegetation.diagnostics());
+    }
+
+    @Test
     void storedVanillaTreesRestoreWithoutGeneratingAndDirtyChunkEvictsThem() {
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
         Map<BlockPos, BlockState> expected;
@@ -841,9 +902,13 @@ class PredictionVegetationTest {
     }
 
     private static ClientTerrainSampler sampler(long seed, Block ground, Map<GenerationStep.Decoration,List<PlacedFeature>> features) {
+        return sampler(seed, ground, features, .7F);
+    }
+
+    private static ClientTerrainSampler sampler(long seed, Block ground, Map<GenerationStep.Decoration,List<PlacedFeature>> features, float temperature) {
         var generation = new BiomeGenerationSettings.PlainBuilder();
         features.forEach((step,list) -> list.forEach(feature -> generation.addFeature(step,Holder.direct(feature))));
-        var biome = new Biome.BiomeBuilder().hasPrecipitation(true).temperature(.7F).downfall(.5F)
+        var biome = new Biome.BiomeBuilder().hasPrecipitation(true).temperature(temperature).downfall(.5F)
                 .specialEffects(new BiomeSpecialEffects.Builder().fogColor(0).waterColor(0)
                         .waterFogColor(0).skyColor(0).build())
                 .mobSpawnSettings(MobSpawnSettings.EMPTY).generationSettings(generation.build()).build();

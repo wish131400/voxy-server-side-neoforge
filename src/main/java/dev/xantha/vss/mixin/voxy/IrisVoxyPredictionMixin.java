@@ -28,7 +28,7 @@ public abstract class IrisVoxyPredictionMixin {
     @Inject(method = "setupAndBindTranslucent(Lme/cortex/voxy/client/core/rendering/Viewport;)V",
             at = @At("RETURN"), remap = false, require = 0)
     private void vss$translucent(@Coerce Object viewport, CallbackInfo ci) {
-        PredictionIrisBridge.render(this, viewport, true);
+        PredictionIrisBridge.prepareTranslucent(this, viewport);
     }
 
     @Inject(method = "free", at = @At("HEAD"), remap = false, require = 0)

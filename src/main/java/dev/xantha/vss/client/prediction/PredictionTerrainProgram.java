@@ -478,6 +478,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             uniform vec3 VanillaMaskOrigin;
             uniform ivec3 VanillaMaskSize;
             uniform float VanillaRenderDistance;
+            uniform mat4 ProjMat;
             uniform sampler2D MainDepth;
             uniform vec2 MainDepthPlanes;
             uniform float DepthBias;
@@ -628,16 +629,25 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 #ifdef VSS_IRIS
                 float clipDepth = VssZeroToOne ? mainDepth : mainDepth * 2.0 - 1.0;
                 vec4 mainView = VssInverseProjection * vec4(gl_FragCoord.xy / VssViewport * 2.0 - 1.0, clipDepth, 1.0);
-                vec4 predictedView = VssInverseProjection * vec4(gl_FragCoord.xy / VssViewport * 2.0 - 1.0,
-                        VssZeroToOne ? gl_FragCoord.z : gl_FragCoord.z * 2.0 - 1.0, 1.0);
-                float predictedDistance = abs(predictedView.z / predictedView.w);
+                float predictedDistance = 1.0 / max(gl_FragCoord.w, 1e-30);
                 if (mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
                         && realCoverageOwnsSurface(abs(mainView.z / mainView.w), predictedDistance)) discard;
                 float fluidTie = 0.02 * max(1.0, predictedDistance / max(abs(dot(vFaceNormal, relative)), 0.02));
+                if (vWater > 0.5 && mainDepth != VssClearDepth) {
+                    // Compare in window depth, avoiding cancellation when an
+                    // inverse projection reconstructs distant coplanar water.
+                    // Two bins cover independent rasterization/storage rounding;
+                    // the additional 2 cm bias is perpendicular to the surface.
+                    vec4 biasedClip = ProjMat * vec4(0.0, 0.0, -predictedDistance - fluidTie, 1.0);
+                    float biasedDepth = biasedClip.z / biasedClip.w;
+                    if (!VssZeroToOne) biasedDepth = biasedDepth * 0.5 + 0.5;
+                    float bins = 2.0 / 16777215.0;
+                    if (VssClearDepth < 0.5 ? mainDepth >= biasedDepth - bins : mainDepth <= biasedDepth + bins) discard;
+                }
                 // Prefer real geometry in the same surface neighbourhood.
                 // Far cut faces must still be occluded by closer predicted ground.
-                if (mainDepth != VssClearDepth && abs(mainView.w) > 1e-10 && abs(mainView.z / mainView.w)
-                        <= predictedDistance + (vWater > 0.5 ? fluidTie : min(16.0, max(1.0, Spacing * 2.0)))) discard;
+                if (vWater < 0.5 && mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
+                        && abs(mainView.z / mainView.w) <= predictedDistance + min(16.0, max(1.0, Spacing * 2.0))) discard;
                 #else
                 // Rasterizer W retains reciprocal clip distance. Recovering it
                 // from window Z subtracts nearly equal numbers at altitude and

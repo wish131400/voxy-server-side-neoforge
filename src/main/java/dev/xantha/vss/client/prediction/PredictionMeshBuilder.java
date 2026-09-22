@@ -807,6 +807,12 @@ public final class PredictionMeshBuilder {
 
     private static void addPlacedVegetation(VertexAccumulator out, PredictionVegetation.Tile tile,
                                             int cell, int surfaceY, int foliageTint, PredictionSurfaceEdits edits, boolean interior) {
+        for (var roof : PredictionSnowSurfaces.roofs(tile, cell,
+                (x, z) -> interior ? Integer.MIN_VALUE : edits.floor(x, z, surfaceY))) {
+            int color = PredictionMaterialPalette.colorForState(roof.state(), 0xffffffff, foliageTint, 0);
+            int material = packSprite(color, spriteOf(roof.state(), 0));
+            addFeatureTop(out, roof.x(), roof.z(), roof.y(), roof.width(), roof.depth(), material, material, material, material);
+        }
         for (var face : PredictionVegetationRuns.faces(tile, cell, (x, z) -> interior ? Integer.MIN_VALUE : edits.floor(x, z, surfaceY), interior)) {
             int direction = face.direction();
             int color = PredictionMaterialPalette.colorForState(face.state(),
@@ -871,7 +877,7 @@ public final class PredictionMeshBuilder {
                 float y1 = voxel.y() + (float) shape.maxY;
                 if (y0 >= y1) continue;
                 int roof = packSprite(color, spriteOf(state, 0));
-                if (shape.maxY < size || !tile.occupied(x, top, z))
+                if (!state.is(net.minecraft.world.level.block.Blocks.SNOW) && (shape.maxY < size || !tile.occupied(x, top, z)))
                     addFeatureTop(out, x0, z0, y1, x1 - x0, z1 - z0, roof, roof, roof, roof);
                 if (interior && (shape.minY > 0 || !tile.occupied(x, voxel.y() - 1, z)))
                     addFeatureBottom(out, x0, z0, y0, x1 - x0, z1 - z0, packSprite(color, spriteOf(state, 5)));
@@ -883,12 +889,15 @@ public final class PredictionMeshBuilder {
                         case 3 -> shape.minX == 0; default -> shape.maxX == size;
                     };
                     if (boundary && tile.occupied(x + dx, voxel.y(), z + dz)) continue;
+                    float sideBottom = state.is(net.minecraft.world.level.block.Blocks.SNOW) && boundary
+                            ? PredictionSnowSurfaces.sideBottom(tile, x + dx, voxel.y(), z + dz, y0) : y0;
+                    if (sideBottom >= y1) continue;
                     int sideColor = PredictionMaterialPalette.colorForState(state, 0xFF888888, foliageTint, face);
                     int side = packSprite(sideColor, spriteOf(state, face));
-                    if (face <= 2) addFeatureZ(out, x0, face == 2 ? z1 : z0, y0,
-                            x1 - x0, y1 - y0, side, side, side, side, face == 1 ? -1 : 1);
-                    else addFeatureX(out, face == 4 ? x1 : x0, z0, y0,
-                            z1 - z0, y1 - y0, side, side, side, side, face == 3 ? -1 : 1);
+                    if (face <= 2) addFeatureZ(out, x0, face == 2 ? z1 : z0, sideBottom,
+                            x1 - x0, y1 - sideBottom, side, side, side, side, face == 1 ? -1 : 1);
+                    else addFeatureX(out, face == 4 ? x1 : x0, z0, sideBottom,
+                            z1 - z0, y1 - sideBottom, side, side, side, side, face == 3 ? -1 : 1);
                 }
             }
         }

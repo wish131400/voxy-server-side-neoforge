@@ -168,6 +168,8 @@
   "vss.voxy_options.prediction_trees": "Predicted trees and plants",
   "vss.voxy_options.prediction_trees.tooltip": "Generate vanilla vegetation after nearby terrain is ready. Distant vegetation requires spyglass focus.",
   "vss.voxy_options.prediction_structures": "Predicted surface structures",
+  "vss.voxy_options.prediction_antialiasing": "Distant edge antialiasing",
+  "vss.voxy_options.prediction_antialiasing.tooltip": "Reduce jagged snow, canopy and terrain edges using their screen size, preserving nearby and zoomed detail. Covers vanilla, Voxy and prediction without shaders. Shader packs handle their own antialiasing.",
   "vss.voxy_options.prediction_structures.tooltip": "Place surface structures such as villages using synced vanilla templates. Requires server support.",
   "vss.voxy_options.prediction_surface_distance": "Surface detail distance",
   "vss.voxy_options.prediction_surface_distance.tooltip": "Extra surface detail beyond observed nearby terrain coverage. The band follows actual coverage; more distant detail requires the spyglass."

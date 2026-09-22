@@ -29,6 +29,7 @@
     "voxy.ModelFactoryFluidBakeOrderMixin",
     "voxy.IrisVoxyRenderPipelineDepthMaskMixin",
     "voxy.IrisVoxyPredictionMixin",
+    "voxy.VoxyTranslucentPredictionMixin",
     "voxy.NormalRenderPipelineDepthMaskMixin",
     "voxy.PredictionFogShaderMixin",
     "voxy.VoxyClientInstanceStoragePathMixin",

@@ -16,6 +16,40 @@ import org.junit.jupiter.api.io.TempDir;
 class PredictionDiskCacheTest {
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
+    @org.junit.jupiter.api.AfterEach void awaitBackgroundClose() {
+        var barrier = new PredictionDiskCache(directory,77);
+        barrier.close(); barrier.flush();
+    }
+
+    @Test void successfulLegacyReadMigratesAndDirtyQueuedMigrationCannotResurrect() throws Exception {
+        var key=PredictionDiskCache.Key.terrain(0,0,0);
+        try(var cache=new PredictionDiskCache(directory,77)) {
+            try(var lease=cache.lease(key)) { assertTrue(cache.writeTerrain(lease,samples())); }
+            byte[] bytes=PredictionCacheTestFiles.read(cache,key);
+            PredictionCacheTestFiles.legacy(cache,key,bytes);
+            try(var lease=cache.lease(key)) { assertArrayEquals(samples(),cache.readTerrain(lease,samples().length)); }
+            cache.flush();
+            assertFalse(Files.exists(cache.file(key)));
+            assertTrue(Files.exists(PredictionCacheTestFiles.storage(cache).path(key)));
+
+            PredictionCacheTestFiles.legacy(cache,key,bytes);
+            var field=PredictionDiskCache.class.getDeclaredField("COMMITS"); field.setAccessible(true);
+            var executor=(java.util.concurrent.ExecutorService)field.get(null);
+            var entered=new java.util.concurrent.CountDownLatch(1);
+            var release=new java.util.concurrent.CountDownLatch(1);
+            var gate=executor.submit(()-> { entered.countDown(); release.await(); return true; });
+            try {
+                assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                try(var lease=cache.lease(key)) { assertNotNull(cache.readTerrain(lease,samples().length)); }
+                cache.invalidate(List.of(key));
+            } finally { release.countDown(); gate.get(); }
+            cache.flush();
+            try(var lease=cache.lease(key)) { assertNull(cache.readTerrain(lease,samples().length)); }
+        }
+        try(var cache=new PredictionDiskCache(directory,77); var lease=cache.lease(key)) {
+            assertNull(cache.readTerrain(lease,samples().length));
+        }
+    }
 
     @Test void batchedHeadersSurviveReopenAndRespectInvalidationAndCorruption() throws Exception {
         var key = PredictionDiskCache.Key.terrain(-1, 2, 0);
@@ -29,8 +63,8 @@ class PredictionDiskCacheTest {
             cache.flush();
             assertEquals(64, cache.cachedTerrainAxis(key));
             // A valid header is merely a hint, never proof that the payload is valid.
-            byte[] bytes = Files.readAllBytes(cache.file(key));
-            Files.write(cache.file(key), Arrays.copyOf(bytes, bytes.length - 8));
+            byte[] bytes = PredictionCacheTestFiles.read(cache,key);
+            PredictionCacheTestFiles.write(cache,key,Arrays.copyOf(bytes, bytes.length - 8));
             try (var lease = cache.lease(key)) { assertNull(cache.readTerrainData(lease, 0)); }
             cache.forgetTerrain(key);
             assertEquals(0, cache.cachedTerrainAxis(key));
@@ -83,9 +117,11 @@ class PredictionDiskCacheTest {
             try(var lease=cache.lease(surface)) { assertTrue(cache.writeSurface(lease,edits)); }
             try(var lease=cache.lease(surface)) { assertEquals(edits,cache.readSurface(lease)); }
             byte[] raw;
-            try(var in=new java.util.zip.InflaterInputStream(Files.newInputStream(cache.file(surface)))) { raw=in.readAllBytes(); }
+            try(var in=new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(PredictionCacheTestFiles.read(cache,surface)))) { raw=in.readAllBytes(); }
             java.nio.ByteBuffer.wrap(raw).putInt(4,1);
-            try(var out=new java.util.zip.DeflaterOutputStream(Files.newOutputStream(cache.file(surface)))) { out.write(raw); }
+            var encoded = new java.io.ByteArrayOutputStream();
+            try(var out=new java.util.zip.DeflaterOutputStream(encoded)) { out.write(raw); }
+            PredictionCacheTestFiles.legacy(cache,surface,encoded.toByteArray());
         }
         try(var reopened=new PredictionDiskCache(directory,77)) {
             try(var lease=reopened.lease(terrain)) { assertArrayEquals(samples(),reopened.readTerrain(lease,samples().length)); }
@@ -105,7 +141,7 @@ class PredictionDiskCacheTest {
         try (var cache = new PredictionDiskCache(directory, 77)) {
             try (var lease = cache.lease(terrainKey)) { assertTrue(cache.writeTerrain(lease, samples)); }
             try (var lease = cache.lease(surfaceKey)) { assertTrue(cache.writeSurface(lease, states)); }
-            long bytes = Files.size(cache.file(terrainKey));
+            long bytes = PredictionCacheTestFiles.read(cache,terrainKey).length;
             assertTrue(bytes < samples.length * 68 / 4, "smooth columns should compress without storing meshes");
             System.out.println("Prediction terrain fixture: columns=" + samples.length + ", rawBytes=" + samples.length * 68 + ", diskBytes=" + bytes);
         }
@@ -122,11 +158,13 @@ class PredictionDiskCacheTest {
         try(var cache=new PredictionDiskCache(directory,77)) {
             try(var lease=cache.lease(key)){assertTrue(cache.writeTerrain(lease,samples()));}
             byte[] raw;
-            try(var in=new java.util.zip.InflaterInputStream(Files.newInputStream(cache.file(key)))){raw=in.readAllBytes();}
+            try(var in=new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(PredictionCacheTestFiles.read(cache,key)))){raw=in.readAllBytes();}
             // Schema 1 ends after samples; schema 2 appends fingerprint + colors-present.
             raw=java.util.Arrays.copyOf(raw,raw.length-9);
             java.nio.ByteBuffer.wrap(raw).putInt(4,1);
-            try(var out=new java.util.zip.DeflaterOutputStream(Files.newOutputStream(cache.file(key)))){out.write(raw);}
+            var encoded = new java.io.ByteArrayOutputStream();
+            try(var out=new java.util.zip.DeflaterOutputStream(encoded)){out.write(raw);}
+            PredictionCacheTestFiles.legacy(cache,key,encoded.toByteArray());
             try(var lease=cache.lease(key)) {
                 var restored=cache.readTerrainData(lease,0);
                 assertNotNull(restored);assertArrayEquals(samples(),restored.samples());
@@ -244,21 +282,20 @@ class PredictionDiskCacheTest {
 
     @Test void corruptionWrongIdentityAndTruncationAreMisses() throws Exception {
         var key = PredictionDiskCache.Key.terrain(2, 3, 1);
-        Path file;
+        byte[] valid;
         try (var cache = new PredictionDiskCache(directory, 77); var lease = cache.lease(key)) {
             assertTrue(cache.writeTerrain(lease, samples()));
-            file = cache.file(key);
+            valid = PredictionCacheTestFiles.read(cache,key);
         }
-        byte[] valid = Files.readAllBytes(file);
         try (var changed = new PredictionDiskCache(directory, 88); var lease = changed.lease(key)) {
             assertNull(changed.readTerrain(lease, samples().length));
         }
         try (var cache = new PredictionDiskCache(directory, 77)) {
-            Files.write(file, Arrays.copyOf(valid, valid.length / 2));
+            PredictionCacheTestFiles.write(cache,key,Arrays.copyOf(valid, valid.length / 2));
             try (var lease = cache.lease(key)) { assertNull(cache.readTerrain(lease, samples().length)); }
-            Files.write(file, valid);
+            PredictionCacheTestFiles.write(cache,key,valid);
             var copied = PredictionDiskCache.Key.terrain(3, 3, 1);
-            Files.copy(file, cache.file(copied));
+            PredictionCacheTestFiles.write(cache,copied,valid);
             try (var lease = cache.lease(copied)) { assertNull(cache.readTerrain(lease, samples().length)); }
             try (var lease = cache.lease(key)) { assertArrayEquals(samples(), cache.readTerrain(lease, samples().length)); }
         }

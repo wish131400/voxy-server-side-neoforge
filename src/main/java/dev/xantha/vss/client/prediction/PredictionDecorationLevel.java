@@ -123,6 +123,16 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     }
 
     void useDisplayTerrain(boolean display) { displayTerrain = display; }
+    void restoreSurface(Map<BlockPos, BlockState> blocks) {
+        // A disk upgrade restores existing geometry; it is not a new feature
+        // transaction and may contain more writes than one feature's budget.
+        blocks.forEach((pos, state) -> {
+            checkColumnBounds(pos.getX(), pos.getZ());
+            noteWrite(pos, state);
+            changedTops.merge(key(pos.getX(), pos.getZ()), pos.getY() + 1, Math::max);
+        });
+        clearPendingUploads();
+    }
     boolean interiorTerrain() { return terrain.interiorTerrain(); }
     boolean usesDisplayTerrain() { return displayTerrain; }
 
@@ -261,6 +271,13 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     @Override public int getRawBrightness(BlockPos pos, int skyDarken) {
         int sky = canSeeSky(pos) ? Math.max(0, 15 - skyDarken) : 0;
         return Math.max(sky, getBlockState(pos).getLightEmission());
+    }
+    @Override public int getBrightness(net.minecraft.world.level.LightLayer layer, BlockPos pos) {
+        // Features run before propagated chunk lighting. In particular Biome's
+        // snow/freeze checks query BLOCK light, not getRawBrightness(). Do not
+        // delegate to the absent live-world light engine or allocate one here.
+        return layer == net.minecraft.world.level.LightLayer.BLOCK
+                ? getBlockState(pos).getLightEmission() : canSeeSky(pos) ? 15 : 0;
     }
     @Override public Holder<Biome> getNoiseBiome(int x, int y, int z) {
         Quart key = new Quart(x, y, z);

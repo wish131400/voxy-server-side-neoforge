@@ -18,9 +18,10 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** Compressed generation results. IO runs on builders or the serial commit worker, never on the render thread. */
 final class PredictionDiskCache implements AutoCloseable {
-    private static final int MAGIC = 0x56535044, SCHEMA = 4;
+    private static final int MAGIC = 0x56535044, SCHEMA = 5;
     private static final int MAX_COLUMNS = 66 * 66, MAX_BLOCKS = 262_144;
-    private static final ExecutorService COMMITS = Executors.newSingleThreadExecutor(task -> {
+    private static final ThreadPoolExecutor COMMITS = new ThreadPoolExecutor(1, 1, 0L,
+            TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), task -> {
         Thread thread = new Thread(task, "vss-prediction-disk");
         thread.setDaemon(true);
         thread.setPriority(Thread.NORM_PRIORITY - 1);
@@ -29,6 +30,9 @@ final class PredictionDiskCache implements AutoCloseable {
     private static final ConcurrentMap<Path, Shared> ROOTS = new ConcurrentHashMap<>();
     private static final class Shared {
         volatile PredictionDiskCache owner;
+        PredictionRegionStorage regions;
+        final Set<Key> migrations = new HashSet<>();
+        boolean maintenanceQueued;
         final Map<Key, Entry> active = new HashMap<>();
         final Map<Key, Long> invalidations = new HashMap<>();
         long revision;
@@ -108,8 +112,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 for (Lease lease : batch) try (lease) {
                     int axis = 0;
                     if (lease.valid() && lease.readable) {
-                        try (var input = new DataInputStream(new InflaterInputStream(
-                                new BufferedInputStream(Files.newInputStream(file(lease.key)))))) {
+                        try (var input = new DataInputStream(new ByteArrayInputStream(shared.regions.header(lease.key)))) {
                             int magic = input.readInt(), version = input.readInt();
                             if (magic == MAGIC && version >= 1 && version <= SCHEMA && input.readLong() == fingerprint
                                     && input.readInt() == 0 && input.readInt() == lease.key.x
@@ -154,6 +157,7 @@ final class PredictionDiskCache implements AutoCloseable {
         this.fingerprint = fingerprint;
         shared = ROOTS.computeIfAbsent(this.root, ignored -> new Shared());
         synchronized (shared) {
+            if (shared.regions == null) shared.regions = new PredictionRegionStorage(this.root);
             shared.active.values().forEach(entry -> entry.valid = false);
             shared.active.clear();
             shared.owner = this;
@@ -280,7 +284,7 @@ final class PredictionDiskCache implements AutoCloseable {
         return data == null ? null : data.blocks();
     }
 
-    record SurfaceData(Map<BlockPos, BlockState> blocks, boolean canonical) { }
+    record SurfaceData(Map<BlockPos, BlockState> blocks, boolean canonical, boolean weatherChecked) { }
 
     SurfaceData readSurfaceData(Lease lease) {
         return read(lease, (input, version) -> {
@@ -293,7 +297,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 BlockPos pos = new BlockPos(input.readInt(), input.readInt(), input.readInt());
                 blocks.put(pos, palette[index(input.readInt(), palette.length)]);
             }
-            return new SurfaceData(Map.copyOf(blocks), version >= 4);
+            return new SurfaceData(Map.copyOf(blocks), version >= 4, version >= 5);
         });
     }
 
@@ -303,7 +307,7 @@ final class PredictionDiskCache implements AutoCloseable {
 
     boolean writeSurface(Lease lease, Map<BlockPos, BlockState> blocks, boolean canonical) {
         if (blocks.size() > MAX_BLOCKS) return false;
-        return write(lease, canonical ? 4 : 3, output -> {
+        return write(lease, canonical ? 5 : 3, output -> {
             Map<BlockState, Integer> palette = new LinkedHashMap<>();
             blocks.values().forEach(state -> palette.computeIfAbsent(state, ignored -> palette.size()));
             output.writeInt(blocks.size()); output.writeInt(palette.size());
@@ -342,21 +346,24 @@ final class PredictionDiskCache implements AutoCloseable {
 
     private <T> T read(Lease lease, Decoder<T> decoder) {
         if (!lease.readable || !lease.valid()) { missStale.increment(); misses.increment(); return null; }
-        Path file = file(lease.key);
         // Buffer decompressed bytes too: DataInputStream.readInt otherwise
         // enters the inflater once per byte for every column field.
-        try (var input = new DataInputStream(new BufferedInputStream(
-                new InflaterInputStream(new BufferedInputStream(Files.newInputStream(file))), 32 * 1024))) {
+        try {
+            var record = shared.regions.read(lease.key);
+            try (var input = new DataInputStream(new BufferedInputStream(
+                    new InflaterInputStream(new ByteArrayInputStream(record.bytes())), 32 * 1024))) {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
-            if ((version != schema(lease.key) && version != 3 && !(lease.key.kind == 0 && (version == 1 || version == 2))) || input.readLong() != fingerprint
+            if ((version != schema(lease.key) && version != 4 && version != 3 && !(lease.key.kind == 0 && (version == 1 || version == 2))) || input.readLong() != fingerprint
                     || input.readInt() != lease.key.kind || input.readInt() != lease.key.x || input.readInt() != lease.key.z
                     || input.readInt() != lease.key.detail) { missIdentity.increment(); throw new IOException("cache identity mismatch"); }
             T result = decoder.read(input, version);
             if (input.read() != -1) { missCorrupt.increment(); throw new IOException("trailing cache data"); } // also validates zlib checksum
             if (!lease.valid()) { missRaced.increment(); misses.increment(); return null; }
             hits.increment();
+            if (record.legacy()) migrateLater(lease);
             return result;
+            }
         } catch (NoSuchFileException absent) {
             missAbsent.increment();
             misses.increment();
@@ -396,10 +403,10 @@ final class PredictionDiskCache implements AutoCloseable {
                         synchronized (shared) {
                             if (!lease.valid() || shared.invalidations.containsKey(lease.key)) return false;
                         }
-                        try { Files.move(completed, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE); }
-                        catch (AtomicMoveNotSupportedException unsupported) { Files.move(completed, target, StandardCopyOption.REPLACE_EXISTING); }
+                        shared.regions.write(lease.key, completed);
                         writes.increment();
                         synchronized (shared) { terrainHints.remove(lease.key); }
+                        scheduleMaintenance();
                         return true;
                     } finally { Files.deleteIfExists(completed); }
                 });
@@ -437,7 +444,7 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (shared) { pending = new HashMap<>(shared.invalidations); }
         for (var entry : pending.entrySet()) {
             try {
-                Files.deleteIfExists(file(entry.getKey()));
+                shared.regions.delete(entry.getKey());
                 synchronized (shared) { shared.invalidations.remove(entry.getKey(), entry.getValue()); }
             } catch (IOException failure) {
                 // Leave a tombstone in memory: a failed deletion must not let
@@ -449,6 +456,40 @@ final class PredictionDiskCache implements AutoCloseable {
             shared.deleting = false;
             boolean newWork = shared.invalidations.entrySet().stream().anyMatch(entry -> !Objects.equals(pending.get(entry.getKey()), entry.getValue()));
             if (newWork) { shared.deleting = true; COMMITS.execute(this::drainInvalidations); }
+        }
+        scheduleMaintenance();
+    }
+
+    private void migrateLater(Lease lease) {
+        synchronized (shared) {
+            if (!lease.valid() || shared.migrations.size() >= 32 || !shared.migrations.add(lease.key)) return;
+            Entry token = lease.entry;
+            long revision = shared.revision;
+            Key key = lease.key;
+            COMMITS.execute(() -> {
+                try {
+                    synchronized (shared) {
+                        if (closed || shared.owner != this || !token.valid || shared.revision != revision
+                                || shared.invalidations.containsKey(key)) return;
+                    }
+                    shared.regions.migrate(key);
+                } catch (IOException failure) { error(failure); }
+                finally { synchronized (shared) { shared.migrations.remove(key); } }
+            });
+        }
+    }
+
+    private void scheduleMaintenance() {
+        if (!shared.regions.hasMaintenance()) return;
+        synchronized (shared) {
+            if (shared.maintenanceQueued || closed || shared.owner != this) return;
+            shared.maintenanceQueued = true;
+            COMMITS.execute(() -> {
+                try {
+                    if (!closed && shared.owner == this && COMMITS.getQueue().isEmpty()) shared.regions.compactOne();
+                } catch (IOException failure) { error(failure); }
+                finally { synchronized (shared) { shared.maintenanceQueued = false; } }
+            });
         }
     }
 
@@ -492,8 +533,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 && PredictionTileManager.captureIntersectsAxis(z * 16L, key.z * (long) span, span, spacing);
     }
     Path file(Key key) {
-        return root.resolve(key.kind + "-" + key.detail).resolve((key.x >> 5) + "_" + (key.z >> 5))
-                .resolve(key.x + "_" + key.z + ".vpd");
+        return shared.regions.legacy(key);
     }
     String diagnostics() { return "disk={hits=" + hits.sum() + ",misses=" + misses.sum() + ",writes=" + writes.sum()
             + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"
@@ -521,6 +561,11 @@ final class PredictionDiskCache implements AutoCloseable {
                 shared.active.values().forEach(entry -> entry.valid = false);
                 shared.active.clear();
                 shared.owner = null;
+                COMMITS.execute(() -> {
+                    // Storage methods synchronize with builders and a newly opened session.
+                    synchronized (shared) { if (shared.owner != null) return; }
+                    try { shared.regions.close(); } catch (IOException failure) { error(failure); }
+                });
             }
         }
     }
