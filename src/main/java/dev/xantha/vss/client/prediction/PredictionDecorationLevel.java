@@ -24,17 +24,23 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
      */
     private static final int COLUMN_CACHE_AXIS = 80;
     private static final int COLUMN_CACHE_SIZE = COLUMN_CACHE_AXIS * COLUMN_CACHE_AXIS;
-    private static final int BLOCK_QUERY_CACHE_SIZE = 64;
+    private static final int BLOCK_QUERY_CACHE_SIZE = 512;
+    private static final int HEIGHT_QUERY_CACHE_SIZE = 256;
+    private static final int BIOME_QUERY_CACHE_SIZE = 1 << 15;
     private final ClientTerrainSampler terrain;
     private final ClientTerrainSampler context;
     private final int originX;
     private final int originZ;
     private final BiomeManager biomes;
-    private record Quart(int x, int y, int z) { }
-    // A job keeps its own exact answers even when concurrent regions churn the shared cache.
-    private final Map<Quart, Holder<Biome>> jobBiomes = new HashMap<>();
+    // Feature placement revisits nearby quart coordinates heavily. Keep the
+    // hot answers in primitive coordinate arrays; a collision only causes a
+    // fresh context lookup and can never return an answer for another point.
+    private int[] biomeXs, biomeYs, biomeZs;
+    private Holder<Biome>[] biomeValues;
+    private int biomeEntries;
     private final VssLodSampleCache sharedColumns;
     private ClientColumnSample[] columns;
+    private ClientColumnSample[] displaySamples;
     // State IDs are richer than ClientColumnSample's block IDs. Retain the
     // original immutable record for this bounded job instead of looking it up
     // in the shared sampler for every ground/heightmap/tree-space query.
@@ -42,31 +48,52 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     private int[][] displayColumns;
     // Feature predicates often ask for the same block more than once (for
     // example DiskFeature checks a column through several nested predicates).
-    // Cache hits and misses in the placed-block overlay. Terrain queries still
-    // pass through the normal path, including native cancellation checks.
+    // Cache complete state answers, including air and fluids. Cancellation is
+    // checked before cache hits. Writes invalidate their own position and
+    // height column; switching the terrain view invalidates every answer.
     private final int[] blockQueryXs = new int[BLOCK_QUERY_CACHE_SIZE];
     private final int[] blockQueryYs = new int[BLOCK_QUERY_CACHE_SIZE];
     private final int[] blockQueryZs = new int[BLOCK_QUERY_CACHE_SIZE];
     private final long[] blockQueryEpochs = new long[BLOCK_QUERY_CACHE_SIZE];
     private final BlockState[] blockQueryStates = new BlockState[BLOCK_QUERY_CACHE_SIZE];
     private long blockQueryEpoch = 1L;
-    private final java.util.Set<Long> exactEdits = new java.util.HashSet<>();
-    private final java.util.Set<Long> displayEdits = new java.util.HashSet<>();
+    private final int[] heightQueryXs = new int[HEIGHT_QUERY_CACHE_SIZE];
+    private final int[] heightQueryZs = new int[HEIGHT_QUERY_CACHE_SIZE];
+    private final int[] heightQueryTypes = new int[HEIGHT_QUERY_CACHE_SIZE];
+    private final int[] heightQueryValues = new int[HEIGHT_QUERY_CACHE_SIZE];
+    private final long[] heightQueryEpochs = new long[HEIGHT_QUERY_CACHE_SIZE];
+    private final int[] heightQueryColumnVersions = new int[HEIGHT_QUERY_CACHE_SIZE];
+    private int[] columnQueryVersions;
+    private final BlockPos.MutableBlockPos heightQueryPos = new BlockPos.MutableBlockPos();
+    private final boolean[] exactEdits = new boolean[COLUMN_CACHE_SIZE];
+    private final boolean[] displayEdits = new boolean[COLUMN_CACHE_SIZE];
     private boolean displayTerrain;
-    private final Map<Long, Integer> changedTops = new HashMap<>();
+    private int[] changedTops;
+    private final int[] biomeBlockXs = new int[BLOCK_QUERY_CACHE_SIZE];
+    private final int[] biomeBlockYs = new int[BLOCK_QUERY_CACHE_SIZE];
+    private final int[] biomeBlockZs = new int[BLOCK_QUERY_CACHE_SIZE];
+    @SuppressWarnings("unchecked")
+    private final Holder<Biome>[] biomeBlockValues = (Holder<Biome>[]) new Holder<?>[BLOCK_QUERY_CACHE_SIZE];
     private final Map<BlockPos, BlockState> undo = new HashMap<>();
+    private it.unimi.dsi.fastutil.ints.Int2ByteOpenHashMap undoColumnModes;
     private final java.util.Set<BlockPos> structureBlocks = new java.util.HashSet<>();
     private boolean transaction;
     private boolean structureTransaction;
     private int writes;
-    private final Map<Long, net.minecraft.world.level.chunk.ChunkAccess> virtualChunks = new HashMap<>();
+    private final net.minecraft.world.level.chunk.ChunkAccess[] virtualChunks =
+            new net.minecraft.world.level.chunk.ChunkAccess[5 * 5];
 
     /** Chunk-facing block queries stay in the same bounded transaction as level writes.
      * Postprocessing/ticks are visual-generation metadata; no live world is touched. */
     @Override public net.minecraft.world.level.chunk.ChunkAccess getChunk(int x, int z,
             net.minecraft.world.level.chunk.status.ChunkStatus status, boolean create) {
         checkColumnBounds(x * 16, z * 16);
-        return virtualChunks.computeIfAbsent(key(x, z), ignored -> new net.minecraft.world.level.chunk.ProtoChunk(
+        int localX = x - (Math.floorDiv(originX, 16) - 2);
+        int localZ = z - (Math.floorDiv(originZ, 16) - 2);
+        int slot = localZ * 5 + localX;
+        net.minecraft.world.level.chunk.ChunkAccess cached = virtualChunks[slot];
+        if (cached != null) return cached;
+        cached = new net.minecraft.world.level.chunk.ProtoChunk(
                 new net.minecraft.world.level.ChunkPos(x, z), net.minecraft.world.level.chunk.UpgradeData.EMPTY,
                 this, registryAccess().registryOrThrow(net.minecraft.core.registries.Registries.BIOME), null) {
             @Override public BlockState getBlockState(BlockPos pos) { return PredictionDecorationLevel.this.getBlockState(pos); }
@@ -85,7 +112,9 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
                 return PredictionDecorationLevel.this.getNoiseBiome(qx, qy, qz);
             }
             @Override public void markPosForPostprocessing(BlockPos pos) { }
-        });
+        };
+        virtualChunks[slot] = cached;
+        return cached;
     }
 
     PredictionDecorationLevel(ClientTerrainSampler terrain, ClientTerrainSampler context,
@@ -105,6 +134,11 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     }
 
     ClientColumnSample column(int x, int z) {
+        checkQueryActive();
+        return columnActive(x, z);
+    }
+
+    private ClientColumnSample columnActive(int x, int z) {
         checkColumnBounds(x, z);
         if (interiorTerrain()) {
             int slot = columnSlot(x, z);
@@ -118,8 +152,13 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
             }
             return sample;
         }
-        if (displayTerrain && terrain instanceof RustTerrainSampler rust)
-            return rust.surfaceSample(nativeColumn(rust,x,z));
+        if (displayTerrain && terrain instanceof RustTerrainSampler rust) {
+            int slot = columnSlot(x, z);
+            if (displaySamples == null) displaySamples = new ClientColumnSample[COLUMN_CACHE_SIZE];
+            ClientColumnSample sample = displaySamples[slot];
+            if (sample == null) displaySamples[slot] = sample = rust.surfaceSample(nativeColumn(rust, x, z));
+            return sample;
+        }
         int slot = columnSlot(x, z);
         if (columns == null) columns = new ClientColumnSample[COLUMN_CACHE_SIZE];
         ClientColumnSample sample = columns[slot];
@@ -138,7 +177,7 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     private int[] nativeColumn(RustTerrainSampler rust, int x, int z) {
         checkColumnBounds(x, z);
-        rust.handle(); // Retained data must not keep a cancelled world usable.
+        // Callers check cancellation before any retained cache hit.
         int slot = columnSlot(x, z);
         if (displayTerrain) {
             if (displayColumns == null) displayColumns = new int[COLUMN_CACHE_SIZE][];
@@ -169,14 +208,18 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         return localZ * COLUMN_CACHE_AXIS + localX;
     }
 
-    void useDisplayTerrain(boolean display) { displayTerrain = display; }
+    void useDisplayTerrain(boolean display) {
+        if (displayTerrain == display) return;
+        displayTerrain = display;
+        invalidateQueryEpoch();
+    }
     void restoreSurface(Map<BlockPos, BlockState> blocks) {
         // A disk upgrade restores existing geometry; it is not a new feature
         // transaction and may contain more writes than one feature's budget.
         blocks.forEach((pos, state) -> {
             checkColumnBounds(pos.getX(), pos.getZ());
             noteWrite(pos, state);
-            changedTops.merge(key(pos.getX(), pos.getZ()), pos.getY() + 1, Math::max);
+            noteTop(pos);
         });
         clearPendingUploads();
     }
@@ -186,20 +229,22 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     @Override
     protected void noteWrite(BlockPos pos, BlockState state) {
         super.noteWrite(pos, state);
-        // A failed feature rolls back through this same method. Bumping the
-        // epoch invalidates hits and misses without clearing or allocating the
-        // fixed-size query table.
-        if (++blockQueryEpoch == 0L) {
-            java.util.Arrays.fill(blockQueryEpochs, 0L);
-            blockQueryEpoch = 1L;
-        }
+        // Block answers have no neighbor dependency. Rollbacks use the same
+        // path, so unrelated positions and height columns remain reusable.
+        int x = pos.getX(), y = pos.getY(), z = pos.getZ();
+        int slot = blockQuerySlot(x, y, z);
+        if (blockQueryXs[slot] == x && blockQueryYs[slot] == y && blockQueryZs[slot] == z)
+            blockQueryEpochs[slot] = 0L;
+        if (columnQueryVersions != null && ++columnQueryVersions[columnSlot(x, z)] == 0)
+            java.util.Arrays.fill(heightQueryEpochs, 0L);
     }
 
     /** Structures/custom feature cuts retain their original extraction floor.
      * Pure visual plant columns use the same ground as their placement. */
     ClientColumnSample exteriorColumn(int x, int z) {
         boolean previous = displayTerrain;
-        displayTerrain = !exactEdits.contains(key(x,z)) && displayEdits.contains(key(x,z));
+        int slot = columnSlot(x, z);
+        displayTerrain = !exactEdits[slot] && displayEdits[slot];
         try { return column(x,z); } finally { displayTerrain = previous; }
     }
 
@@ -212,71 +257,79 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     void beginFeature() {
         writes = 0;
         undo.clear();
+        if (undoColumnModes != null) undoColumnModes.clear();
         transaction = true;
         structureTransaction = false;
     }
 
+    int featureWriteCount() { return writes; }
+
     void beginStructure() { beginFeature(); structureTransaction = true; }
 
     void endFeature(boolean success) {
-        if (!success) undo.forEach((pos, state) -> {
-            // Routed through `noteWrite` so the rollback is registered as a
-            // write: an unregistered one would let the next round trip claim
-            // the two sides agree.
-            noteWrite(pos, state);
-        });
-        if (!success) {
-            changedTops.clear();
-            placed().forEach((pos, state) -> {
-                if (!state.isAir()) changedTops.merge(key(pos.getX(), pos.getZ()), pos.getY() + 1, Math::max);
+        if (!success && !undo.isEmpty()) {
+            undo.forEach((pos, state) -> {
+                // Rollbacks must register writes for the next native transfer.
+                noteWrite(pos, state);
             });
+            if (undoColumnModes != null) {
+                var entries = undoColumnModes.int2ByteEntrySet().fastIterator();
+                while (entries.hasNext()) {
+                    var entry = entries.next();
+                    int slot = entry.getIntKey();
+                    exactEdits[slot] = (entry.getByteValue() & 1) != 0;
+                    displayEdits[slot] = (entry.getByteValue() & 2) != 0;
+                }
+            }
+            rebuildChangedTops();
         }
         if (success && structureTransaction) structureBlocks.addAll(undo.keySet());
         undo.clear();
+        if (undoColumnModes != null) undoColumnModes.clear();
         transaction = false;
+    }
+
+    private void rebuildChangedTops() {
+        changedTops = null;
+        placed().forEach((pos, state) -> {
+            if (!state.isAir()) noteTop(pos);
+        });
     }
 
     boolean isStructureBlock(BlockPos pos) { return structureBlocks.contains(pos); }
 
     @Override
     public BlockState getBlockState(BlockPos pos) {
-        if (!placed().isEmpty()) {
-            int x = pos.getX(), y = pos.getY(), z = pos.getZ();
-            int querySlot = blockQuerySlot(x, y, z);
-            BlockState placed;
-            if (blockQueryEpochs[querySlot] == blockQueryEpoch
-                    && blockQueryXs[querySlot] == x && blockQueryYs[querySlot] == y
-                    && blockQueryZs[querySlot] == z) {
-                placed = blockQueryStates[querySlot];
-            } else {
-                placed = placed().get(pos);
-                blockQueryXs[querySlot] = x;
-                blockQueryYs[querySlot] = y;
-                blockQueryZs[querySlot] = z;
-                blockQueryStates[querySlot] = placed;
-                blockQueryEpochs[querySlot] = blockQueryEpoch;
-            }
-            if (placed != null) return placed;
+        checkQueryActive();
+        int x = pos.getX(), y = pos.getY(), z = pos.getZ();
+        int slot = blockQuerySlot(x, y, z);
+        if (blockQueryEpochs[slot] == blockQueryEpoch
+                && blockQueryXs[slot] == x && blockQueryYs[slot] == y && blockQueryZs[slot] == z) {
+            return blockQueryStates[slot];
         }
+        BlockState result = resolveBlockState(pos);
+        cacheBlockQuery(slot, x, y, z, result);
+        return result;
+    }
+
+    private BlockState resolveBlockState(BlockPos pos) {
+        BlockState placed = placed().get(pos);
+        if (placed != null) return placed;
         if (pos.getY() < getMinBuildHeight() || pos.getY() >= getMaxBuildHeight()) {
             return Blocks.AIR.defaultBlockState();
         }
         if (interiorTerrain()) {
-            int block = column(pos.getX(), pos.getZ()).volume().blockAt(pos.getY());
+            int block = columnActive(pos.getX(), pos.getZ()).volume().blockAt(pos.getY());
             return block == ClientColumnSample.NO_BLOCK ? Blocks.AIR.defaultBlockState()
                     : BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
         }
         if (terrain instanceof RustTerrainSampler rust) {
-            // Bounds and cancellation are checked by nativeColumn. A block
-            // query needs the original record, not a second metadata lookup.
             return rust.proxyBlock(nativeColumn(rust, pos.getX(), pos.getZ()), pos.getY());
         }
-        ClientColumnSample sample = column(pos.getX(), pos.getZ());
+        ClientColumnSample sample = columnActive(pos.getX(), pos.getZ());
         if (pos.getY() >= sample.surfaceY()) {
             if (sample.hasFluid() && pos.getY() < sample.fluidY()) {
-                if (sample.ice() && pos.getY() == sample.fluidY() - 1) {
-                    return Blocks.ICE.defaultBlockState();
-                }
+                if (sample.ice() && pos.getY() == sample.fluidY() - 1) return Blocks.ICE.defaultBlockState();
                 return (sample.fluid() == 2 ? Blocks.LAVA : Blocks.WATER).defaultBlockState();
             }
             return Blocks.AIR.defaultBlockState();
@@ -303,15 +356,27 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     @Override
     public boolean setBlock(BlockPos pos, BlockState state, int flags, int recursion) {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new java.util.concurrent.CancellationException("prediction decoration interrupted");
+        }
         if (!ensureCanWrite(pos)) {
             throw new UnsupportedOperationException("decoration write outside its bounded region");
         }
-        if (++writes > MAX_WRITES || Thread.currentThread().isInterrupted()) {
+        if (++writes > MAX_WRITES) {
             throw new UnsupportedOperationException("decoration exceeded its work budget");
         }
-        changedTops.merge(key(pos.getX(), pos.getZ()), pos.getY() + 1, Math::max);
-        if (!displayTerrain) exactEdits.add(key(pos.getX(),pos.getZ()));
-        else displayEdits.add(key(pos.getX(),pos.getZ()));
+        noteTop(pos);
+        int columnSlot = columnSlot(pos.getX(), pos.getZ());
+        if (transaction && (displayTerrain ? !displayEdits[columnSlot] : !exactEdits[columnSlot])) {
+            if (undoColumnModes == null) {
+                undoColumnModes = new it.unimi.dsi.fastutil.ints.Int2ByteOpenHashMap(8);
+                undoColumnModes.defaultReturnValue((byte) -1);
+            }
+            if (!undoColumnModes.containsKey(columnSlot))
+                undoColumnModes.put(columnSlot, (byte) ((exactEdits[columnSlot] ? 1 : 0) | (displayEdits[columnSlot] ? 2 : 0)));
+        }
+        if (!displayTerrain) exactEdits[columnSlot] = true;
+        else displayEdits[columnSlot] = true;
         if (transaction && !undo.containsKey(pos)) undo.put(pos.immutable(), placed().get(pos));
         return super.setBlock(pos, state, flags, recursion);
     }
@@ -323,14 +388,30 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     @Override
     public int getHeight(Heightmap.Types type, int x, int z) {
-        ClientColumnSample sample = column(x, z);
+        checkQueryActive();
+        checkColumnBounds(x, z);
+        int columnSlot = columnSlot(x, z);
+        if (columnQueryVersions == null) columnQueryVersions = new int[COLUMN_CACHE_SIZE];
+        int columnVersion = columnQueryVersions[columnSlot];
+        int typeId = type.ordinal();
+        int querySlot = heightQuerySlot(x, z, typeId);
+        if (heightQueryEpochs[querySlot] == blockQueryEpoch
+                && heightQueryXs[querySlot] == x && heightQueryZs[querySlot] == z
+                && heightQueryTypes[querySlot] == typeId
+                && heightQueryColumnVersions[querySlot] == columnVersion) return heightQueryValues[querySlot];
+        ClientColumnSample sample = columnActive(x, z);
         int top = Math.max(Math.max(sample.surfaceY(), sample.fluidY()),
-                changedTops.getOrDefault(key(x, z), getMinBuildHeight()));
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos(x, top, z);
+                changedTops == null ? getMinBuildHeight() : changedTops[columnSlot]);
+        BlockPos.MutableBlockPos pos = heightQueryPos.set(x, top, z);
         for (int y = Math.min(top - 1, getMaxBuildHeight() - 1); y >= getMinBuildHeight(); y--) {
-            if (type.isOpaque().test(getBlockState(pos.setY(y)))) return y + 1;
+            if (type.isOpaque().test(getBlockState(pos.setY(y)))) {
+                cacheHeightQuery(querySlot, x, z, typeId, y + 1, columnVersion);
+                return y + 1;
+            }
         }
-        return getMinBuildHeight();
+        int result = getMinBuildHeight();
+        cacheHeightQuery(querySlot, x, z, typeId, result, columnVersion);
+        return result;
     }
 
     @Override public int getMinBuildHeight() { return terrain.profile().minY(); }
@@ -354,13 +435,66 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         return layer == net.minecraft.world.level.LightLayer.BLOCK
                 ? getBlockState(pos).getLightEmission() : canSeeSky(pos) ? 15 : 0;
     }
+    @Override public Holder<Biome> getBiome(BlockPos pos) {
+        checkQueryActive();
+        int x = pos.getX(), y = pos.getY(), z = pos.getZ();
+        int slot = blockQuerySlot(x, y, z);
+        Holder<Biome> value = biomeBlockValues[slot];
+        if (value != null && biomeBlockXs[slot] == x && biomeBlockYs[slot] == y && biomeBlockZs[slot] == z) {
+            return value;
+        }
+        value = biomes.getBiome(pos);
+        biomeBlockXs[slot] = x; biomeBlockYs[slot] = y; biomeBlockZs[slot] = z;
+        biomeBlockValues[slot] = value;
+        return value;
+    }
+
     @Override public Holder<Biome> getNoiseBiome(int x, int y, int z) {
-        Quart key = new Quart(x, y, z);
-        Holder<Biome> cached = jobBiomes.get(key);
-        if (cached != null) return cached;
+        checkQueryActive();
+        // A tree job visits only a few quart positions. Do not zero half a
+        // megabyte of biome arrays for every source chunk before its first read.
+        if (biomeValues == null) growBiomeCache(1024);
+        int mask = biomeValues.length - 1;
+        int home = biomeSlot(x, y, z, mask);
+        int slot = -1;
+        for (int probe = 0; probe < 8; probe++) {
+            int candidate = (home + probe) & mask;
+            Holder<Biome> cached = biomeValues[candidate];
+            if (cached == null) { slot = candidate; break; }
+            if (biomeXs[candidate] == x && biomeYs[candidate] == y && biomeZs[candidate] == z) return cached;
+        }
+        if ((slot < 0 || biomeEntries >= biomeValues.length / 2)
+                && biomeValues.length < BIOME_QUERY_CACHE_SIZE) {
+            growBiomeCache(biomeValues.length * 2);
+            return getNoiseBiome(x, y, z);
+        }
+        if (slot < 0) slot = home;
         Holder<Biome> biome = context.noiseBiome(x, y, z);
-        if (jobBiomes.size() < 16384) jobBiomes.put(key, biome);
+        if (biomeValues[slot] == null) biomeEntries++;
+        biomeXs[slot] = x; biomeYs[slot] = y; biomeZs[slot] = z; biomeValues[slot] = biome;
         return biome;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void growBiomeCache(int size) {
+        int[] oldXs = biomeXs, oldYs = biomeYs, oldZs = biomeZs;
+        Holder<Biome>[] oldValues = biomeValues;
+        biomeXs = new int[size]; biomeYs = new int[size]; biomeZs = new int[size];
+        biomeValues = (Holder<Biome>[]) new Holder<?>[size];
+        biomeEntries = 0;
+        if (oldValues == null) return;
+        int mask = size - 1;
+        for (int i = 0; i < oldValues.length; i++) {
+            if (oldValues[i] == null) continue;
+            int home = biomeSlot(oldXs[i], oldYs[i], oldZs[i], mask), slot = home;
+            for (int probe = 0; probe < 8; probe++) {
+                int candidate = (home + probe) & mask;
+                if (biomeValues[candidate] == null) { slot = candidate; break; }
+            }
+            if (biomeValues[slot] == null) biomeEntries++;
+            biomeXs[slot] = oldXs[i]; biomeYs[slot] = oldYs[i]; biomeZs[slot] = oldZs[i];
+            biomeValues[slot] = oldValues[i];
+        }
     }
     @Override public Holder<Biome> getUncachedNoiseBiome(int x, int y, int z) {
         return getNoiseBiome(x, y, z);
@@ -368,9 +502,55 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     private static long key(int x, int z) { return (long) x << 32 | z & 0xFFFFFFFFL; }
 
+    private void noteTop(BlockPos pos) {
+        if (changedTops == null) {
+            changedTops = new int[COLUMN_CACHE_SIZE];
+            java.util.Arrays.fill(changedTops, getMinBuildHeight());
+        }
+        int slot = columnSlot(pos.getX(), pos.getZ());
+        changedTops[slot] = Math.max(changedTops[slot], pos.getY() + 1);
+    }
+
+    private void checkQueryActive() {
+        if (terrain instanceof RustTerrainSampler rust) rust.handle();
+        else if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+    }
+
     private static int blockQuerySlot(int x, int y, int z) {
         int hash = x * 0x9E3779B9 ^ Integer.rotateLeft(y * 0x85EBCA6B, 11)
                 ^ Integer.rotateLeft(z * 0xC2B2AE35, 22);
         return (hash ^ hash >>> 16) & (BLOCK_QUERY_CACHE_SIZE - 1);
+    }
+
+    private static int heightQuerySlot(int x, int z, int type) {
+        int hash = x * 0x9E3779B9 ^ Integer.rotateLeft(z * 0x85EBCA6B, 13);
+        // Mixing type before folding aliases WORLD_SURFACE and OCEAN_FLOOR
+        // at every column. An odd multiplier preserves distinct type slots.
+        return ((hash ^ hash >>> 16) ^ type * 0x9E3779B9) & (HEIGHT_QUERY_CACHE_SIZE - 1);
+    }
+
+    private static int biomeSlot(int x, int y, int z, int mask) {
+        int hash = x * 0x9E3779B9 ^ Integer.rotateLeft(y * 0x85EBCA6B, 11)
+                ^ Integer.rotateLeft(z * 0xC2B2AE35, 22);
+        return (hash ^ hash >>> 16) & mask;
+    }
+
+    private void cacheBlockQuery(int slot, int x, int y, int z, BlockState state) {
+        blockQueryXs[slot] = x; blockQueryYs[slot] = y; blockQueryZs[slot] = z;
+        blockQueryStates[slot] = state; blockQueryEpochs[slot] = blockQueryEpoch;
+    }
+
+    private void cacheHeightQuery(int slot, int x, int z, int type, int height, int columnVersion) {
+        heightQueryXs[slot] = x; heightQueryZs[slot] = z; heightQueryTypes[slot] = type;
+        heightQueryColumnVersions[slot] = columnVersion;
+        heightQueryValues[slot] = height; heightQueryEpochs[slot] = blockQueryEpoch;
+    }
+
+    private void invalidateQueryEpoch() {
+        if (++blockQueryEpoch == 0L) {
+            java.util.Arrays.fill(blockQueryEpochs, 0L);
+            java.util.Arrays.fill(heightQueryEpochs, 0L);
+            blockQueryEpoch = 1L;
+        }
     }
 }

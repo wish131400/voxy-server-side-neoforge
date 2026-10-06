@@ -9,9 +9,12 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Pseudo
-@Mixin(targets = "raccoonman.reterraforged.world.worldgen.WorldFilters", remap = false)
+@Mixin(targets = {"raccoonman.reterraforged.world.worldgen.WorldFilters",
+        "etcodehome.freeterraforged.world.worldgen.WorldFilters"}, remap = false)
 public abstract class FreeTerraForgedPredictionFiltersMixin {
-    @Inject(method = "apply(Lraccoonman/reterraforged/world/worldgen/densityfunction/tile/Tile;Z)V", at = @At("HEAD"), cancellable = true, require = 0, remap = false)
+    @Inject(method = {"apply(Lraccoonman/reterraforged/world/worldgen/densityfunction/tile/Tile;Z)V",
+            "apply(Letcodehome/freeterraforged/world/worldgen/densityfunction/tile/Tile;Z)V"},
+            at = @At("HEAD"), cancellable = true, require = 0, remap = false)
     private void vss$nativePredictionFilters(@Coerce Object tile, boolean optional, CallbackInfo ci) {
         if (FreeTerraForgedNativeFilters.apply(this, tile, optional)) ci.cancel();
     }

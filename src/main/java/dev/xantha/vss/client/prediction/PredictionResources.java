@@ -13,18 +13,23 @@ final class PredictionResources {
         return thread;
     });
 
-    static void retire(ExecutorService workers, PredictionSampleStore store, ClientTerrainSampler sampler) {
+    static void retire(ExecutorService workers, PredictionSampleStore store, ClientTerrainSampler sampler,
+                       ExecutorService... additionalWorkers) {
         if (sampler instanceof RustTerrainSampler rust) rust.cancelWork();
+        sampler.decorationContext().cancelDensityCompilation();
         DISPOSER.execute(() -> {
             try {
                 // A JNI graph must outlive every sample still using it.
                 while (!workers.awaitTermination(30, TimeUnit.SECONDS)) { }
+                for (ExecutorService additional : additionalWorkers)
+                    while (!additional.awaitTermination(30, TimeUnit.SECONDS)) { }
                 if (store != null) store.close();
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 return;
             } finally {
-                if (workers.isTerminated()) releaseSampler(sampler);
+                if (workers.isTerminated() && java.util.Arrays.stream(additionalWorkers)
+                        .allMatch(ExecutorService::isTerminated)) releaseSampler(sampler);
             }
         });
     }
@@ -35,8 +40,7 @@ final class PredictionResources {
     }
 
     static void releaseSampler(ClientTerrainSampler sampler) {
-        if (sampler instanceof RustTerrainSampler nativeSampler) nativeSampler.close();
-        if (sampler instanceof FreeTerraForgedTerrainSampler rtfSampler) rtfSampler.close();
+        sampler.close();
     }
 
     private PredictionResources() { }

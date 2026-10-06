@@ -19,13 +19,12 @@ class PredictionFrameEventsTest {
         var budget = (PredictionUploadBudget) field.get(null);
         try {
             // Simulate a preceding frame that used all its upload slots.
-            budget.record(1024, 0);
-            budget.record(1024, 0);
+            for (int slot = 0; slot < PredictionUploadBudget.MAX_TILES; slot++) budget.record(1024, 0);
             assertFalse(budget.allows(1024));
             int uploaded = 0;
             for (int frame = 0; frame < 60; frame++) {
                 bus.post(new RenderFrameEvent.Pre(null));
-                for (int slot = 0; slot < 2; slot++) {
+                for (int slot = 0; slot < PredictionUploadBudget.MAX_TILES; slot++) {
                     assertTrue(budget.allows(1024), "GPU upload stalled at frame " + frame);
                     budget.record(1024, 100_000);
                     uploaded++;
@@ -34,7 +33,7 @@ class PredictionFrameEventsTest {
                 bus.post(new RenderFrameEvent.Post(null));
                 assertFalse(budget.allows(1), "frame end must not reopen upload slots");
             }
-            assertEquals(120, uploaded, "uploads must continue beyond the first two meshes");
+            assertEquals(60 * PredictionUploadBudget.MAX_TILES, uploaded, "uploads must continue beyond the first two meshes");
         } finally {
             bus.unregister(VSSClientNetworking.class);
             budget.reset();

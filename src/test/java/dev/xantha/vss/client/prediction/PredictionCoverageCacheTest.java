@@ -3,6 +3,7 @@ package dev.xantha.vss.client.prediction;
 import static org.junit.jupiter.api.Assertions.*;
 
 import dev.xantha.vss.common.PositionUtil;
+import dev.xantha.vss.compat.StrictLodVisibility;
 import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.registries.Registries;
@@ -126,6 +127,31 @@ class PredictionCoverageCacheTest {
         assertTrue(scopedSnapshot.scopeAffects(parent.key()));
         assertTrue(scopedSnapshot.scopeAffects(scoped.key()));
         assertFalse(scopedSnapshot.scopeAffects(distant.key()),"a telescope patch must not invalidate unrelated terrain on camera movement");
+    }
+
+    @Test void voxyWindowChangesNeverResetPredictionOwnership() {
+        StrictLodVisibility.reset();
+        try {
+            StrictLodVisibility.updateRenderWindow(DIMENSION, 1, 1, 64);
+            var view = new PredictionRenderer.CoverageView(0, 0, 1400, null).ownership(false);
+            var cached = new PredictionRenderer.CachedCoverage(1, 2, 0, view, null);
+            long revision = StrictLodVisibility.coverageRevision();
+            StrictLodVisibility.updateRenderWindow(DIMENSION, 15, 15, 64);
+            assertEquals(revision, StrictLodVisibility.coverageRevision());
+            assertTrue(cached.matchesOwnership(1, 2, view));
+            StrictLodVisibility.updateRenderWindow(DIMENSION, 16, 15, 64);
+            assertTrue(cached.matchesOwnership(1, 2, view));
+            var movement = StrictLodVisibility.coverageChangesSince(revision);
+            assertFalse(movement.reset());
+            assertEquals(1, movement.windows().size());
+            assertFalse(movement.windows().get(0).affects(0, 0, 4, 4));
+            assertTrue(movement.windows().get(0).affects(60, 0, 64, 4));
+            var moved = new PredictionRenderer.CachedCoverage(1, 2, 0, view, null);
+            StrictLodVisibility.updateRenderWindow(DIMENSION, 16, 15, 0);
+            assertTrue(moved.matchesOwnership(1, 2, view));
+        } finally {
+            StrictLodVisibility.reset();
+        }
     }
 
     private static PredictionTileManager.PredictionTile tile(int lod, long revision) {

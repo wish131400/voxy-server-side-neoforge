@@ -108,20 +108,19 @@ final class DeferredColumnQueue implements Iterable<Long> {
         enqueue(packed, targetUrgent);
     }
 
-    LongList pollClosestCandidates(int maxAttempts, boolean urgentOnly) {
+    LongList pollClosestCandidates(int maxAttempts) {
         int attempts = Math.min(queuedColumns.size(), Math.max(0, maxAttempts));
         LongArrayList candidates = new LongArrayList(attempts);
         while (attempts-- > 0 && candidates.size() < maxAttempts) {
             long packed = pollClosest(urgentColumnsByRing);
-            if (packed == Long.MIN_VALUE && !urgentOnly) {
+            if (packed == Long.MIN_VALUE) {
                 packed = pollClosest(normalColumnsByRing);
             }
             if (packed == Long.MIN_VALUE) {
                 break;
             }
             queuedColumns.remove(packed);
-            if (!columns.contains(packed)
-                    || (urgentOnly && !urgentColumns.contains(packed))) {
+            if (!columns.contains(packed)) {
                 continue;
             }
             candidates.add(packed);

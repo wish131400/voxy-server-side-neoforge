@@ -17,33 +17,50 @@ final class PredictionMeshRestore {
             }, new ThreadPoolExecutor.AbortPolicy());
 
     static synchronized void stage(PredictionPackedMesh mesh, int[] words) {
-        long size = words.length * 4L;
-        if (size > LIMIT_BYTES) return;
+        long size = mesh.stagingBytes();
+        // A single maximum-size compressed tile may need more than 32 MiB
+        // after its pass palettes are remapped. Permit one bounded oversized
+        // restore so eviction can never leave it permanently unuploadable.
+        if (size > PredictionMeshCompression.MAX_BYTES * 3L) return;
         int[] old = READY.remove(mesh);
-        if (old != null) readyBytes -= old.length * 4L;
+        if (old != null) readyBytes -= mesh.stagingBytes();
         while (readyBytes + size > LIMIT_BYTES && !READY.isEmpty()) {
             var iterator = READY.entrySet().iterator();
-            readyBytes -= iterator.next().getValue().length * 4L; iterator.remove();
+            var retired = iterator.next().getKey();
+            readyBytes -= retired.stagingBytes(); iterator.remove(); retired.releaseUploadStorage();
         }
         READY.put(mesh, words); readyBytes += size;
     }
     static synchronized int[] peek(PredictionPackedMesh mesh) { return READY.get(mesh); }
     static synchronized void uploaded(PredictionPackedMesh mesh) {
         int[] old = READY.remove(mesh);
-        if (old != null) readyBytes -= old.length * 4L;
+        if (old != null) readyBytes -= mesh.stagingBytes();
     }
     static synchronized void request(PredictionPackedMesh mesh) {
         if (READY.containsKey(mesh) || PENDING.contains(mesh)) return;
-        long bytes = mesh.storageBytes();
-        if (bytes > LIMIT_BYTES - pendingBytes) return;
+        long bytes = mesh.maximumStagingBytes();
+        if (bytes > PredictionMeshCompression.MAX_BYTES * 3L
+                || bytes > LIMIT_BYTES - pendingBytes && pendingBytes != 0) return;
         long generation = epoch;
+        long uploadGeneration = PredictionUploadStaging.SHARED.epoch();
         PENDING.add(mesh); pendingBytes += bytes;
         try {
             WORKER.execute(() -> {
                 try {
                     synchronized (PredictionMeshRestore.class) { if (generation != epoch) return; }
                     int[] words = mesh.restoreUploadWords();
-                    synchronized (PredictionMeshRestore.class) { if (generation == epoch) stage(mesh, words); }
+                    mesh.preparePassStorage(words);
+                    synchronized (PredictionMeshRestore.class) {
+                        if (generation == epoch) stage(mesh, words);
+                        else {
+                            PredictionUploadStaging.SHARED.discard(mesh);
+                            mesh.releaseUploadStorage();
+                        }
+                    }
+                    // Publish CPU restore first. An immediately available render
+                    // may use it without waiting for native staging; it must not
+                    // finish an upload before READY is published by this worker.
+                    mesh.prepareUpload(uploadGeneration);
                 } catch (RuntimeException failure) {
                     dev.xantha.vss.common.VSSLogger.error("VSS mesh restore failed", failure);
                 } finally {
@@ -54,12 +71,15 @@ final class PredictionMeshRestore {
     }
     static synchronized void clear() {
         epoch++;
+        PredictionUploadStaging.SHARED.clear();
+        READY.keySet().forEach(PredictionPackedMesh::releaseUploadStorage);
         READY.clear(); readyBytes = 0;
         // Queued jobs observe the epoch and release their reservation in finally.
     }
     static synchronized long readyBytes() { return readyBytes; }
     static synchronized long pendingBytes() { return pendingBytes; }
     static synchronized String diagnostics() {
-        return "stagedBytes=" + readyBytes + ",pendingBytes=" + pendingBytes + ",jobs=" + PENDING.size();
+        return "stagedBytes=" + readyBytes + ",pendingBytes=" + pendingBytes + ",jobs=" + PENDING.size()
+                + ",uploadStaging={" + PredictionUploadStaging.SHARED.diagnostics() + "}";
     }
 }

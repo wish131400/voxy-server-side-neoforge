@@ -35,7 +35,7 @@ final class ClientColumnProcessor {
     private static final int MAX_COLUMNS_PER_DRAIN = 64;
     private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 768;
     private static final int MAX_SECTIONS_PER_COLUMN = 64;
-    private static final long TRANSFER_IDLE_TIMEOUT_NANOS = 60_000_000_000L;
+    private static final long TRANSFER_IDLE_TIMEOUT_NANOS = dev.xantha.vss.common.VSSConstants.COLUMN_QUEUE_IDLE_TIMEOUT_NANOS;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
 
     private final ClientColumnTransferAssembler assembler =
@@ -309,6 +309,10 @@ final class ClientColumnProcessor {
             recordDrop();
             fail(transfer);
         }
+    }
+
+    void onColumnQueued(int requestId) {
+        assembler.refreshRequest(requestId, System.nanoTime());
     }
 
     private void clearQueue() {

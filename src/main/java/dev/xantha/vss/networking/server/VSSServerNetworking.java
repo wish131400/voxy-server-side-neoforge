@@ -4,6 +4,7 @@ package dev.xantha.vss.networking.server;
 import dev.xantha.vss.networking.server.diagnostics.ServerNetworkingDiagnostics;
 import dev.xantha.vss.networking.server.diagnostics.ServerRequestStats;
 import dev.xantha.vss.networking.server.generation.ChunkGenerationService;
+import dev.xantha.vss.networking.server.generation.ChunkyGenerationService;
 import dev.xantha.vss.networking.server.preload.ExistingColumnPreloader;
 import dev.xantha.vss.networking.server.request.ClientControlMessageHandler;
 import dev.xantha.vss.networking.server.request.ColumnRequestBatchHandler;
@@ -24,6 +25,7 @@ import dev.xantha.vss.networking.server.storage.PersistentColumnLodStore;
 import dev.xantha.vss.networking.server.storage.PersistentColumnWriter;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSConstants;
+import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.BandwidthUpdateC2SPayload;
@@ -71,6 +73,9 @@ public final class VSSServerNetworking {
     private static final PersistentColumnWriter PERSISTENT_COLUMN_WRITER = new PersistentColumnWriter(
             PERSISTENT_COLUMN_STORE,
             DISK_RUNTIME);
+    private static final ChunkyGenerationService CHUNKY_SERVICE = new ChunkyGenerationService(
+            GENERATION_SERVICE, COLUMN_CACHE, PERSISTENT_COLUMN_STORE,
+            PERSISTENT_COLUMN_WRITER, DISK_RUNTIME, PLAYER_REGISTRY);
     private static final ColumnStorageReadPipeline STORAGE_READ_PIPELINE = new ColumnStorageReadPipeline(
             PLAYER_REGISTRY,
             GENERATION_SERVICE,
@@ -83,7 +88,8 @@ public final class VSSServerNetworking {
             PLAYER_REGISTRY,
             GENERATION_SERVICE,
             COLUMN_CACHE,
-            PERSISTENT_COLUMN_WRITER);
+            PERSISTENT_COLUMN_WRITER,
+            CHUNKY_SERVICE);
     private static final long DIAGNOSTIC_INTERVAL_NANOS = 5_000_000_000L;
     private static final ColumnRequestBatchHandler BATCH_REQUEST_HANDLER = new ColumnRequestBatchHandler(
             PLAYER_REGISTRY,
@@ -117,7 +123,8 @@ public final class VSSServerNetworking {
             DISK_RUNTIME,
             GENERATED_COLUMN_FLUSHER,
             EXISTING_COLUMN_PRELOADER,
-            QUEUED_COLUMN_SENDER);
+            QUEUED_COLUMN_SENDER,
+            CHUNKY_SERVICE);
     private static final PlayerSessionManager SESSION_MANAGER = new PlayerSessionManager(
             PLAYER_REGISTRY,
             EXISTING_COLUMN_PRELOADER,
@@ -199,6 +206,10 @@ public final class VSSServerNetworking {
         return NETWORKING_DIAGNOSTICS.generationDiagnosticsComponent();
     }
 
+    public static ChunkyGenerationService chunky() {
+        return CHUNKY_SERVICE;
+    }
+
     public static String diagnostics() {
         return NETWORKING_DIAGNOSTICS.diagnostics();
     }
@@ -242,11 +253,18 @@ public final class VSSServerNetworking {
     }
 
     public static boolean queueColumn(ServerPlayer player, PlayerRequestState state, VoxelColumnS2CPayload payload, boolean priority) {
+        if (state.consumeCancelled(payload.requestId()) || !state.isActiveRequest(payload.requestId())) {
+            return false;
+        }
         if (isServerStopping()) {
             state.clearRequest(payload.requestId());
             return false;
         }
         if (!payload.completeColumn()) {
+            if (VSSLogger.isDebugEnabled()) {
+                VSSLogger.debug("LOD column unavailable: reason=incomplete, dimension=" + payload.dimension().location()
+                        + ", chunk=" + payload.chunkX() + "," + payload.chunkZ() + ", request=" + payload.requestId());
+            }
             state.clearRequest(payload.requestId());
             sendNotGenerated(player, payload.requestId());
             return false;

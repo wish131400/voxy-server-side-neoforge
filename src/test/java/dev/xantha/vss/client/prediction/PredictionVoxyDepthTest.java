@@ -45,6 +45,17 @@ class PredictionVoxyDepthTest {
             }
         } finally { PredictionVoxyDepth.clear(); }
     }
+    @Test void actualRasterConventionOverridesDeclaredProjectionForNormalHandoff() {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        try {
+            for (boolean declared : new boolean[]{false, true}) for (boolean actual : new boolean[]{false, true}) {
+                PredictionVoxyDepth.capture(new Pipeline(new Properties(declared, false)), new Viewport(), 13, actual);
+                var captured = PredictionVoxyDepth.current(13, 64, 32, Vec3.ZERO);
+                assertNotNull(captured);
+                assertEquals(actual, captured.zeroToOne(), "decode stored depth using GL's raster mapping");
+            }
+        } finally { PredictionVoxyDepth.clear(); }
+    }
     public static class Texture { public final int id = 7; }
     public static class Framebuffer { public Texture getDepthTex() { return new Texture(); } }
     public record Properties(boolean isZero2One, boolean isReverseZ) { }
@@ -59,4 +70,51 @@ class PredictionVoxyDepthTest {
         public double cameraX, cameraY, cameraZ;
         public Matrix4f MVP = new Matrix4f().perspective(1.2F, 2, 16, 65536).rotateX(.1F);
     }
+
+    @Test void incompatibleAccessorStopsCallingTheFailedApiAndOtherClassesCanRecover() {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        boolean enabled = dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction;
+        dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = true;
+        PredictionVoxyDepth.clearAccessorCache();
+        var pipeline = new FailingPipeline();
+        try {
+            for (int i = 0; i < 1000; i++) PredictionVoxyDepth.capture(pipeline, new Viewport(), 13);
+            assertEquals(1, pipeline.fb.calls, "an unsupported API must fail once, not every frame");
+            assertNull(PredictionVoxyDepth.current(13, 64, 32, Vec3.ZERO));
+            PredictionVoxyDepth.capture(new Pipeline(), new Viewport(), 13);
+            assertNotNull(PredictionVoxyDepth.current(13, 64, 32, Vec3.ZERO));
+            PredictionVoxyDepth.capture(new MissingProperties(), new Viewport(), 13);
+            assertNull(PredictionVoxyDepth.current(13, 64, 32, Vec3.ZERO));
+        } finally {
+            PredictionVoxyDepth.clearAccessorCache();
+            dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = enabled;
+        }
+    }
+
+    @Test void verifiedLegacyNormalPipelineUsesMinusOneToOneIncreasingDepth() {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        boolean enabled = dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction;
+        dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = true;
+        PredictionVoxyDepth.clearAccessorCache();
+        try {
+            PredictionVoxyDepth.capture(new me.cortex.voxy.client.core.NormalRenderPipeline(), new Viewport(), 13);
+            var captured = PredictionVoxyDepth.current(13, 64, 32, Vec3.ZERO);
+            assertNotNull(captured);
+            assertFalse(captured.zeroToOne());
+            assertFalse(captured.reverseZ());
+        } finally {
+            PredictionVoxyDepth.clearAccessorCache();
+            dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = enabled;
+        }
+    }
+
+    public static class FailingFramebuffer {
+        public int calls;
+        public Texture getDepthTex() { calls++; throw new IllegalStateException("unsupported test depth"); }
+    }
+    public static class FailingPipeline {
+        public final FailingFramebuffer fb = new FailingFramebuffer();
+        public final Properties properties = new Properties(true, false);
+    }
+    public static class MissingProperties { public final Framebuffer fb = new Framebuffer(); }
 }

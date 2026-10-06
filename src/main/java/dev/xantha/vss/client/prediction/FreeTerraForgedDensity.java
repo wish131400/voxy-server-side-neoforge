@@ -1,5 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -22,7 +23,8 @@ final class FreeTerraForgedDensity {
         if (context == null) return router;
         FreeTerraForgedNativeFilters.register(context);
         var loader = context.getClass().getClassLoader();
-        var cellType = loader.loadClass("raccoonman.reterraforged.world.worldgen.densityfunction.CellSampler");
+        var variant = FreeTerraForgedVariant.fromClass(context.getClass());
+        var cellType = loader.loadClass(variant.worldgenClass("densityfunction.CellSampler"));
         var fieldMethod = cellType.getMethod("field");
         var lookup = context.getClass().getField("lookup").get(context);
         Object heightmap = lookup.getClass().getMethod("getHeightmap").invoke(lookup);
@@ -40,7 +42,7 @@ final class FreeTerraForgedDensity {
                 try {
                     Object field = fieldMethod.invoke(original);
                     MethodHandle read = handles.unreflect(fieldMethod.getReturnType().getMethod("read",
-                            loader.loadClass("raccoonman.reterraforged.world.worldgen.cell.Cell"), heightmap.getClass()))
+                            loader.loadClass(variant.worldgenClass("cell.Cell")), heightmap.getClass()))
                             .bindTo(field).asType(MethodType.methodType(float.class, Object.class, Object.class));
                     return new ExactCell(original, heightmap, provide, cell, read);
                 } catch (ReflectiveOperationException failure) {

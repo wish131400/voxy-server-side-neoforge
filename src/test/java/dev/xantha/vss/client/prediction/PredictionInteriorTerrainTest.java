@@ -98,7 +98,7 @@ class PredictionInteriorTerrainTest {
         var random = net.minecraft.world.level.levelgen.RandomState.create(settings,
                 lookup.lookupOrThrow(net.minecraft.core.registries.Registries.NOISE),42);
         var javaSampler = new ClientTerrainSampler(42,profile,generator,random,
-                net.minecraft.world.level.LevelHeightAccessor.create(0,128),32,java.util.List.of());
+                net.minecraft.world.level.LevelHeightAccessor.create(0,128),32);
         try(var sampler=new RustTerrainSampler(RustWorldgenBackend.create(42,0,doc.toString()),profile,new ClientTerrainSampler(42,profile))) {
             long exteriorStart=System.nanoTime();
             for(int z=-4;z<4;z++)for(int x=-4;x<4;x++) sampler.sample(x*16,z*16);
@@ -126,7 +126,7 @@ class PredictionInteriorTerrainTest {
             }
             System.out.println("NETHER_JAVA_PARITY columns=16 elapsedMs="+(System.nanoTime()-javaStart)/1e6);
             var oldStorage=PredictionCacheStorage.forWorld(Path.of("build/test"),Path.of("build/test/world"),null,null);
-            assertNotEquals(oldStorage.directory(new ClientTerrainSampler(42,profile) {
+            assertEquals(oldStorage.directory(new ClientTerrainSampler(42,profile) {
                 @Override boolean interiorTerrain() { return false; }
             }),oldStorage.directory(new ClientTerrainSampler(42,profile)));
         }

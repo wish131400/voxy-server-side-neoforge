@@ -47,6 +47,11 @@ final class PredictionGpuTile implements AutoCloseable {
                 for (int i = 0; i < mask.length; i++) values[i] = mask[i] & 255;
                 PredictionTerrainArena.SHARED.mask(arenaSlice, values);
             }
+            if (waterArenaSlice != null) {
+                int[] values = new int[mask.length];
+                for (int i = 0; i < mask.length; i++) values[i] = mask[i] & 255;
+                PredictionTerrainArena.WATER.mask(waterArenaSlice, values);
+            }
             boundaryCoverage = mask;
         } finally {
             PredictionGlState.bindTexture(0);
@@ -64,10 +69,31 @@ final class PredictionGpuTile implements AutoCloseable {
     }
     private long uploadedAt;
     float morphAmount(long now) { return packed == null || packed.morph() == null ? 0 : PredictionMorph.amount(now-uploadedAt); }
+    float morphStartSeconds() { return packed == null || packed.morph() == null ? 0.0F : PredictionMorph.startSeconds(uploadedAt); }
 
     private PredictionQuadBufferPool.Allocation quadAllocation;
+    private PredictionQuadBufferPool.Allocation waterQuadAllocation;
     private PredictionTerrainArena.Slice arenaSlice;
+    private PredictionTerrainArena.Slice waterArenaSlice;
     PredictionTerrainArena.Slice arenaSlice() { return arenaSlice; }
+    PredictionTerrainArena.Slice arenaSlice(boolean water) {
+        if (!water) return arenaSlice;
+        if (waterArenaSlice != null) return waterArenaSlice;
+        // A standalone texture-buffer fallback cannot be submitted through
+        // MDI (the batch binds an arena page), so force the caller to use the
+        // stateful path instead of accidentally applying water-local ranges
+        // to the opaque page.
+        return waterQuadAllocation != null ? null : arenaSlice;
+    }
+    boolean dedicatedWaterArena() { return waterArenaSlice != null; }
+    int rangeBase(boolean water) {
+        // A standalone texture-buffer fallback also stores only the compact
+        // water records.  Rebase its canonical ranges just like the arena
+        // page; arenaSlice(water) deliberately returns null for that case so
+        // MDI falls back to the stateful path.
+        return water && (waterArenaSlice != null || waterQuadAllocation != null) && packed != null
+                ? packed.terrainQuadCount() : 0;
+    }
     private int yieldTexture = -1;
     private int yieldAxis;
 
@@ -92,15 +118,23 @@ final class PredictionGpuTile implements AutoCloseable {
         if (packed != null && meshRevision == tile.revision()) return false;
         PredictionPackedMesh next = tile.mesh().gpuPayload();
         if (next == null) return false;
-        int[] words = next.uploadWords();
-        if (words == null) return false;
-        // The upload helper retires the previous GPU resources itself;
-        // deleting after creation would free the freshly uploaded payload.
-        if (next.quadCount() > 0) ensureQuadBuffer(words, next.morph(), next.cellAxis());
-        else closeQuads();
+        // Taking transfers ownership: worker eviction/reset cannot free memory
+        // until both GL uploads return. A staging miss retains the existing fast
+        // path instead of postponing a ready tile to another frame.
+        try (var upload = PredictionUploadStaging.SHARED.take(next)) {
+            if (upload != null) {
+                uploadQuadBuffers(upload.opaque(), upload.water(), next.cellAxis());
+            } else {
+                int[] words = next.opaqueUploadWords();
+                int[] waterWords = next.waterUploadWords();
+                if (words == null || waterWords == null) return false;
+                if (next.quadCount() > 0) ensureQuadBuffer(next, words, waterWords, next.morph(), next.cellAxis());
+                else closeQuads();
+            }
+        }
         next.uploaded();
         packed = next;
-        uploadedPaletteBase = next.paletteBaseTexel();
+        uploadedPaletteBase = next.opaquePaletteBaseTexel();
         meshRevision = tile.revision();
         uploadedAt = System.nanoTime();
         // The mesh changed shape; force the coverage mask to re-upload even
@@ -119,7 +153,7 @@ final class PredictionGpuTile implements AutoCloseable {
         boolean changed = packed == null || !Arrays.equals(packed.quads(), next.quads())
                 || !Arrays.equals(packed.morph(), next.morph());
         if (changed || uploadedPaletteBase != 0) {
-            ensureQuadBuffer(next.quads(), next.morph(), next.cellAxis());
+            ensureQuadBuffer(next, next.quads(), next.waterUploadWords(), next.morph(), next.cellAxis());
             changed = true;
         }
         // Seam records are uploaded in canonical form, even when a caller supplied a compact mesh.
@@ -171,6 +205,11 @@ final class PredictionGpuTile implements AutoCloseable {
                 for (int i = 0; i < allowed.length; i++) values[i] = allowed[i] ? 255 : 0;
                 PredictionTerrainArena.SHARED.mask(arenaSlice, values);
             }
+            if (waterArenaSlice != null) {
+                int[] values = new int[allowed.length];
+                for (int i = 0; i < allowed.length; i++) values[i] = allowed[i] ? 255 : 0;
+                PredictionTerrainArena.WATER.mask(waterArenaSlice, values);
+            }
             boundaryCoverage = null;
             return axis * axis;
         } finally {
@@ -178,8 +217,8 @@ final class PredictionGpuTile implements AutoCloseable {
         }
     }
 
-    private void ensureQuadBuffer(int[] quads, float[] morph, int axis) {
-        if (quads.length == 0) { closeQuads(); return; }
+    private void ensureQuadBuffer(PredictionPackedMesh mesh, int[] quads, int[] waterWords, float[] morph, int axis) {
+        if (quads.length == 0 && (waterWords == null || waterWords.length == 0)) { closeQuads(); return; }
         int extra = morph == null ? 0 : (morph.length + 3) / 4 * 4;
         ByteBuffer data = MemoryUtil.memAlloc((quads.length + extra) * 4).order(ByteOrder.nativeOrder());
         try {
@@ -189,20 +228,56 @@ final class PredictionGpuTile implements AutoCloseable {
                 for (int i = morph.length; i < extra; i++) data.putInt(0);
             }
             data.flip();
-            // Keep the old allocation valid if allocation/upload fails. The pool only
-            // overwrites spare storage whose fence has completed, never this live mesh.
-            var nextArena = PredictionTerrainArena.SHARED.upload(data, axis * axis);
-            var next = nextArena == null ? PredictionQuadBufferPool.SHARED.upload(data) : null;
-            var previous = quadAllocation;
-            var oldArena = arenaSlice;
-            quadAllocation = next;
-            arenaSlice = nextArena;
-            coverage = null;
-            publishedCoverage = null;
-            boundaryCoverage = null;
-            PredictionQuadBufferPool.SHARED.retire(previous);
-            PredictionTerrainArena.SHARED.retire(oldArena);
+            ByteBuffer waterData = waterWords == null || waterWords.length == 0 ? null
+                    : MemoryUtil.memAlloc(waterWords.length * 4).order(ByteOrder.nativeOrder());
+            if (waterData != null) {
+                writeQuadPayload(waterData, waterWords);
+                waterData.flip();
+            }
+            try {
+                uploadQuadBuffers(data, waterData, axis);
+            } finally {
+                if (waterData != null) MemoryUtil.memFree(waterData);
+            }
         } finally { MemoryUtil.memFree(data); }
+    }
+
+    /** Both passes succeed before replacing the old mesh; staged and fallback
+     * uploads share exactly the same GPU allocation and retirement contract. */
+    private void uploadQuadBuffers(ByteBuffer data, ByteBuffer waterData, int axis) {
+        PredictionTerrainArena.Slice nextArena = null, nextWaterArena = null;
+        PredictionQuadBufferPool.Allocation next = null, nextWater = null;
+        try {
+            if (data.hasRemaining()) {
+                nextArena = PredictionTerrainArena.SHARED.upload(data, axis * axis);
+                next = nextArena == null ? PredictionQuadBufferPool.SHARED.upload(data) : null;
+            }
+            if (waterData != null && waterData.hasRemaining()) {
+                nextWaterArena = PredictionTerrainArena.WATER.upload(waterData, axis * axis);
+                nextWater = nextWaterArena == null ? PredictionQuadBufferPool.SHARED.upload(waterData) : null;
+            }
+        } catch (RuntimeException | Error failure) {
+            PredictionQuadBufferPool.SHARED.discard(next);
+            PredictionQuadBufferPool.SHARED.discard(nextWater);
+            PredictionTerrainArena.SHARED.retire(nextArena);
+            PredictionTerrainArena.WATER.retire(nextWaterArena);
+            throw failure;
+        }
+        var previous = quadAllocation;
+        var oldWater = waterQuadAllocation;
+        var oldArena = arenaSlice;
+        var oldWaterArena = waterArenaSlice;
+        quadAllocation = next;
+        waterQuadAllocation = nextWater;
+        arenaSlice = nextArena;
+        waterArenaSlice = nextWaterArena;
+        coverage = null;
+        publishedCoverage = null;
+        boundaryCoverage = null;
+        PredictionQuadBufferPool.SHARED.retire(previous);
+        PredictionQuadBufferPool.SHARED.retire(oldWater);
+        PredictionTerrainArena.SHARED.retire(oldArena);
+        PredictionTerrainArena.WATER.retire(oldWaterArena);
     }
 
     static void writeQuadPayload(ByteBuffer data, int[] quads) {
@@ -216,9 +291,21 @@ final class PredictionGpuTile implements AutoCloseable {
     }
 
     void bindTerrain(PredictionTerrainProgram program) {
-        program.setPaletteBase(uploadedPaletteBase);
-        if (arenaSlice == null) { bindQuad(4); program.setQuadBase(0); }
-        else { bind(4, arenaSlice.page.texture, TEXTURE_BUFFER); program.setQuadBase(arenaSlice.offset / 16); }
+        bindTerrain(program, false);
+    }
+
+    void bindTerrain(PredictionTerrainProgram program, boolean water) {
+        boolean dedicated = water && (waterArenaSlice != null || waterQuadAllocation != null);
+        PredictionTerrainArena.Slice slice = dedicated ? waterArenaSlice : arenaSlice;
+        PredictionQuadBufferPool.Allocation allocation = dedicated ? waterQuadAllocation : quadAllocation;
+        program.setPaletteBase(dedicated ? packed == null ? 0 : packed.waterPaletteBaseTexel() : uploadedPaletteBase);
+        if (slice == null) {
+            bind(4, allocation == null ? -1 : allocation.texture, TEXTURE_BUFFER);
+            program.setQuadBase(0);
+        } else {
+            bind(4, slice.page.texture, TEXTURE_BUFFER);
+            program.setQuadBase(slice.offset / 16);
+        }
     }
 
     void bindYield(int unit) {
@@ -245,6 +332,16 @@ final class PredictionGpuTile implements AutoCloseable {
         return packed == null ? 0 : packed.quadCount();
     }
 
+    long residentBytes() {
+        return (arenaSlice != null ? arenaSlice.length : quadAllocation == null ? 0 : quadAllocation.capacity)
+                + (waterArenaSlice != null ? waterArenaSlice.length : waterQuadAllocation == null ? 0 : waterQuadAllocation.capacity)
+                + (long) yieldAxis * yieldAxis;
+    }
+    long standaloneBytes() {
+        return (quadAllocation == null ? 0L : quadAllocation.capacity)
+                + (waterQuadAllocation == null ? 0L : waterQuadAllocation.capacity);
+    }
+
     boolean drawable() {
         return packed != null && packed.quadCount() > 0;
     }
@@ -269,8 +366,12 @@ final class PredictionGpuTile implements AutoCloseable {
         // Evictions and distance reduction release storage instead of filling the pool.
         PredictionQuadBufferPool.SHARED.discard(quadAllocation);
         quadAllocation = null;
+        PredictionQuadBufferPool.SHARED.discard(waterQuadAllocation);
+        waterQuadAllocation = null;
         PredictionTerrainArena.SHARED.retire(arenaSlice);
         arenaSlice = null;
+        PredictionTerrainArena.WATER.retire(waterArenaSlice);
+        waterArenaSlice = null;
     }
 
     private static final class GL12Compat {

@@ -36,7 +36,7 @@ class JavaPreviewSamplingTest {
         var generator=new net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator(biome,net.minecraft.core.Holder.direct(settings));
         var random=net.minecraft.world.level.levelgen.RandomState.create(settings,lookup.lookupOrThrow(net.minecraft.core.registries.Registries.NOISE),seed);
         return new ClientTerrainSampler(seed,profile,generator,random,
-                LevelHeightAccessor.create(profile.minY(),profile.height()),settings.seaLevel(),List.of(),null,access);
+                LevelHeightAccessor.create(profile.minY(),profile.height()),settings.seaLevel(),null,access);
     }
 
     @Test void decodedJavaColorsHaveStableIdentityButOpaqueProvidersDoNot() throws Exception {
@@ -138,7 +138,7 @@ class JavaPreviewSamplingTest {
         };
         var generator = new net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator(biomes,source.generatorContext().generatorSettings());
         var terrain = new ClientTerrainSampler(0,source.profile(),generator,source.randomStateContext(),
-                LevelHeightAccessor.create(-64,384),63,List.of(),null,access);
+                LevelHeightAccessor.create(-64,384),63,null,access);
         var preview = FreeTerraForgedDensity.coarse(true,()->terrain.samplePreview(0,0));
         assertTrue(preview.approximate());
         assertEquals(snowy.value().getGrassColor(0,0),FreeTerraForgedDensity.coarse(true,

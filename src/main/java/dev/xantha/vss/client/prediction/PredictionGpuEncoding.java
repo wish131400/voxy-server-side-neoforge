@@ -7,6 +7,40 @@ final class PredictionGpuEncoding {
     private PredictionGpuEncoding() { }
     record Encoded(int[] words, int paletteBaseTexel) { }
 
+    /** Select one pass without decoding an already compact CPU payload. The two opaque
+     * spans straddle canonical water; appended display geometry belongs to opaque. */
+    static Encoded selectPass(int[] source, int paletteBase, int quads,
+                              int waterFirst, int waterCount, boolean water, boolean compact) {
+        if (waterFirst < 0 || waterCount < 0 || waterFirst + waterCount > quads)
+            throw new IllegalArgumentException("Invalid water interval");
+        int count = water ? waterCount : quads - waterCount;
+        if (count == 0) return new Encoded(new int[0], 0);
+        if (!water && waterCount == 0) return new Encoded(source, paletteBase);
+        int stride = paletteBase == 0 ? 12 : 8;
+        int[] records = new int[count * stride];
+        if (water) System.arraycopy(source, waterFirst * stride, records, 0, records.length);
+        else {
+            System.arraycopy(source, 0, records, 0, waterFirst * stride);
+            System.arraycopy(source, (waterFirst + waterCount) * stride, records,
+                    waterFirst * stride, (quads - waterFirst - waterCount) * stride);
+        }
+        if (paletteBase == 0) return compact ? encode(records) : new Encoded(records, 0);
+        int paletteStart = paletteBase * 4;
+        int[] remap = new int[(source.length - paletteStart) / 4];
+        java.util.Arrays.fill(remap, -1);
+        int colors = 0;
+        for (int p = 7; p < records.length; p += 8) {
+            int id = records[p] >>> 16;
+            if (id >= remap.length) throw new IllegalArgumentException("Invalid pass palette id");
+            if (remap[id] < 0) remap[id] = colors++;
+            records[p] = (records[p] & 65535) | (remap[id] << 16);
+        }
+        int[] result = java.util.Arrays.copyOf(records, records.length + colors * 4);
+        for (int id = 0; id < remap.length; id++) if (remap[id] >= 0)
+            System.arraycopy(source, paletteStart + id * 4, result, records.length + remap[id] * 4, 4);
+        return new Encoded(result, records.length / 4);
+    }
+
     static Encoded encode(int[] source) {
         if (source.length % 12 != 0) throw new IllegalArgumentException("Invalid quad words");
         int quads = source.length / 12;

@@ -55,8 +55,18 @@ final class ClientColumnTransferAssembler {
             transfers.put(payload.transferId(), pending);
             requestTransfers.put(requestKey, payload.transferId());
             activeLogicalColumns++;
-        } else if (!pending.matches(payload, priority, replaceMissingSections)
-                || pending.parts[payload.partIndex()] != null) {
+        } else if (!pending.matches(payload, priority, replaceMissingSections)) {
+            FailedTransfer failed = pending.failedTransfer();
+            removeTransfer(payload.transferId());
+            return OfferResult.rejected(failed);
+        }
+
+        VoxelColumnS2CPayload duplicate = pending.parts[payload.partIndex()];
+        if (duplicate != null) {
+            if (duplicate.sameSectionData(payload)
+                    && Arrays.equals(duplicate.replacementSectionYs(), payload.replacementSectionYs())) {
+                return OfferResult.accepted();
+            }
             FailedTransfer failed = pending.failedTransfer();
             removeTransfer(payload.transferId());
             return OfferResult.rejected(failed);
@@ -99,6 +109,12 @@ final class ClientColumnTransferAssembler {
             }
         }
         return failed;
+    }
+
+    synchronized void refreshRequest(int requestId, long nowNanos) {
+        for (PendingTransfer pending : transfers.values()) {
+            if (pending.requestId == requestId) pending.lastPartNanos = nowNanos;
+        }
     }
 
     synchronized List<FailedTransfer> invalidatePositions(

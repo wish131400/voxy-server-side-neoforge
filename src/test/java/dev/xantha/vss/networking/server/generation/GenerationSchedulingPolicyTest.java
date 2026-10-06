@@ -82,6 +82,28 @@ class GenerationSchedulingPolicyTest {
         assertFalse(callbacks.containsKey(7));
     }
 
+
+    @Test
+    void backgroundOwnersHaveNoPerPlayerAdmissionLimit() {
+        UUID background = UUID.randomUUID();
+        UUID player = UUID.randomUUID();
+        var owners = java.util.Set.of(background);
+        var counts = Map.of(background, Integer.MAX_VALUE, player, 4);
+        assertTrue(GenerationSchedulingPolicy.hasPerPlayerCapacity(counts,
+                List.of(background, background), 4, owners));
+        assertFalse(GenerationSchedulingPolicy.hasPerPlayerCapacity(counts,
+                List.of(background, player), 4, owners));
+    }
+
+    @Test
+    void removingBackgroundRegistrationRestoresOrdinaryAdmissionRules() {
+        UUID owner = UUID.randomUUID();
+        assertTrue(GenerationSchedulingPolicy.hasPerPlayerCapacity(
+                Map.of(owner, 4096), List.of(owner), 4, java.util.Set.of(owner)));
+        assertFalse(GenerationSchedulingPolicy.hasPerPlayerCapacity(
+                Map.of(owner, 4096), List.of(owner), 4, java.util.Set.of()));
+    }
+
     private record TestEntry(String name, boolean priority, int ring, long sequence)
             implements Comparable<TestEntry> {
         @Override

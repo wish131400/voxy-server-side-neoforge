@@ -22,4 +22,20 @@ class PredictionCaptureRefreshTest {
         refresh.retain(java.util.Set.of());
         assertFalse(refresh.defer(key, 520_000_002L));
     }
+
+    @Test void newCapturesDuringQueueWaitAreCoalescedBeforeTheWorkerSamples() {
+        var refresh = new PredictionCaptureRefresh();
+        var key = new PredictionTileKey(Level.OVERWORLD, 0, 0, 0);
+        refresh.changed(key, 1);
+        refresh.started(key);
+        refresh.changed(key, 20_000_001L);
+        refresh.changed(key, 30_000_001L);
+        assertTrue(refresh.defer(key, 50_000_001L));
+        refresh.changed(key, 70_000_001L);
+        assertTrue(refresh.defer(key, 150_000_001L));
+        assertFalse(refresh.defer(key, 170_000_001L));
+        refresh.started(key);
+        refresh.changed(key, 190_000_001L);
+        assertFalse(refresh.defer(key, 190_000_001L), "single edits stay immediate");
+    }
 }

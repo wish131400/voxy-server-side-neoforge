@@ -8,18 +8,20 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.function.LongSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 
 final class ClientPresenceReporter {
-    private static final int REGIONS_PER_PACKET = 64;
-    private static final int INTEGRATED_REGIONS_PER_PACKET = 16;
+    private static final int REGIONS_PER_PACKET = 8;
+    private static final int INTEGRATED_REGIONS_PER_PACKET = 4;
     private static final int COLUMNS_PER_PACKET = 4096;
     private static final int INTEGRATED_COLUMNS_PER_PACKET = 1024;
-    private static final int PACKETS_PER_TICK = 2;
+    private static final int PACKETS_PER_TICK = 1;
     private static final int INTEGRATED_PACKETS_PER_TICK = 1;
+    private static final long DRAIN_BUDGET_NANOS = 1_000_000L;
     private static final long INCREMENTAL_RESEND_INTERVAL_NANOS = 5_000_000_000L;
     private static final int INCREMENTAL_RESENDS_PER_TICK = 32;
     private static final long VERIFICATION_RETRY_INTERVAL_NANOS = 1_000_000_000L;
@@ -124,6 +126,15 @@ final class ClientPresenceReporter {
             ClientLevel level,
             ResourceKey<Level> dimension,
             boolean allowZstd) {
+        drain(level, dimension, allowZstd, System::nanoTime);
+    }
+
+    void drain(
+            ClientLevel level,
+            ResourceKey<Level> dimension,
+            boolean allowZstd,
+            LongSupplier clock) {
+        long deadline = clock.getAsLong() + DRAIN_BUDGET_NANOS;
         queueDueIncrementalRegions();
         queueDueVerificationRetries();
         if (pendingRegions.isEmpty()) {
@@ -146,6 +157,11 @@ final class ClientPresenceReporter {
             while (consumedRegions < regionsPerPacket
                     && columnCount < columnsPerPacket
                     && !pendingRegions.isEmpty()) {
+                // Finish one region atomically, then yield without dropping
+                // queued work. Cache replay must not monopolize a client tick.
+                if (consumedRegions > 0 && clock.getAsLong() >= deadline) {
+                    break;
+                }
                 long key = pendingRegions.pollFirst();
                 queuedRegions.remove(key);
                 consumedRegions++;
@@ -355,7 +371,8 @@ final class ClientPresenceReporter {
     }
 
     private static boolean isIntegratedServer() {
-        return Minecraft.getInstance().getSingleplayerServer() != null;
+        Minecraft minecraft = Minecraft.getInstance();
+        return minecraft != null && minecraft.getSingleplayerServer() != null;
     }
 
     interface ReconciliationListener {

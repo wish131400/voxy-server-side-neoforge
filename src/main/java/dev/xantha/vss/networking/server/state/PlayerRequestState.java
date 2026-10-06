@@ -3,6 +3,8 @@ package dev.xantha.vss.networking.server.state;
 
 import dev.xantha.vss.networking.server.storage.PersistentColumnLodStore;
 import dev.xantha.vss.common.BandwidthLimiter;
+import dev.xantha.vss.common.VSSConstants;
+import dev.xantha.vss.networking.server.sending.PlayerSendWindow;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.payloads.RegionPresenceC2SPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
@@ -27,6 +29,8 @@ public final class PlayerRequestState {
     private final Map<Integer, RequestPosition> requestPositions = new HashMap<>();
     private final Set<RequestPosition> activePositions = new HashSet<>();
     private final PlayerSendQueue sendQueue = new PlayerSendQueue();
+    private final PlayerSendWindow sendWindow = new PlayerSendWindow();
+    private long lastQueuedAckNanos;
     private final PreloadColumnFrontier preloadColumnFrontier = new PreloadColumnFrontier();
     private final PreloadRegionWindow preloadRegionWindow = new PreloadRegionWindow();
     private final ClientKnownColumnIndex clientKnownColumns = new ClientKnownColumnIndex();
@@ -35,9 +39,10 @@ public final class PlayerRequestState {
     private int clientCapabilities;
 
     public synchronized void cancel(int requestId) {
-        cancelled.add(requestId);
+        boolean removedQueued = sendQueue.cancel(requestId);
         RequestPosition position = requestPositions.remove(requestId);
         if (position != null) {
+            if (!removedQueued) cancelled.add(requestId);
             activePositions.remove(position);
         }
     }
@@ -160,6 +165,21 @@ public final class PlayerRequestState {
         return sendQueue.queuedBytes();
     }
 
+    public PlayerSendWindow sendWindow() { return sendWindow; }
+
+    public synchronized int[] queuedRequestIdsForAck(long nowNanos) {
+        if (!supportsQueuedAcknowledgements() || nowNanos - lastQueuedAckNanos < 5_000_000_000L) {
+            return new int[0];
+        }
+        int[] ids = sendQueue.pendingRequestIds();
+        if (ids.length > 0) lastQueuedAckNanos = nowNanos;
+        return ids;
+    }
+
+    public synchronized boolean supportsQueuedAcknowledgements() {
+        return (clientCapabilities & VSSConstants.CAPABILITY_QUEUED_ACKNOWLEDGEMENTS) != 0;
+    }
+
     public synchronized void addPreloadColumns(ArrayList<PersistentColumnLodStore.ExistingColumn> columns) {
         preloadColumnFrontier.addColumns(columns);
     }
@@ -231,7 +251,7 @@ public final class PlayerRequestState {
                 queuedBytes(),
                 config.sendQueueLimitPerPlayer,
                 config.sendQueueBytesLimitPerPlayer,
-                Long.MAX_VALUE,
+                config.totalBandwidthBytesPerSecond(),
                 desiredBandwidth());
     }
 
@@ -317,6 +337,7 @@ public final class PlayerRequestState {
         preloadRegionWindow.clear();
         clientKnownColumns.clear();
         priorityBytesSent = 0L;
+        lastQueuedAckNanos = 0L;
     }
 
     private static int backpressureThreshold(int limit, int minimum) {

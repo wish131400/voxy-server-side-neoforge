@@ -4,7 +4,6 @@ import dev.xantha.vss.common.processing.LoadedColumnData;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.OptionalInt;
 import net.minecraft.core.Holder;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
@@ -19,7 +18,6 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
-import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LayerLightEventListener;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 
@@ -86,7 +84,7 @@ public final class SectionSerializer {
         }
 
         boolean completeColumn = hasCompleteRequiredLighting(requiresSkyLight, missingSkyLight)
-                && isCompleteColumn(level, chunk, highestIncludedSectionY, includedSections.isEmpty());
+                && isCompleteColumn(sections, minSectionY, highestIncludedSectionY);
         return new ColumnSnapshot(cx, cz, includedSections.toArray(SectionSnapshot[]::new), completeColumn);
     }
 
@@ -158,7 +156,7 @@ public final class SectionSerializer {
         }
 
         if (includedSections.isEmpty()) {
-            boolean completeColumn = isCompleteColumn(level, chunk, Integer.MIN_VALUE, true);
+            boolean completeColumn = isCompleteColumn(sections, minSectionY, Integer.MIN_VALUE);
             return emptyColumn(cx, cz, completeColumn);
         }
 
@@ -193,7 +191,7 @@ public final class SectionSerializer {
             byte[] serialized = new byte[buf.readableBytes()];
             buf.readBytes(serialized);
             boolean completeColumn = hasCompleteRequiredLighting(requiresSkyLight, missingSkyLight)
-                    && isCompleteColumn(level, chunk, highestIncludedSectionY, false);
+                    && isCompleteColumn(sections, minSectionY, highestIncludedSectionY);
             return new LoadedColumnData(
                     cx,
                     cz,
@@ -207,29 +205,16 @@ public final class SectionSerializer {
         }
     }
 
-    private static boolean isCompleteColumn(ServerLevel level, ChunkAccess chunk, int highestIncludedSectionY, boolean emptyColumn) {
-        OptionalInt surfaceSection = highestSurfaceSection(level, chunk);
-        if (surfaceSection.isEmpty()) {
-            return emptyColumn;
-        }
-        return highestIncludedSectionY >= surfaceSection.getAsInt();
-    }
-
-    private static OptionalInt highestSurfaceSection(ServerLevel level, ChunkAccess chunk) {
-        int minBuildHeight = level.getMinBuildHeight();
-        int highestSurfaceBlockY = Integer.MIN_VALUE;
-        for (int localZ = 0; localZ < 16; localZ++) {
-            for (int localX = 0; localX < 16; localX++) {
-                int height = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, localX, localZ);
-                int surfaceBlockY = height - 1;
-                if (surfaceBlockY >= minBuildHeight) {
-                    highestSurfaceBlockY = Math.max(highestSurfaceBlockY, surfaceBlockY);
-                }
+    static boolean isCompleteColumn(LevelChunkSection[] sections, int minSectionY, int highestIncludedSectionY) {
+        // All non-air sections are serialized. Editor-exported heightmaps can
+        // be stale, so certify against actual section metadata instead.
+        for (int i = sections.length - 1; i >= 0; i--) {
+            LevelChunkSection section = sections[i];
+            if (section != null && !section.hasOnlyAir()) {
+                return highestIncludedSectionY >= minSectionY + i;
             }
         }
-        return highestSurfaceBlockY == Integer.MIN_VALUE
-                ? OptionalInt.empty()
-                : OptionalInt.of(SectionPos.blockToSectionCoord(highestSurfaceBlockY));
+        return true;
     }
 
     private static boolean hasNonZeroData(DataLayer layer) {

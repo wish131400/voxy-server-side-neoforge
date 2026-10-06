@@ -145,7 +145,7 @@ class PredictionInitializationTest {
                 "vss-test:lazy-session", "test", 2L);
         var payload = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload(3, 42, 1, List.of(a, b));
         try (var session = new ClientWorldgenProfileDecoder.Session(payload, net.minecraft.core.RegistryAccess.EMPTY,
-                new com.google.gson.JsonObject(), null, null)) {
+                new com.google.gson.JsonObject(), null, null, () -> { throw new AssertionError("No legacy cache lookup requested"); })) {
             assertTrue(opened.isEmpty());
             var published = new java.util.ArrayList<net.minecraft.resources.ResourceKey<Level>>();
             session.decode(Level.OVERWORLD, () -> true, (key, sampler) -> published.add(key));
@@ -161,6 +161,56 @@ class PredictionInitializationTest {
             assertThrows(java.util.concurrent.CancellationException.class,
                     () -> session.decode(Level.OVERWORLD, () -> true, (key, sampler) -> fail("closed publish")));
         } finally { enabled.set(false); }
+    }
+
+    @Test void malformedGeneratorIsLocalToItsDimensionAndCustomBackendGetsStableFingerprint() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        var enabled = new java.util.concurrent.atomic.AtomicBoolean(true);
+        PredictionTerrainBackends.register(new PredictionTerrainBackend() {
+            public String id() { return "vss-test:content-session"; }
+            public int priority() { return Integer.MAX_VALUE; }
+            public java.util.Optional<ClientTerrainSampler> open(DimensionProfile profile, long seed,
+                    net.minecraft.core.RegistryAccess access) {
+                return enabled.get() && profile.generatorType().equals(id())
+                        ? java.util.Optional.of(new ClientTerrainSampler(seed, profile)) : java.util.Optional.empty();
+            }
+        });
+        var invalid = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"), 42, -64, 384,
+                "noise", "test", 1, 0, 2, "[]".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var valid = new DimensionProfile(ResourceLocation.withDefaultNamespace("the_nether"), 0, 256,
+                "vss-test:content-session", "test", 2);
+        var payload = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload(3, 42, 1, List.of(invalid, valid));
+        try (var session = new ClientWorldgenProfileDecoder.Session(payload, net.minecraft.core.RegistryAccess.EMPTY,
+                new com.google.gson.JsonObject(), null, null, () -> { throw new AssertionError("No legacy cache lookup requested"); })) {
+            assertDoesNotThrow(() -> session.decode(Level.OVERWORLD, () -> true,
+                    (key, sampler) -> fail("malformed generator must not publish")));
+            var published = new java.util.ArrayList<ClientTerrainSampler>();
+            session.decode(Level.NETHER, () -> true, (key, sampler) -> published.add(sampler));
+            assertEquals(1, published.size());
+            assertEquals(PredictionCacheStorage.fingerprint(valid), published.get(0).cacheFingerprint());
+            assertNull(published.get(0).legacyCacheIdentity(), "published samplers must not retain the registry snapshot");
+        } finally { enabled.set(false); }
+    }
+
+    @Test void migratedSamplingSaltIsSharedWithNativeJavaContextAcrossWireFingerprintChanges() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var firstProfile = profile("overworld");
+        var secondProfile = new DimensionProfile(firstProfile.dimension(), firstProfile.seed(), firstProfile.minY(),
+                firstProfile.height(), firstProfile.generatorType(), firstProfile.generatorSettings(), 999);
+        var firstContext = new ClientTerrainSampler(1, firstProfile);
+        var secondContext = new ClientTerrainSampler(1, secondProfile);
+        var document = LithostitchedNativeTest.document();
+        document.add("possible_biomes", new com.google.gson.JsonArray());
+        try (var first = new RustTerrainSampler(RustWorldgenBackend.create(1, 0, document.toString()), firstProfile, firstContext);
+             var second = new RustTerrainSampler(RustWorldgenBackend.create(1, 0, document.toString()), secondProfile, secondContext)) {
+            first.bindCacheFingerprint(123);
+            second.bindCacheFingerprint(123);
+            assertEquals(123, firstContext.cacheFingerprint());
+            assertEquals(123, secondContext.cacheFingerprint());
+            assertArrayEquals(firstContext.sampleChunk(7, -3), secondContext.sampleChunk(7, -3));
+            assertEquals(999, second.profile().fingerprint());
+        }
     }
 
     private static DimensionProfile profile(String dimension) {

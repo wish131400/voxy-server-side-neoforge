@@ -3,7 +3,7 @@ package dev.xantha.vss.networking.client;
 import dev.xantha.vss.common.ChebyshevRingOffsets;
 import java.util.function.BiPredicate;
 
-/** Complete square rings only. A failure, timeout or missing cache never completes a cell. */
+/** Complete square rings only, including explicitly unavailable cells settled by the request manager. */
 public final class StrictLodFrontier {
     private int x, z, limit;
     private int visible = -1;
@@ -53,8 +53,5 @@ public final class StrictLodFrontier {
     public long revision() { return revision; }
     public boolean visible(int cx, int cz) {
         return initialized && Math.max(Math.abs(cx - x), Math.abs(cz - z)) <= visible;
-    }
-    public boolean requestable(int cx, int cz) {
-        return initialized && Math.max(Math.abs(cx - x), Math.abs(cz - z)) <= requestRing();
     }
 }

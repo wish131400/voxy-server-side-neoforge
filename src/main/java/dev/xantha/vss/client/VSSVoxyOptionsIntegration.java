@@ -4,6 +4,7 @@ import com.google.common.collect.ImmutableList;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
+import dev.xantha.vss.config.PredictionVegetationDensity;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
@@ -241,10 +242,16 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.prediction_antialiasing.tooltip", "LOW", true,
                             value -> VSSClientConfig.CONFIG.predictionAntialiasing = value,
                             () -> VSSClientConfig.CONFIG.predictionAntialiasing, VSSVoxyOptionsIntegration::saveClientConfig),
-                    sodium08BooleanOption(configBuilder, "prediction_trees", "vss.voxy_options.prediction_trees",
-                            "vss.voxy_options.prediction_trees.tooltip", "HIGH", true,
-                            value -> VSSClientConfig.CONFIG.predictionTrees = value,
-                            () -> VSSClientConfig.CONFIG.predictionTrees, VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08IntOption(configBuilder, "prediction_vegetation_density", "vss.voxy_options.prediction_trees",
+                            "vss.voxy_options.prediction_trees.tooltip", "HIGH", 1, 0, 2, 1,
+                            value -> VSSClientConfig.CONFIG.predictionVegetationDensity =
+                                    PredictionVegetationDensity.values()[Math.max(0, Math.min(2, value))].configName(),
+                            () -> PredictionVegetationDensity.current().ordinal(),
+                            VSSVoxyOptionsIntegration::formatVegetationIndex, VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08BooleanOption(configBuilder, "prediction_spyglass_loading", "vss.voxy_options.prediction_spyglass_loading",
+                            "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH", true,
+                            value -> VSSClientConfig.CONFIG.predictionSpyglassLoading = value,
+                            () -> VSSClientConfig.CONFIG.predictionSpyglassLoading, VSSVoxyOptionsIntegration::saveClientConfig),
                     sodium08BooleanOption(configBuilder, "prediction_structures", "vss.voxy_options.prediction_structures",
                             "vss.voxy_options.prediction_structures.tooltip", "HIGH", true,
                             value -> VSSClientConfig.CONFIG.predictionStructures = value,
@@ -574,6 +581,14 @@ public final class VSSVoxyOptionsIntegration {
         });
     }
 
+    private static Component formatVegetationIndex(int index) {
+        return Component.translatable(switch (index) {
+            case 0 -> "vss.voxy_options.vegetation_low";
+            case 2 -> "vss.voxy_options.vegetation_high";
+            default -> "vss.voxy_options.vegetation_medium";
+        });
+    }
+
     private static Object sodium08Group(Object configBuilder, String nameKey, Object... options) throws ReflectiveOperationException {
         Object group = invokeByName(configBuilder, "createOptionGroup");
         invokeByName(group, "setName", Component.translatable(nameKey));
@@ -899,9 +914,11 @@ public final class VSSVoxyOptionsIntegration {
             }
 
             groups.add(oldGroup(
-                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_trees",
-                            "vss.voxy_options.prediction_trees.tooltip", "HIGH",
-                            (VSSClientConfig config, Boolean value) -> config.predictionTrees = value, config -> config.predictionTrees),
+                    oldVegetationOption(clientStorage),
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_spyglass_loading",
+                            "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionSpyglassLoading = value,
+                            config -> config.predictionSpyglassLoading),
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_antialiasing",
                             "vss.voxy_options.prediction_antialiasing.tooltip", "LOW",
                             (VSSClientConfig config, Boolean value) -> config.predictionAntialiasing = value, config -> config.predictionAntialiasing),
@@ -954,23 +971,33 @@ public final class VSSVoxyOptionsIntegration {
     }
 
     private static Object oldCyclingControl(Object option) {
+        return oldCyclingControl(option, dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class,
+                new Component[]{
+                        Component.translatable("vss.voxy_options.tier_low"),
+                        Component.translatable("vss.voxy_options.tier_medium"),
+                        Component.translatable("vss.voxy_options.tier_high")});
+    }
+
+    private static Object oldVegetationOption(Object storage) throws ReflectiveOperationException {
+        return oldOption(PredictionVegetationDensity.class, storage,
+                "vss.voxy_options.prediction_trees", "vss.voxy_options.prediction_trees.tooltip", "HIGH",
+                option -> oldCyclingControl(option, PredictionVegetationDensity.class,
+                        new Component[]{formatVegetationIndex(0), formatVegetationIndex(1), formatVegetationIndex(2)}),
+                (VSSClientConfig config, PredictionVegetationDensity value) -> config.predictionVegetationDensity = value.configName(),
+                (VSSClientConfig config) -> PredictionVegetationDensity.fromName(config.predictionVegetationDensity));
+    }
+
+    private static Object oldCyclingControl(Object option, Class<?> valueClass, Component[] names) {
         try {
             Class<?> optionClass = Class.forName(OLD_OPTION);
-            Component[] names = new Component[]{
-                    Component.translatable("vss.voxy_options.tier_low"),
-                    Component.translatable("vss.voxy_options.tier_medium"),
-                    Component.translatable("vss.voxy_options.tier_high")};
             try {
                 Constructor<?> constructor = Class.forName(OLD_CYCLING_CONTROL).getConstructor(
                         optionClass, Class.class, Component[].class);
-                return constructor.newInstance(option,
-                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class, names);
+                return constructor.newInstance(option, valueClass, names);
             } catch (NoSuchMethodException ignored) {
                 Constructor<?> constructor = Class.forName(OLD_CYCLING_CONTROL).getConstructor(
-                        optionClass, Class.class, dev.xantha.vss.client.prediction.PredictionPerformanceProfile[].class);
-                return constructor.newInstance(option,
-                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class,
-                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.values());
+                        optionClass, Class.class, valueClass.getEnumConstants().getClass());
+                return constructor.newInstance(option, valueClass, valueClass.getEnumConstants());
             }
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Failed to create Sodium cycling control", e);

@@ -7,7 +7,6 @@ import java.util.concurrent.Semaphore;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 
@@ -43,12 +42,10 @@ final class RustVegetationStage implements AutoCloseable {
     }
 
     private final PredictionDecorationLevel level;
-    private String[] names;
-    private boolean[] supported;
+    private RustVegetationDescriptors.Job features;
     private final int x, z;
     private int step;
     private long volume;
-    private boolean javaChanged = true;
     private boolean nativeChanged;
     // Whether the current native volume has received the placed map at least
     // once. A freshly created proxy only holds column summaries, so the first
@@ -73,23 +70,12 @@ final class RustVegetationStage implements AutoCloseable {
         boolean display = !sampler.interiorTerrain() && visualPlants && step == net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
         if (display != displayProxy) { finish(); close(); synced=false; displayProxy=display; }
         this.step = step;
-        // Structures and Java features may have changed the shared level
-        // between steps. Preserve their edits when reusing the native volume.
-        javaChanged = true;
-        names = new String[features.size()]; supported = new boolean[features.size()];
-        var registry = sampler.decorationContext().decorationAccess().registryOrThrow(Registries.PLACED_FEATURE);
-        String[][] order = sampler.featureOrder();
-        for (int i = 0; i < features.size(); i++) {
-            var key = registry.getKey(features.get(i));
-            if (key == null) continue;
-            names[i] = key.toString();
-            if (step >= order.length || i >= order[step].length || !names[i].equals(order[step][i])) continue;
-            supported[i] = sampler.supports(names[i]);
-        }
+        this.features = new RustVegetationDescriptors.Job(sampler.featureDescriptors(features, step));
     }
 
     boolean place(int index) {
-        if (disabled || !supported[index]) return false;
+        if (disabled) { features.reject(index, RustTerrainSampler.JavaFeatureReason.PROXY); return false; }
+        if (!features.supported(index)) return false;
         if (volume == 0) {
             try {
                 if (!VOLUMES.tryAcquire()) throw new PredictionWorkDeferred();
@@ -104,21 +90,22 @@ final class RustVegetationStage implements AutoCloseable {
                 synced = false;
             } catch (IllegalArgumentException unavailable) {
                 close(); disabled=true;
+                features.reject(index, RustTerrainSampler.JavaFeatureReason.PROXY);
                 sampler.handle(); // A world cancellation must not produce a cacheable partial result.
                 if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS native vegetation context needs Java: " + unavailable);
                 return false;
             }
         }
-        if (javaChanged) upload();
+        upload();
         try {
             long featureStarted = System.nanoTime();
-            RustWorldgenBackend.placedFeature(volume, names[index], x, z, index, step);
+            RustWorldgenBackend.placedFeature(volume, features.name(index), x, z, index, step);
             FEATURE_NANOS.add(System.nanoTime() - featureStarted);
             FEATURES_PLACED.increment();
             nativeChanged = true;
         } catch (IllegalArgumentException requiresJava) {
             // The native transaction restored both the blocks and random stream.
-            supported[index] = false;
+            features.reject(index, RustTerrainSampler.JavaFeatureReason.TRANSACTION);
             sampler.handle();
             return false;
         }
@@ -130,37 +117,38 @@ final class RustVegetationStage implements AutoCloseable {
         return true;
     }
     void beforeJava() { download(); }
-    void afterJava() { javaChanged = true; sampler.javaFeatureCompleted(); }
+    void afterJava(int index, boolean reusableTree, boolean success, long nanos) {
+        sampler.javaFeatureCompleted(reusableTree ? RustTerrainSampler.JavaFeatureReason.TREE_MODEL : features.reason(index),
+                level.featureWriteCount(), success, nanos);
+    }
     void finish() { download(); }
 
     private void upload() {
-        // Nothing was written since the last successful transfer, so both sides
-        // already agree and the whole placed map can be skipped. `selectStep`
-        // sets `javaChanged` conservatively because structures may touch the
-        // level between steps, so that flag alone must not force a rewrite -
-        // `pendingUploads` is what actually proves something changed, and every
-        // write path (including rollbacks) registers there.
-        if (synced && level.pendingUploads().isEmpty()) {
-            javaChanged = false;
-            return;
-        }
+        // Every Java write, including structures and rollbacks, records a pending edit.
+        if (synced && level.pendingUploads().isEmpty()) return;
         if (level.placed().size() > MAX_EDITS) throw new IllegalStateException("Native decoration edit budget exceeded");
         long started = System.nanoTime();
         ByteBuffer buffer = BUFFERS.get(); buffer.clear();
-        for (var entry : level.placed().entrySet()) {
+        var edits = synced ? level.pendingUploads() : level.placed();
+        int count = 0;
+        for (var entry : edits.entrySet()) {
             BlockPos p = entry.getKey();
-            int state = sampler.stateId(entry.getValue());
+            // A null journal entry removes an uncommitted Java write. The native
+            // proxy never received it and still owns the original terrain value.
+            if (synced && !level.placed().containsKey(p)) continue;
+            if (count == MAX_EDITS) throw new IllegalStateException("Native decoration edit budget exceeded");
+            int state = sampler.stateId(synced ? level.getBlockState(p) : entry.getValue());
             if (state < 0) throw new IllegalStateException("Block state absent from native snapshot");
             buffer.putInt(p.getX()).putInt(p.getY()).putInt(p.getZ()).putInt(state);
+            count++;
         }
-        RustWorldgenBackend.applyEdits(volume, buffer, level.placed().size());
+        if (count != 0 || !synced) RustWorldgenBackend.applyEdits(volume, buffer, count);
         UPLOAD_NANOS.add(System.nanoTime() - started);
-        EDITS_UP.add(level.placed().size());
+        EDITS_UP.add(count);
         // Only after the transfer succeeded: a thrown transfer must leave the
         // set intact so the next attempt still sees the pending writes.
         level.clearPendingUploads();
         synced = true;
-        javaChanged = false;
     }
     private void download() {
         if (!nativeChanged) return;
@@ -171,6 +159,7 @@ final class RustVegetationStage implements AutoCloseable {
         EDITS_DOWN.add(count);
         if (count < 0 || count > MAX_EDITS) throw new IllegalStateException("Invalid native vegetation output");
         BlockState[] states = sampler.states();
+        var position = new BlockPos.MutableBlockPos();
         // Validate the whole result before publishing it to the Java context.
         for (int i = 0; i < count; i++) {
             int id = buffer.getInt(i * 16 + 12);
@@ -179,7 +168,7 @@ final class RustVegetationStage implements AutoCloseable {
                 throw new IllegalStateException("Native result used an unsynchronised state " + id + "/" + states.length
                         + ": " + (id>=0&&id<table.size()?table.get(id):"invalid"));
             }
-            if (!level.ensureCanWrite(new BlockPos(buffer.getInt(i*16),buffer.getInt(i*16+4),buffer.getInt(i*16+8))))
+            if (!level.ensureCanWrite(position.set(buffer.getInt(i*16),buffer.getInt(i*16+4),buffer.getInt(i*16+8))))
                 throw new IllegalStateException("Native result exceeded its write region");
         }
         level.beginFeature();
@@ -189,11 +178,18 @@ final class RustVegetationStage implements AutoCloseable {
                 int base = i * 16;
                 BlockPos p = new BlockPos(buffer.getInt(base), buffer.getInt(base + 4), buffer.getInt(base + 8));
                 BlockState state = states[buffer.getInt(base + 12)];
-                if (level.placed().get(p) != state) level.setBlock(p, state, 19, 0);
+                if (level.placed().get(p) != state) applyNativeEdit(level, p, state);
             }
             complete = true;
         } finally { level.endFeature(complete); }
         nativeChanged = false;
+    }
+
+    static void applyNativeEdit(PredictionDecorationLevel level, BlockPos pos, BlockState state) {
+        boolean javaPending = level.pendingUploads().containsKey(pos);
+        level.setBlock(pos, state, 19, 0);
+        // This exact edit already exists in the native volume. Preserve older Java/rollback markers.
+        if (!javaPending) level.pendingUploads().remove(pos);
     }
     @Override public void close() {
         try { if (volume != 0) { RustWorldgenBackend.close(volume); volume = 0; } }

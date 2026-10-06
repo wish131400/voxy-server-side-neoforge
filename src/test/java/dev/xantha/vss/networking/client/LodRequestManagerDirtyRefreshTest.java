@@ -40,13 +40,14 @@ class LodRequestManagerDirtyRefreshTest {
         });
         LodRequestManager manager = new LodRequestManager("test", tracker);
         long packed = PositionUtil.packPosition(2, 3);
-        manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L});
+        assertEquals(1, manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L}).length);
         tracker.track(packed, false, true, 1_000_000_000L, 0L);
 
-        manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L});
+        assertEquals(0, manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L}).length,
+                "duplicates must not invalidate the column assembler or prediction a second time");
         assertEquals(true, tracker.contains(packed));
 
-        manager.onDirtyColumns(new long[] {packed}, new long[] {10_001L});
+        assertEquals(1, manager.onDirtyColumns(new long[] {packed}, new long[] {10_001L}).length);
         assertFalse(tracker.contains(packed));
     }
 }

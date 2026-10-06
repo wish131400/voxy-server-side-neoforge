@@ -103,6 +103,27 @@ class XaeroMapCompatBufferUpdateTest {
     }
 
     @Test
+    void longSaveDoesNotDiscardAnOwedTextureRebuild() {
+        this.bridge.updateIdlePumps = 1;
+        this.bridge.offerPrepared(null, tile(64, 64));
+        this.bridge.pump();
+        MapRegion region = region();
+        MapTileChunk tileChunk = tileChunk();
+        region.resting = false;
+
+        // Pixel data exists, but the map stays black until its texture is built.
+        // A busy saver must not erase that obligation after 1200 pumps.
+        for (int i = 0; i < 1240; i++) this.bridge.pump();
+        region.resting = true;
+        this.bridge.pump();
+
+        assertEquals(1, tileChunk.bufferUpdates);
+        assertEquals(0, this.bridge.counterForTest("pending_updates"));
+        assertEquals(0, this.bridge.counterForTest("dropped_updates"));
+        assertFalse(tileChunk.changed);
+    }
+
+    @Test
     void activeFrameSliceOwnsTheRebuildAndTickStandsDown() {
         this.bridge.updateIdlePumps = 1;
         this.bridge.offerPrepared(null, tile(64, 64));

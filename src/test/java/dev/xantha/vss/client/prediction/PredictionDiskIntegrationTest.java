@@ -14,11 +14,16 @@ import org.junit.jupiter.api.io.TempDir;
 
 class PredictionDiskIntegrationTest {
     @TempDir Path directory;
+    private PredictionCacheTestFiles.ResourceIdentity resourceIdentity;
+    @org.junit.jupiter.api.BeforeEach void resourceIdentity() throws Exception {
+        resourceIdentity = new PredictionCacheTestFiles.ResourceIdentity();
+    }
     private static final DimensionProfile PROFILE = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
             42L, -64, 384, "noise", "minecraft:overworld", 123L);
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @org.junit.jupiter.api.AfterEach void finishBackgroundCloseBeforeTempCleanup() throws Exception {
         PredictionCacheTestFiles.awaitBackgroundClose();
+        resourceIdentity.close();
     }
 
     @Test void reopenedManagerUsesStoredGroundWithoutTerrainSamplingAndDirtyRebuildsIt() throws Exception {
@@ -36,7 +41,9 @@ class PredictionDiskIntegrationTest {
                 assertTrue(ready > 0);
                 assertTrue(calls.get() > 0, "cold fixture must calculate terrain");
                 assertEquals(0, manager.failedTileCount());
+                cache.flushMeshes(); cache.flush();
             }
+            PredictionCacheTestFiles.awaitBackgroundClose();
             int firstCalls = calls.getAndSet(0);
             try (var cache = new PredictionDiskCache(directory, PROFILE.fingerprint());
                  var manager = manager(calls, cache)) {
@@ -84,7 +91,7 @@ class PredictionDiskIntegrationTest {
         assertTrue(pending.isEmpty());assertEquals(0,manager.failedTileCount());
     }
 
-    @Test void cacheIdentitySeparatesWorldSeedGeneratorBytesAndBackend() {
+    @Test void cacheSeparatesWorldSeedAndDimensionButSharesGeneratorAndBackendChanges() {
         var sampler = sampler(new AtomicInteger(), PROFILE);
         var storage = PredictionCacheStorage.forWorld(directory, directory.resolve("saves/world-a"), null, null);
         Path a = storage.directory(sampler);
@@ -93,8 +100,11 @@ class PredictionDiskIntegrationTest {
         assertNotEquals(a, storage.directory(sampler(new AtomicInteger(), otherSeed)));
         byte[] generator = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         var otherGenerator = new DimensionProfile(PROFILE.dimension(), 42L, -64, 384, "noise", "minecraft:overworld", 123L, 0, generator.length, generator);
-        assertNotEquals(a, storage.directory(sampler(new AtomicInteger(), otherGenerator)));
-        assertNotEquals(a, storage.directory(ClientTerrainSampler.custom(42L, PROFILE, (x, z) -> 64)));
+        assertEquals(a, storage.directory(sampler(new AtomicInteger(), otherGenerator)));
+        assertEquals(a, storage.directory(ClientTerrainSampler.custom(42L, PROFILE, (x, z) -> 64)));
+        var otherDimension = new DimensionProfile(ResourceLocation.withDefaultNamespace("the_nether"), 42L, -64, 384,
+                "noise", "minecraft:overworld", 123L);
+        assertNotEquals(a, storage.directory(sampler(new AtomicInteger(), otherDimension)));
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -156,6 +166,7 @@ class PredictionDiskIntegrationTest {
     }
     private static ClientTerrainSampler sampler(AtomicInteger calls, DimensionProfile profile) {
         return new ClientTerrainSampler(profile.seed(), profile) {
+            @Override long colorCacheFingerprint() { return 77; }
             @Override public ClientColumnSample sample(int x, int z) {
                 calls.incrementAndGet();
                 return new ClientColumnSample(64, 64, 0, PredictionMaterialPalette.grassBlockIndex(), 0, 0, 0, 0, 0,

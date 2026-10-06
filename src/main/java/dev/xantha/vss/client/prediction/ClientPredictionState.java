@@ -44,7 +44,6 @@ public final class ClientPredictionState {
 
     /** Immutable metadata already received from the server, for explicit reference export. */
     static WorldgenProfileS2CPayload referenceProfile() { return acceptedProfile; }
-    private static volatile long profileInstalledNanos;
     private static final Map<CellKey, CellState> cellStates = new ConcurrentHashMap<>();
     private static final Map<CellKey, Long> requestTimes = new ConcurrentHashMap<>();
     private static final Map<CellKey, Long> exactAcceptedTimes = new ConcurrentHashMap<>();
@@ -55,18 +54,16 @@ public final class ClientPredictionState {
      */
     private static final PredictionExactCoverageIndex exactCoverage = new PredictionExactCoverageIndex();
     /**
-     * Bumped whenever a cell's exact ownership MATERIALLY flips to Voxy
-     * (ingest, background sweep discovery, session reset).  Renderer
-     * coverage caches compare it so far tiles re-resolve on real change
-     * instead of a blind timer: a timed far-band recheck resolved thousands
-     * of cells per frame on the render thread and showed up as 300 ms
-     * coverage spikes every few seconds.
+     * Version of confirmed column data used by the asynchronous shader mask.
+     * Settled columns own their world-space region inside Voxy's render range.
+     * Transient GPU traversal and node replacement do not change this index.
      */
     private static final AtomicLong exactCoverageRevision = new AtomicLong();
+    private static final AtomicLong exactCoverageRemovalRevision = new AtomicLong();
+    static long exactCoverageRemovalRevision() { return exactCoverageRemovalRevision.get(); }
 
-    /** Revision of the exact-ownership cache; see {@link #exactCoverageRevision}. */
-    public static long exactCoverageRevision() {
-        return exactCoverageRevision.get() + dev.xantha.vss.compat.StrictLodVisibility.revision();
+    static void exactCoverageChanged(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
+        exactCoverageRevision.incrementAndGet();
     }
 
     static CompletableFuture<PredictionExactCoverageMask.Snapshot> exactCoverageSnapshot(
@@ -125,8 +122,14 @@ public final class ClientPredictionState {
         if (minecraft.getConnection() == null) {
             return;
         }
+        // Start the cache identity scan as soon as the profile arrives.  It
+        // is independent of registry decoding and can run in parallel with
+        // the expensive worldgen preparation; VssLodSpriteTable.prepare()
+        // remains the render-thread fallback after an atlas reload.
+        if (VSSClientConfig.CONFIG.rememberTerrain) {
+            PredictionMeshResources.prepare(minecraft.getResourceManager());
+        }
         RegistryAccess clientRegistries = minecraft.getConnection().registryAccess();
-        PredictionCacheStorage storage = PredictionCacheStorage.current();
         acceptedProfile = payload;
         if (connectionInputs == null) connectionInputs = new RustWorldgenDocument.SharedInputs();
         var inputs = connectionInputs;
@@ -140,13 +143,14 @@ public final class ClientPredictionState {
             try {
                 decoder = ClientWorldgenProfileDecoder.prepare(payload, clientRegistries,
                         () -> generation == DECODE_GENERATION.get(), inputs);
-                var prepared = new PreparedProfile(decoder, generation, storage);
+                var preparedDecoder = decoder;
                 minecraft.execute(() -> {
                     if (generation != DECODE_GENERATION.get()) {
-                        PROFILE_DECODER.execute(prepared.decoder()::close);
+                        PROFILE_DECODER.execute(preparedDecoder::close);
                         return;
                     }
-                    preparedProfile = prepared;
+                    // Login identity may arrive during decoding; resolve only after the session check.
+                    preparedProfile = new PreparedProfile(preparedDecoder, generation, PredictionCacheStorage.current());
                     requestCurrentDimension(minecraft, receivedNanos);
                 });
             } catch (java.util.concurrent.CancellationException ignored) {
@@ -209,7 +213,6 @@ public final class ClientPredictionState {
                         var previous = MANAGERS.put(dimension, manager);
                         if (previous != null) previous.close();
                         manager.setPaused(!VSSClientConfig.CONFIG.enablePrediction);
-                        if (!profileReady) profileInstalledNanos = System.nanoTime();
                         profileReady = true;
                         VSSLogger.info("VSS prediction dimension ready: dimension=" + dimension.location()
                                 + ", rust=" + (sampler instanceof RustTerrainSampler)
@@ -233,7 +236,7 @@ public final class ClientPredictionState {
 
     /** Extra detail is scoped; ordinary selection covers the whole camera neighbourhood. */
     private static VssLodFocus combinedFocus(Minecraft minecraft, LocalPlayer player) {
-        if (!player.isScoping()) return null;
+        if (!VSSClientConfig.CONFIG.predictionSpyglassLoading || !player.isScoping()) return null;
         ViewFocus current = viewFocus;
         if (current == null || current.focus() == null) {
             return null;
@@ -248,7 +251,7 @@ public final class ClientPredictionState {
     private static volatile VssLodFocus lastFocus;
 
     static VssLodFocus currentFocus() {
-        return lastFocus;
+        return VSSClientConfig.CONFIG.predictionSpyglassLoading ? lastFocus : null;
     }
 
     private record ViewFocus(VssLodFocus focus) {
@@ -256,7 +259,7 @@ public final class ClientPredictionState {
 
     /** Refreshes the look-direction focus target on a background thread. */
     private static void updateViewFocus(Minecraft minecraft, ClientLevel level) {
-        boolean scoping = minecraft.player.isScoping();
+        boolean scoping = VSSClientConfig.CONFIG.predictionSpyglassLoading && minecraft.player.isScoping();
         if (scoping != focusScoping) {
             focusScoping = scoping;
             focusGeneration.incrementAndGet();
@@ -300,6 +303,7 @@ public final class ClientPredictionState {
                 VssLodFocus selected = picked;
                 minecraft.execute(() -> {
                     if (generation == focusGeneration.get() && minecraft.level == level
+                            && VSSClientConfig.CONFIG.predictionSpyglassLoading
                             && minecraft.player != null && minecraft.player.isScoping()) {
                         viewFocus = new ViewFocus(selected);
                     }
@@ -470,40 +474,6 @@ public final class ClientPredictionState {
         return manager == null ? PredictionLoadingProgress.INITIALIZING : manager.loadingProgress();
     }
 
-    public static boolean shouldDeferExactColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ, long nowNanos) {
-        if (!profileReady || !VSSClientConfig.CONFIG.enablePrediction || dimension == null) {
-            return false;
-        }
-        Minecraft minecraft = Minecraft.getInstance();
-        ClientLevel level = minecraft.level;
-        LocalPlayer player = minecraft.player;
-        if (level == null || player == null || player.isRemoved() || !dimension.equals(level.dimension())) {
-            return false;
-        }
-        int playerChunkX = player.getBlockX() >> 4;
-        int playerChunkZ = player.getBlockZ() >> 4;
-        int ring = Math.max(Math.abs(chunkX - playerChunkX), Math.abs(chunkZ - playerChunkZ));
-        int exactDistance = VSSClientNetworking.getEffectiveLodDistanceChunks();
-        if (exactDistance <= 0 || ring <= exactDistance) {
-            return false;
-        }
-        PredictionTileManager manager = MANAGERS.get(dimension);
-        CellState state = cellStates.get(new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ)));
-        if (manager == null || state == CellState.REQUESTED || state == CellState.EXACT
-                || state == CellState.DIRTY) {
-            return false;
-        }
-        boolean covered = manager.hasCoverage(chunkX, chunkZ)
-                || (manager.pendingCount() > 0 && profileInstalledNanos != 0L
-                && nowNanos - profileInstalledNanos < 750_000_000L);
-        if (covered) {
-            cellStates.putIfAbsent(
-                    new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ)),
-                    CellState.PREDICTED);
-        }
-        return covered;
-    }
-
     public static void markRequested(ResourceKey<Level> dimension, int chunkX, int chunkZ) {
         if (dimension != null) {
             CellKey key = new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ));
@@ -529,12 +499,10 @@ public final class ClientPredictionState {
             CellKey key = new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ));
             cellStates.put(key, CellState.EXACT);
             exactAcceptedTimes.putIfAbsent(key, System.nanoTime());
-            // Write the positive coverage entry directly: the render thread
-            // reads the cache without probing, so ingest must publish the
-            // handover itself (the ExactCoverageGate settle window inside
-            // hasExactCoverage still applies).
+            // Publish data presence immediately. GPU readiness independently
+            // gates CPU handoff; the depth fallback's snapshot still settles.
             if (exactCoverage.confirm(dimension, chunkX, chunkZ, exactAcceptedTimes.get(key))) {
-                exactCoverageRevision.incrementAndGet();
+                exactCoverageChanged(dimension, chunkX, chunkZ);
             }
             requestTimes.remove(key);
         }
@@ -567,46 +535,30 @@ public final class ClientPredictionState {
         return manager != null && manager.isAuthoritative(chunkX, chunkZ);
     }
 
-    /**
-     * Returns whether a column is already rendered by the exact VSS/Voxy
-     * path. Two evidence kinds, two latencies: a raw ingest acknowledgement
-     * from the delivery path is held behind a short settling window while
-     * Voxy builds and uploads render nodes, but a probe positive from
-     * Voxy's own storage index yields immediately — that data is already
-     * renderable on Voxy's side, and delaying it drew prediction meshes
-     * over freshly loaded real LOD after every teleport.
-     *
-     * <p>Cache-only read for the render thread: NEVER probes Voxy's local
-     * index here.  The reflection probe costs microseconds per chunk and a
-     * coverage re-resolve sweeps thousands of cells in one frame; probing
-     * inline turned far-band re-resolves into 15 ms frame spikes.  A
-     * background sweep (sweepExactCoverage) keeps the cache fresh, ingest
-     * writes positives directly through onExactColumn, and a miss simply
-     * means "prediction draws" — the safe default.</p>
-     */
+    /** Cache-only data presence; it cannot prove that Voxy drew a surface this frame. */
     public static boolean hasExactCoverage(ResourceKey<Level> dimension, ClientLevel level,
                                             int chunkX, int chunkZ) {
-        if (!dev.xantha.vss.compat.StrictLodVisibility.visible(dimension, chunkX, chunkZ)) return false;
         if (dimension == null || level == null || !dimension.equals(level.dimension())) {
             return false;
         }
-        CellKey key = new CellKey(dimension, PositionUtil.packPosition(chunkX, chunkZ));
-        long now = System.nanoTime();
-        // Ingest ground truth first: a cell whose column VSS itself delivered
-        // (the server's ring scheduler) is rendered by Voxy once the ingest
-        // has settled.  This path is immune to Voxy's local index build
-        // timing, which the probe cache below depends on — during index
-        // rebuilds the probe returns UNKNOWN and the yield used to flap,
-        // visibly swapping the near Voxy field to prediction LOD.
-        PredictionTileManager manager = MANAGERS.get(dimension);
-        if (manager != null && manager.isAuthoritative(chunkX, chunkZ)) {
-            Long accepted = exactAcceptedTimes.get(key);
-            if (accepted != null
-                    && now - accepted >= ExactCoverageGate.SETTLE_NANOS) {
-                return true;
-            }
-        }
-        return exactCoverage.owns(dimension, chunkX, chunkZ, now);
+        return exactCoverage.contains(dimension, chunkX, chunkZ);
+    }
+
+    /**
+     * Returns true only after an exact column has had time to reach Voxy's
+     * ingest/render path. A network acknowledgement alone is not enough to
+     * remove the prediction fallback because Voxy uploads its node on a
+     * separate queue.
+     */
+    static boolean hasSettledExactCoverage(ResourceKey<Level> dimension,
+                                            int chunkX, int chunkZ) {
+        return dimension != null && exactCoverage.owns(dimension, chunkX, chunkZ,
+                System.nanoTime());
+    }
+
+    static boolean hasSettledExactCoverageBox(ResourceKey<Level> dimension,
+                                              int minX, int minZ, int maxX, int maxZ) {
+        return dimension != null && exactCoverage.ownsBox(dimension, minX, minZ, maxX, maxZ, System.nanoTime());
     }
 
     /** Reflection probe that refreshes the cache; background threads only.
@@ -618,16 +570,10 @@ public final class ClientPredictionState {
                 level, chunkX, chunkZ);
         boolean present = state == ModCompat.LocalColumnState.PRESENT;
         if (present) {
-            // Probe positives yield IMMEDIATELY: the probe reads Voxy's own
-            // storage index, so the data is already renderable on Voxy's
-            // side.  Backdating the transition skips the ingest settle
-            // window here — a post-teleport area flips cell by cell as
-            // Voxy loads it, and a 2 s settle per cell drew prediction
-            // meshes over the freshly loaded real LOD (the mixing report).
-            // The settle only protects the delivery path, where the ingest
-            // ack precedes Voxy's render-node build (onExactColumn).
-            if (exactCoverage.confirm(dimension, chunkX, chunkZ, now - ExactCoverageGate.SETTLE_NANOS)) {
-                exactCoverageRevision.incrementAndGet();
+            // A storage discovery can precede GPU upload too. All new claims
+            // use the same grace period; re-probes preserve the first timestamp.
+            if (exactCoverage.confirm(dimension, chunkX, chunkZ, now)) {
+                exactCoverageChanged(dimension, chunkX, chunkZ);
             }
         } else {
             // Definitive MISS (index ready, not confirmed, not stored): the
@@ -638,9 +584,12 @@ public final class ClientPredictionState {
             if (state == ModCompat.LocalColumnState.MISSING) {
                 PredictionTileManager manager = MANAGERS.get(dimension);
                 if (manager != null && manager.revokeAuthoritative(chunkX, chunkZ)) {
-                    exactCoverageRevision.incrementAndGet();
+                    exactCoverageChanged(dimension, chunkX, chunkZ);
                 }
-                if (exactCoverage.remove(dimension, chunkX, chunkZ)) exactCoverageRevision.incrementAndGet();
+                if (exactCoverage.remove(dimension, chunkX, chunkZ)) {
+                    exactCoverageRemovalRevision.incrementAndGet();
+                    exactCoverageChanged(dimension, chunkX, chunkZ);
+                }
             }
         }
         return present;
@@ -675,16 +624,18 @@ public final class ClientPredictionState {
                 PredictionCoverageOffsets offsets = sweepOffsets(radius);
                 if (now - coverageRetainedAt >= 5_000_000_000L) {
                     coverageRetainedAt = now;
-                    if (exactCoverage.retain(dimension, playerChunkX, playerChunkZ, radius + 64))
+                    if (exactCoverage.retain(dimension, playerChunkX, playerChunkZ, radius + 64)) {
+                        exactCoverageRemovalRevision.incrementAndGet();
                         exactCoverageRevision.incrementAndGet();
+                    }
                 }
-                PredictionTileManager manager = MANAGERS.get(dimension);
                 var result = coverageSweep.run(offsets, nearRingChunks, playerChunkX, playerChunkZ, generation,
                         () -> generation == DECODE_GENERATION.get() && VSSClientConfig.CONFIG.enablePrediction,
                         index -> {
                             int chunkX = playerChunkX + offsets.x(index), chunkZ = playerChunkZ + offsets.z(index);
-                            return manager != null && manager.isAuthoritative(chunkX, chunkZ)
-                                    || probeExactCoverage(dimension, level, chunkX, chunkZ);
+                            // Recheck acknowledged columns too: otherwise a
+                            // stale claim can never reach the MISSING path.
+                            return probeExactCoverage(dimension, level, chunkX, chunkZ);
                         });
                 long logNow = System.nanoTime();
                 if (VSSClientConfig.CONFIG.debugLogging
@@ -747,16 +698,12 @@ public final class ClientPredictionState {
     }
 
     public static void onDirtyColumns(ResourceKey<Level> dimension, long[] packedPositions) {
-        if (packedPositions == null) {
+        if (packedPositions == null || packedPositions.length == 0) {
             return;
         }
+        PredictionTileManager manager = MANAGERS.get(dimension);
+        if (manager != null) manager.invalidate(packedPositions);
         for (long packed : packedPositions) {
-            int chunkX = PositionUtil.unpackX(packed);
-            int chunkZ = PositionUtil.unpackZ(packed);
-            PredictionTileManager manager = MANAGERS.get(dimension);
-            if (manager != null) {
-                manager.invalidate(chunkX, chunkZ);
-            }
             if (dimension != null) {
                 CellKey key = new CellKey(dimension, packed);
                 cellStates.put(key, CellState.DIRTY);
@@ -840,7 +787,15 @@ public final class ClientPredictionState {
 
     public static void clear() { dimensionProfiles.clear(); reset(false); }
 
+    public static void tagsChanged() {
+        PredictionVegetationTraits.invalidate();
+        PredictionSurfaceShapes.invalidate();
+        MANAGERS.values().forEach(PredictionTileManager::invalidateAppearance);
+    }
+
     private static void reset(boolean preserveInputs) {
+        PredictionVegetationTraits.invalidate();
+        PredictionSurfaceShapes.invalidate();
         if (!preserveInputs) {
             RustWorldgenDocument.invalidateSharedInputs();
             PredictionColorCache.RESOURCES.invalidate();
@@ -867,17 +822,16 @@ public final class ClientPredictionState {
         MANAGERS.clear();
         cellStates.clear();
         exactCoverage.clear();
+        exactCoverageRemovalRevision.incrementAndGet();
         exactCoverageRevision.incrementAndGet();
         exactAcceptedTimes.clear();
         requestTimes.clear();
         seed = 0L;
         revision = 0L;
         profileReady = false;
-        profileInstalledNanos = 0L;
     }
 
     public enum CellState {
-        PREDICTED,
         REQUESTED,
         EXACT,
         DIRTY

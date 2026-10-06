@@ -13,6 +13,60 @@ import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
 class DiskTaskRuntimeTest {
+    @Test
+    void unrestrictedDiskQueuesAcceptWorkBeyondOrdinaryCapacity() throws Exception {
+        DiskTaskRuntime runtime = runtime(() -> 1, () -> true);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger rejections = new AtomicInteger();
+        Runnable blocked = () -> {
+            try { release.await(10, TimeUnit.SECONDS); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        };
+        try {
+            for (int i = 0; i < 2050; i++) {
+                assertTrue(runtime.submitReadUnrestricted(blocked, error -> rejections.incrementAndGet()));
+                assertTrue(runtime.submitWriteUnrestricted(blocked, error -> rejections.incrementAndGet()));
+            }
+            assertEquals(2050, runtime.pendingReads());
+            assertEquals(2050, runtime.pendingWrites());
+            assertFalse(runtime.submitRead(1, blocked, error -> rejections.incrementAndGet()));
+            assertFalse(runtime.submitWrite(1, blocked, error -> rejections.incrementAndGet()));
+            assertEquals(2, rejections.get());
+            release.countDown();
+            waitForPendingReads(runtime, 0);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (runtime.pendingWrites() > 0 && System.nanoTime() < deadline) Thread.sleep(1);
+            assertEquals(0, runtime.pendingWrites());
+        } finally {
+            release.countDown();
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void unrestrictedDiskModeUsesHardwareAndRestoresConfiguredExecutors() {
+        DiskTaskRuntime runtime = runtime(() -> 8, () -> true);
+        try {
+            runtime.restart();
+            runtime.setUnrestrictedMode(true);
+            assertEquals(Math.max(1, Runtime.getRuntime().availableProcessors()), runtime.snapshot().readThreads());
+            runtime.setUnrestrictedMode(false);
+            assertEquals(2, runtime.snapshot().readThreads());
+        } finally { runtime.shutdown(); }
+    }
+
+    @Test
+    void unrestrictedDiskSubmissionStillRejectsAfterServerStop() {
+        DiskTaskRuntime runtime = runtime(() -> 1, () -> false);
+        AtomicInteger rejected = new AtomicInteger();
+        try {
+            assertFalse(runtime.submitReadUnrestricted(() -> { }, error -> rejected.incrementAndGet()));
+            assertFalse(runtime.submitWriteUnrestricted(() -> { }, error -> rejected.incrementAndGet()));
+            assertEquals(2, rejected.get());
+            assertEquals(0, runtime.pendingReads());
+            assertEquals(0, runtime.pendingWrites());
+        } finally { runtime.shutdown(); }
+    }
 
     @Test
     void restartCreatesClampedExecutors() {

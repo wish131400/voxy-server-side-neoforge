@@ -4,9 +4,14 @@ import static org.junit.jupiter.api.Assertions.*;
 import dev.xantha.vss.client.prediction.PredictionTileManager.*;
 import java.util.*;
 import net.minecraft.world.level.Level;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class PredictionCoverageIndexTest {
+    @BeforeAll static void bootstrapMinecraft() {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+    }
+
     @Test void primitiveIndexPreservesSelectionAcrossMissingLevelsAndNegativeCoordinates() {
         var layout = VssLodLayout.of(4096, 6, true, false);
         var tiles = new HashMap<PredictionTileKey, PredictionTile>();
@@ -27,7 +32,6 @@ class PredictionCoverageIndexTest {
     }
 
     @Test void chunkGroupsProduceTheSameMaskAsIndividualCells() throws Exception {
-        ClientTerrainSamplerTest.bootstrapMinecraft();
         var layout = VssLodLayout.of(4096, 6, true, false);
         var method = PredictionRenderer.class.getDeclaredMethod("resolveCoverage", PredictionTile.class,
                 int.class, int.class, double.class, RenderSnapshot.class, VssLodFocus.class);
@@ -54,7 +58,7 @@ class PredictionCoverageIndexTest {
                     if (focus != null) {
                         if (focus.contains(cx * 16 + 8, cz * 16 + 8)) desired = Math.min(desired,
                                 PredictionRenderer.lodForBlocks(distance, focus.selectionScale(scale), PredictionRenderer.pixelsPerQuad()));
-                        if (PredictionWorkOrder.surfaceFocus(focus).intersects(cx * 16D, cz * 16D, (cx + 1D) * 16, (cz + 1D) * 16)) desired = 0;
+                        if (PredictionWorkOrder.terrainFocus(focus).intersects(cx * 16D, cz * 16D, (cx + 1D) * 16, (cz + 1D) * 16)) desired = 0;
                     }
                     var cover = snapshot.coveringTileAtDetail(cx, cz, desired);
                     expected[z * 64 + x] = tile == cover || cover == null && desired >= tile.key().lod();

@@ -1,5 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.lang.reflect.Method;
 import java.util.function.Supplier;
 import net.minecraft.core.RegistryAccess;
@@ -8,14 +9,12 @@ import net.minecraft.world.level.levelgen.RandomState;
 
 /** Optional FreeTerraForged context bridge; prediction tile filters run in Rust. */
 final class FreeTerraForgedCompat {
-    private static final String PREFIX = "raccoonman.reterraforged.world.worldgen.";
-
     private FreeTerraForgedCompat() { }
 
     static net.minecraft.world.level.levelgen.NoiseRouter predictionRouter(RandomState state) {
         if (!isState(state)) return state.router();
         try {
-            var api = new Api(state.getClass().getClassLoader());
+            var api = new Api(state.getClass().getClassLoader(), variant(state));
             return FreeTerraForgedDensity.map(api.context.invoke(state), state.router());
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("FreeTerraForged prediction density context unavailable", failure);
@@ -23,8 +22,16 @@ final class FreeTerraForgedCompat {
     }
 
     private static boolean isState(Object state) {
-        return java.util.Arrays.stream(state.getClass().getInterfaces())
-                .anyMatch(type -> type.getName().equals(PREFIX + "RTFRandomState"));
+        return variant(state) != null;
+    }
+
+    private static FreeTerraForgedVariant variant(Object state) {
+        for (Class<?> type = state.getClass(); type != null; type = type.getSuperclass()) {
+            for (Class<?> api : type.getInterfaces()) for (var variant : FreeTerraForgedVariant.values()) {
+                if (api.getName().equals(variant.stateClass())) return variant;
+            }
+        }
+        return null;
     }
 
     static RandomState create(boolean required, boolean overworld, RegistryAccess registries,
@@ -32,7 +39,10 @@ final class FreeTerraForgedCompat {
         if (!required) return factory.get();
         try {
             var loader = FreeTerraForgedCompat.class.getClassLoader();
-            Api api = new Api(loader);
+            var variant = java.util.Arrays.stream(FreeTerraForgedVariant.values())
+                    .filter(candidate -> candidate.hasPreset(registries)).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("FreeTerraForged snapshot contains no active preset"));
+            Api api = new Api(loader, variant);
             return scoped(api.overworld, overworld, () -> {
                 RandomState state = factory.get();
                 api.initialize(state, registries);
@@ -53,6 +63,24 @@ final class FreeTerraForgedCompat {
         }
     }
 
+    static void copyClimateContext(Object source, Object target) {
+        Class<?> api = java.util.Arrays.stream(source.getClass().getInterfaces())
+                .filter(type -> type.getName().equals(FreeTerraForgedVariant.CURRENT.worldgenClass("biome.FTFClimateSampler")))
+                .findFirst().orElse(null);
+        if (api == null) return;
+        try {
+            var preset = api.getMethod("getUndergroundBiomeBandingPreset");
+            var context = api.getMethod("getUndergroundBiomeSurfaceContext");
+            api.getMethod("setUndergroundBiomeBandingPreset", preset.getReturnType(), long.class).invoke(target,
+                    preset.invoke(source), api.getMethod("getUndergroundBiomeBandingSeed").invoke(source));
+            api.getMethod("setUndergroundBiomeSurfaceContext", context.getReturnType()).invoke(target, context.invoke(source));
+            api.getMethod("setSpawnSearchCenter", net.minecraft.core.BlockPos.class).invoke(target,
+                    api.getMethod("getSpawnSearchCenter").invoke(source));
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("FreeTerraForged climate context unavailable", failure);
+        }
+    }
+
     /** Release only this prediction context, after its VSS workers have stopped. */
     static void releaseTileCache(Object tileCache) throws ReflectiveOperationException {
         if (tileCache == null) return;
@@ -69,7 +97,7 @@ final class FreeTerraForgedCompat {
         mapField.setAccessible(true);
         Object map = mapField.get(ownedCache);
         mapField.getType().getMethod("clear").invoke(map);
-        Class<?> manager = Class.forName("raccoonman.reterraforged.concurrent.cache.CacheManager",
+        Class<?> manager = Class.forName(FreeTerraForgedVariant.fromClass(ownedCache.getClass()).packagePrefix + "concurrent.cache.CacheManager",
                 false, ownedCache.getClass().getClassLoader());
         var cachesField = manager.getDeclaredField("CACHES");
         cachesField.setAccessible(true);
@@ -78,22 +106,29 @@ final class FreeTerraForgedCompat {
 
     static final class Api {
         final ThreadLocal<Boolean> overworld;
+        final FreeTerraForgedVariant variant;
         final Class<?> stateType;
         final Method initialize;
         final Method context;
 
-        @SuppressWarnings("unchecked")
         Api(ClassLoader loader) throws ReflectiveOperationException {
+            this(loader, FreeTerraForgedVariant.detect(loader));
+        }
+
+        @SuppressWarnings("unchecked")
+        Api(ClassLoader loader, FreeTerraForgedVariant variant) throws ReflectiveOperationException {
+            this.variant = variant;
             ThreadLocal<Boolean> dimensionContext;
             try {
-                dimensionContext = (ThreadLocal<Boolean>) loader.loadClass(PREFIX + "RTFWorldGenContext")
+                dimensionContext = (ThreadLocal<Boolean>) loader.loadClass(variant.worldgenClass(variant.abbreviation + "WorldGenContext"))
                         .getField("IS_VANILLA_OVERWORLD").get(null);
             } catch (ClassNotFoundException legacyRelease) {
+                if (variant != FreeTerraForgedVariant.LEGACY) throw legacyRelease;
                 // Earlier releases discover their context from CellSampler markers.
                 dimensionContext = ThreadLocal.withInitial(() -> false);
             }
             overworld = dimensionContext;
-            stateType = loader.loadClass(PREFIX + "RTFRandomState");
+            stateType = loader.loadClass(variant.stateClass());
             initialize = stateType.getMethod("initialize", RegistryAccess.class);
             context = stateType.getMethod("generatorContext");
         }
@@ -117,7 +152,7 @@ final class FreeTerraForgedCompat {
     static <T> T withSurfaceChunk(RandomState state, ChunkAccess chunk, Supplier<T> action) {
         if (!isState(state)) return action.get();
         try {
-            Class<?> active = activeChunk(state.getClass().getClassLoader());
+            Class<?> active = activeChunk(state.getClass().getClassLoader(), variant(state));
             if (active == null) return action.get();
             Method get = active.getMethod("get");
             Method set = active.getMethod("set", ChunkAccess.class);
@@ -132,7 +167,15 @@ final class FreeTerraForgedCompat {
 
     static Class<?> activeChunk(ClassLoader loader) {
         try {
-            return Class.forName(PREFIX + "ActiveChunk", false, loader);
+            return activeChunk(loader, FreeTerraForgedVariant.detect(loader));
+        } catch (ClassNotFoundException absent) {
+            return null;
+        }
+    }
+
+    private static Class<?> activeChunk(ClassLoader loader, FreeTerraForgedVariant variant) {
+        try {
+            return Class.forName(variant.worldgenClass("ActiveChunk"), false, loader);
         } catch (ClassNotFoundException legacyRelease) {
             return null;
         }

@@ -86,6 +86,7 @@ public class VSSServerConfig extends JsonConfig {
     public boolean debugLogging = false;
     public int lodDistanceChunks = 128;
     public int totalBandwidthBytesPerSecond = DEFAULT_TOTAL_BANDWIDTH_BYTES_PER_SECOND;
+    public int sendPacketsPerTick = 64;
     @Deprecated
     @SerializedName("bytesPerSecondLimitPerPlayer")
     private Integer legacyBytesPerSecondLimitPerPlayer;
@@ -154,6 +155,7 @@ public class VSSServerConfig extends JsonConfig {
                 + MIN_TOTAL_BANDWIDTH_BYTES_PER_SECOND + "-" + MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND + "（约 0.5-100 Mbps）。");
         help.put("sendQueueLimitPerPlayer", "每名玩家待发送 LOD 列数量上限；默认 1024；范围 "
                 + MIN_SEND_QUEUE_LIMIT_PER_PLAYER + "-" + MAX_SEND_QUEUE_LIMIT_PER_PLAYER + "。");
+        help.put("sendPacketsPerTick", "全服每 tick 的 LOD 列数据出站包数上限；默认 64；范围 1-4096。不限制入服预测档案初始化。各距离的请求数设置不等于出站包数。");
         help.put("sendQueueBytesLimitPerPlayer", "每名玩家待发送 LOD 数据内存上限，单位字节；默认 16 MiB；范围 4-128 MiB。");
         help.put("diskReaderThreads", "持久化缓存和 NBT 读取线程数；默认 4；范围 "
                 + MIN_DISK_READER_THREADS + "-" + MAX_DISK_READER_THREADS + "。");
@@ -238,6 +240,7 @@ public class VSSServerConfig extends JsonConfig {
         lodDistanceChunks = clamp(lodDistanceChunks, MIN_LOD_DISTANCE_CHUNKS, MAX_LOD_DISTANCE_CHUNKS);
         totalBandwidthBytesPerSecond = clamp(totalBandwidthBytesPerSecond, MIN_TOTAL_BANDWIDTH_BYTES_PER_SECOND, MAX_TOTAL_BANDWIDTH_BYTES_PER_SECOND);
         sendQueueLimitPerPlayer = clamp(sendQueueLimitPerPlayer, MIN_SEND_QUEUE_LIMIT_PER_PLAYER, MAX_SEND_QUEUE_LIMIT_PER_PLAYER);
+        sendPacketsPerTick = clamp(sendPacketsPerTick, 1, 4096);
         sendQueueBytesLimitPerPlayer = clamp(sendQueueBytesLimitPerPlayer, MIN_SEND_QUEUE_BYTES_PER_PLAYER, MAX_SEND_QUEUE_BYTES_PER_PLAYER);
         diskReaderThreads = clamp(diskReaderThreads, MIN_DISK_READER_THREADS, MAX_DISK_READER_THREADS);
         diskReadQueueLimit = clamp(diskReadQueueLimit, 1, 100000);

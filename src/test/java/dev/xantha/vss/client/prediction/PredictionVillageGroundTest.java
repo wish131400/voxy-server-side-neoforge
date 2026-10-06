@@ -104,7 +104,7 @@ class PredictionVillageGroundTest {
     }
     private static PredictionMesh meshWithGrid(int step,PredictionVegetation.Tile tile,int grid) {
         var samples=new ClientColumnSample[grid*grid]; Arrays.fill(samples,column());
-        return PredictionMeshBuilder.build(samples,null,63,0xB23F76E4,step,grid,true,null,null,null,0,0,tile);
+        return PredictionMeshBuilder.build(samples,null,63,0xB23F76E4,step,grid,null,null,0,0,tile);
     }
     private static double topArea(PredictionMesh mesh,float height,float x0,float z0,float x1,float z1) {
         double area=0;

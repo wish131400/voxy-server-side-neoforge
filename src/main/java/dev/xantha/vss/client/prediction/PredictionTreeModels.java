@@ -1,6 +1,5 @@
 package dev.xantha.vss.client.prediction;
 
-import dev.xantha.vss.client.prediction.feature.FeatureSimulator;
 import dev.xantha.vss.client.prediction.feature.FeatureStampLevel;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -30,6 +29,7 @@ import net.minecraft.world.level.levelgen.placement.PlacementContext;
 /** Visual tree geometry, scoped to one worldgen context. Placement still uses the actual biome features. */
 final class PredictionTreeModels {
     private static final int VARIANTS = 8, MAX_MODELS = 256, MAX_BLOCKS = 65_536;
+    private static final BlockPos MODEL_ORIGIN = new BlockPos(0, FeatureStampLevel.GROUND_Y, 0);
     private final RegistryAccess access;
     private final ChunkGenerator generator;
     private final Map<PlacedFeature, Boolean> supported = new ConcurrentHashMap<>();
@@ -92,10 +92,8 @@ final class PredictionTreeModels {
         if (decoration != null && !supports(feature)) decoration.useDisplayTerrain(false);
         try {
         var context = new PlacementContext(level, generator, biomeCheck ? Optional.of(feature) : Optional.empty());
-        Stream<BlockPos> positions = Stream.of(origin);
-        for (var modifier : feature.placement())
-            positions = positions.flatMap(pos -> modifier.getPositions(context, random, pos));
-        positions.forEach(pos -> placeConfigured(feature.feature().value(), level, random, pos));
+        PredictionPlacementExecutor.stream(feature, context, random, origin,
+                pos -> placeConfigured(feature.feature().value(), level, random, pos));
         } finally { if (decoration != null) decoration.useDisplayTerrain(previous); }
     }
 
@@ -192,10 +190,10 @@ final class PredictionTreeModels {
                 if (tree.forceDirt) builder.forceDirt();
                 feature = new ConfiguredFeature<>(Feature.TREE, builder.build());
             }
-            if (!feature.place(level, generator, RandomSource.create(seed), FeatureSimulator.ORIGIN)
+            if (!feature.place(level, generator, RandomSource.create(seed), MODEL_ORIGIN)
                     || level.placed().size() > 4096) return List.of();
             return level.placed().entrySet().stream().filter(e -> !e.getValue().isAir())
-                    .map(e -> new Cell(e.getKey().subtract(FeatureSimulator.ORIGIN), e.getValue()))
+                    .map(e -> new Cell(e.getKey().subtract(MODEL_ORIGIN), e.getValue()))
                     .sorted(Comparator.comparingInt((Cell c) -> c.offset.getY())
                             .thenComparingInt(c -> c.offset.getZ()).thenComparingInt(c -> c.offset.getX())).toList();
         } catch (UnsupportedOperationException unsupported) {

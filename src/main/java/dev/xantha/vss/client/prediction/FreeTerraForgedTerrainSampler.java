@@ -22,7 +22,7 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
             RandomState randomState, LevelHeightAccessor heights,
             ClientWorldgenRegistries registries, RegistryAccess clientRegistries) {
         super(profile.seed(), profile, generator, randomState, heights,
-                generator.generatorSettings().value().seaLevel(), registries.structureIds(), registries, clientRegistries);
+                generator.generatorSettings().value().seaLevel(), registries, clientRegistries);
         try {
             var api = new FreeTerraForgedCompat.Api(getClass().getClassLoader());
             Object context = api.context.invoke(randomState);
@@ -111,5 +111,6 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
         catch (ReflectiveOperationException failure) {
             dev.xantha.vss.common.VSSLogger.warn("Could not release FreeTerraForged prediction tile cache", failure);
         }
+        finally { super.close(); }
     }
 }

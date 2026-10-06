@@ -20,5 +20,12 @@ public abstract class VoxyBoundaryTerrainMixin {
                                         long drawCountOffset, int maxDrawCount, CallbackInfo ci) {
         PredictionVoxyBoundaryBridge.bind();
     }
-}
 
+    @Inject(method = "renderTranslucent(Lme/cortex/voxy/client/core/rendering/section/backend/mdic/MDICViewport;)V",
+            at = @At(value = "INVOKE",
+                    target = "Lme/cortex/voxy/client/core/gl/shader/Shader;bind()V",
+                    shift = At.Shift.AFTER), remap = false, require = 0)
+    private void vss$bindOuterSkirtMaskTranslucent(@Coerce Object viewport, CallbackInfo ci) {
+        PredictionVoxyBoundaryBridge.bind();
+    }
+}

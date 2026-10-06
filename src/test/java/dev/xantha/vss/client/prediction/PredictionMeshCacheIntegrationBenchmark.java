@@ -49,7 +49,7 @@ class PredictionMeshCacheIntegrationBenchmark {
                 PredictionVegetation.Tile.EMPTY,PredictionSimpleVegetation.Result.EMPTY);
     }
     private static PredictionMesh build(ClientColumnSample[] samples,int[] colors,int grid) {
-        var mesh=PredictionMeshBuilder.build(samples,colors,63,0xff3878a0,1,grid,false,null,null,null,0,0,PredictionVegetation.Tile.EMPTY).compactForRendering();
+        var mesh=PredictionMeshBuilder.build(samples,colors,63,0xff3878a0,1,grid,null,null,0,0,PredictionVegetation.Tile.EMPTY).compactForRendering();
         int n=(mesh.cellAxis()+1)*(mesh.cellAxis()+1);
         var tile=new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD,0,0,0),
                 new int[n],new int[n],new ClientColumnSample[n],mesh,new PredictionDepthBound(48,96),0,1,mesh.cellAxis(),1);

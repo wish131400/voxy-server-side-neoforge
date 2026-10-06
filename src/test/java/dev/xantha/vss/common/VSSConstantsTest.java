@@ -9,7 +9,7 @@ class VSSConstantsTest {
 
     @Test
     void protocolVersionIncludesLostCitiesHints() {
-        assertEquals(48, VSSConstants.PROTOCOL_VERSION);
+        assertEquals(50, VSSConstants.PROTOCOL_VERSION);
     }
 
     @Test

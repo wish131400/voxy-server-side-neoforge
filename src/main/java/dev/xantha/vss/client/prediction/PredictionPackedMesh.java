@@ -83,30 +83,79 @@ final class PredictionPackedMesh {
 
     private float[] morph;
     private int morphMinY, morphMaxY;
-    void morph(float[] field, int minY, int maxY) { morph=field; morphMinY=minY; morphMaxY=maxY; }
+    private float morphDeltaMin, morphDeltaMax;
+    void morph(float[] field, int minY, int maxY) {
+        morph=field; morphMinY=minY; morphMaxY=maxY;
+        morphDeltaMin=morphDeltaMax=0;
+        if (field != null) for (float delta : field) {
+            morphDeltaMin=Math.min(morphDeltaMin,delta);
+            morphDeltaMax=Math.max(morphDeltaMax,delta);
+        }
+    }
+    float morphDeltaMin() { return morphDeltaMin; }
+    float morphDeltaMax() { return morphDeltaMax; }
     float[] morph() { return morph; }
-    long uploadBytes() { return storageWordCount * 4L + (morph == null ? 0 : (morph.length+3)/4*16L); }
+    long uploadBytes() { return gpuStorageBytes() + (morph == null ? 0 : (morph.length+3)/4*16L); }
     long retainedHeapBytes() {
         var blob = compressed;
-        return 4096L + (blob == null ? storageWordCount * 4L : blob.bytes().length) + (morph == null ? 0L : morph.length * 4L);
+        return 4096L + displayRangeBytes + occlusionBounds.values.length * 4L + ownershipRuns.ends.length * 28L
+                + (blob == null ? storageWordCount * 4L + passHeapBytes() : blob.bytes().length)
+                + (morph == null ? 0L : morph.length * 4L);
     }
     long quadBytes() { return wordCount * 4L; }
     int morphMinY() { return morphMinY; }
     int morphMaxY() { return morphMaxY; }
     private volatile int[] quads;
     private final int wordCount;
+    private final int sourceWordCount;
+    private final PredictionDrawRanges[][] displayRanges;
+    private final long displayRangeBytes;
+    final PredictionMeshletBounds occlusionBounds;
+    final PredictionOwnershipRuns ownershipRuns;
     private int storageWordCount, paletteBaseTexel;
+    private volatile int[] opaqueStorage;
+    private boolean opaqueAliasesSource;
+    private int opaqueStorageWordCount, opaquePaletteBaseTexel, waterStorageWordCount;
+    private final PredictionGeometryStats geometryStats;
+    /** Water-only storage for the transparent page. It contains no opaque
+     * records; compact payloads have a separately remapped palette. */
+    private volatile int[] waterStorage;
+    private int waterPaletteBaseTexel;
+    private final int waterQuadCount;
     int paletteBaseTexel() { return paletteBaseTexel; }
-    int morphBaseTexel() { return storageWordCount / 4; }
+    int opaquePaletteBaseTexel() { return opaquePaletteBaseTexel; }
+    int waterPaletteBaseTexel() { return waterPaletteBaseTexel; }
+    int morphBaseTexel() { return opaqueStorageWordCount / 4; }
     long storageBytes() { return storageWordCount * 4L; }
+    long gpuStorageBytes() { return (opaqueStorageWordCount + (long) waterStorageWordCount) * 4; }
+    long opaqueStorageBytes() { return opaqueStorageWordCount * 4L; }
+    long waterStorageBytes() { return waterStorageWordCount * 4L; }
+    long stagingBytes() { return storageBytes() + passHeapBytes(); }
+    long maximumStagingBytes() { return storageBytes() + gpuStorageBytes(); }
+    PredictionGeometryStats geometryStats() { return geometryStats; }
+    private long passHeapBytes() {
+        int[] opaque = opaqueStorage, water = waterStorage;
+        return (opaque == null || opaqueAliasesSource ? 0 : opaque.length * 4L)
+                + (water == null ? 0 : water.length * 4L);
+    }
 
     /** Publishing worker only, before CPU compression and before entering any renderer snapshot. */
     void prepareGpuStorage() {
-        if (paletteBaseTexel != 0 || compressed != null || Boolean.getBoolean("vss.disableCompactGpu")) return;
+        if (opaqueStorage != null) return;
+        if (compressed != null) return;
+        if (Boolean.getBoolean("vss.disableCompactGpu")) {
+            preparePassStorage(quads);
+            return;
+        }
+        if (paletteBaseTexel != 0) {
+            preparePassStorage(quads);
+            return;
+        }
         var encoded = PredictionGpuEncoding.encode(quads);
         quads = encoded.words();
         storageWordCount = quads.length;
         paletteBaseTexel = encoded.paletteBaseTexel();
+        preparePassStorage(quads);
     }
     private volatile PredictionMeshCompression.Blob compressed;
     private static final java.util.concurrent.Semaphore COMPRESSORS = new java.util.concurrent.Semaphore(2);
@@ -116,6 +165,7 @@ final class PredictionPackedMesh {
         int[] source = quads;
         if (compressed != null || source == null || !COMPRESSORS.tryAcquire()) return;
         try {
+            if (opaqueStorage == null) preparePassStorage(source);
             var blob = PredictionMeshCompression.compress(source);
             if (blob == null) return;
             compressed = blob;
@@ -131,8 +181,20 @@ final class PredictionPackedMesh {
         if (words == null) PredictionMeshRestore.request(this);
         return words;
     }
-    boolean uploadReady() { return uploadWords() != null; }
-    void uploaded() { PredictionMeshRestore.uploaded(this); }
+    /** Optional acceleration; failure to reserve native staging never delays a tile. */
+    void prepareUpload(long epoch) {
+        int[] opaque = opaqueStorage, water = waterStorage;
+        if (opaque != null && water != null) PredictionUploadStaging.SHARED.stage(this, opaque, water, morph, epoch);
+    }
+    boolean uploadReady() { return PredictionUploadStaging.SHARED.contains(this)
+            || opaqueUploadWords() != null && waterUploadWords() != null; }
+    void uploaded() {
+        PredictionUploadStaging.SHARED.discard(this);
+        PredictionMeshRestore.uploaded(this); releaseUploadStorage();
+    }
+    void releaseUploadStorage() {
+        if (compressed != null) { opaqueStorage = null; waterStorage = null; }
+    }
     int[] restoreUploadWords() {
         int[] words = quads;
         return words != null ? words : compressed.restore();
@@ -148,6 +210,64 @@ final class PredictionPackedMesh {
     private final boolean downFaces;
     // Render-thread-only plans. No direct/native buffers retained per mesh.
     private final PredictionDrawRanges[][] drawRanges = new PredictionDrawRanges[2][32];
+    private final int[][] aquaticCounts;
+    private final PredictionDrawRanges[][] aquaticRanges = new PredictionDrawRanges[4][32];
+    final PredictionAquaticLod aquaticLod = new PredictionAquaticLod();
+    boolean hasAquaticLod() { return !Arrays.equals(aquaticCounts[0], aquaticCounts[3]); }
+    boolean hasDisplayLod() { return hasAquaticLod() || displayRanges != null; }
+    PredictionDrawRanges drawRanges(boolean water, int visible, int aquaticTier) {
+        if (!water && aquaticTier > 0 && displayRanges != null && morph == null) return displayRanges[aquaticTier][visible];
+        if (water || aquaticTier == 0 || !hasAquaticLod()) return drawRanges(water, visible);
+        var result = aquaticRanges[aquaticTier][visible];
+        if (result == null) aquaticRanges[aquaticTier][visible] = result = new PredictionDrawRanges(
+                terrainRangeFirst, aquaticCounts[aquaticTier], visible);
+        return result;
+    }
+    /** Production workers precompute both passes. Cold compressed restores use
+     * PredictionMeshRestore; no decompression or palette construction in a frame. */
+    int[] opaqueUploadWords() {
+        if (compressed != null && PredictionMeshRestore.peek(this) == null) {
+            PredictionMeshRestore.request(this); return null;
+        }
+        if (opaqueStorage == null) {
+            if (compressed != null) PredictionMeshRestore.request(this);
+            else preparePassStorage(quads); // Raw GPU fixtures / small seam producers.
+        }
+        return opaqueStorage;
+    }
+    int[] waterUploadWords() { opaqueUploadWords(); return waterStorage; }
+
+    synchronized void preparePassStorage(int[] source) {
+        if (opaqueStorage != null || source == null) return;
+        boolean compact = !Boolean.getBoolean("vss.disableCompactGpu");
+        var opaque = PredictionGpuEncoding.selectPass(source, paletteBaseTexel, quadCount(),
+                terrainQuadCount, waterQuadCount, false, compact);
+        var water = PredictionGpuEncoding.selectPass(source, paletteBaseTexel, quadCount(),
+                terrainQuadCount, waterQuadCount, true, compact);
+        opaqueStorageWordCount = opaque.words().length;
+        opaqueAliasesSource = opaque.words() == source;
+        opaquePaletteBaseTexel = opaque.paletteBaseTexel();
+        waterStorageWordCount = water.words().length;
+        waterPaletteBaseTexel = water.paletteBaseTexel();
+        waterStorage = water.words();
+        opaqueStorage = opaque.words(); // Volatile publication after all pass metadata.
+    }
+
+    /** Translate a canonical range only at submission. CPU bounds, ownership
+     * runs, transparent order and disk indices remain in canonical space. */
+    int gpuFirst(int first, int count, boolean water) {
+        if (count < 0 || first < 0 || (long) first + count > quadCount())
+            throw new IllegalArgumentException("Invalid GPU draw range");
+        int waterEnd = terrainQuadCount + waterQuadCount;
+        if (water) {
+            if (first < terrainQuadCount || (long) first + count > waterEnd)
+                throw new IllegalArgumentException("Water range contains opaque geometry");
+            return first - terrainQuadCount;
+        }
+        if ((long) first + count <= terrainQuadCount) return first;
+        if (first >= waterEnd) return first - waterQuadCount;
+        throw new IllegalArgumentException("Opaque range crosses water geometry");
+    }
     PredictionDrawRanges drawRanges(boolean water, int visible) {
         int pass=water?1:0;
         var result=drawRanges[pass][visible];
@@ -160,15 +280,36 @@ final class PredictionPackedMesh {
                                  int terrainQuadCount, int[] terrainFirst, int[] terrainCount,
                                  int[] waterFirst, int[] waterCount, boolean downFaces,
                                  int spriteQuadCount) {
-        this.quads = quads;
-        this.wordCount = quads.length;
-        this.storageWordCount = quads.length;
+        // Also reorder restored caches after their material IDs have been remapped.
+        // Complete canonical records are preserved; water and all face-range boundaries stay put.
+        boolean[] plants = VssLodSpriteTable.aquaticSprites();
+        boolean[] land = VssLodSpriteTable.landPlantSprites();
+        for (int i = 0; i < plants.length; i++) plants[i] |= land[i];
+        this.aquaticCounts = PredictionSpatialOrder.arrange(quads, terrainFirst, terrainCount, plants);
+        this.sourceWordCount = quads.length;
+        var display = PredictionDisplayGeometry.build(quads, terrainFirst, terrainCount, aquaticCounts, cellAxis);
+        this.displayRanges = display.ranges();
+        long rangeBytes = 0;
+        if (displayRanges != null) for (var level : displayRanges) for (var range : level)
+            if (range != null) rangeBytes += 64L + range.first.length * 8L;
+        this.displayRangeBytes = rangeBytes;
+        this.quads = display.words();
+        this.wordCount = this.quads.length;
+        this.geometryStats = PredictionGeometryStats.measure(this.quads);
+        this.occlusionBounds = new PredictionMeshletBounds(this.quads);
+        this.ownershipRuns = new PredictionOwnershipRuns(this.quads);
+        this.storageWordCount = this.quads.length;
         this.cellAxis = cellAxis;
         this.terrainQuadCount = terrainQuadCount;
         this.terrainRangeFirst = terrainFirst;
         this.terrainRangeCount = terrainCount;
         this.waterRangeFirst = waterFirst;
         this.waterRangeCount = waterCount;
+        int waterTotal = 0;
+        for (int value : waterCount) waterTotal += value;
+        this.waterQuadCount = waterTotal;
+        this.opaqueStorageWordCount = this.quads.length - waterTotal * STRIDE_INTS;
+        this.waterStorageWordCount = waterTotal * STRIDE_INTS;
         this.downFaces = downFaces;
         this.spriteQuadCount = spriteQuadCount;
     }
@@ -195,6 +336,11 @@ final class PredictionPackedMesh {
         if (words == null) words = PredictionMeshRestore.peek(this);
         if (words == null) words = restoreUploadWords();
         return PredictionGpuEncoding.decode(words, paletteBaseTexel, quadCount());
+    }
+
+    int[] cacheWords() {
+        int[] words = quads();
+        return words.length == sourceWordCount ? words : Arrays.copyOf(words, sourceWordCount);
     }
 
     boolean downFaces() {

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.nio.file.Path;
 import java.lang.reflect.Proxy;
 import java.util.Random;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -37,10 +38,28 @@ class FreeTerraForgedNativeFiltersTest {
         assertEquals(0x7fc00000, data.getInt(0));
     }
 
+    @Test void filterSeedUsesTheReleasedWorldSeedConversion() throws Exception {
+        var variant = FreeTerraForgedCompatTest.releaseVariant();
+        var seedType = FreeTerraForgedCompatTest.releaseLoader().loadClass(variant.worldgenClass("util.Seed"));
+        for (long worldSeed : new long[]{0, -918273, Long.MIN_VALUE, Long.MAX_VALUE, 918273645123L}) {
+            Object seed;
+            int expected;
+            if (variant == FreeTerraForgedVariant.CURRENT) {
+                seed = seedType.getConstructor(long.class).newInstance(worldSeed);
+                expected = (int) seedType.getMethod("toInt", long.class).invoke(null, worldSeed);
+            } else {
+                seed = seedType.getConstructor(int.class).newInstance((int) worldSeed);
+                expected = (int) worldSeed;
+            }
+            assertEquals(expected, FreeTerraForgedNativeFilters.filterSeed(seed));
+        }
+    }
+
     @Test void optionalMixinMatchesReleasedTileEntryPoint() throws Exception {
         var target = new org.objectweb.asm.tree.ClassNode();
+        var variant = FreeTerraForgedCompatTest.releaseVariant();
         try (var jar = new java.util.jar.JarFile(System.getProperty("vss.freeTerraForgedJar"));
-             var in = jar.getInputStream(jar.getJarEntry("raccoonman/reterraforged/world/worldgen/WorldFilters.class"))) {
+             var in = jar.getInputStream(jar.getJarEntry(variant.worldgenClass("WorldFilters").replace('.', '/') + ".class"))) {
             new org.objectweb.asm.ClassReader(in).accept(target, 0);
         }
         var mixin = new org.objectweb.asm.tree.ClassNode();
@@ -56,7 +75,7 @@ class FreeTerraForgedNativeFiltersTest {
                 for (int i = 0; i < a.values.size(); i += 2) values.put((String) a.values.get(i), a.values.get(i + 1));
                 var selectors = (java.util.List<?>) values.get("method");
                 for (Object selector : selectors) {
-                    assertEquals(1, target.methods.stream().filter(m -> selector.equals(m.name + m.desc)).count()); matches++;
+                    matches += (int) target.methods.stream().filter(m -> selector.equals(m.name + m.desc)).count();
                 }
                 assertEquals(true, values.get("cancellable"));
                 assertEquals(false, values.get("remap"));
@@ -68,16 +87,20 @@ class FreeTerraForgedNativeFiltersTest {
     @Test void completePipelineMatchesReleasedTileFilters() throws Throwable {
         {
             var loader = FreeTerraForgedCompatTest.releaseLoader();
-            String prefix = "raccoonman.reterraforged.world.worldgen.";
+            var variant = FreeTerraForgedCompatTest.releaseVariant();
+            boolean modern = variant == FreeTerraForgedVariant.CURRENT;
+            String prefix = variant.worldgenClass("");
             var cell = loader.loadClass(prefix + "cell.Cell");
             var filterable = loader.loadClass(prefix + "densityfunction.tile.filter.Filterable");
             var modifier = loader.loadClass(prefix + "densityfunction.tile.filter.Modifier");
-            var erosionType = loader.loadClass("raccoonman.reterraforged.data.worldgen.preset.settings.FilterSettings$Erosion");
-            var smoothingType = loader.loadClass("raccoonman.reterraforged.data.worldgen.preset.settings.FilterSettings$Smoothing");
-            var filterSettingsType = loader.loadClass("raccoonman.reterraforged.data.worldgen.preset.settings.FilterSettings");
+            var erosionType = loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.FilterSettings$Erosion");
+            var smoothingType = loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.FilterSettings$Smoothing");
+            var filterSettingsType = loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.FilterSettings");
             var access = new FreeTerraForgedNativeFilters.Access(loader);
             long javaTime = 0, nativeTime = 0;
+            for (int worldHeight : modern ? new int[]{128, 384, 512} : new int[]{256})
             for (int side : new int[]{32, 64, 96, 256}) for (int seed : new int[]{0, -918273, Integer.MAX_VALUE}) for (boolean optional : new boolean[]{false, true}) {
+                int scale = modern ? Math.min(worldHeight, 256) : worldHeight;
                 int border = side >= 96 ? 16 : 0;
                 var size = loader.loadClass(prefix + "densityfunction.tile.Size").getMethod("make", int.class, int.class).invoke(null, side - 2 * border, border);
                 Object[] actual = (Object[]) java.lang.reflect.Array.newInstance(cell, side * side);
@@ -89,6 +112,7 @@ class FreeTerraForgedNativeFiltersTest {
                 for (int i = 0; i < actual.length; i++) {
                     actual[i] = cell.getConstructor().newInstance(); expected[i] = cell.getConstructor().newInstance();
                     float height = 0.12f + random.nextFloat() * 0.6f;
+                    if (modern && i % 17 == 0) height += 2.0f;
                     float river = random.nextFloat(); float edge = random.nextFloat();
                     for (Object c : new Object[]{actual[i], expected[i]}) {
                         cell.getField("height").setFloat(c, height);
@@ -105,16 +129,24 @@ class FreeTerraForgedNativeFiltersTest {
                         .newInstance(5, 40, 0.7f, 1.1f, 0.5f, 0.35f);
                 Object smoothingSettings = smoothingType.getConstructor(int.class, float.class, float.class).newInstance(2, 1.8f, 0.55f);
                 Object settings = filterSettingsType.getConstructor(erosionType, smoothingType).newInstance(erosionSettings, smoothingSettings);
-                Object erosionModifier = modifier.getMethod("range", float.class, float.class).invoke(null, 63f / 256, 78f / 256);
-                Object smoothingModifier = modifier.getMethod("range", float.class, float.class).invoke(null, 64f / 256, 183f / 256);
+                Object erosionModifier = modifier.getMethod("range", float.class, float.class).invoke(null, 63f / scale, 78f / scale);
+                Object smoothingModifier = modifier.getMethod("range", float.class, float.class).invoke(null, 64f / scale, 183f / scale);
                 smoothingModifier = modifier.getMethod("invert").invoke(smoothingModifier);
                 var erosionClass = loader.loadClass(prefix + "densityfunction.tile.filter.Erosion");
                 var levelsClass = loader.loadClass(prefix + "cell.heightmap.Levels");
-                Object levels = levelsClass.getConstructor(int.class, int.class).newInstance(256, 63);
-                Class<?> controlClass = loader.loadClass("raccoonman.reterraforged.data.worldgen.preset.settings.WorldSettings$ControlPoints");
-                Object preset = loader.loadClass("raccoonman.reterraforged.data.worldgen.preset.settings.Presets").getMethod("makeRTFDefault").invoke(null);
+                Object levels = modern ? levelsClass.getConstructor(int.class, int.class, int.class, int.class).newInstance(scale, worldHeight, 64, 63)
+                        : levelsClass.getConstructor(int.class, int.class).newInstance(worldHeight, 63);
+                Class<?> controlClass = loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.WorldSettings$ControlPoints");
+                Object preset = FreeTerraForgedCompatTest.defaultPreset(loader);
                 Object worldSettings = preset.getClass().getMethod("world").invoke(preset);
                 Object control = worldSettings.getClass().getField("controlPoints").get(worldSettings);
+                Object ceiling = null;
+                if (modern) {
+                    Object properties = worldSettings.getClass().getField("properties").get(worldSettings);
+                    properties.getClass().getField("worldHeight").setInt(properties, worldHeight);
+                    ceiling = loader.loadClass(prefix + "densityfunction.tile.filter.TerrainCeiling")
+                            .getMethod("make", properties.getClass()).invoke(null, properties);
+                }
                 long start = System.nanoTime();
                 if (optional) {
                 Object erosion = erosionClass.getConstructor(int.class, int.class, erosionType, modifier).newInstance(seed + 12768, side, erosionSettings, erosionModifier);
@@ -124,24 +156,29 @@ class FreeTerraForgedNativeFiltersTest {
                 smoothingClass.getMethod("apply", filterable, int.class, int.class, int.class).invoke(smoothing, expectedMap, 0, 0, 2);
                 }
                 var steepnessClass = loader.loadClass(prefix + "densityfunction.tile.filter.Steepness");
-                Object steepness = steepnessClass.getConstructor(int.class, float.class, float.class).newInstance(1, 10f, 62f / 256);
+                Object steepness = steepnessClass.getConstructor(int.class, float.class, float.class).newInstance(1, 10f, 62f / scale);
                 steepnessClass.getMethod("apply", filterable, int.class, int.class, int.class).invoke(steepness, expectedMap, 0, 0, 1);
                 var beachClass = loader.loadClass(prefix + "densityfunction.tile.filter.BeachDetect");
                 Object beach = beachClass.getConstructor(levelsClass, controlClass).newInstance(levels, control);
                 beachClass.getMethod("apply", filterable, int.class, int.class, int.class).invoke(beach, expectedMap, 0, 0, 1);
-                if (optional) {
+                if (optional && !modern) {
                     var correctionClass = loader.loadClass(prefix + "densityfunction.tile.filter.NoiseCorrection");
                     Object correction = correctionClass.getConstructor(levelsClass).newInstance(levels);
                     correctionClass.getMethod("apply", filterable, int.class, int.class, int.class).invoke(correction, expectedMap, 0, 0, 1);
                 }
+                if (ceiling != null) ceiling.getClass().getMethod("apply", filterable, int.class, int.class, int.class)
+                        .invoke(ceiling, expectedMap, 0, 0, 1);
                 javaTime += System.nanoTime() - start;
-                var options = FreeTerraForgedNativeFilters.options(settings, seed, 256, 63);
+                var options = FreeTerraForgedNativeFilters.options(settings, seed, levels);
+                assertEquals(scale, options.get("world_height").getAsInt());
+                options.addProperty("noise_correction", !modern);
+                FreeTerraForgedNativeFilters.addTerrainCeiling(options, ceiling);
                 options.addProperty("optional", optional);
                 options.addProperty("beach_transition", controlClass.getField("beach").getFloat(control));
                 start = System.nanoTime(); access.apply(actualMap, options); nativeTime += System.nanoTime() - start;
                 for (int i = 0; i < actual.length; i++) for (String name : new String[]{"height", "sediment", "heightErosion", "gradient"}) {
                     var field = cell.getField(name);
-                    assertEquals(field.getFloat(expected[i]), field.getFloat(actual[i]), 0.0f, "side=" + side + " seed=" + seed + " cell=" + i + " field=" + name);
+                    assertEquals(field.getFloat(expected[i]), field.getFloat(actual[i]), 0.0f, "worldHeight=" + worldHeight + " side=" + side + " seed=" + seed + " cell=" + i + " field=" + name);
                 }
                 for (int i = 0; i < actual.length; i++) assertSame(cell.getField("terrain").get(expected[i]), cell.getField("terrain").get(actual[i]), "terrain cell=" + i);
             }
@@ -150,7 +187,7 @@ class FreeTerraForgedNativeFiltersTest {
     }
 
     private static Object tile(ClassLoader loader, Class<?> filterable, Class<?> cell, Object[] cells, Object size, int side) throws Exception {
-        String prefix = "raccoonman.reterraforged.";
+        String prefix = FreeTerraForgedVariant.detect(loader).packagePrefix;
         Class<?> tile = loader.loadClass(prefix + "world.worldgen.densityfunction.tile.Tile");
         Class<?> resource = loader.loadClass(prefix + "concurrent.Resource");
         Object chunks = java.lang.reflect.Array.newInstance(loader.loadClass(tile.getName() + "$Chunk"), 1);

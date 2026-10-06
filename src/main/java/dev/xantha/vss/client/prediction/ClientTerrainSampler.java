@@ -13,9 +13,6 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeSource;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
-import net.minecraft.resources.ResourceKey;
-import net.minecraft.resources.ResourceLocation;
 
 /**
  * Small deterministic sampler owned by VSS. It deliberately has no dependency
@@ -23,25 +20,25 @@ import net.minecraft.resources.ResourceLocation;
  * worker thread while the authoritative VSS columns arrive in the foreground.
  * Subclasses (the rust graph sampler) replace surfaceY/sample wholesale.
  */
-public class ClientTerrainSampler {
+public class ClientTerrainSampler implements AutoCloseable {
     private final long seed;
     private final DimensionProfile profile;
-    private final long dimensionSalt;
+    private long dimensionSalt;
+    private java.util.function.Supplier<String> legacyCacheIdentity;
     private final NoiseBasedChunkGenerator generator;
     private final RandomState randomState;
     private final LevelHeightAccessor heights;
     private final int seaLevel;
     private final DensityFunction finalDensity;
     private final DensityFunction initialDensity;
+    private final DensityCompilation densityCompilation;
     private final boolean initialDensityIsConstant;
     private final boolean lavaOcean;
     private final BiomeSource biomeSource;
     private final net.minecraft.world.level.biome.Climate.Sampler climate;
+    private final PredictionClimateSampler climateOptimization;
     private final PredictionBiomeCache biomeCache;
     private final Map<Holder<Biome>, Integer> biomeIndices;
-    private final ClientFeatureHintCache featureHints;
-    private final ClientStructureHintCache structureHints;
-    private final PredictionFeatureStampCache featureStamps;
     private net.minecraft.core.RegistryAccess decorationAccess;
     private com.google.gson.JsonObject structureTemplates = new com.google.gson.JsonObject();
     private final int floorY;
@@ -67,22 +64,21 @@ public class ClientTerrainSampler {
     public ClientTerrainSampler(long seed, DimensionProfile profile) {
         this.seed = seed;
         this.profile = profile;
-        this.dimensionSalt = profile.fingerprint() ^ profile.dimension().hashCode();
+        this.dimensionSalt = PredictionCacheStorage.fingerprint(profile) ^ profile.dimension().hashCode();
         this.generator = null;
         this.randomState = null;
         this.heights = null;
         this.seaLevel = profile.minY() + Math.min(profile.height() - 1, 63 - profile.minY());
         this.finalDensity = null;
         this.initialDensity = null;
+        this.densityCompilation = null;
         this.initialDensityIsConstant = false;
         this.lavaOcean = false;
         this.biomeSource = null;
         this.climate = null;
+        this.climateOptimization = null;
         this.biomeCache = null;
         this.biomeIndices = Map.of();
-        this.featureHints = null;
-        this.structureHints = new ClientStructureHintCache(java.util.List.of());
-        this.featureStamps = new PredictionFeatureStampCache();
         this.floorY = profile.minY();
         this.ceilingY = profile.minY() + profile.height() - 1;
         this.customSurface = null;
@@ -100,22 +96,21 @@ public class ClientTerrainSampler {
     private ClientTerrainSampler(long seed, DimensionProfile profile, TerrainFunction surface) {
         this.seed = seed;
         this.profile = profile;
-        this.dimensionSalt = profile.fingerprint() ^ profile.dimension().hashCode();
+        this.dimensionSalt = PredictionCacheStorage.fingerprint(profile) ^ profile.dimension().hashCode();
         this.generator = null;
         this.randomState = null;
         this.heights = null;
         this.seaLevel = profile.minY() + Math.min(profile.height() - 1, 63 - profile.minY());
         this.finalDensity = null;
         this.initialDensity = null;
+        this.densityCompilation = null;
         this.initialDensityIsConstant = false;
         this.lavaOcean = false;
         this.biomeSource = null;
         this.climate = null;
+        this.climateOptimization = null;
         this.biomeCache = null;
         this.biomeIndices = Map.of();
-        this.featureHints = null;
-        this.structureHints = new ClientStructureHintCache(java.util.List.of());
-        this.featureStamps = new PredictionFeatureStampCache();
         this.floorY = profile.minY();
         this.ceilingY = profile.minY() + profile.height() - 1;
         this.customSurface = surface;
@@ -145,16 +140,15 @@ public class ClientTerrainSampler {
         this.seaLevel = source.seaLevel;
         this.finalDensity = source.finalDensity;
         this.initialDensity = source.initialDensity;
+        this.densityCompilation = source.densityCompilation;
         this.initialDensityIsConstant = source.initialDensityIsConstant;
         this.cacheExactHeights = source.cacheExactHeights;
         this.lavaOcean = source.lavaOcean;
         this.biomeSource = source.biomeSource;
         this.climate = source.climate;
+        this.climateOptimization = source.climateOptimization;
         this.biomeCache = source.biomeCache;
         this.biomeIndices = source.biomeIndices;
-        this.featureHints = source.featureHints;
-        this.structureHints = source.structureHints;
-        this.featureStamps = source.featureStamps;
         this.decorationAccess = source.decorationAccess;
         this.structureTemplates = source.structureTemplates;
         this.floorY = source.floorY;
@@ -164,18 +158,16 @@ public class ClientTerrainSampler {
     }
 
     ClientTerrainSampler(long seed, DimensionProfile profile, NoiseBasedChunkGenerator generator,
-                         RandomState randomState, LevelHeightAccessor heights, int seaLevel,
-                         Iterable<ResourceLocation> structureIds) {
-        this(seed, profile, generator, randomState, heights, seaLevel, structureIds, null, null);
+                         RandomState randomState, LevelHeightAccessor heights, int seaLevel) {
+        this(seed, profile, generator, randomState, heights, seaLevel, null, null);
     }
 
     ClientTerrainSampler(long seed, DimensionProfile profile, NoiseBasedChunkGenerator generator,
                          RandomState randomState, LevelHeightAccessor heights, int seaLevel,
-                         Iterable<ResourceLocation> structureIds,
                          ClientWorldgenRegistries registries, net.minecraft.core.RegistryAccess access) {
         this.seed = seed;
         this.profile = profile;
-        this.dimensionSalt = profile.fingerprint() ^ profile.dimension().hashCode();
+        this.dimensionSalt = PredictionCacheStorage.fingerprint(profile) ^ profile.dimension().hashCode();
         this.generator = generator;
         this.randomState = randomState;
         this.heights = heights;
@@ -186,15 +178,18 @@ public class ClientTerrainSampler {
         // again from a sibling parent and a single-slot memo catches it.
         DensityFunction[] roots = DensityMemo.wrapRoots(
                 router.finalDensity(), router.initialDensityWithoutJaggedness());
-        this.finalDensity = roots[0];
-        this.initialDensity = roots[1];
         var rawProperties = new PredictionRawDensity();
         this.cacheExactHeights = !"off".equals(System.getProperty("vss.javaHeightCache"))
-                && rawProperties.inspect(finalDensity).pure() && rawProperties.inspect(initialDensity).pure();
+                && rawProperties.inspect(roots[0]).pure() && rawProperties.inspect(roots[1]).pure();
+        this.densityCompilation = new DensityCompilation(roots);
+        DensityFunction[] compiledRoots = densityCompilation.roots();
+        this.finalDensity = compiledRoots[0];
+        this.initialDensity = compiledRoots[1];
         this.initialDensityIsConstant = initialDensity.minValue() == initialDensity.maxValue();
         this.lavaOcean = generator.generatorSettings().value().defaultFluid().is(Blocks.LAVA);
         this.biomeSource = generator.getBiomeSource();
-        this.climate = randomState.sampler();
+        this.climateOptimization = new PredictionClimateSampler(randomState.sampler());
+        this.climate = climateOptimization.sampler();
         this.biomeCache = new PredictionBiomeCache(biomeSource, climate);
         Map<Holder<Biome>, Integer> indices = new HashMap<>();
         int index = 0;
@@ -202,11 +197,6 @@ public class ClientTerrainSampler {
             indices.put(biome, index++);
         }
         this.biomeIndices = Map.copyOf(indices);
-        this.featureHints = new ClientFeatureHintCache(biomeSource.possibleBiomes());
-        this.structureHints = registries == null
-                ? new ClientStructureHintCache(structureIds)
-                : new ClientStructureHintCache(registries.structurePlacements(), seed);
-        this.featureStamps = new PredictionFeatureStampCache(registries, access, generator, this);
         this.decorationAccess = registries == null ? access : registries.access();
         if (registries != null) this.structureTemplates = registries.templates();
         this.floorY = heights.getMinBuildHeight();
@@ -222,6 +212,27 @@ public class ClientTerrainSampler {
 
     public DimensionProfile profile() {
         return profile;
+    }
+
+    long cacheFingerprint() { return dimensionSalt ^ profile.dimension().hashCode(); }
+
+    /** Bound before publication; migrated records keep their original sampling salt. */
+    final void bindCacheFingerprint(long fingerprint) {
+        dimensionSalt = fingerprint ^ profile.dimension().hashCode();
+        ClientTerrainSampler context = decorationContext();
+        if (context != this) context.bindCacheFingerprint(fingerprint);
+    }
+
+    final void legacyCacheIdentity(java.util.function.Supplier<String> identity) { legacyCacheIdentity = identity; }
+    final java.util.function.Supplier<String> legacyCacheIdentity() { return legacyCacheIdentity; }
+
+    java.util.List<String> cacheBiomes() {
+        ClientTerrainSampler context = decorationContext();
+        if (context != this) return context.cacheBiomes();
+        String[] names = new String[biomeIndices.size()];
+        biomeIndices.forEach((biome, index) -> names[index] = biome.unwrapKey()
+                .map(key -> key.location().toString()).orElse(""));
+        return java.util.List.of(names);
     }
 
     /** Ceiling worlds need occupancy throughout the column, not an exterior heightfield. */
@@ -321,10 +332,7 @@ public class ClientTerrainSampler {
     }
 
     public int groundY(int blockX, int blockZ) {
-        if (customSurface != null) {
-            return surfaceY(blockX, blockZ);
-        }
-        if (generator == null) {
+        if (customSurface != null || generator == null) {
             return surfaceY(blockX, blockZ);
         }
         return densitySurfaceY(blockX, blockZ);
@@ -366,16 +374,27 @@ public class ClientTerrainSampler {
         return biomeCache == null ? "unavailable" : biomeCache.diagnostics();
     }
 
+    String densityCompilerDiagnostics() {
+        return densityCompilation == null ? "state=unavailable" : densityCompilation.diagnostics();
+    }
+
+    String climateCompilerDiagnostics() {
+        return climateOptimization == null ? "state=unavailable" : climateOptimization.diagnostics();
+    }
+
+    void cancelDensityCompilation() {
+        if (densityCompilation != null) densityCompilation.close();
+        if (climateOptimization != null) climateOptimization.close();
+    }
+
+    @Override public void close() { cancelDensityCompilation(); }
+
     com.google.gson.JsonObject structureTemplates() { return structureTemplates; }
 
     net.minecraft.core.RegistryAccess decorationAccess() {
         return decorationAccess;
     }
 
-    /** Expensive backends can publish a smaller coverage grid before final refinement. */
-    // Publish a cheap coarse grid first.  Terrain mods often use the Java
-    // fallback; requiring the final 64x64 grid here made the first visible
-    // tile wait for thousands of density/NoiseChunk samples.
     /** Stable resource-colormap identity, or unavailable for opaque color providers. */
     long colorCacheFingerprint() {
         return colorCacheFingerprint(PredictionColorCache.RESOURCES);
@@ -388,58 +407,21 @@ public class ClientTerrainSampler {
                 ? resources.fingerprint() : Long.MIN_VALUE;
     }
 
+    /** Expensive backends can publish a smaller coverage grid before final refinement. */
     int initialTerrainCellAxis(int lod) { return generator == null ? VssLodLayout.TILE_QUADS : PredictionWorkOrder.initialCellAxis(lod); }
 
     /** Samples all metadata needed by the Packed-quad mesh pipeline. */
     public ClientColumnSample sample(int blockX, int blockZ) {
+        if (generator != null && biomeSource != null && climate != null)
+            return sampleDecodedSurface(blockX, blockZ);
         int surface = surfaceY(blockX, blockZ);
-        if (generator == null || biomeSource == null || climate == null) {
-            return new ClientColumnSample(surface, surface, -1,
-                    PredictionMaterialPalette.representativeBlock(null, false, false, false), 0,
-                    0, 0, 0, 0, 0, 0,
-                    PredictionMaterialPalette.dirtIndex(),
-                    PredictionMaterialPalette.stoneIndex(),
-                    ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
-                    ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
-        }
-        boolean submerged = surface < seaLevel;
-        int fluidKind = submerged ? (lavaOcean ? 2 : 1) : 0;
-        int fluidY = submerged ? seaLevel : surface;
-        int flags = 0;
-        Holder<Biome> biome = noiseBiome(
-                QuartPos.fromBlock(blockX), QuartPos.fromBlock(surface - 1),
-                QuartPos.fromBlock(blockZ));
-        Biome biomeValue = biome.value();
-        if ((fluidKind == 1 && biomeValue.coldEnoughToSnow(
-                new net.minecraft.core.BlockPos(blockX, fluidY - 1, blockZ)))
-                || (fluidKind == 0 && biomeValue.coldEnoughToSnow(
-                new net.minecraft.core.BlockPos(blockX, surface, blockZ)))) {
-            flags |= fluidKind == 1 ? ClientColumnSample.FLAG_SNOW | ClientColumnSample.FLAG_ICE
-                    : ClientColumnSample.FLAG_SNOW;
-        }
-        int biomeIndex = biomeIndices.getOrDefault(biome, ClientColumnSample.NO_BLOCK);
-        ClientFeatureHintCache.Hint hint = featureHints.hint(biome);
-        int treeKind = hint.treeKind();
-        int treeDensity = hint.density();
-        int treeHeight = treeKind == 0 ? 0
-                : 5 + (int) (featureHash(blockX + 17, blockZ - 31) % 5);
-        // Feature-list hints cannot establish placement. The Java density
-        // fallback leaves trees absent until a placement sample is available.
-        int[] spans = spans(blockX, blockZ, surface);
-        Optional<ResourceKey<Biome>> biomeKey = biome.unwrapKey();
-        String biomePath = biomeKey.map(key -> key.location().getPath()).orElse("");
-        int topBlock = PredictionMaterialPalette.representativeBlock(biomePath,
-                (flags & ClientColumnSample.FLAG_SNOW) != 0, lavaOcean,
-                (flags & ClientColumnSample.FLAG_TREE_HERE) != 0);
-        int structureIndex = structureHints.index(blockX, blockZ, biomeIndex,
-                biomeKey.map(ResourceKey::location).orElse(null));
-        return resolveSurface(new ClientColumnSample(surface, fluidY, biomeIndex,
-                topBlock,
-                structureIndex,
-                treeKind, treeDensity, treeHeight, fluidKind, flags, hint.groundKind(),
+        return new ClientColumnSample(surface, surface, -1,
+                PredictionMaterialPalette.representativeBlock(null, false, false, false), 0,
+                0, 0, 0, 0, 0, 0,
                 PredictionMaterialPalette.dirtIndex(),
                 PredictionMaterialPalette.stoneIndex(),
-                spans[0], spans[1], spans[2], spans[3]), blockX, blockZ, this::surfaceY);
+                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
+                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
 
     /**
@@ -534,6 +516,10 @@ public class ClientTerrainSampler {
     public ClientColumnSample sampleSurface(int blockX, int blockZ) {
         // Native/custom samplers override sample and must keep that backend.
         if (generator == null || biomeSource == null || climate == null) return sample(blockX, blockZ);
+        return sampleDecodedSurface(blockX, blockZ);
+    }
+
+    private ClientColumnSample sampleDecodedSurface(int blockX, int blockZ) {
         int surface = surfaceY(blockX, blockZ);
         boolean submerged = surface < seaLevel;
         int fluidKind = submerged ? (lavaOcean ? 2 : 1) : 0;
@@ -565,32 +551,12 @@ public class ClientTerrainSampler {
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
 
-    private long featureHash(int blockX, int blockZ) {
-        long value = seed ^ dimensionSalt ^ ((long) blockX * 0x9E3779B97F4A7C15L)
-                ^ ((long) blockZ * 0xC2B2AE3D27D4EB4FL);
-        value ^= value >>> 30;
-        value *= 0xBF58476D1CE4E5B9L;
-        value ^= value >>> 27;
-        value *= 0x94D049BB133111EBL;
-        value ^= value >>> 31;
-        // Tree density is expressed in the same 0..1023 domain as the
-        // feature placement threshold below (for example, 48 means about
-        // 4.7% of columns).  The old 0..99 modulus made a density of 48
-        // select nearly half of all columns and turned coarse LOD tiles into
-        // a wall of detached green canopy boxes.
-        return Math.floorMod(value, 1024);
-    }
-
     public int seaLevel() {
         return seaLevel;
     }
 
     public boolean exactWorldgen() {
         return generator != null || customSurface != null;
-    }
-
-    PredictionFeatureStampCache featureStamps() {
-        return featureStamps;
     }
 
     public int fluidColor() {
@@ -725,85 +691,6 @@ public class ClientTerrainSampler {
         while (high - low > 1) {
             int mid = low + (high - low) / 2;
             if (solid(blockX, mid, blockZ)) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        return low;
-    }
-
-    private int[] spans(int blockX, int blockZ, int surface) {
-        int[] result = {ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
-                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN};
-        if (initialDensityIsConstant) {
-            return result;
-        }
-        int estimate = estimateSurface(blockX, blockZ);
-        int floor = Math.max(Math.max(estimate - 4, surface - 96), floorY);
-        if (surface - estimate < 8 || surface - floor <= 2) {
-            return result;
-        }
-        int first = firstBelow(blockX, blockZ, surface - 1, floor, false);
-        if (first == Integer.MIN_VALUE) {
-            return result;
-        }
-        int second = firstBelow(blockX, blockZ, first, floor, true);
-        if (second == Integer.MIN_VALUE) {
-            return new int[]{first + 1, ClientColumnSample.NO_SPAN,
-                    ClientColumnSample.NO_SPAN, estimate};
-        }
-        if (first - second >= 2) {
-            int third = firstBelow(blockX, blockZ, second, floor, false);
-            return new int[]{first + 1, second + 1,
-                    third == Integer.MIN_VALUE ? ClientColumnSample.NO_SPAN : third + 1,
-                    estimate};
-        }
-        return spansContinue(blockX, blockZ, floor, estimate, second);
-    }
-
-    private int[] spansContinue(int blockX, int blockZ, int floor, int estimate, int start) {
-        int current = start;
-        while (current != Integer.MIN_VALUE) {
-            int first = firstBelow(blockX, blockZ, current, floor, false);
-            if (first == Integer.MIN_VALUE) {
-                return new int[]{current + 1, ClientColumnSample.NO_SPAN,
-                        ClientColumnSample.NO_SPAN, estimate};
-            }
-            int second = firstBelow(blockX, blockZ, first, floor, true);
-            if (second == Integer.MIN_VALUE) {
-                return new int[]{first + 1, ClientColumnSample.NO_SPAN,
-                        ClientColumnSample.NO_SPAN, estimate};
-            }
-            if (first - second >= 2) {
-                int third = firstBelow(blockX, blockZ, second, floor, false);
-                return new int[]{first + 1, second + 1,
-                        third == Integer.MIN_VALUE ? ClientColumnSample.NO_SPAN : third + 1,
-                        estimate};
-            }
-            current = second;
-        }
-        return new int[]{ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
-                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN};
-    }
-
-    private int firstBelow(int blockX, int blockZ, int startY, int stopY, boolean targetSolid) {
-        int previous = startY;
-        int y = floorY + Math.floorDiv(startY - 1 - floorY, 8) * 8;
-        while (y > stopY) {
-            if (solid(blockX, y, blockZ) != targetSolid) {
-                return refineBoundary(blockX, blockZ, previous, y, targetSolid);
-            }
-            previous = y;
-            y -= 8;
-        }
-        return Integer.MIN_VALUE;
-    }
-
-    private int refineBoundary(int blockX, int blockZ, int high, int low, boolean targetSolid) {
-        while (high - low > 1) {
-            int mid = low + (high - low) / 2;
-            if (solid(blockX, mid, blockZ) == targetSolid) {
                 low = mid;
             } else {
                 high = mid;

@@ -122,6 +122,21 @@ class ClientConnectionIdentityTest {
     }
 
     @Test
+    void domainAndIpReconnectKeepPredictionScopeWhenIdentityArrivesDuringPlay() {
+        ClientConnectionIdentity.acceptServerIdentity("7K4M9PXA", true, "");
+        ClientConnectionIdentity.beginSession("play.example.com:25565", false);
+        String domainScope = ClientConnectionIdentity.currentPredictionScope();
+
+        ClientConnectionIdentity.endSession();
+        ClientConnectionIdentity.beginSession("192.0.2.25:25565", false);
+        assertEquals("server:192.0.2.25:25565", ClientConnectionIdentity.currentPredictionScope());
+        ClientConnectionIdentity.acceptServerIdentity("7K4M9PXA", true, "");
+
+        assertEquals("vss:7k4m9pxa", domainScope);
+        assertEquals(domainScope, ClientConnectionIdentity.currentPredictionScope());
+    }
+
+    @Test
     void changingEndpointRenamesAndReusesTheStableCache() throws IOException {
         ClientConnectionIdentity.acceptServerIdentity("7K4M9PXA", true, "");
         ClientConnectionIdentity.beginSession("alpha.example:25565", false);

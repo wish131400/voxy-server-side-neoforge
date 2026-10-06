@@ -31,13 +31,38 @@ class ClientColumnTransferAssemblerTest {
     }
 
     @Test
-    void duplicatePartRejectsAndRemovesWholeTransfer() {
+    void identicalDuplicatePartDoesNotDiscardOrCountTheTransferTwice() {
         ClientColumnTransferAssembler assembler = new ClientColumnTransferAssembler(4, 1_000_000L);
         VoxelColumnS2CPayload first = part(7, 42L, 0, 2, 0, new int[0]);
 
         assertEquals(OfferStatus.ACCEPTED, assembler.offer(first, false, false, 0, 0L, 1L).status());
-        assertEquals(OfferStatus.REJECTED, assembler.offer(first, false, false, 0, 0L, 2L).status());
+        long bytes = assembler.activeBytes();
+        assertEquals(OfferStatus.ACCEPTED, assembler.offer(first, false, false, 0, 0L, 2L).status());
+        assertEquals(1, assembler.activeLogicalColumns());
+        assertEquals(bytes, assembler.activeBytes());
+        assertEquals(OfferStatus.COMPLETED,
+                assembler.offer(part(7, 42L, 1, 2, 0, new int[0]), false, false, 0, 0L, 3L).status());
         assertEquals(0, assembler.activeLogicalColumns());
+    }
+
+    @Test
+    void conflictingDuplicateStillRejectsTheTransfer() {
+        ClientColumnTransferAssembler assembler = new ClientColumnTransferAssembler(4, 1_000_000L);
+        assembler.offer(part(7, 42L, 0, 2, 0, new int[0]), false, false, 0, 0L, 1L);
+        VoxelColumnS2CPayload conflicting = new VoxelColumnS2CPayload(
+                7, 0, 0, null, 100L, new byte[] {1}, true, 42L, 0, 2, new int[0]);
+        assertEquals(OfferStatus.REJECTED,
+                assembler.offer(conflicting, false, false, 0, 0L, 2L).status());
+        assertEquals(0, assembler.activeLogicalColumns());
+    }
+
+    @Test
+    void queueAcknowledgementKeepsPartialTransferWithoutResendingData() {
+        ClientColumnTransferAssembler assembler = new ClientColumnTransferAssembler(4, 1_000_000L);
+        assembler.offer(part(7, 42L, 0, 2, 0, new int[0]), false, false, 0, 0L, 1L);
+        assembler.refreshRequest(7, 10L);
+        assertTrue(assembler.expireIdle(12L, 5L).isEmpty());
+        assertEquals(1, assembler.expireIdle(16L, 5L).size(), "disconnected transfers must still expire");
     }
 
     @Test
@@ -97,4 +122,3 @@ class ClientColumnTransferAssemblerTest {
                 replacementSectionYs);
     }
 }
-

@@ -24,15 +24,20 @@ class RustDecorationReuseTest {
     }
 
     private static RustTerrainSampler sampler(boolean orientedSurface) throws Exception {
-        var doc = LithostitchedNativeTest.document();
+        return sampler(orientedSurface, false);
+    }
+
+    private static RustTerrainSampler sampler(boolean orientedSurface, boolean interior) throws Exception {
+        var doc = interior ? PredictionNetherDecorationTest.nativeDocument("minecraft:nether_wastes")
+                : LithostitchedNativeTest.document();
         doc.add("possible_biomes", new JsonArray());
         if (orientedSurface) {
             doc.getAsJsonObject("settings").add("surface_rule", com.google.gson.JsonParser.parseString("""
                     {"type":"minecraft:block","result_state":{"Name":"minecraft:oak_log","Properties":{"axis":"x"}}}
                     """));
         }
-        var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
-                -64, 384, "noise", "minecraft:overworld", 1L);
+        var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace(interior ? "the_nether" : "overworld"),
+                interior ? 0 : -64, interior ? 256 : 384, "noise", interior ? "minecraft:nether" : "minecraft:overworld", 1L);
         return new RustTerrainSampler(RustWorldgenBackend.create(1, 0, doc.toString()), profile,
                 new ClientTerrainSampler(1, profile));
     }
@@ -42,6 +47,35 @@ class RustDecorationReuseTest {
         var field = RustTerrainSampler.class.getDeclaredField("points");
         field.setAccessible(true);
         return (Map<Long, int[]>) field.get(sampler);
+    }
+
+    @Test void allWarmNativeColumnPoliciesHonorClosureCancellationAndThreadInterruption() throws Exception {
+        for (boolean interior : new boolean[]{false, true}) for (String stop : new String[]{"close", "cancel", "interrupt"}) {
+            try (var sampler = sampler(false, interior)) {
+                var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, 0, 0);
+                assertEquals(interior, level.interiorTerrain());
+                var exact = level.column(0, 0);
+                assertSame(exact, level.column(0, 0));
+                if (interior) assertNotNull(exact.volume());
+                if (!interior) {
+                    level.useDisplayTerrain(true);
+                    var display = level.column(0, 0);
+                    assertSame(display, level.column(0, 0));
+                    level.useDisplayTerrain(false);
+                }
+                var position = new BlockPos(0, sampler.profile().minY() + 1, 0);
+                var block = level.getBlockState(position);
+                assertSame(block, level.getBlockState(position));
+                if (stop.equals("close")) sampler.close();
+                else if (stop.equals("cancel")) sampler.cancelWork();
+                else Thread.currentThread().interrupt();
+                assertThrows(java.util.concurrent.CancellationException.class, () -> level.column(0, 0), stop + " exact/interior");
+                assertThrows(java.util.concurrent.CancellationException.class, () -> level.getBlockState(position), stop + " retained native block");
+                level.useDisplayTerrain(true);
+                assertThrows(java.util.concurrent.CancellationException.class, () -> level.column(0, 0), stop + " display/interior");
+                if (stop.equals("interrupt")) assertTrue(Thread.currentThread().isInterrupted());
+            } finally { Thread.interrupted(); }
+        }
     }
 
     @Test void decorationRetainsRefinedColumnAfterSharedCacheEviction() throws Exception {
@@ -71,6 +105,8 @@ class RustDecorationReuseTest {
             int exactSize=sharedPoints(sampler).size();
             level.useDisplayTerrain(true);
             assertEquals(display[0],level.column(-16,-16));
+            var retainedDisplay = level.column(-16, -16);
+            assertSame(retainedDisplay, level.column(-16, -16));
             var stats=com.google.gson.JsonParser.parseString(RustWorldgenBackend.decorationQueryStats(sampler.handle())).getAsJsonObject();
             assertEquals(16,stats.get("columns").getAsInt());
             assertEquals(16,stats.get("cached").getAsInt());
@@ -84,8 +120,56 @@ class RustDecorationReuseTest {
             assertEquals(sampler.sample(-16,-16),level.column(-16,-16));
             level.beginStructure();level.setBlock(ground.above(),Blocks.OAK_PLANKS.defaultBlockState(),0,0);level.endFeature(true);
             level.useDisplayTerrain(true);
+            assertSame(retainedDisplay, level.column(-16, -16));
             assertEquals(sampler.sample(-16,-16),level.exteriorColumn(-16,-16));
             assertTrue(level.getBlockState(ground.above()).is(Blocks.OAK_PLANKS));
+            sampler.close();
+            assertThrows(java.util.concurrent.CancellationException.class, () -> level.column(-16, -16));
+        }
+    }
+
+    @Test void failedExactPlacementRestoresSurvivingDisplayColumnPolicy() throws Exception {
+        try (var sampler = sampler()) {
+            var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, -1, -1);
+            int selectedX = -16, selectedZ = -16;
+            // This flat sampler has equal exact/display heights. Seed contrasting retained
+            // immutable records to isolate extraction-policy rollback from density quality.
+            level.useDisplayTerrain(true); level.column(selectedX, selectedZ);
+            level.useDisplayTerrain(false); level.column(selectedX, selectedZ);
+            var displayRecord = sampler.decorationDisplayPage(selectedX, selectedZ)[0].clone();
+            var exactRecord = sampler.surfaceRecord(selectedX, selectedZ).clone();
+            displayRecord[0] = 64; exactRecord[0] = 68;
+            var display = sampler.surfaceSample(displayRecord);
+            var exact = sampler.surfaceSample(exactRecord);
+            var slotMethod = PredictionDecorationLevel.class.getDeclaredMethod("columnSlot", int.class, int.class);
+            slotMethod.setAccessible(true);
+            int slot = (int) slotMethod.invoke(level, selectedX, selectedZ);
+            for (String name : new String[]{"displayColumns", "nativeColumns", "displaySamples", "columns"}) {
+                var cacheField = PredictionDecorationLevel.class.getDeclaredField(name); cacheField.setAccessible(true);
+                if (name.equals("displayColumns")) ((int[][]) cacheField.get(level))[slot] = displayRecord;
+                else if (name.equals("nativeColumns")) ((int[][]) cacheField.get(level))[slot] = exactRecord;
+                else ((ClientColumnSample[]) cacheField.get(level))[slot] = name.equals("displaySamples") ? display : exact;
+            }
+            assertNotEquals(display.surfaceY(), exact.surfaceY());
+            var surviving = new BlockPos(selectedX, Math.max(display.surfaceY(), exact.surfaceY()) + 5, selectedZ);
+            level.useDisplayTerrain(true);
+            level.beginFeature();
+            level.setBlock(surviving, Blocks.OAK_LOG.defaultBlockState(), 0, 0);
+            level.endFeature(true);
+            assertSame(display, level.exteriorColumn(selectedX, selectedZ));
+            level.useDisplayTerrain(false);
+            level.beginFeature();
+            level.setBlock(surviving.above(), Blocks.STONE.defaultBlockState(), 0, 0);
+            assertSame(exact, level.exteriorColumn(selectedX, selectedZ));
+            level.endFeature(false);
+            assertSame(display, level.exteriorColumn(selectedX, selectedZ),
+                    "a rolled-back exact edit must not change extraction ground for the surviving display tree");
+            assertTrue(level.getBlockState(surviving).is(Blocks.OAK_LOG));
+            level.beginFeature();
+            level.setBlock(surviving.above(), Blocks.STONE.defaultBlockState(), 0, 0);
+            level.endFeature(true);
+            assertSame(exact, level.exteriorColumn(selectedX, selectedZ),
+                    "successful exact edits must still retain their extraction policy");
         }
     }
 

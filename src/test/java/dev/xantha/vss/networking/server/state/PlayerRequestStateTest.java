@@ -7,6 +7,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 class PlayerRequestStateTest {
+    @Test
+    void oldClientsGetNoUnknownQueueResponsesAndNewClientsGetPacedMetadata() {
+        PlayerRequestState state = new PlayerRequestState();
+        state.enqueue(new dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload(
+                7, 0, 0, null, 1L, new byte[] {0}), false);
+        assertEquals(0, state.queuedRequestIdsForAck(10_000_000_000L).length);
+        state.setClientCapabilities(dev.xantha.vss.common.VSSConstants.CAPABILITY_QUEUED_ACKNOWLEDGEMENTS);
+        assertEquals(7, state.queuedRequestIdsForAck(10_000_000_000L)[0]);
+        assertEquals(0, state.queuedRequestIdsForAck(11_000_000_000L).length);
+        assertEquals(7, state.queuedRequestIdsForAck(15_000_000_000L)[0]);
+        assertEquals(1, state.queuedPayloadCount(), "status acknowledgements never resend or consume data");
+        state.cancel(7);
+        assertEquals(0, state.queuedRequestIdsForAck(20_000_000_000L).length);
+        assertEquals(0L, state.queuedBytes());
+    }
+
 
     @Test
     void lowEffectiveBandwidthBackpressuresBeforeByteQueueLimit() {

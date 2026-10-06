@@ -9,6 +9,7 @@ import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.common.worldgen.DensityFunctionSnapshot;
 import dev.xantha.vss.common.worldgen.DensityFunctionReferences;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import dev.xantha.vss.common.worldgen.WorldgenRegistryDependencies;
 import java.util.Map;
 import net.minecraft.core.Holder;
@@ -172,16 +173,7 @@ final class WorldgenCodecSnapshot {
         JsonObject noiseSeeds = noiseSeedAliases(access.registryOrThrow(Registries.NOISE).keySet(),
                 mods != null && mods.isLoaded("tectonic"));
         if (!noiseSeeds.isEmpty()) root.add("noise_seed_aliases", noiseSeeds);
-        var rtfPreset = ResourceKey.createRegistryKey(ResourceLocation.parse("reterraforged:worldgen/preset"));
-        if (mods != null && mods.isLoaded("reterraforged")
-                && access.registry(rtfPreset).map(registry -> registry.containsKey(
-                        ResourceLocation.parse("reterraforged:preset"))).orElse(false)) {
-            // FreeTerraForged's RandomState initializer reads these directly,
-            // even though its CellSampler markers do not encode preset holders.
-            dependencies.require(ResourceLocation.parse("reterraforged:worldgen/preset"));
-            dependencies.require(ResourceLocation.parse("reterraforged:worldgen/noise"));
-            root.addProperty("vss_freeterraforged", true);
-        }
+        snapshotFreeTerraForged(root, access, dependencies, id -> mods != null && mods.isLoaded(id));
         if (mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
                 && noise.getBiomeSource() instanceof MultiNoiseBiomeSource) {
             // TerraBlender's positional region grid and per-region climate
@@ -233,6 +225,18 @@ final class WorldgenCodecSnapshot {
             encoded = compress(root);
         }
         return encoded;
+    }
+
+    static void snapshotFreeTerraForged(JsonObject root, RegistryAccess access,
+            WorldgenRegistryDependencies dependencies, java.util.function.Predicate<String> loaded) {
+        for (var variant : FreeTerraForgedVariant.values()) {
+            if (!loaded.test(variant.namespace) || !variant.hasPreset(access)) continue;
+            // Cell markers do not serialize the preset/noise lookups made by RandomState.
+            dependencies.require(ResourceLocation.parse(variant.namespace + ":worldgen/preset"));
+            dependencies.require(ResourceLocation.parse(variant.namespace + ":worldgen/noise"));
+            root.addProperty("vss_freeterraforged", true);
+            return;
+        }
     }
 
     // Tectonic's NoisesMixin changes only the positional RNG name. The

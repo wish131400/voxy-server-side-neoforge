@@ -4,6 +4,10 @@ import com.google.gson.*;
 import com.google.gson.stream.JsonWriter;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 /** Stable object order for persisted worldgen identities; array order is semantic. */
 public final class WorldgenJson {
@@ -15,6 +19,24 @@ public final class WorldgenJson {
         } catch (IOException impossible) { throw new UncheckedIOException(impossible); }
         return text.toString().getBytes(StandardCharsets.UTF_8);
     }
+
+    /** Hash the same canonical bytes without retaining another full snapshot string. */
+    public static String sha256(JsonElement value) {
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            try (var writer = new JsonWriter(new BufferedWriter(new OutputStreamWriter(
+                    new DigestOutputStream(OutputStream.nullOutputStream(), digest), StandardCharsets.UTF_8)))) {
+                writer.setSerializeNulls(true);
+                write(writer, value);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (IOException impossible) {
+            throw new UncheckedIOException(impossible);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new AssertionError(impossible);
+        }
+    }
+
     private static void write(JsonWriter writer, JsonElement value) throws IOException {
         if (value.isJsonObject()) {
             writer.beginObject();

@@ -6,7 +6,6 @@ import static org.lwjgl.opengl.GL43C.*;
 
 /** Bounded shared geometry pages. Retired slices are reusable only after a zero-timeout fence succeeds. */
 final class PredictionTerrainArena {
-    static final PredictionTerrainArena SHARED = new PredictionTerrainArena();
     // Larger pages keep opaque tiles together, reducing texture switches and
     // MDI submissions. This remains a lazy allocation, not a startup reserve.
     static final int PAGE_BYTES = configuredPageMiB() * 1024 * 1024;
@@ -20,6 +19,13 @@ final class PredictionTerrainArena {
      * rather than an eager VRAM reservation. A JVM property is provided for
      * low-VRAM systems and deterministic GPU tests. */
     static final int MAX_PAGES = configuredMaxPages();
+    /** Opaque and transparent geometry use separate page pools. Water is a
+     * small bounded pool so transparent sorting never forces opaque pages to
+     * fragment. Pages are still lazy and only allocated when water exists. */
+    private static final int WATER_MAX_PAGES = Math.max(1,
+            Math.min(MAX_PAGES, Integer.getInteger("vss.indirectWaterPages", 2)));
+    static final PredictionTerrainArena SHARED = new PredictionTerrainArena(MAX_PAGES, "opaque");
+    static final PredictionTerrainArena WATER = new PredictionTerrainArena(WATER_MAX_PAGES, "water");
 
     private static int configuredMaxPages() {
         int mib = Integer.getInteger("vss.indirectArenaMiB", 2048);
@@ -28,7 +34,14 @@ final class PredictionTerrainArena {
     }
     private final List<Page> pages = new ArrayList<>();
     private final ArrayDeque<Slice> retired = new ArrayDeque<>();
+    private final int maxPages;
+    private final String name;
     private int alignment;
+
+    private PredictionTerrainArena(int maxPages, String name) {
+        this.maxPages = maxPages;
+        this.name = name;
+    }
     static boolean supported() {
         try { return !Boolean.getBoolean("vss.disableIndirect") && org.lwjgl.opengl.GL.getCapabilities().OpenGL46; }
         catch (IllegalStateException noContext) { return false; }
@@ -76,7 +89,7 @@ final class PredictionTerrainArena {
         if(length>PAGE_BYTES/2)return null;
         Page selected=null;int offset=-1;
         for(Page page:pages)if((offset=page.allocate(length))>=0){selected=page;break;}
-        if(selected==null){if(pages.size()>=MAX_PAGES)return null;selected=new Page();pages.add(selected);offset=selected.allocate(length);}
+        if(selected==null){if(pages.size()>=maxPages)return null;selected=new Page();pages.add(selected);offset=selected.allocate(length);}
         int texture=glGenTextures();
         try {
             glBindBuffer(GL_TEXTURE_BUFFER,selected.buffer);glBufferSubData(GL_TEXTURE_BUFFER,offset,data);
@@ -95,7 +108,7 @@ final class PredictionTerrainArena {
         slice.fence=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0);retired.addLast(slice);
         reap();
     }
-    void reap(){
+    private void reapLocal(){
         for(int count=0;count<16&&!retired.isEmpty();count++){
             Slice slice=retired.peekFirst();int result=glClientWaitSync(slice.fence,0,0);
             // Fences are in submission order. Later slices cannot become reusable first.
@@ -104,10 +117,22 @@ final class PredictionTerrainArena {
         }
         for(var it=pages.iterator();it.hasNext();){Page page=it.next();if(page.live==0){page.close();it.remove();}}
     }
-    void close(){
+    void reap(){
+        reapLocal();
+        if (this == SHARED) WATER.reapLocal();
+    }
+    private void closeLocal(){
         for(Slice slice:retired)glDeleteSync(slice.fence);retired.clear();
         for(Page page:pages)page.close();pages.clear();alignment=0;
     }
-    String diagnostics(){return "arena={pages="+pages.size()+",bytes="+(long)pages.size()*PAGE_BYTES
-            +",budgetBytes="+(long)MAX_PAGES*PAGE_BYTES+",retired="+retired.size()+"}";}
+    void close(){
+        closeLocal();
+        // Existing callers historically closed SHARED directly. Keep that
+        // lifecycle contract while also disposing the dedicated water pool.
+        if (this == SHARED) WATER.closeLocal();
+    }
+    private String diagnosticsLocal(){return "arena="+name+"{pages="+pages.size()+",bytes="+(long)pages.size()*PAGE_BYTES
+            +",budgetBytes="+(long)maxPages*PAGE_BYTES+",retired="+retired.size()+"}";}
+    String diagnostics(){return diagnosticsLocal()+","+WATER.diagnosticsLocal();}
+    long allocatedBytes() { return (long) pages.size() * PAGE_BYTES; }
 }

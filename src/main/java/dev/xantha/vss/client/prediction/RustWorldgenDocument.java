@@ -31,6 +31,8 @@ final class RustWorldgenDocument {
         private BlockState[] canonicalStates;
         private Map<JsonElement, BlockState> stateLookup;
         private JsonObject colors;
+        private JsonObject compactPalette;
+        private String compactPaletteSerialized;
         private long palette;
 
         void prepare() {
@@ -43,6 +45,8 @@ final class RustWorldgenDocument {
             canonicalStates = list.toArray(BlockState[]::new);
             stateLookup = null;
             colors = null;
+            compactPalette = null;
+            compactPaletteSerialized = null;
             generation = current;
         }
         Map<JsonElement, BlockState> stateLookup() {
@@ -55,6 +59,7 @@ final class RustWorldgenDocument {
         BlockState[] canonicalStates() { return canonicalStates; }
         JsonObject compactPalette() {
             prepare();
+            if (compactPalette != null) return compactPalette;
             JsonArray groups = new JsonArray();
             for (Block block : BuiltInRegistries.BLOCK) {
                 var properties = new ArrayList<Property<?>>(block.getStateDefinition().getProperties());
@@ -82,14 +87,20 @@ final class RustWorldgenDocument {
             }
             JsonObject doc = new JsonObject();
             doc.add("block_definitions", definitions); doc.add("groups", groups);
-            return doc;
+            compactPalette = doc;
+            return compactPalette;
         }
         long palette() {
             prepare();
             if (palette == 0) {
                 var timing = new PredictionInitializationTiming("sharedPalette");
-                JsonObject compact = compactPalette(); timing.mark("encode");
-                String serialized = compact.toString(); timing.mark("serialize");
+                compactPalette(); timing.mark("encode");
+                String serialized = compactPaletteSerialized;
+                if (serialized == null) {
+                    serialized = compactPalette.toString();
+                    compactPaletteSerialized = serialized;
+                }
+                timing.mark("serialize");
                 palette = RustWorldgenBackend.openPalette(serialized); timing.mark("nativeCreate");
                 if (palette == 0) throw new IllegalStateException("Missing native palette");
                 if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
@@ -106,6 +117,7 @@ final class RustWorldgenDocument {
         @Override public void close() {
             if (palette != 0) { RustWorldgenBackend.closePalette(palette); palette = 0; }
             definitions = null; canonicalStates = null; stateLookup = null; colors = null;
+            compactPalette = null; compactPaletteSerialized = null;
         }
     }
 

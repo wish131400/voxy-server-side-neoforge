@@ -19,6 +19,8 @@ import dev.xantha.vss.networking.payloads.WorldgenProfileFragmentS2CPayload;
 import dev.xantha.vss.networking.payloads.LostCityHintsC2SPayload;
 import dev.xantha.vss.networking.payloads.LostCityHintsS2CPayload;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
+import dev.xantha.vss.compat.BandwidthOptimizerCompat;
+import io.netty.channel.Channel;
 import dev.xantha.vss.networking.server.ServerIdentityConfigurationTask;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -84,6 +86,24 @@ public final class VSSNetworking {
             WorldgenProfileTransfer.send(profile, part -> PacketDistributor.sendToPlayer(player, part));
         } else {
             PacketDistributor.sendToPlayer(player, payload);
+        }
+    }
+
+    public static boolean canSendQueuedToPlayer(ServerPlayer player) {
+        Channel channel = player.connection.getConnection().channel();
+        return channel != null && channel.isActive() && channel.isWritable()
+                && !BandwidthOptimizerCompat.isWaitingForClient(channel);
+    }
+
+    public static void sendQueuedToPlayer(ServerPlayer player, CustomPacketPayload payload, Runnable encoded) {
+        try {
+            sendToPlayer(player, payload);
+            // Connection schedules encoding on this event loop. Release our
+            // reservation only after that work, without changing BO's batching.
+            player.connection.getConnection().channel().eventLoop().execute(encoded);
+        } catch (RuntimeException | Error e) {
+            encoded.run();
+            throw e;
         }
     }
 

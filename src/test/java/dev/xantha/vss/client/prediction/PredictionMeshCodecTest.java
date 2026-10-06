@@ -26,7 +26,7 @@ class PredictionMeshCodecTest {
                     y<63?1:0,0,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
                     ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
         }
-        var mesh=PredictionMeshBuilder.build(samples,null,63,0xff509050,1,grid,false,null,null,null,0,0,PredictionVegetation.Tile.EMPTY);
+        var mesh=PredictionMeshBuilder.build(samples,null,63,0xff509050,1,grid,null,null,0,0,PredictionVegetation.Tile.EMPTY);
         // Use the builder's real cell grid, keeping the fixture independent of GPU/atlas initialization.
         var key=new PredictionTileManager.PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD,0,0,0);
         mesh=mesh.compactForRendering();axis=mesh.cellAxis();int n=(axis+1)*(axis+1);
@@ -155,5 +155,26 @@ class PredictionMeshCodecTest {
             byte[] changed = base.clone(); changed[31] = 1;
             assertNull(cache.readMeshBase(lease, changed, mesh.cellAxis()));
         }
+    }
+
+    @Test void surfaceCompletionIsExplicitAndOldRecordsRemainIncomplete() throws Exception {
+        var mesh = fixture();
+        byte[] identity = new byte[32];
+        byte[] complete = PredictionMeshCodec.encode(mesh, identity, identity, true, true);
+        var record = PredictionMeshCodec.decodeBaseRecord(complete, identity, mesh.cellAxis());
+        assertNotNull(record);
+        assertTrue(record.surfaceCompleted());
+        assertArrayEquals(mesh.gpuPayload().restoreWords(), record.mesh().gpuPayload().restoreWords());
+        byte[] legacy = Arrays.copyOf(complete, complete.length - 1);
+        java.nio.ByteBuffer.wrap(legacy).putInt(8);
+        record = PredictionMeshCodec.decodeBaseRecord(legacy, identity, mesh.cellAxis());
+        assertNotNull(record);
+        assertFalse(record.surfaceCompleted(), "version 8 never proved that every surface source was gathered");
+        byte[] changed = identity.clone(); changed[31] = 1;
+        assertNull(PredictionMeshCodec.decodeBaseRecord(complete, changed, mesh.cellAxis()));
+        assertThrows(java.io.IOException.class, () -> PredictionMeshCodec.decodeBaseRecord(complete, identity, mesh.cellAxis() / 2));
+        assertThrows(java.io.IOException.class, () -> PredictionMeshCodec.encode(mesh, identity, identity, false, true));
+        complete[complete.length - 1] = 2;
+        assertThrows(java.io.IOException.class, () -> PredictionMeshCodec.decodeBaseRecord(complete, identity, mesh.cellAxis()));
     }
 }

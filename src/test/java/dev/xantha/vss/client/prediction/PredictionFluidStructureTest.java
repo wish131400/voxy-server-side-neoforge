@@ -30,8 +30,7 @@ class PredictionFluidStructureTest {
         var samples = new ClientColumnSample[9];
         Arrays.fill(samples,new ClientColumnSample(60,63,0,0,0,0,0,0,2,0,0,0,0,
                 ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN));
-        var mesh = PredictionMeshBuilder.build(samples,null,Integer.MIN_VALUE,0xffd9572b,1,3,
-                false,null,null,null,0,0,PredictionVegetation.Tile.EMPTY);
+        var mesh = PredictionMeshBuilder.build(samples,null,Integer.MIN_VALUE,0xffd9572b,1,3,null,null,0,0,PredictionVegetation.Tile.EMPTY);
         assertEquals(4,area(mesh),1e-5,"Fluids are sampled independently of the dimension's sea level");
         assertTrue(mesh.waterVertexCount()>0);
     }
@@ -83,8 +82,7 @@ class PredictionFluidStructureTest {
         Arrays.fill(samples, new ClientColumnSample(60, 63, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN));
         var vegetation = PredictionVegetation.Tile.of(blocks, 0, 0, 2 * step, step, 1);
-        return PredictionMeshBuilder.build(samples, null, 63, 0xB22D78C5, step, 3,
-                true, null, null, null, 0, 0, vegetation);
+        return PredictionMeshBuilder.build(samples, null, 63, 0xB22D78C5, step, 3, null, null, 0, 0, vegetation);
     }
 
     private static double area(PredictionMesh mesh) {

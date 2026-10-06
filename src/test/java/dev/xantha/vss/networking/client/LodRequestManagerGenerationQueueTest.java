@@ -7,6 +7,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 class LodRequestManagerGenerationQueueTest {
+    @Test
+    void queuedColumnExtendsMatchingRequestWithoutUsingAGenerationSlot() {
+        ClientRequestTracker tracker = new ClientRequestTracker(ignored -> { });
+        LodRequestManager manager = new LodRequestManager("test", tracker);
+        long now = System.nanoTime();
+        int requestId = tracker.track(42L, false, false, 30_000_000_000L, now);
+        manager.onColumnQueued(requestId);
+        assertTrue(tracker.drainTimedOut(now + 31_000_000_000L).isEmpty());
+        assertFalse(tracker.isGenerationRequest(requestId));
+        assertEquals(0, tracker.generationSize());
+        manager.onColumnQueued(requestId + 1);
+        assertEquals(1, tracker.drainTimedOut(now + 121_000_000_000L).size());
+    }
+
 
     @Test
     void generationAcknowledgementTransitionsOnlyMatchingRequest() {

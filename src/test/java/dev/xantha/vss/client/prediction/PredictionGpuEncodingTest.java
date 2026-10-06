@@ -51,7 +51,7 @@ class PredictionGpuEncodingTest {
         packed.prepareGpuStorage();assertTrue(packed.paletteBaseTexel()>0);
         int[] upload=packed.uploadWords().clone();
         assertArrayEquals(original,packed.quads());assertTrue(upload.length<original.length);
-        assertEquals(upload.length/4,packed.morphBaseTexel());
+        assertEquals(packed.opaqueUploadWords().length/4,packed.morphBaseTexel());
         packed.prepareStorage();assertTrue(packed.compressed());PredictionMeshRestore.clear();
         try {
             assertArrayEquals(original,packed.restoreWords());

@@ -2,7 +2,9 @@ package dev.xantha.vss.client.prediction;
 
 /** Soft per-frame upload bounds; an oversized first tile must still make progress. */
 final class PredictionUploadBudget {
-    static final int MAX_TILES = 2;
+    // Small cached/coarse tiles can fill the existing byte/time budget together.
+    // This is a safety cap, not a target; large uploads still stop at 4 MiB/2 ms.
+    static final int MAX_TILES = 16;
     static final long MAX_BYTES = 4L * 1024 * 1024;
     static final long MAX_NANOS = 2_000_000L;
     private int tiles;

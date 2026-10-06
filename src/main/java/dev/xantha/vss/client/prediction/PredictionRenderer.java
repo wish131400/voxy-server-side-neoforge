@@ -4,11 +4,13 @@ import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import dev.xantha.vss.compat.ModCompat;
+import dev.xantha.vss.compat.StrictLodVisibility;
 import dev.xantha.vss.config.VSSClientConfig;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -37,8 +39,9 @@ import org.lwjgl.system.MemoryUtil;
  *
  * <p>Meshes reach the GPU as packed 48-byte quads in texture buffers and are
  * expanded by the terrain program from {@code gl_VertexID}; a shared index
- * buffer turns each quad into two triangles. Exact-coverage handover is an
- * R8 cell mask texture. Voxel faces remain at their sampled heights so tops
+ * buffer turns each quad into two triangles. An R8 cell mask selects resident
+ * prediction owners; a settled column mask selects Voxy regions and current
+ * frame depth handles remaining occlusion. Voxel faces stay at sampled heights so tops
  * and connecting walls cannot separate. Only mesh changes trigger uploads.</p>
  */
 public final class PredictionRenderer {
@@ -47,6 +50,7 @@ public final class PredictionRenderer {
     private static boolean resetEdgeFilter;
     private static final PredictionVanillaMask vanillaMask = new PredictionVanillaMask();
     private static final PredictionExactCoverageMask exactMask = new PredictionExactCoverageMask();
+    private static final PredictionSubmissionCoverage submissionCoverage = new PredictionSubmissionCoverage();
     private static final AtomicLong frameStarts = new AtomicLong();
     private static final AtomicLong renderFrames = new AtomicLong();
     private static final AtomicLong seenTiles = new AtomicLong();
@@ -68,8 +72,8 @@ public final class PredictionRenderer {
     private static int frameOpaqueBuckets;
     private static int frameOpaquePageGroups;
     private static int frameOpaqueFallbacks;
-    private static final java.nio.IntBuffer rangeCounts = org.lwjgl.BufferUtils.createIntBuffer(VssLodFaceGroup.COUNT);
-    private static final org.lwjgl.PointerBuffer rangeOffsets = org.lwjgl.BufferUtils.createPointerBuffer(VssLodFaceGroup.COUNT);
+    private static java.nio.IntBuffer rangeCounts = org.lwjgl.BufferUtils.createIntBuffer(VssLodFaceGroup.COUNT);
+    private static org.lwjgl.PointerBuffer rangeOffsets = org.lwjgl.BufferUtils.createPointerBuffer(VssLodFaceGroup.COUNT);
     /**
      * Frame-local atlas availability. Transient sampler failures may recover
      * on a later frame; they must not disable textures for the whole session.
@@ -85,10 +89,168 @@ public final class PredictionRenderer {
     private static final AtomicLong preparedPlans = new AtomicLong(), reusedPlans = new AtomicLong();
     private static final PredictionFramePlan<PreparedFrame> normalFramePlan = new PredictionFramePlan<>();
     record PreparedFrame(List<Draw> draws) { }
+    private static final PreparedPass opaquePass = new PreparedPass(false);
+    private static final PreparedPass waterPass = new PreparedPass(true);
     private record PlanRequest(PredictionFramePlan<PreparedFrame> cache, Object viewport, int frame) { }
     private record DeferredWater(Frame frame, VssLodProjection.MatrixData projection,
                                  List<Draw> draws, ClientLevel level, RenderTarget target) { }
     record Frame(Matrix4f modelView, Matrix4f projection, Vec3 camera) { }
+    private record PreparedDraw(Draw draw, PredictionDrawRanges ranges) { }
+
+    /**
+     * Render-thread metadata for one pass. Range construction is cheap after
+     * the mesh cache is warm, but scanning the complete visible list happened
+     * several times per frame (has-content, max-quads, then submission). Keep
+     * those results together and invalidate them only when the visible list
+     * changes or GPU residency advances.
+     */
+    private static final class PreparedPass {
+        private final boolean water;
+        private List<Draw> source;
+        private long preparedResidencyRevision = Long.MIN_VALUE;
+        private long preparedOwnershipRevision = Long.MIN_VALUE;
+        private long ownershipSkipped;
+        private long aquaticSkipped;
+        private Vec3 aquaticCamera;
+        private int aquaticDistance;
+        private boolean aquaticScoping;
+        private final ArrayList<PreparedDraw> entries = new ArrayList<>();
+        private IdentityHashMap<Draw, PredictionDrawRanges> byDraw = new IdentityHashMap<>();
+        private int maxQuads;
+        private boolean hasDraws;
+        private boolean batchWorthwhile;
+        private long hits;
+        private long misses;
+
+        private PreparedPass(boolean water) { this.water = water; }
+
+        private double preparedCameraX = Double.NaN;
+        private double preparedCameraY = Double.NaN;
+        private double preparedCameraZ = Double.NaN;
+
+        private void prepare(List<Draw> draws, long residencyRevision, Vec3 camera) {
+            boolean aquaticChanged = prepareAquatic(draws, residencyRevision, camera);
+            if (source == draws && preparedResidencyRevision == residencyRevision
+                    && preparedOwnershipRevision == submissionCoverage.revision() && !aquaticChanged) {
+                if (water && camera != null && (camera.x != preparedCameraX
+                        || camera.y != preparedCameraY || camera.z != preparedCameraZ)) {
+                    sortWater(camera);
+                }
+                hits++;
+                return;
+            }
+            misses++;
+            var next = new ArrayList<PreparedDraw>();
+            var nextByDraw = new IdentityHashMap<Draw, PredictionDrawRanges>();
+            int maximum = 0;
+            boolean any = false;
+            int arenaBacked = 0;
+            ownershipSkipped = 0;
+            aquaticSkipped = 0;
+            for (Draw draw : draws) {
+                PredictionPackedMesh packed = draw.gpu().packed();
+                if (packed == null) continue;
+                PredictionDrawRanges ranges = packed.drawRanges(water, draw.faces());
+                int fullQuads = ranges.quads;
+                if (!water && !draw.seam()) ranges = packed.drawRanges(false, draw.faces(), packed.aquaticLod.tier());
+                aquaticSkipped += fullQuads - ranges.quads;
+                int originalQuads = ranges.quads;
+                ranges = submissionCoverage.filter(packed, ranges, draw.tile().baseBlockX(), draw.tile().baseBlockZ(), water, draw.faces());
+                ownershipSkipped += originalQuads - ranges.quads;
+                if (ranges.quads == 0) continue;
+                if (draw.gpu().arenaSlice() != null) arenaBacked++;
+                next.add(new PreparedDraw(draw, ranges));
+                nextByDraw.put(draw, ranges);
+                maximum = Math.max(maximum, packed.quadCount());
+                any = true;
+            }
+            source = draws;
+            preparedResidencyRevision = residencyRevision;
+            preparedOwnershipRevision = submissionCoverage.revision();
+            entries.clear();
+            entries.addAll(next);
+            byDraw = nextByDraw;
+            maxQuads = maximum;
+            hasDraws = any;
+            batchWorthwhile = arenaBacked >= 64;
+            if (camera != null) {
+                preparedCameraX = camera.x;
+                preparedCameraY = camera.y;
+                preparedCameraZ = camera.z;
+            }
+            if (water && camera != null) sortWater(camera);
+        }
+
+        private boolean prepareAquatic(List<Draw> draws, long residencyRevision, Vec3 camera) {
+            if (water || camera == null) return false;
+            int distance = (int) Math.ceil(Math.max(VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks,
+                    Math.min(4096, selectionScale * .5)));
+            if (source == draws && preparedResidencyRevision == residencyRevision && camera.equals(aquaticCamera)
+                    && distance == aquaticDistance && selectionScoping == aquaticScoping) return false;
+            boolean changed = false;
+            for (Draw draw : draws) {
+                var packed = draw.gpu().packed();
+                if (draw.seam() || packed == null || !packed.hasDisplayLod()) continue;
+                var tile = draw.tile();
+                changed |= packed.aquaticLod.update(PredictionAquaticLod.distance(camera.x, camera.z,
+                        tile.baseBlockX(), tile.baseBlockZ(), tile.spanBlocks()), distance, selectionScoping);
+            }
+            aquaticCamera = camera;
+            aquaticDistance = distance;
+            aquaticScoping = selectionScoping;
+            return changed;
+        }
+
+        /**
+         * Opaque submission uses the stable visible-plan order. Water still
+         * needs an exact back-to-front order, so reorder the already prepared
+         * entries in place when only the camera moved. This keeps ownership
+         * filtering and range construction cached while preserving blending.
+         */
+        private void sortWater(Vec3 camera) {
+            final double cx = camera.x, cz = camera.z;
+            entries.sort((left, right) -> {
+                Draw a = left.draw(), b = right.draw();
+                double ax = a.tile().baseBlockX() + a.tile().spanBlocks() * 0.5D - cx;
+                double az = a.tile().baseBlockZ() + a.tile().spanBlocks() * 0.5D - cz;
+                double bx = b.tile().baseBlockX() + b.tile().spanBlocks() * 0.5D - cx;
+                double bz = b.tile().baseBlockZ() + b.tile().spanBlocks() * 0.5D - cz;
+                return Double.compare(ax * ax + az * az, bx * bx + bz * bz);
+            });
+            preparedCameraX = camera.x;
+            preparedCameraY = camera.y;
+            preparedCameraZ = camera.z;
+        }
+
+        private PredictionDrawRanges ranges(Draw draw) {
+            return byDraw.get(draw);
+        }
+
+        private List<PreparedDraw> entries() { return entries; }
+        private int maxQuads() { return maxQuads; }
+        private boolean hasDraws() { return hasDraws; }
+        private boolean batchWorthwhile() { return batchWorthwhile; }
+        private IdentityHashMap<Draw, PredictionDrawRanges> rangesByDraw() { return byDraw; }
+        private void clear() {
+            source = null;
+            preparedResidencyRevision = Long.MIN_VALUE;
+            preparedOwnershipRevision = Long.MIN_VALUE;
+            ownershipSkipped = 0;
+            aquaticSkipped = 0;
+            aquaticCamera = null;
+            entries.clear();
+            byDraw = new IdentityHashMap<>();
+            maxQuads = 0;
+            hasDraws = false;
+            batchWorthwhile = false;
+            preparedCameraX = Double.NaN;
+            preparedCameraY = Double.NaN;
+            preparedCameraZ = Double.NaN;
+        }
+        private String diagnostics() { return "hits=" + hits + ",misses=" + misses + ",voxyExcludedQuads=" + ownershipSkipped
+                + ",displayExcludedQuads=" + aquaticSkipped; }
+
+    }
     private static int sharedVertexArray = -1;
     private static int sharedIndexBuffer = -1;
     private static int sharedIndexQuads;
@@ -100,6 +262,7 @@ public final class PredictionRenderer {
     private static final Map<PredictionTileManager.PredictionTileKey, CachedCoverage> coverageCache =
             new ConcurrentHashMap<>();
     private static final PredictionRenderResidency renderResidency = new PredictionRenderResidency();
+    private static final PredictionGpuResidency<PredictionTileManager.PredictionTileKey> gpuResidency = PredictionGpuResidency.runtime();
     private static final Scene scene = new Scene();
     private static final PredictionLodSeams lodSeams = new PredictionLodSeams();
     private static final SeamBatch seamBatch = new SeamBatch();
@@ -107,6 +270,7 @@ public final class PredictionRenderer {
     private static final SeamBatch realSeamBatch = new SeamBatch();
     private static final PredictionUploadBudget uploadBudget = new PredictionUploadBudget();
     private static final long COVERAGE_RECHECK_NANOS = 250_000_000L;
+
     /**
      * Global per-chunk coverage decisions shared across tiles in a frame.
      * The same chunk's yield/desired-LOD computation ran once per owning
@@ -118,6 +282,7 @@ public final class PredictionRenderer {
     // Render-thread only. Primitive keys mix the entire packed coordinate,
     // avoid Long.hashCode's x^z collisions and allocate no per-chunk arrays.
     private static final Long2ByteOpenHashMap chunkDecisionCache = newDecisionCache();
+    private static final PredictionCoverageOwners coverageOwners = new PredictionCoverageOwners();
     private static volatile long decisionCachePixelsBits = Long.MIN_VALUE;
     private static double decisionCachePixelThreshold;
     private static int decisionCachePlayerChunkX = Integer.MIN_VALUE;
@@ -161,7 +326,8 @@ public final class PredictionRenderer {
         // Terrain supplies the background before vanilla translucent blocks.
         // Water waits for their depth so it cannot tint real water a second time.
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_CUTOUT_BLOCKS) {
-            renderStage(new Frame(event.getModelViewMatrix(), event.getProjectionMatrix(), event.getCamera().getPosition()));
+            if (!PredictionNormalTranslucencyBridge.rendered(Minecraft.getInstance().getMainRenderTarget().frameBufferId))
+                renderStage(new Frame(event.getModelViewMatrix(), event.getProjectionMatrix(), event.getCamera().getPosition()));
             PredictionRenderCapture.current("vanilla-after-cutout");
         } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) {
             renderDeferredWater();
@@ -177,6 +343,7 @@ public final class PredictionRenderer {
         PredictionIrisBridge.beginFrame();
         deferredWater = null;
         PredictionVoxyDepth.clear();
+        PredictionNormalTranslucencyBridge.beginFrame();
         uploadBudget.reset();
         drainRetiredTiles();
     }
@@ -190,6 +357,16 @@ public final class PredictionRenderer {
         program = pass.program();
         try { renderStage(frame, snapshot, new PlanRequest(cache, viewport, frameId)); }
         finally { irisPass = null; program = previous; }
+    }
+
+    static int normalDepthTexture() { return predictionTarget.depthTextureId(); }
+    static int normalSeedTexture() { return predictionTarget.seedTextureId(); }
+
+    static boolean renderBeforeVoxyWater(Frame event) {
+        if (programBroken || !VSSClientConfig.CONFIG.enablePrediction) return false;
+        long before = renderFrames.get();
+        renderStage(event);
+        return !programBroken && renderFrames.get() != before;
     }
 
     private static void renderStage(Frame event) {
@@ -219,6 +396,8 @@ public final class PredictionRenderer {
         selectionScoping = minecraft.player.isScoping();
         viewRay = VssLodProjection.centerRay(event.projection(), event.modelView(), event.camera());
         if (snapshot == null) return;
+        StrictLodVisibility.updateRenderWindow(minecraft.level.dimension(), event.camera().x, event.camera().z,
+                ModCompat.getVoxyViewDistanceChunks().orElse(0));
         Collection<PredictionTileManager.PredictionTile> tiles = snapshot.tiles().values();
         if (tiles.isEmpty()) {
             return;
@@ -232,21 +411,27 @@ public final class PredictionRenderer {
 
         var sourceSnapshot = snapshot;
         Vec3 camera = event.camera();
+        exactMask.update(level, camera, handoffDistanceChunks(VSSClientNetworking.getEffectiveLodDistanceChunks()));
+        submissionCoverage.update(exactMask.submissionSnapshot(), camera,
+                PredictionVoxyOwnership.radiusBlocks(ModCompat.getVoxyViewDistanceChunks().orElse(0)));
         Matrix4f vanillaProjection = new Matrix4f(event.projection());
         VssLodProjection.MatrixData projection = VssLodProjection.of(vanillaProjection);
         Frustum lodFrustum = new Frustum(event.modelView(), projection.culling());
         lodFrustum.prepare(camera.x, camera.y, camera.z);
+        if (irisPass == null || !irisPass.translucent()) maintainGpuResidency(sourceSnapshot, camera, lodFrustum);
         PreparedFrame prepared = null;
         if (request != null) {
             int width = irisPass == null ? minecraft.getMainRenderTarget().width : irisPass.width();
             int height = irisPass == null ? minecraft.getMainRenderTarget().height : irisPass.height();
             if (irisPass == null) {
-                boolean pendingVisibleUpload = renderResidency.hasPendingUploads(snapshot,
-                        tile -> tile.mesh().gpuPayload() != null && tileWithinHorizon(tile, camera, lodFrustum));
-                if (!pendingVisibleUpload) {
-                    prepared = request.cache().getStable(request.viewport(), level, snapshot, planGeneration.get(),
-                            renderResidency.revision(), width, height, event);
-                }
+                // Moving cameras cannot reuse the previous matrices. Reject that
+                // plan before walking every deferred upload outside the horizon.
+                prepared = request.cache().getStable(request.viewport(), level, snapshot, planGeneration.get(),
+                        renderResidency.revision(), width, height, event);
+                if (prepared != null && renderResidency.hasPendingUploads(snapshot,
+                        tile -> tile.mesh().gpuPayload() != null && tileWithinHorizon(tile, camera, lodFrustum)
+                                && allowsGpuUpload(tile, camera, lodFrustum)))
+                    prepared = null;
             } else if (irisPass.translucent()) {
                 prepared = request.cache().get(request.viewport(), level, snapshot,
                         frameStarts.get(), planGeneration.get(), request.frame(), width, height, event);
@@ -297,6 +482,7 @@ public final class PredictionRenderer {
                             mainTarget.frameBufferId, mainTarget.width, mainTarget.height, camera);
                     predictionTarget.beginOpaque(mainTarget, projection, voxyDepth,
                             new Matrix4f(event.projection()).mul(event.modelView()));
+                    if (PredictionNormalTranslucencyBridge.preparing()) predictionTarget.captureSeed();
                 } finally {
                     PredictionRenderTimings.gpuEnd(depthCopyQuery);
                     PredictionRenderTimings.end(PredictionRenderTimings.Stage.DEPTH_COPY, depthCopyStart);
@@ -329,15 +515,17 @@ public final class PredictionRenderer {
                     var uploads = new ArrayList<>(visibleTiles);
                     VssLodLayout uploadLayout = snapshot.layout();
                     VssLodFocus uploadFocus = ClientPredictionState.currentFocus();
-                    uploads.sort(Comparator.comparingInt((PredictionTileManager.PredictionTile tile) -> PredictionWorkOrder.priority(
+                    uploads.sort(Comparator.comparingInt((PredictionTileManager.PredictionTile tile) -> gpuTiles.containsKey(tile.key()) ? 1 : 0)
+                            .thenComparingInt(tile -> -tile.key().lod())
+                            .thenComparingInt(tile -> PredictionWorkOrder.priority(
                                     tile.key(), uploadLayout, PredictionWorkOrder.distanceSquared(tile.key(), uploadLayout,
                                             camera.x, camera.z), 0, false, uploadFocus))
-                            .thenComparingInt(tile -> -tile.key().lod())
                             .thenComparingDouble(tile -> PredictionWorkOrder.orderingDistance(tile.key(), uploadLayout,
                                     camera.x, camera.z, uploadFocus)));
                     int coldRequests = 0;
                     for (var tile : uploads) {
                         if (renderResidency.contains(tile) || tile.mesh().gpuPayload() == null) continue;
+                        if (!allowsGpuUpload(tile, camera, lodFrustum)) continue;
                         long bytes = tile.mesh().gpuPayload().uploadBytes();
                         if (!uploadBudget.allows(bytes)) break;
                         if (!tile.mesh().gpuPayload().uploadReady()) {
@@ -351,12 +539,14 @@ public final class PredictionRenderer {
                         uploadBudget.record(bytes, System.nanoTime() - start);
                         PredictionRenderTimings.end(PredictionRenderTimings.Stage.UPLOAD, prepareStart == 0 ? 0 : start);
                         renderResidency.uploaded(tile);
+                        gpuResidency.uploaded(tile.key(), tile.revision(), gpu.residentBytes());
                     }
                 }
                 snapshot = renderResidency.snapshot(snapshot);
                 var changes=renderResidency.drainChanges();
                 for(var key:changes) if(!snapshot.tiles().containsKey(key)) {
                     var retired=gpuTiles.remove(key);if(retired!=null) retiredTiles.add(retired);
+                    if (!sourceSnapshot.tiles().containsKey(key) || !gpuResidency.cold(key)) gpuResidency.removed(key);
                     coverageCache.remove(key);
                 }
                 ClientPredictionState.drainCoverageHot(level.dimension());
@@ -380,6 +570,7 @@ public final class PredictionRenderer {
                 reusedPlans.incrementAndGet();
             }
             PredictionRenderTimings.end(PredictionRenderTimings.Stage.PREPARE, prepareStart);
+            for (var draw : draws) if (!draw.seam()) gpuResidency.used(draw.tile().key());
             if (!draws.isEmpty() && ensureProgram()) {
                 long quadsBeforePass = submittedQuads.get();
                 var timingStage = irisPass != null && irisPass.translucent()
@@ -394,7 +585,7 @@ public final class PredictionRenderer {
                     PredictionRenderTimings.end(timingStage, drawStart);
                 }
                 frameQuads = submittedQuads.get() - quadsBeforePass;
-                if (irisPass == null && hasPassDraws(draws, true)) deferredWater = new DeferredWater(
+                if (irisPass == null && preparePass(draws, true, camera).hasDraws()) deferredWater = new DeferredWater(
                         new Frame(new Matrix4f(event.modelView()), new Matrix4f(event.projection()), camera),
                         projection, draws, level, mainTarget);
             }
@@ -445,6 +636,7 @@ public final class PredictionRenderer {
                     + ", wallIndex={" + lodSeams.diagnostics() + "," + PredictionSeamMasks.diagnostics() + "}"
                     + ", ownership={" + scene.ownershipDiagnostics() + "}"
                     + ", gpuTiles=" + gpuTiles.size()
+                    + ", gpuResidency={" + gpuResidency.diagnostics() + "}"
                     + ", " + PredictionTerrainArena.SHARED.diagnostics()
                     + ", textures=" + textureDiagnostics(draws)
                     + ", memory={" + PredictionMemoryBudget.SHARED.diagnostics() + "}"
@@ -466,6 +658,55 @@ public final class PredictionRenderer {
         long start = System.nanoTime();
         int bytes = gpu.updatePublishedCoverage(allowed);
         if (bytes != 0) uploadBudget.recordRequired(bytes, System.nanoTime() - start);
+    }
+
+    private static boolean allowsGpuUpload(PredictionTileManager.PredictionTile tile, Vec3 camera, Frustum frustum) {
+        if (!gpuResidency.cold(tile.key())) return true;
+        var packed = tile.mesh().gpuPayload();
+        boolean owned = packed != null && renderResidency.hasFallback(tile.key())
+                && submissionCoverage.fullyOwned(packed, tile.baseBlockX(), tile.baseBlockZ());
+        return gpuResidency.allowsUpload(tile.key(), tile.revision(), tileWithinHorizon(tile, camera, frustum), owned);
+    }
+
+    private static void maintainGpuResidency(PredictionTileManager.RenderSnapshot source, Vec3 camera, Frustum frustum) {
+        if (!gpuResidency.sweepDue()) return;
+        gpuResidency.retainCold(source.tiles()::containsKey);
+        long committed = PredictionTerrainArena.SHARED.allocatedBytes() + PredictionTerrainArena.WATER.allocatedBytes()
+                + PredictionQuadBufferPool.SHARED.retainedBytes();
+        long opaque = 0, water = 0, previous = 0, quads = 0, rectangles = 0, waterRectangles = 0;
+        VssLodFocus focus = ClientPredictionState.currentFocus();
+        for (var entry : gpuTiles.entrySet()) {
+            var tile = renderResidency.resident(entry.getKey()); var gpu = entry.getValue();
+            committed += gpu.standaloneBytes();
+            if (tile == null || gpu.packed() == null) continue;
+            var geometry = scene.geometry.get(tile.key());
+            var bounds = geometry == null ? new PredictionRenderGeometry.Entry(tile).culling() : geometry.culling();
+            double dx = Math.max(Math.max(bounds.minX - camera.x, camera.x - bounds.maxX), 0);
+            double dz = Math.max(Math.max(bounds.minZ - camera.z, camera.z - bounds.maxZ), 0);
+            boolean protectedTile = tile.key().lod() >= source.layout().levelCount() - 2
+                    || dx * dx + dz * dz <= 256.0 * 256.0
+                    || focus != null && focus.intersects(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ)
+                    || seamBatch.draws.containsKey(tile.key()) || realSeamBatch.draws.containsKey(tile.key());
+            boolean visible = dx * dx + dz * dz <= predictionHorizonBlocks() * predictionHorizonBlocks()
+                    && frustum.isVisible(bounds.inflate(64));
+            var packed = gpu.packed();
+            boolean owned = submissionCoverage.fullyOwned(packed, tile.baseBlockX(), tile.baseBlockZ());
+            gpuResidency.observe(tile.key(), gpu.residentBytes(), visible, protectedTile,
+                    renderResidency.hasFallback(tile.key()), owned);
+            var stats = packed.geometryStats();
+            opaque += packed.opaqueStorageBytes(); water += packed.waterStorageBytes();
+            previous += packed.storageBytes() + packed.waterStorageBytes();
+            quads += stats.quads(); rectangles += stats.rectangles(); waterRectangles += stats.waterRectangles();
+        }
+        for (var gpu : seamBatch.tiles.values()) committed += gpu.standaloneBytes();
+        for (var gpu : realSeamBatch.tiles.values()) committed += gpu.standaloneBytes();
+        gpuResidency.census(opaque, water, previous, quads, rectangles, waterRectangles);
+        for (var retirement : gpuResidency.retirements(committed)) {
+            // Recheck after earlier retirements in the same sweep. Ownership and
+            // seam publication follow the normal residency revision path together.
+            if (!renderResidency.hasFallback(retirement.key())) continue;
+            renderResidency.evict(retirement.key()); gpuResidency.evicted(retirement);
+        }
     }
 
     /** Applies only changed patches; stable neighbors retain their Draw and GPU binding. */
@@ -516,7 +757,7 @@ public final class PredictionRenderer {
 
     private record DrawKey(PredictionTileManager.PredictionTileKey tile,int kind) { }
 
-    /** World ownership changes independently of camera rotation and transparent passes. */
+    /** Resident prediction ownership is independent of Voxy's per-frame visibility. */
     static final class Scene {
         private final Map<PredictionTileManager.PredictionTileKey,PredictionRenderGeometry.Entry> geometry=new java.util.HashMap<>();
         private final PredictionSpatialIndex<PredictionTileManager.PredictionTileKey> spatial=new PredictionSpatialIndex<>();
@@ -539,7 +780,8 @@ public final class PredictionRenderer {
         long worldVisits() { return worldVisits; }
         long visibilityVisits() { return visible.visited(); }
         String diagnostics() { return "worldVisits="+worldVisits+",visibilityVisits="+visible.visited()
-                +",orderEdits="+visible.orderEdits()+",listPublications="+visible.publications(); }
+                +",orderEdits="+visible.orderEdits()+",listPublications="+visible.publications()
+                +",handoff=region-index+frame-depth"; }
         String ownershipDiagnostics() { return "ownerTiles=" + ownerTiles
                 + ",suppressedParents=" + suppressedParents
                 + ",partialCoverageParents=" + partialCoverageParents
@@ -551,16 +793,18 @@ public final class PredictionRenderer {
             resolves=0;resolveNanos=0;
             if(snapshot!=null && !snapshot.dimension().equals(next.dimension())) clear();
             boolean reset=snapshot==null || !snapshot.layout().equals(next.layout());
+            if (reset) coverageCache.clear();
             boolean moved=!nextCamera.equals(camera) || nextHorizon!=horizon;
             boolean horizontalMove=camera==null || nextCamera.x!=camera.x || nextCamera.z!=camera.z;
             boolean turned=cullingModelView==null || cullingProjection==null
                     || !cullingModelView.equals(modelView) || !cullingProjection.equals(projection);
             boolean stableOwnership=!reset && changes.isEmpty() && nextHorizon==horizon
                     && java.util.Objects.equals(view,nextView);
-            if(!reset && !moved && !turned && changes.isEmpty() && java.util.Objects.equals(view,nextView)) {
+            if(!reset && !moved && !turned && changes.isEmpty()
+                    && java.util.Objects.equals(view,nextView)) {
                 patches(realSeamBatch,realSeams.apply(lodSeams.index(),Set.of(),vanillaMask.groundEdges()),2);
                 snapshot=next;
-                return visible.select(nextCamera,modelView,projection,frustum);
+                return visible.selectStable(nextCamera,modelView,projection,frustum);
             }
             var dirty=new HashSet<PredictionTileManager.PredictionTileKey>();
             if(reset) { dirty.addAll(geometry.keySet());dirty.addAll(next.tiles().keySet()); }
@@ -571,9 +815,11 @@ public final class PredictionRenderer {
                 if(tile==null) { geometry.remove(key);spatial.remove(key); }
                 else {
                     var old=geometry.get(key);
-                    if(old==null || old.tile()!=tile) geometry.put(key,new PredictionRenderGeometry.Entry(tile));
-                    var entry=geometry.get(key);
-                    spatial.put(key,key,(int)Math.floor(entry.bounds().minY),(int)Math.ceil(entry.bounds().maxY));
+                    if(old==null || old.tile()!=tile) {
+                        var entry=new PredictionRenderGeometry.Entry(tile);
+                        geometry.put(key,entry);
+                        spatial.put(key,key,(int)Math.floor(entry.bounds().minY),(int)Math.ceil(entry.bounds().maxY));
+                    }
                 }
             }
             Set<PredictionTileManager.PredictionTileKey> broadCandidates = null;
@@ -632,7 +878,7 @@ public final class PredictionRenderer {
                 for (var key : broadCandidates) drawCandidates.add(new DrawKey(key, 0));
                 for (var key : seamBatch.draws.keySet()) drawCandidates.add(new DrawKey(key, 1));
                 for (var key : realSeamBatch.draws.keySet()) drawCandidates.add(new DrawKey(key, 2));
-                return visible.select(nextCamera, modelView, projection, frustum, drawCandidates);
+                return visible.selectStable(nextCamera, modelView, projection, frustum, drawCandidates);
             }
             if(!java.util.Objects.equals(view,nextView)) {
                 dirty.addAll(next.scopedFamilies());
@@ -641,11 +887,12 @@ public final class PredictionRenderer {
             }
             var replacements=new ArrayList<PredictionLodSeams.Surface>();
             var removals=new HashSet<PredictionTileManager.PredictionTileKey>();
-            long hits=0,now=System.nanoTime();
+            long hits=0;
             worldVisits+=dirty.size();
             for(var key:dirty) {
                 var geo=geometry.get(key);var old=terrain.get(key);
                 if(geo==null || !geo.visible(nextCamera,null,nextHorizon)) {
+                    if (geo == null) coverageCache.remove(key);
                     emptyCoverage.remove(key);remove(key,old,removals);continue;
                 }
                 var tile=geo.tile();
@@ -655,14 +902,18 @@ public final class PredictionRenderer {
                 if(cached!=null && cached.matchesOwnership(tile.revision(),next.epoch(key),ownerView)) {
                     coverage=cached.coverage();hits++;
                 } else {
-                    long timingStart=PredictionRenderTimings.start(),start=System.nanoTime();
-                    coverage=resolveCoverage(tile,nextView.playerChunkX(),nextView.playerChunkZ(),nextView.pixelsPerBlock(),next,nextView.focus());
-                    if(cached!=null && java.util.Arrays.equals(cached.coverage().allowed(),coverage.allowed()))
-                        coverage=new TileCoverage(cached.coverage().allowed(),coverage.considered(),coverage.rendered(),coverage.coverageSkipped(),coverage.authoritativeSkipped());
-                    long elapsed=System.nanoTime()-start;resolves++;resolveNanos+=elapsed;
+                    // CPU masks choose between resident prediction meshes only.
+                    // An uploaded Voxy ancestor may be empty, occluded or replaced
+                    // by children in this frame's traversal. Its metadata cannot
+                    // remove fallback before the current pixel-depth test.
+                    long timingStart = PredictionRenderTimings.start(), start = System.nanoTime();
+                    coverage=resolveCoverage(tile,nextView.playerChunkX(),nextView.playerChunkZ(),
+                            nextView.pixelsPerBlock(),next,nextView.focus());
+                    resolves++; resolveNanos+=System.nanoTime()-start;
                     PredictionRenderTimings.end(PredictionRenderTimings.Stage.COVERAGE,timingStart);
-                    coverageCache.put(key,new CachedCoverage(tile.revision(),next.epoch(key),
-                            coverageExpiry(tile,nextView.playerChunkX(),nextView.playerChunkZ(),nearDistance,now),ownerView,coverage));
+                    if (old != null && old.allowed() != coverage.allowed() && java.util.Arrays.equals(old.allowed(),coverage.allowed()))
+                        coverage=new TileCoverage(old.allowed(),coverage.considered(),coverage.rendered(),coverage.coverageSkipped(),0);
+                    coverageCache.put(key,new CachedCoverage(tile.revision(),next.epoch(key),0,ownerView,coverage));
                 }
                 var gpu=gpuTiles.get(key);
                 if(coverage.rendered()==0) {
@@ -720,7 +971,7 @@ public final class PredictionRenderer {
                 for (var key : seamBatch.draws.keySet()) drawCandidates.add(new DrawKey(key, 1));
                 for (var key : realSeamBatch.draws.keySet()) drawCandidates.add(new DrawKey(key, 2));
             }
-            return visible.select(nextCamera,modelView,projection,frustum,drawCandidates);
+            return visible.selectStable(nextCamera,modelView,projection,frustum,drawCandidates);
         }
 
         private void focus(VssLodFocus focus,Set<PredictionTileManager.PredictionTileKey> dirty) {
@@ -803,6 +1054,7 @@ public final class PredictionRenderer {
         void clear() {
             geometry.clear();spatial.clear();terrain.clear();emptyCoverage.clear();totals.clear();lower.clear();upper.clear();visible.clear();suppressedParentsSet.clear();partialOwners.clear();transitionOwners.clear();
             snapshot=null;view=null;camera=null;cullingModelView=null;cullingProjection=null;
+            coverageCache.clear();
             considered=rendered=coverageSkipped=authoritativeSkipped=0;
             ownerTiles=suppressedParents=partialCoverageParents=transitionTiles=0;
             lodSeams.clear();realSeams.clear();seamBatch.clear();realSeamBatch.clear();
@@ -883,6 +1135,8 @@ public final class PredictionRenderer {
         program.bindRealCoverage(minecraft.level.dimension(), camera);
         program.setRealRenderDistance(Math.max(vanillaMask.renderDistanceBlocks(),
                 ModCompat.getVoxyViewDistanceChunks().orElse(0) * 16.0F));
+        program.setVoxyOwnershipDistance(PredictionVoxyOwnership.radiusBlocks(
+                ModCompat.getVoxyViewDistanceChunks().orElse(0)));
         program.bindExactCoverage(exactMask, minecraft.level, camera, handoffDistanceChunks(VSSClientNetworking.getEffectiveLodDistanceChunks()));
         program.setHorizon(predictionHorizonBlocks());
         program.bindMainDepth(irisPass == null ? minecraft.getMainRenderTarget().getDepthTextureId()
@@ -897,11 +1151,9 @@ public final class PredictionRenderer {
         program.setDirectionalLighting(minecraft.level);
         program.setFrame(fogColor, fog.start(), fog.end(), fog.density(),
                 fog.hazeStart(), lightmapId != 0, 1.0F);
-        // The packed tint is already the correct distant material summary.
-        // Skip atlas detail outside the normal fine band; scope mode keeps
-        // the complete material path so a telescope target remains exact.
-        program.setDetailDistance(selectionScoping ? 0.0F : Math.max(256.0F,
-                VSSClientConfig.CONFIG.predictionFineDistanceBlocks));
+        // Material detail follows screen footprint independently of the geometry fine band.
+        program.setDetailDistance(selectionScoping ? 0.0F : (float) Math.min(predictionHorizonBlocks(),
+                Math.max(2048.0D, basePixelsPerBlock(minecraft) * 4.0D)));
         // Keep rasterized depth and the main-depth comparison in agreement.
         program.setCamera(event.modelView(), irisPass == null ? projection.matrix() : event.projection());
         if (irisPass != null) irisPass.bindFrame(event);
@@ -1023,16 +1275,17 @@ public final class PredictionRenderer {
     private static long drawPasses(Minecraft minecraft, Frame event,
                                    List<Draw> draws, Vec3 camera,
                                    VssLodProjection.MatrixData projection, boolean water) {
-        if (!hasPassDraws(draws, water)) return 0L;
+        PreparedPass pass = preparePass(draws, water, camera);
+        if (!pass.hasDraws()) return 0L;
         int previousAtlasSampler = GL30.glGetIntegeri(org.lwjgl.opengl.GL33.GL_SAMPLER_BINDING, 0);
         PredictionTerrainProgram original = program;
         try {
-            if (!batchProgramBroken && PredictionTerrainArena.supported() && batchWorthwhile(draws, water)) {
+            if (!batchProgramBroken && PredictionTerrainArena.supported() && pass.batchWorthwhile()) {
                 try { if (batchProgram == null) batchProgram = PredictionTerrainProgram.createBatch(); }
                 catch (RuntimeException unavailable) { batchProgramBroken = true; }
                 if (batchProgram != null) { program = batchProgram; program.use(); }
             }
-            return drawNormalPass(minecraft, event, draws, camera, projection, water);
+            return drawNormalPass(minecraft, event, draws, camera, projection, water, pass);
         } finally { program = original; org.lwjgl.opengl.GL33.glBindSampler(0, previousAtlasSampler); }
     }
 
@@ -1058,16 +1311,19 @@ public final class PredictionRenderer {
     }
 
     private static boolean hasPassDraws(List<Draw> draws, boolean water) {
-        for (Draw draw : draws) {
-            var packed = draw.gpu().packed();
-            if (packed != null && packed.drawRanges(water, draw.faces()).quads > 0) return true;
-        }
-        return false;
+        return preparePass(draws, water, null).hasDraws();
+    }
+
+    private static PreparedPass preparePass(List<Draw> draws, boolean water, Vec3 camera) {
+        PreparedPass pass = water ? waterPass : opaquePass;
+        pass.prepare(draws, renderResidency.revision(), camera);
+        return pass;
     }
 
     private static long drawNormalPass(Minecraft minecraft, Frame event,
                                       List<Draw> draws, Vec3 camera,
-                                      VssLodProjection.MatrixData projection, boolean water) {
+                                      VssLodProjection.MatrixData projection, boolean water,
+                                      PreparedPass pass) {
         // All tiles in a frame share one validated binding. Worker-side
         // material discovery must not switch fallback modes halfway through a pass.
         boolean useAverage = !bindFrame(minecraft, event, projection, camera);
@@ -1082,11 +1338,7 @@ public final class PredictionRenderer {
                         new Matrix4f(event.projection()).mul(event.modelView()));
             }
         }
-        int maxQuads = 0;
-        for (Draw draw : draws) {
-            var packed = draw.gpu().packed();
-            if (packed != null) maxQuads = Math.max(maxQuads, packed.quadCount());
-        }
+        int maxQuads = pass.maxQuads();
         if (maxQuads <= 0) {
             GlProgram.unuse();
             return 0L;
@@ -1095,11 +1347,22 @@ public final class PredictionRenderer {
         long calls = 0L;
         long quads = 0L;
         boolean batch = program.supportsBatch();
+        long frameTime = System.nanoTime();
+        // Batch metadata is world-stable.  These two uniforms are the only
+        // per-frame values needed by the batch vertex shader.
+        program.setBatchCameraOffset((float) -camera.x, (float) -camera.y, (float) -camera.z);
+        program.setBatchTimeSeconds(PredictionMorph.seconds(frameTime));
+        long indirectBuildStart = batch ? PredictionRenderTimings.start() : 0L;
             if (batch) {
                 if (indirectBatch == null) indirectBatch = new PredictionIndirectBatch();
-                indirectBatch.begin(program, !water);
+                if (!water) {
+                    var main = minecraft.getMainRenderTarget();
+                    indirectBatch.begin(program, predictionTarget.depthTextureId(), main.width, main.height,
+                            new Matrix4f(projection.matrix()).mul(event.modelView()), camera,
+                            renderResidency.revision(), submissionCoverage.revision());
+                } else indirectBatch.begin(program, false,
+                        renderResidency.revision(), submissionCoverage.revision());
             }
-        long frameTime = System.nanoTime();
         try {
             PredictionGlState.depthMask(!water);
             program.setOpaqueAlpha(water ? 0.0F : 1.0F);
@@ -1118,18 +1381,19 @@ public final class PredictionRenderer {
                  * boundary is only an ordering approximation; geometry,
                  * coverage masks, materials and depth tests stay unchanged.
                  */
-                int bucketCount = opaqueBatches.prepare(draws);
+                int bucketCount = opaqueBatches.prepare(draws, renderResidency.revision(), pass.rangesByDraw());
                 frameOpaqueBuckets = bucketCount;
                 frameOpaquePageGroups = 0;
                 frameOpaqueFallbacks = 0;
                 for (int bucketIndex = 0; bucketIndex < bucketCount; bucketIndex++) {
+                    indirectBatch.nextOcclusionBucket();
                     PredictionOpaqueBatches.Bucket bucket = opaqueBatches.bucket(bucketIndex);
                     frameOpaquePageGroups += bucket.pages.size();
                     frameOpaqueFallbacks += bucket.fallback.size();
                     for (PredictionOpaqueBatches.PageGroup pageGroup : bucket.pages) {
                         for (Draw draw : pageGroup.draws) {
-                            PredictionPackedMesh packed = draw.gpu().packed();
-                            var ranges = packed.drawRanges(false, draw.faces());
+                            var ranges = pass.ranges(draw);
+                            if (ranges == null) continue;
                             if (ranges.quads == 0) continue;
                             if (indirectBatch.add(draw, ranges, camera, false, useAverage, frameTime)) {
                                 quads += ranges.quads;
@@ -1149,8 +1413,8 @@ public final class PredictionRenderer {
                     // within this bucket's near-to-far window.
                     if (!bucket.fallback.isEmpty()) indirectBatch.flush();
                     for (Draw draw : bucket.fallback) {
-                        PredictionPackedMesh packed = draw.gpu().packed();
-                        var ranges = packed.drawRanges(false, draw.faces());
+                        var ranges = pass.ranges(draw);
+                        if (ranges == null) continue;
                         if (ranges.quads == 0) continue;
                         indirectBatch.fallback(draw, ranges, camera);
                         drawSingle(draw, ranges, camera, useAverage, frameTime, false);
@@ -1161,18 +1425,17 @@ public final class PredictionRenderer {
             } else {
                 frameOpaqueBuckets = 0;
                 frameOpaquePageGroups = 0;
-                for (int index = 0; index < draws.size(); index++) {
-                    Draw draw = draws.get(water ? draws.size() - 1 - index : index);
-                    PredictionPackedMesh packed = draw.gpu().packed();
-                    if (packed == null) continue;
-                    var ranges = packed.drawRanges(water, draw.faces());
-                    if (ranges.quads == 0) continue;
+                List<PreparedDraw> entries = pass.entries();
+                for (int index = 0; index < entries.size(); index++) {
+                    PreparedDraw prepared = entries.get(water ? entries.size() - 1 - index : index);
+                    Draw draw = prepared.draw();
+                    var ranges = prepared.ranges();
                     if (batch && indirectBatch.add(draw, ranges, camera, true, useAverage, frameTime)) {
                         quads += ranges.quads;
                         continue;
                     }
                     if (batch) indirectBatch.fallback(draw, ranges, camera);
-                    drawSingle(draw, ranges, camera, useAverage, frameTime, true);
+                    drawSingle(draw, ranges, camera, useAverage, frameTime, water);
                     calls++;
                     quads += ranges.quads;
                 }
@@ -1185,6 +1448,7 @@ public final class PredictionRenderer {
                 indirectCalls.addAndGet(batchCalls);
                 indirectTiles.addAndGet(batchTiles);
             }
+            PredictionRenderTimings.end(PredictionRenderTimings.Stage.INDIRECT_BUILD, indirectBuildStart);
             PredictionGlState.depthMask(true);
             PredictionGlState.disableBlend();
             GL30.glBindVertexArray(0);
@@ -1209,7 +1473,11 @@ public final class PredictionRenderer {
         // values only when this flag is true. Explicitly leave batch mode for
         // an independent-buffer fallback, including after a page flush.
         program.batch(false);
-        draw.gpu().bindTerrain(program);
+        // Water may live in its own compact arena slice.  Keep the direct
+        // path on the same payload/base contract as MDI: the bind selects the
+        // slice and palette, while the ranges are rebased to the local water
+        // records when that slice is present.
+        draw.gpu().bindTerrain(program, water);
         draw.gpu().bindYield(3);
         program.setTile((float) (draw.tile().baseBlockX() - camera.x), (float) -camera.y,
                 (float) (draw.tile().baseBlockZ() - camera.z), draw.tile().spacingBlocks(),
@@ -1220,39 +1488,37 @@ public final class PredictionRenderer {
         if (!water) program.setMorph(packed, draw.seam() ? 0.0F
                 : draw.morph() * draw.gpu().morphAmount(frameTime));
         program.setBoundaryReplacement(!water && !draw.seam());
-        submitRanges(ranges);
+        submitRanges(ranges, packed, water);
     }
 
     private static long drawIris(Minecraft minecraft, Frame event, List<Draw> draws,
                                  Vec3 camera, VssLodProjection.MatrixData projection) {
         boolean water = irisPass.translucent();
-        if (!hasPassDraws(draws, water)) return 0L;
+        PreparedPass pass = preparePass(draws, water, camera);
+        if (!pass.hasDraws()) return 0L;
         boolean useAverage = !bindFrame(minecraft, event, projection, camera);
-        int maxQuads = 0;
-        for (Draw draw : draws) {
-            var packed = draw.gpu().packed();
-            if (packed != null) maxQuads = Math.max(maxQuads, packed.quadCount());
-        }
+        int maxQuads = pass.maxQuads();
         if (maxQuads == 0) return 0;
         bindSharedIndices(maxQuads);
         program.setOpaqueAlpha(water ? 0.0F : 1.0F);
         PredictionGlState.depthMask(true);
         long calls = 0;
         PredictionRenderCapture.current(water ? "water-bound" : "opaque-bound");
-        for (int i = 0; i < draws.size(); i++) {
-            Draw draw = draws.get(water ? draws.size() - 1 - i : i);
+        List<PreparedDraw> entries = pass.entries();
+        for (int i = 0; i < entries.size(); i++) {
+            PreparedDraw prepared = entries.get(water ? entries.size() - 1 - i : i);
+            Draw draw = prepared.draw();
             PredictionPackedMesh packed = draw.gpu().packed();
             if (packed == null) continue;
-            var ranges=packed.drawRanges(water,draw.faces());
-            if(ranges.quads==0) continue;
-            draw.gpu().bindTerrain(program);
+            var ranges = prepared.ranges();
+            draw.gpu().bindTerrain(program, water);
             draw.gpu().bindYield(3);
             program.setTile((float) (draw.tile().baseBlockX() - camera.x), (float) -camera.y,
                     (float) (draw.tile().baseBlockZ() - camera.z), draw.tile().spacingBlocks(),
                     packed.cellAxis(), useAverage);
             if (!water && !draw.seam()) program.setMorph(packed, draw.morph() * draw.gpu().morphAmount(System.nanoTime()));
             program.setBoundaryReplacement(!water && !draw.seam());
-            submitRanges(ranges);
+            submitRanges(ranges, packed, water);
             calls++;
             submittedQuads.addAndGet(ranges.quads);
         }
@@ -1263,38 +1529,59 @@ public final class PredictionRenderer {
     /** Same ordered indices and tile bindings, one GL entry per tile/pass.
      * GL 1.4 multidraw is below the renderer's existing GL requirement. */
     static void submitRanges(PredictionDrawRanges ranges) {
+        submitRanges(ranges, 0);
+    }
+
+    /**
+     * Submit face ranges against either the canonical payload or a compact
+     * pass-local payload.  A dedicated water page contains only water quads,
+     * so its ranges start at zero after subtracting {@code rangeBase}; the
+     * shared index buffer itself remains unchanged.  Keeping the rebase here
+     * also makes the direct and Iris paths use the same offsets as MDI.
+     */
+    static void submitRanges(PredictionDrawRanges ranges, int rangeBase) {
+        if (rangeBase < 0) throw new IllegalArgumentException("negative range base");
         if(ranges.first.length==1) {
-            GL11.glDrawElements(GL11.GL_TRIANGLES,ranges.count[0]*6,GL11.GL_UNSIGNED_INT,(long)ranges.first[0]*24);
+            int first = ranges.first[0] - rangeBase;
+            if (first < 0) throw new IllegalArgumentException("range base exceeds range start");
+            GL11.glDrawElements(GL11.GL_TRIANGLES,ranges.count[0]*6,GL11.GL_UNSIGNED_INT,(long)first*24);
             return;
+        }
+        if (rangeCounts.capacity() < ranges.first.length) {
+            rangeCounts = org.lwjgl.BufferUtils.createIntBuffer(ranges.first.length);
+            rangeOffsets = org.lwjgl.BufferUtils.createPointerBuffer(ranges.first.length);
         }
         rangeCounts.clear();rangeOffsets.clear();
         for(int i=0;i<ranges.first.length;i++) {
-            rangeCounts.put(ranges.count[i]*6);rangeOffsets.put((long)ranges.first[i]*24);
+            int first = ranges.first[i] - rangeBase;
+            if (first < 0) throw new IllegalArgumentException("range base exceeds range start");
+            rangeCounts.put(ranges.count[i]*6);rangeOffsets.put((long)first*24);
         }
         rangeCounts.flip();rangeOffsets.flip();
         org.lwjgl.opengl.GL14.glMultiDrawElements(GL11.GL_TRIANGLES,rangeCounts,GL11.GL_UNSIGNED_INT,rangeOffsets);
         groupedDrawCalls.incrementAndGet();
     }
 
-    private static long coverageExpiry(PredictionTileManager.PredictionTile tile,
-                                       int playerChunkX, int playerChunkZ,
-                                       int nearDistance, long nowNanos) {
-        int minChunkX = Math.floorDiv(tile.baseBlockX(), 16);
-        int minChunkZ = Math.floorDiv(tile.baseBlockZ(), 16);
-        int maxChunkX = Math.floorDiv(tile.baseBlockX() + tile.spanBlocks() - 1, 16);
-        int maxChunkZ = Math.floorDiv(tile.baseBlockZ() + tile.spanBlocks() - 1, 16);
-        int dx = playerChunkX < minChunkX ? minChunkX - playerChunkX
-                : playerChunkX > maxChunkX ? playerChunkX - maxChunkX : 0;
-        int dz = playerChunkZ < minChunkZ ? minChunkZ - playerChunkZ
-                : playerChunkZ > maxChunkZ ? playerChunkZ - maxChunkZ : 0;
-        if (Math.max(dx, dz) > nearDistance) {
-            // Residency epochs invalidate handoffs immediately; periodic
-            // distant checks can run less often than near-field checks.
-            return nowNanos + 2_000_000_000L;
+    static void submitRanges(PredictionDrawRanges ranges, PredictionPackedMesh packed, boolean water) {
+        if (ranges.first.length == 1) {
+            int first = packed.gpuFirst(ranges.first[0], ranges.count[0], water);
+            GL11.glDrawElements(GL11.GL_TRIANGLES, ranges.count[0] * 6,
+                    GL11.GL_UNSIGNED_INT, (long) first * 24);
+            return;
         }
-        return nowNanos + COVERAGE_RECHECK_NANOS;
+        if (rangeCounts.capacity() < ranges.first.length) {
+            rangeCounts = org.lwjgl.BufferUtils.createIntBuffer(ranges.first.length);
+            rangeOffsets = org.lwjgl.BufferUtils.createPointerBuffer(ranges.first.length);
+        }
+        rangeCounts.clear(); rangeOffsets.clear();
+        for (int i = 0; i < ranges.first.length; i++) {
+            int first = packed.gpuFirst(ranges.first[i], ranges.count[i], water);
+            rangeCounts.put(ranges.count[i] * 6); rangeOffsets.put((long) first * 24);
+        }
+        rangeCounts.flip(); rangeOffsets.flip();
+        org.lwjgl.opengl.GL14.glMultiDrawElements(GL11.GL_TRIANGLES, rangeCounts, GL11.GL_UNSIGNED_INT, rangeOffsets);
+        groupedDrawCalls.incrementAndGet();
     }
-
 
     static Long2ByteOpenHashMap newDecisionCache() {
         Long2ByteOpenHashMap cache = new Long2ByteOpenHashMap();
@@ -1336,21 +1623,24 @@ public final class PredictionRenderer {
         int baseBlockZ = tile.baseBlockZ();
         long considered = (long) mesh.cellAxis() * mesh.cellAxis();
         long coverageSkipped = 0L;
-        long authoritativeSkipped = 0L;
         int cellAxis = mesh.cellAxis();
         boolean[] allowed = new boolean[cellAxis * cellAxis];
-        int groupAxis = Math.max(1, 16 / stepBlocks);
-        // This mask selects among prediction tiles only. Vanilla/Voxy
-        // occlusion is resolved per fragment against actual rendered depth.
-        Long2ByteOpenHashMap decisions = decisionCacheFor(playerChunkX, playerChunkZ,
+        // Resident ordinary tiles always have an owner and do not depend on
+        // the view's requested detail. Resolve once per minimum tile footprint.
+        boolean ordinary = !snapshot.hasScopedTiles() && snapshot.tiles().get(tile.key()) == tile;
+        int groupAxis = Math.max(1, (ordinary ? snapshot.layout().tileBlocks(0) : 16) / stepBlocks);
+        // Keep prediction ownership independent from optional Voxy suppression.
+        // This immutable mask is safe to draw while a Voxy refresh is pending.
+        Long2ByteOpenHashMap decisions = ordinary ? null : decisionCacheFor(playerChunkX, playerChunkZ,
                 pixelsPerBlock, focus);
+        VssLodFocus terrainFocus = ordinary ? null : PredictionWorkOrder.terrainFocus(focus);
         for (int z = 0; z < cellAxis; z += groupAxis) {
             for (int x = 0; x < cellAxis; x += groupAxis) {
                 int endX = Math.min(cellAxis, x + groupAxis), endZ = Math.min(cellAxis, z + groupAxis);
                 int cellChunkX = Math.floorDiv(baseBlockX + x * stepBlocks + stepBlocks / 2, 16);
                 int cellChunkZ = Math.floorDiv(baseBlockZ + z * stepBlocks + stepBlocks / 2, 16);
                 long chunkKey = (long) cellChunkX << 32 | cellChunkZ & 0xFFFFFFFFL;
-                byte shared = decisions.get(chunkKey);
+                byte shared = ordinary ? 0 : decisions.get(chunkKey);
                 byte desiredLod;
                 if (shared != UNKNOWN_DECISION) {
                     // Selection depends on position, projection and focus.
@@ -1372,8 +1662,9 @@ public final class PredictionRenderer {
                                     focus.selectionScale(pixelsPerBlock), pixelsPerQuad());
                             desiredLod = (byte) Math.min(desiredLod, floor);
                         }
-                        VssLodFocus patch = PredictionWorkOrder.surfaceFocus(focus);
-                        if (patch.intersects(cellChunkX * 16D, cellChunkZ * 16D,
+                        // The active terrain patch keeps its best uploaded detail,
+                        // including while a new child still contains only a preview.
+                        if (terrainFocus.intersects(cellChunkX * 16D, cellChunkZ * 16D,
                                 (cellChunkX + 1D) * 16, (cellChunkZ + 1D) * 16)) desiredLod = 0;
                     }
                     if (decisions.size() > 96_000) {
@@ -1382,7 +1673,7 @@ public final class PredictionRenderer {
                     decisions.put(chunkKey, desiredLod);
                 }
                 byte decision;
-                PredictionTileManager.PredictionTile cover = snapshot.coveringTileAtDetail(cellChunkX, cellChunkZ, desiredLod);
+                PredictionTileManager.PredictionTile cover = coverageOwners.coveringTileAtDetail(snapshot, cellChunkX, cellChunkZ, desiredLod);
                 if (cover == tile || (cover == null && desiredLod >= tile.key().lod())) {
                     decision = 0;
                 } else {
@@ -1396,9 +1687,9 @@ public final class PredictionRenderer {
                         row * cellAxis + x, row * cellAxis + endX, true);
             }
         }
-        long rendered = considered - coverageSkipped - authoritativeSkipped;
+        long rendered = considered - coverageSkipped;
         return new TileCoverage(allowed, considered, rendered,
-                coverageSkipped, authoritativeSkipped);
+                coverageSkipped, 0);
     }
 
     public static String diagnostics() {
@@ -1414,16 +1705,22 @@ public final class PredictionRenderer {
                 + ",authoritativeSkipped=" + skippedAuthoritative.get()
                 + ",meshUploads=" + meshUploads.get()
                 + ",meshRestore={" + PredictionMeshRestore.diagnostics() + "}"
+                + ",gpuResidency={" + gpuResidency.diagnostics() + "}"
                 + "," + PredictionQuadBufferPool.SHARED.diagnostics()
                 + "," + PredictionTerrainArena.SHARED.diagnostics()
                 + ",drawCalls=" + drawCalls.get()
                 + ",indirectCalls=" + indirectCalls.get()
                 + ",indirectTiles=" + indirectTiles.get()
                 + ",indirect={" + (indirectBatch == null ? "none" : indirectBatch.diagnostics()) + "}"
+                + ",batchCache={hits=" + opaqueBatches.cacheHits()
+                + ",misses=" + opaqueBatches.cacheMisses() + "}"
+                + ",passCache={opaque=" + opaquePass.diagnostics()
+                + ",water=" + waterPass.diagnostics() + "}"
                 + ",multiDrawCalls=" + groupedDrawCalls.get()
                 + ",quads=" + submittedQuads.get()
                 + ",wallIndex={" + lodSeams.diagnostics() + "," + PredictionSeamMasks.diagnostics() + "}"
                 + ",scene={" + scene.diagnostics() + "}"
+                + ",coverageOwners={" + coverageOwners.diagnostics() + "}"
                 + ",gpuTiles=" + gpuTiles.size()
                 + ",coverageCacheHits=" + coverageCacheHits.get()
                 + ",coverageResolves=" + coverageResolves.get()
@@ -1448,7 +1745,8 @@ public final class PredictionRenderer {
                 double angle = ((sector + sample * 0.5) / 128.0) * (Math.PI * 2.0) - Math.PI;
                 int blockX = (int) Math.floor(camera.x + Math.cos(angle) * radius);
                 int blockZ = (int) Math.floor(camera.z + Math.sin(angle) * radius);
-                var tile = snapshot.coveringTileAtDetail(Math.floorDiv(blockX, 16), Math.floorDiv(blockZ, 16), 0);
+                var tile = coverageOwners.coveringTileAtDetail(snapshot,
+                        Math.floorDiv(blockX, 16), Math.floorDiv(blockZ, 16), 0);
                 var draw = tile == null ? null : scene.terrain.get(tile.key());
                 if (draw == null || draw.tile() != tile || !draw.gpu().drawable()
                         || !draw.allowed()[PredictionLodSeams.cellAt(tile, blockX, blockZ)]) covered = false;
@@ -1471,12 +1769,17 @@ public final class PredictionRenderer {
         viewRay = null;
         PredictionVoxyDepth.clear();
         renderResidency.clear();
+        gpuResidency.clear();
         PredictionMeshRestore.clear();
         scene.clear();
         uploadBudget.clear();
         vanillaMask.invalidate();
         exactMask.invalidate();
+        submissionCoverage.clear();
         coverageCache.clear();
+        coverageOwners.clear();
+        opaquePass.clear();
+        waterPass.clear();
         List<PredictionGpuTile> released = new ArrayList<>(gpuTiles.values());
         gpuTiles.clear();
         retiredTiles.addAll(released);
@@ -1554,12 +1857,9 @@ public final class PredictionRenderer {
     }
 
     record CachedCoverage(long tileRevision, long tileEpoch, long expiresAtNanos,
-                                  CoverageView view,
-                                  TileCoverage coverage) {
+                          CoverageView view, TileCoverage coverage) {
         boolean matchesOwnership(long nextTileRevision, long nextTileEpoch, CoverageView nextView) {
-            return tileRevision == nextTileRevision
-                    && tileEpoch == nextTileEpoch
-                    && view.equals(nextView);
+            return tileRevision == nextTileRevision && tileEpoch == nextTileEpoch && view.equals(nextView);
         }
     }
 

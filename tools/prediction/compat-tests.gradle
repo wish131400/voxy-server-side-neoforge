@@ -24,8 +24,14 @@ allprojects {
         if (providers.gradleProperty('vssVoxyJar').isPresent()) {
             systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
         }
+        if (providers.gradleProperty('vssLostCitiesMatrix').isPresent()) {
+            systemProperty 'vss.lostCitiesMatrix', providers.gradleProperty('vssLostCitiesMatrix').get()
+        }
         if (providers.gradleProperty('vssLostCitiesJar').isPresent()) {
             systemProperty 'vss.lostCitiesJar', providers.gradleProperty('vssLostCitiesJar').get()
+        }
+        if (providers.gradleProperty('vssXaeroJars').isPresent()) {
+            systemProperty 'vss.xaeroJars', providers.gradleProperty('vssXaeroJars').get()
         }
     }
 }

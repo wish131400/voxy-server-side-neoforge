@@ -2,6 +2,7 @@ package dev.xantha.vss.networking.server.sending;
 
 
 import dev.xantha.vss.networking.server.generation.ChunkGenerationService;
+import dev.xantha.vss.networking.server.generation.ChunkyGenerationService;
 import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import dev.xantha.vss.networking.server.state.PlayerRequestRegistry;
 import dev.xantha.vss.networking.server.state.PlayerRequestState;
@@ -9,6 +10,7 @@ import dev.xantha.vss.networking.server.storage.ColumnLodCache;
 import dev.xantha.vss.networking.server.storage.PersistentColumnWriter;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.common.VSSConstants;
+import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.processing.EncodedColumnData;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
@@ -21,16 +23,19 @@ public final class GeneratedColumnFlusher {
     private final ChunkGenerationService generationService;
     private final ColumnLodCache columnCache;
     private final PersistentColumnWriter persistentColumnWriter;
+    private final ChunkyGenerationService chunky;
 
     public GeneratedColumnFlusher(
             PlayerRequestRegistry playerRegistry,
             ChunkGenerationService generationService,
             ColumnLodCache columnCache,
-            PersistentColumnWriter persistentColumnWriter) {
+            PersistentColumnWriter persistentColumnWriter,
+            ChunkyGenerationService chunky) {
         this.playerRegistry = playerRegistry;
         this.generationService = generationService;
         this.columnCache = columnCache;
         this.persistentColumnWriter = persistentColumnWriter;
+        this.chunky = chunky;
     }
 
     public void flush(MinecraftServer server) {
@@ -38,9 +43,11 @@ public final class GeneratedColumnFlusher {
             return;
         }
         for (ChunkGenerationService.GenerationResult result : generationService.tick(server)) {
+            if (chunky.handleResult(result)) continue;
             PlayerRequestState state = playerRegistry.get(result.playerUuid());
             ServerPlayer player = server.getPlayerList().getPlayer(result.playerUuid());
-            if (state == null || state != result.requestState() || player == null || state.consumeCancelled(result.requestId())) {
+            if (state == null || state != result.requestState() || player == null
+                    || state.consumeCancelled(result.requestId()) || !state.isActiveRequest(result.requestId())) {
                 continue;
             }
 
@@ -61,6 +68,11 @@ public final class GeneratedColumnFlusher {
             }
 
             if (!columnData.hasBody() || !columnData.completeColumn()) {
+                if (VSSLogger.isDebugEnabled()) {
+                    VSSLogger.debug("LOD column unavailable: reason=" + (!columnData.hasBody() ? "empty-body" : "incomplete")
+                            + ", dimension=" + result.dimension().location() + ", chunk=" + columnData.chunkX()
+                            + "," + columnData.chunkZ() + ", request=" + result.requestId());
+                }
                 sendNotGenerated(player, state, result.requestId());
                 continue;
             }

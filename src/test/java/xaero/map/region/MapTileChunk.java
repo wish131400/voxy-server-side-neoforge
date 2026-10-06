@@ -14,7 +14,7 @@ public class MapTileChunk {
     public boolean changed;
     public boolean toUpdateBuffers;
     public boolean hasHadTerrain;
-    public boolean includeInSaveResult = true;
+    public boolean includeInSaveResult;
     public final LeafRegionTexture leafTexture = new LeafRegionTexture();
     public final MapTile[][] tiles = new MapTile[4][4];
     public boolean setTileThrows; // arms the throw-latch tests
@@ -66,6 +66,7 @@ public class MapTileChunk {
 
     public void setHasHadTerrain() {
         this.hasHadTerrain = true;
+        this.region.hasHadTerrain = true;
         dev.xantha.vss.compat.XaeroStubEvents.record("tileChunk.setHasHadTerrain");
     }
 
@@ -80,8 +81,8 @@ public class MapTileChunk {
                     + " native writer commits tiles under the region's writer-pause monitor");
         }
         if (this.setTileThrows) throw new IllegalStateException("armed setTile throw");
+        if (tile != null) this.includeInSaveResult = true;
         this.tiles[x][z] = tile;
         dev.xantha.vss.compat.XaeroStubEvents.record("tileChunk.setTile " + x + "," + z);
     }
 }
-

@@ -287,7 +287,7 @@ class PredictionFirstCoverageTest {
             } finally { blocking.set(false); release.countDown(); PredictionFramePace.resetForTesting(); }
             awaitIdle(manager);
             assertEquals(0,manager.failedTileCount());
-            assertTrue(manager.surfaceDiagnostics().contains("borrowedSurfaceBuilds=" + (nearbyPreview ? 1 : 0)));
+            assertTrue(manager.surfaceDiagnostics().contains("detailActive=0"), "shared detail permits must be released");
         }
     }
 
@@ -421,6 +421,7 @@ class PredictionFirstCoverageTest {
             assertEquals(manager.layout().tileBlocks(root.lod()), preview.spanBlocks());
             assertEquals(-preview.spanBlocks(), preview.baseBlockX());
             assertNotNull(preview.mesh().gpuPayload());
+            disk.flush();
             try (var lease = disk.lease(PredictionDiskCache.Key.terrain(-1, -1, root.lod()))) {
                 assertEquals(8, disk.readTerrainData(lease, 0).cellAxis(), "first preview must survive a restart");
             }
@@ -432,6 +433,7 @@ class PredictionFirstCoverageTest {
             var intermediate = manager.readyTiles().iterator().next();
             assertEquals(16, intermediate.cellAxis(), "first refinement should publish before the full grid");
             assertEquals(preview.spanBlocks(), intermediate.spanBlocks());
+            disk.flush();
             try (var lease = disk.lease(PredictionDiskCache.Key.terrain(-1, -1, root.lod()))) {
                 assertEquals(16, disk.readTerrainData(lease, 0).cellAxis(), "intermediate detail must survive a restart");
             }
@@ -570,7 +572,7 @@ class PredictionFirstCoverageTest {
         } finally { release.countDown(); }
     }
 
-    @Test void obsoleteQueuedCaptureDoesNoSamplingBeforeRetry() throws Exception {
+    @Test void queuedCaptureUsesLatestEpochBeforeItsFirstQuery() throws Exception {
         var calls = new AtomicInteger();
         var release = new CountDownLatch(1);
         try (var manager = manager(sampler(calls, null, null), null)) {
@@ -590,8 +592,8 @@ class PredictionFirstCoverageTest {
             int chunk = -manager.layout().tileBlocks(root.lod()) / 16;
             manager.capturedTerrainChanged(chunk, chunk);
             release.countDown(); awaitIdle(manager);
-            assertEquals(before, calls.get(), "stale queued jobs must exit before their first terrain query");
-            assertEquals(built, manager.builtTileCount());
+            assertEquals(before * 2, calls.get(), "queued work must sample the latest epoch once without discarding a complete preview");
+            assertEquals(built + 1, manager.builtTileCount(), "the latest capture can publish on the first attempt");
             enqueue(manager, root); awaitIdle(manager);
             assertTrue(manager.builtTileCount() > built, "latest capture remains eligible for rebuilding");
         } finally { release.countDown(); }
@@ -657,6 +659,7 @@ class PredictionFirstCoverageTest {
             desire(manager,root,true);
             for(int stage=8;stage<=axis;stage*=2){enqueue(manager,root);awaitIdle(manager);}
             assertEquals(axis,manager.readyTiles().iterator().next().cellAxis());
+            disk.flush();
         }
         double coldMs=(System.nanoTime()-coldStart)/1e6;
         assertTrue(samples.getAndSet(0)>0);assertTrue(colors.getAndSet(0)>0);
@@ -683,6 +686,27 @@ class PredictionFirstCoverageTest {
             try(var lease=disk.lease(PredictionDiskCache.Key.terrain(root.tileX(),root.tileZ(),root.lod()))) {
                 assertNull(disk.readTerrainData(lease,0),"dirty columns invalidate persisted previews as well");
             }
+        }
+    }
+
+    @Test void telescopeBuildCannotReclassifyAnOrdinaryResidentAsScopeOnly() throws Exception {
+        var calls=new AtomicInteger();
+        try (var manager=manager(sampler(calls,null,null),null)) {
+            int lod=manager.layout().levelCount()-1;
+            var key=new PredictionTileKey(PROFILE.levelKey(),1,0,lod);
+            desire(manager,key,true);
+            enqueue(manager,key); awaitIdle(manager);
+            var ordinary=manager.renderSnapshot().tiles().get(key);
+            assertNotNull(ordinary); assertFalse(ordinary.scopeOnly());
+            var focus=PredictionTileManager.class.getDeclaredField("buildFocus"); focus.setAccessible(true);
+            focus.set(manager,new VssLodFocus(ordinary.baseBlockX()+32,32,64,5000));
+            var targets=PredictionTileManager.class.getDeclaredField("terrainTargets"); targets.setAccessible(true);
+            targets.set(manager,java.util.Map.of(key,64));
+            enqueue(manager,key); awaitIdle(manager);
+            var upgraded=manager.renderSnapshot().tiles().get(key);
+            assertTrue(upgraded.spacingBlocks()<ordinary.spacingBlocks(),"the telescope build must actually refine");
+            assertFalse(upgraded.scopeOnly(),"the upgrade must retain the original ordinary coverage qualification");
+            assertEquals(1,manager.renderSnapshot().tiles().size(),"same-key refinement must not retain a duplicate resident mesh");
         }
     }
 

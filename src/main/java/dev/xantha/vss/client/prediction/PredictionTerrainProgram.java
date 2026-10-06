@@ -65,10 +65,18 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private final int batchEnabled;
     private final int quadBase;
     private final int paletteBase;
+    private final int batchCameraOffset;
+    private final int batchTimeSeconds;
     void setQuadBase(int offset) { GL20.glUniform1i(quadBase, offset); }
     void setPaletteBase(int offset) { GL20.glUniform1i(paletteBase, offset); }
     boolean supportsBatch() { return batchEnabled >= 0; }
     void batch(boolean enabled) { if (batchEnabled >= 0) GL20.glUniform1i(batchEnabled, enabled ? 1 : 0); }
+    void setBatchCameraOffset(float x, float y, float z) {
+        if (batchCameraOffset >= 0) GL20.glUniform3f(batchCameraOffset, x, y, z);
+    }
+    void setBatchTimeSeconds(float seconds) {
+        if (batchTimeSeconds >= 0) GL20.glUniform1f(batchTimeSeconds, seconds);
+    }
 
     private PredictionTerrainProgram() {
         this(TERRAIN_VERTEX, TERRAIN_FRAGMENT);
@@ -80,6 +88,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
         this.batchEnabled = program.uniform("BatchEnabled");
         this.quadBase = program.uniform("QuadBaseTexel");
         this.paletteBase = program.uniform("PaletteBaseTexel");
+        this.batchCameraOffset = program.uniform("BatchCameraOffset");
+        this.batchTimeSeconds = program.uniform("BatchTimeSeconds");
         this.modelView = program.uniform("ModelViewMat");
         this.projection = program.uniform("ProjMat");
         this.viewOrigin = program.uniform("ViewOrigin");
@@ -130,8 +140,14 @@ final class PredictionTerrainProgram implements AutoCloseable {
 
     private static final String BATCH_RECORDS = """
             uniform bool BatchEnabled;
+            uniform vec3 BatchCameraOffset;
+            uniform float BatchTimeSeconds;
             struct BatchRecord { vec4 offsetSpacing; ivec4 data; vec4 morph; ivec4 flags; };
             layout(std430,binding=7) readonly buffer BatchRecords { BatchRecord records[]; };
+            float VssBatchMorphAmount(float age) {
+                float t = clamp(age / 0.35, 0.0, 1.0);
+                return 1.0 - t * t * (3.0 - 2.0 * t);
+            }
             """;
     private static String batchUniform(String source, String type, String name, String value) {
         return source.replaceAll("\\b" + name + "\\b", "Vss" + name)
@@ -141,11 +157,13 @@ final class PredictionTerrainProgram implements AutoCloseable {
     static String batchVertex(String source) {
         source = source.replace("#version 150", "#version 460 core")
                 .replace("uniform usamplerBuffer QuadPayload;", BATCH_RECORDS + "\nflat out int BatchSlot;\nuniform usamplerBuffer QuadPayload;");
-        source = batchUniform(source, "vec3", "TileOffset", "records[gl_BaseInstance].offsetSpacing.xyz");
+        source = batchUniform(source, "vec3", "TileOffset", "records[gl_BaseInstance].offsetSpacing.xyz + BatchCameraOffset");
         source = batchUniform(source, "float", "Spacing", "records[gl_BaseInstance].offsetSpacing.w");
         source = batchUniform(source, "int", "CellAxis", "records[gl_BaseInstance].data.x");
         source = batchUniform(source, "int", "UseAverage", "records[gl_BaseInstance].data.y");
-        source = batchUniform(source, "vec2", "TerrainMorph", "records[gl_BaseInstance].morph.xy");
+        source = batchUniform(source, "vec2", "TerrainMorph",
+                "vec2(records[gl_BaseInstance].morph.x, uintBitsToFloat(records[gl_BaseInstance].flags.w)"
+                        + " * VssBatchMorphAmount(BatchTimeSeconds - uintBitsToFloat(records[gl_BaseInstance].flags.z)))");
         source = batchUniform(source, "vec2", "MorphBounds", "records[gl_BaseInstance].morph.zw");
         source = batchUniform(source, "int", "QuadBaseTexel", "records[gl_BaseInstance].data.z");
         source = batchUniform(source, "int", "PaletteBaseTexel", "records[gl_BaseInstance].flags.y");
@@ -223,6 +241,10 @@ final class PredictionTerrainProgram implements AutoCloseable {
 
     void setRealRenderDistance(float blocks) {
         GL20.glUniform1f(program.uniform("RealRenderDistance"), blocks);
+    }
+
+    void setVoxyOwnershipDistance(float blocks) {
+        GL20.glUniform1f(program.uniform("VoxyOwnershipDistance"), blocks);
     }
 
     void bindExactCoverage(PredictionExactCoverageMask mask, ClientLevel level,
@@ -460,6 +482,12 @@ final class PredictionTerrainProgram implements AutoCloseable {
                             int(vCell) / CellAxis);
                     sourceOwned = texelFetch(Yield, coverageCell, 0).r >= 0.5;
                 }
+                // Ownership is constant for every corner of this fixed-cell quad.
+                // Do not fetch morph/material data or expand a fully replaced primitive.
+                if (!sourceOwned) {
+                    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+                    return;
+                }
                 bool fineCoordinates = (attr & (1u << 20)) != 0u;
                 uint fluid = (attr >> 22) & 3u;
                 bool fluidFineY = fluid != 0u && (attr & (1u << 21)) != 0u;
@@ -510,8 +538,15 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 vDistance = length(relative.xz);
                 vSprite = float(sprite);
                bool cutout = (attr & (1u << 26)) != 0u;
+               // A flat varying must agree at every corner, including quads crossing
+               // the cutoff. Only skip lookup when the complete XZ box is outside it.
+               vec2 quadMin = vec2(min(min(halfX(texelA, 0), halfX(texelA, 1)), min(halfX(texelA, 2), halfX(texelA, 3))),
+                                   min(min(halfZ(texelA, 0), halfZ(texelA, 1)), min(halfZ(texelA, 2), halfZ(texelA, 3)))) / horizontalScale + TileOffset.xz;
+               vec2 quadMax = vec2(max(max(halfX(texelA, 0), halfX(texelA, 1)), max(halfX(texelA, 2), halfX(texelA, 3))),
+                                   max(max(halfZ(texelA, 0), halfZ(texelA, 1)), max(halfZ(texelA, 2), halfZ(texelA, 3)))) / horizontalScale + TileOffset.xz;
+               vec2 nearestMaterial = max(max(quadMin, -quadMax), vec2(0.0));
                bool farMaterial = DetailDistance > 0.0
-                       && dot(relative.xz, relative.xz) > DetailDistance * DetailDistance;
+                       && dot(nearestMaterial, nearestMaterial) > DetailDistance * DetailDistance;
                // Far solid faces already carry their averaged/tinted colour
                // in the packed payload. Keep atlas reads for cutouts and
                // fluids, whose alpha/animated surface is still meaningful.
@@ -552,18 +587,20 @@ final class PredictionTerrainProgram implements AutoCloseable {
                         : axis == 1u ? vec3(positive ? 1.0 : -1.0, 0.0, 0.0)
                         : vec3(0.0, 0.0, positive ? 1.0 : -1.0);
                 vFaceNormal = diagonal ? vec3(0.0) : faceNormal;
-                // Keep the real position for every vertex. Moving only some
-                // vertices outside clip space makes the rasterizer create a
-                // new clipping edge across an otherwise planar quad, which
-                // shows up as a thin see-through strip at the Voxy handoff.
+                // Moving only some corners outside clip space stretches the
+                // remaining triangles toward that artificial clip position.
                 bool surfaceVisible = diagonal || dot(faceNormal, relative) < 0.0;
                 vSurfaceVisible = surfaceVisible ? 1.0 : 0.0;
-                // All four vertices of a planar face share this result. Move
-                // a fully back-facing face outside clip space so it never
-                // reaches rasterization. Fragment-side discard alone still
-                // paid the cost of depth, coverage, and material work for
-                // every covered pixel.
-                if (!surfaceVisible) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+                // A sloping or morphing top can straddle eye height. Its
+                // axis normal is only an approximation, so this test need
+                // not agree at all four corners. Only skip rasterization
+                // when the face-normal coordinate is constant for the quad.
+                // Other faces retain their real positions and flat discard.
+                uint planeA = axis == 0u ? texelB.x : axis == 1u ? texelA.x : texelA.z;
+                uint planeB = axis == 0u ? texelB.y : axis == 1u ? texelA.y : texelA.w;
+                bool constantFacePlane = (axis != 0u || TerrainMorph.y <= 0.0)
+                        && planeA == planeB && (planeA & 65535u) == (planeA >> 16u);
+                if (!surfaceVisible && constantFacePlane) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             }
             """;
 
@@ -585,6 +622,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             uniform vec4 RealCoverageBounds;
             uniform sampler2D ExactCoverage;
             uniform vec3 ExactCoverageGrid; // camera-relative origin X/Z and column count
+            uniform float VoxyOwnershipDistance;
             uniform float HorizonDistance;
             uniform float RealRenderDistance;
             uniform bool ReplaceBoundaryWalls;
@@ -656,15 +694,22 @@ final class PredictionTerrainProgram implements AutoCloseable {
                  return rectMin + repeated * size;
              }
 
-             bool hasRealColumn(vec2 position) {
+             float realColumnCoverage(vec2 position) {
                  ivec2 cell = ivec2(floor((position - ExactCoverageGrid.xy) / 16.0));
                  return ExactCoverageGrid.z > 0.0 && all(greaterThanEqual(cell, ivec2(0)))
                          && all(lessThan(cell, ivec2(ExactCoverageGrid.z)))
-                         && texelFetch(ExactCoverage, cell, 0).r > 0.5;
+                         ? texelFetch(ExactCoverage, cell, 0).r : 0.0;
              }
 
-             bool realCoverageOwnsSurface(float realDistance, float predictedDistance) {
-                 if (vWater > 0.5 || realDistance <= 0.0 || predictedDistance <= 0.0) return false;
+             bool hasRealColumn(vec2 position) {
+                 return realColumnCoverage(position) > 0.5;
+             }
+
+             bool realCoverageOwnsSurface(float realDistance, float predictedDistance, bool realGround) {
+                 // A rear cut wall is not the real ground at this column.
+                 // Cached columns can prefer a rendered ground surface, but
+                 // cannot make the buried side of a section erase its fallback.
+                 if (!realGround || vWater > 0.5 || realDistance <= 0.0 || predictedDistance <= 0.0) return false;
                  // Reproject along the actual camera ray, including view bob.
                  // Both ends of the ray segment must belong to confirmed real
                  // coverage. Readiness alone never removes a prediction tile;
@@ -696,37 +741,6 @@ final class PredictionTerrainProgram implements AutoCloseable {
                      uvDy = dFdy(tileUv);
                      footprint = max(length(uvDx), length(uvDy));
                  }
-                if (vSurfaceVisible < 0.5) {
-                    discard;
-                }
-                // Parent meshes extend beyond the planned circle. Keep their
-                // useful interior, but never display unrefinable outer slabs.
-                if (HorizonDistance > 0.0 && dot(relative.xz, relative.xz)
-                        > HorizonDistance * HorizonDistance) discard;
-                // Reject cells owned by another prediction tile before depth reconstruction.
-                ivec2 sourceCell = ivec2(int(vCell) % CellAxis, int(vCell) / CellAxis);
-                ivec2 cell = vCellLocal > 0.5
-                        ? ivec2(int(floor(localXZ.x / Spacing)),
-                                int(floor(localXZ.y / Spacing)))
-                        : sourceCell;
-                // A wall lies on a cell boundary. Its perpendicular coordinate
-                // must stay on the owning column, including at the tile edge.
-                if (vCoverageAxis == 1u) cell.x = sourceCell.x;
-                if (vCoverageAxis == 2u) cell.y = sourceCell.y;
-                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis || cell.y >= CellAxis) discard;
-                float ownership = texelFetch(Yield, cell, 0).r;
-                if (ownership < 0.5) discard;
-                // Only worker-tagged ground walls can be replaced by a current seam.
-                if (ReplaceBoundaryWalls && vTerrainWall != 0u && vWater < 0.5 && vCutout < 0.5 && vModelUv < 0.5
-                        && vRealBoundary == 0u && vCoverageAxis != 0u && dot(vFaceNormal, vFaceNormal) > 0.5) {
-                    int flags = int(round(ownership * 255.0));
-                    bool xNormal = vCoverageAxis == 1u;
-                    float plane = xNormal ? localXZ.x : localXZ.y;
-                    float origin = float(xNormal ? cell.x : cell.y) * Spacing;
-                    int edge = abs(plane - origin) < 0.01 ? (xNormal ? 0 : 2)
-                            : abs(plane - origin - Spacing) < 0.01 ? (xNormal ? 1 : 3) : -1;
-                    if (edge >= 0 && (flags & (1 << edge)) != 0) discard;
-                }
                 // Compare in the main target's depth space. Equal/quantized
                 // depths belong to Voxy; a closer prediction still occludes
                 // distant cut faces. Sky must remain fillable at any distance.
@@ -740,33 +754,19 @@ final class PredictionTerrainProgram implements AutoCloseable {
                  float mainDepth = realDepthRelevant
                          ? texelFetch(MainDepth, ivec2(gl_FragCoord.xy), 0).r : 1.0;
                  #endif
+                // W is the same clip distance used by the rasterizer, including
+                // view bob. Reconstruct real geometry before any discard so
+                // screen derivatives remain defined across the fragment quad.
+                float predictedDistance = 1.0 / max(gl_FragCoord.w, 1e-30);
                  #ifdef VSS_IRIS
                 float clipDepth = VssZeroToOne ? mainDepth : mainDepth * 2.0 - 1.0;
                 vec4 mainView = VssInverseProjection * vec4(gl_FragCoord.xy / VssViewport * 2.0 - 1.0, clipDepth, 1.0);
-                float predictedDistance = 1.0 / max(gl_FragCoord.w, 1e-30);
-                if (mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
-                        && realCoverageOwnsSurface(abs(mainView.z / mainView.w), predictedDistance)) discard;
-                float fluidTie = 0.02 * max(1.0, predictedDistance / max(abs(dot(vFaceNormal, relative)), 0.02));
-                if (vWater > 0.5 && mainDepth != VssClearDepth) {
-                    // Compare in window depth, avoiding cancellation when an
-                    // inverse projection reconstructs distant coplanar water.
-                    // Two bins cover independent rasterization/storage rounding;
-                    // the additional 2 cm bias is perpendicular to the surface.
-                    vec4 biasedClip = ProjMat * vec4(0.0, 0.0, -predictedDistance - fluidTie, 1.0);
-                    float biasedDepth = biasedClip.z / biasedClip.w;
-                    if (!VssZeroToOne) biasedDepth = biasedDepth * 0.5 + 0.5;
-                    float bins = 2.0 / 16777215.0;
-                    if (VssClearDepth < 0.5 ? mainDepth >= biasedDepth - bins : mainDepth <= biasedDepth + bins) discard;
-                }
-                // Prefer real geometry in the same surface neighbourhood.
-                // Far cut faces must still be occluded by closer predicted ground.
-                if (vWater < 0.5 && mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
-                        && abs(mainView.z / mainView.w) <= predictedDistance + min(16.0, max(1.0, Spacing * 2.0))) discard;
+                float realDistance = abs(mainView.w) > 1e-10 ? abs(mainView.z / mainView.w) : 0.0;
                 #else
                 // Rasterizer W retains reciprocal clip distance. Recovering it
                 // from window Z subtracts nearly equal numbers at altitude and
                 // makes coplanar water alternate ownership in horizontal bands.
-                float distance = 1.0 / max(gl_FragCoord.w, 1e-30);
+                float distance = predictedDistance;
                 // A fluid tie is measured perpendicular to the face, not
                 // along view Z. At grazing angles a two-centimetre plane
                 // tolerance spans much more clip distance. This also bounds
@@ -810,14 +810,91 @@ final class PredictionTerrainProgram implements AutoCloseable {
                         }
                     }
                 }
+                #endif
+                bool realGround = false;
+                if (vWater < 0.5) {
+                    float finiteDistance = realDistance > 0.0 && realDistance < 1e30 ? realDistance : 0.0;
+                    vec3 realPosition = ViewOrigin + (relative - ViewOrigin) * (finiteDistance / predictedDistance);
+                    vec3 normal = cross(dFdx(realPosition), dFdy(realPosition));
+                    // A surface facing upward can correct a sampled height.
+                    // A vertical side behind prediction must obey depth order.
+                    // Reuse the current depth fetch; no extra texture or scan.
+                    realGround = normal.y > 0.0 && normal.y * normal.y > 0.25 * dot(normal, normal);
+                }
+                if (vSurfaceVisible < 0.5) discard;
+                // Parent meshes extend beyond the planned circle. Keep their
+                // useful interior, but never display unrefinable outer slabs.
+                if (HorizonDistance > 0.0 && dot(relative.xz, relative.xz)
+                        > HorizonDistance * HorizonDistance) discard;
+                // Reject cells owned by another prediction tile before handoff.
+                ivec2 sourceCell = ivec2(int(vCell) % CellAxis, int(vCell) / CellAxis);
+                ivec2 cell = vCellLocal > 0.5
+                        ? ivec2(int(floor(localXZ.x / Spacing)),
+                                int(floor(localXZ.y / Spacing)))
+                        : sourceCell;
+                // A wall lies on a cell boundary. Its perpendicular coordinate
+                // must stay on the owning column, including at the tile edge.
+                if (vCoverageAxis == 1u) cell.x = sourceCell.x;
+                if (vCoverageAxis == 2u) cell.y = sourceCell.y;
+                if (cell.x < 0 || cell.y < 0 || cell.x >= CellAxis || cell.y >= CellAxis) discard;
+                float ownership = texelFetch(Yield, cell, 0).r;
+                if (ownership < 0.5) discard;
+                // The index selects the regional owner, but is not proof of
+                // an actual pixel at a coarse edge. Keep a retained mixed
+                // tile's opaque background where real depth is clear; losing
+                // that seabed would blend transparent water over the sky.
+                // Water itself uses the fluid depth/tie test below so a ray
+                // across the index boundary does not open a water-only hole.
+                // Inward bias keeps walls with their source column.
+                vec3 ownershipPosition = relative - vFaceNormal * 0.01;
+                bool waterSurface = vWater > 0.5 && vWater < 1.5;
+                #ifdef VSS_IRIS
+                bool realPixel = mainDepth != VssClearDepth;
+                #else
+                bool realPixel = mainDepth < 1.0;
+                #endif
+                if (!waterSurface && realPixel && VoxyOwnershipDistance > 0.0
+                        && dot(ownershipPosition, ownershipPosition) < VoxyOwnershipDistance * VoxyOwnershipDistance
+                        && realColumnCoverage(ownershipPosition.xz) > 0.75) discard;
+                // Only worker-tagged ground walls can be replaced by a current seam.
+                if (ReplaceBoundaryWalls && vTerrainWall != 0u && vWater < 0.5 && vCutout < 0.5 && vModelUv < 0.5
+                        && vRealBoundary == 0u && vCoverageAxis != 0u && dot(vFaceNormal, vFaceNormal) > 0.5) {
+                    int flags = int(round(ownership * 255.0));
+                    bool xNormal = vCoverageAxis == 1u;
+                    float plane = xNormal ? localXZ.x : localXZ.y;
+                    float origin = float(xNormal ? cell.x : cell.y) * Spacing;
+                    int edge = abs(plane - origin) < 0.01 ? (xNormal ? 0 : 2)
+                            : abs(plane - origin - Spacing) < 0.01 ? (xNormal ? 1 : 3) : -1;
+                    if (edge >= 0 && (flags & (1 << edge)) != 0) discard;
+                }
+                #ifdef VSS_IRIS
+                if (mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
+                        && realCoverageOwnsSurface(realDistance, predictedDistance, realGround)) discard;
+                float fluidTie = 0.02 * max(1.0, predictedDistance / max(abs(dot(vFaceNormal, relative)), 0.02));
+                if (vWater > 0.5 && mainDepth != VssClearDepth) {
+                    // Compare in window depth, avoiding cancellation when an
+                    // inverse projection reconstructs distant coplanar water.
+                    // Two bins cover independent rasterization/storage rounding;
+                    // the additional 2 cm bias is perpendicular to the surface.
+                    vec4 biasedClip = ProjMat * vec4(0.0, 0.0, -predictedDistance - fluidTie, 1.0);
+                    float biasedDepth = biasedClip.z / biasedClip.w;
+                    if (!VssZeroToOne) biasedDepth = biasedDepth * 0.5 + 0.5;
+                    float bins = 2.0 / 16777215.0;
+                    if (VssClearDepth < 0.5 ? mainDepth >= biasedDepth - bins : mainDepth <= biasedDepth + bins) discard;
+                }
+                // Prefer rendered ground within its sampling tolerance; rear
+                // section walls must not borrow the same height preference.
+                if (vWater < 0.5 && mainDepth != VssClearDepth && abs(mainView.w) > 1e-10
+                        && realDistance <= predictedDistance + (realGround ? min(16.0, max(1.0, Spacing * 2.0)) : 0.02)) discard;
+                #else
                 if (mainDepth < 1.0 && (originalVoxyDepth ? distance >= realDistance : projectedDepth >= mainDepth)) {
                     discard;
                 }
                 // Sample-space error must not put the coarse fallback above
                 // a rendered real surface. Bound the preference so distant
                 // Voxy cut faces do not punch through foreground prediction.
-                if (vWater < 0.5 && mainDepth < 1.0 && abs(realDistance - distance) <= min(16.0, max(1.0, Spacing * 2.0))) discard;
-                if (mainDepth < 1.0 && realCoverageOwnsSurface(realDistance, distance - tieBias)) discard;
+                if (realGround && vWater < 0.5 && mainDepth < 1.0 && abs(realDistance - distance) <= min(16.0, max(1.0, Spacing * 2.0))) discard;
+                if (mainDepth < 1.0 && realCoverageOwnsSurface(realDistance, predictedDistance, realGround)) discard;
                 #endif
                 // Boundary faces belong to the solid on their inward side.
                 ivec3 section = ivec3(floor((relative - vFaceNormal * 0.01
@@ -845,6 +922,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
                     discard;
                 }
                 float detailWeight = 1.0 - smoothstep(0.5, 1.0, footprint);
+                if (DetailDistance > 0.0 && vCutout < 0.5 && vWater < 0.5)
+                    detailWeight *= 1.0 - smoothstep(DetailDistance * 0.75, DetailDistance, length(relative.xz));
                 vec4 color = vColor * ColorModulator;
                 if (color.a == 0.0) {
                     discard;

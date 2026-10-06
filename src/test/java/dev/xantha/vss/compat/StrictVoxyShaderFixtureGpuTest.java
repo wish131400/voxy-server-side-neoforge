@@ -15,7 +15,7 @@ import org.lwjgl.opengl.GL;
 @EnabledIfSystemProperty(named="vss.gpuTests",matches="true")
 @EnabledIfSystemProperty(named="vss.voxyJar",matches=".+")
 class StrictVoxyShaderFixtureGpuTest {
-    @Test void realVoxyProgramsLinkWithoutARequestFrontierGate() throws Exception {
+    @Test void realVoxyProgramsLinkWithoutStrictDistanceClipping() throws Exception {
         assertTrue(glfwInit()); glfwWindowHint(GLFW_VISIBLE,GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,4); glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,6);
         glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
@@ -43,6 +43,9 @@ class StrictVoxyShaderFixtureGpuTest {
             assertEquals(GL_TRUE,glGetProgrami(p,GL_LINK_STATUS),glGetProgramInfoLog(p));
             assertEquals(-1,glGetUniformLocation(p,"VssStrictEnabled"));
             assertEquals(-1,glGetUniformLocation(p,"VssStrictFrontier"));
+            assertEquals(-1,glGetUniformLocation(p,"VssStrictNearFirst"));
+            assertEquals(-1,glGetUniformLocation(p,"VssStrictVisibleBounds"));
+            assertEquals(-1,glGetUniformLocation(p,"VssStrictVisibleRadius"));
             assertNotEquals(-1,glGetUniformLocation(p,"VssBoundaryEnabled"));
             assertNotEquals(-1,glGetUniformLocation(p,"VssBoundaryCoverage"));
             glDeleteProgram(p);glDeleteShader(vs);glDeleteShader(fs);

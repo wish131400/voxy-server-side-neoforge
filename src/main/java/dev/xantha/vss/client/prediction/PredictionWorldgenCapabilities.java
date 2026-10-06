@@ -125,7 +125,9 @@ final class PredictionWorldgenCapabilities {
                 if (entry.getKey().startsWith("vss_")) continue;
                 if (entry.getKey().equals("type") && entry.getValue().isJsonPrimitive()) {
                     String type = entry.getValue().getAsString();
-                    if (type.contains(":") && !type.startsWith("minecraft:") && !NATIVE_MOD_CODECS.contains(type)) return path + ".type=" + type;
+                    String supported = type.startsWith("freeterraforged:")
+                            ? "reterraforged:" + type.substring("freeterraforged:".length()) : type;
+                    if (type.contains(":") && !type.startsWith("minecraft:") && !NATIVE_MOD_CODECS.contains(supported)) return path + ".type=" + type;
                 }
                 String reason = nativeRejection(entry.getValue(), path + "." + entry.getKey());
                 if (reason != null) return reason;

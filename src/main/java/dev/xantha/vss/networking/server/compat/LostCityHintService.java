@@ -1,11 +1,12 @@
 package dev.xantha.vss.networking.server.compat;
 
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.worldgen.LostCityPreview;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.LostCityHintsC2SPayload;
 import dev.xantha.vss.networking.payloads.LostCityHintsS2CPayload;
-import java.lang.reflect.Method;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -25,7 +26,8 @@ public final class LostCityHintService {
     private static final AtomicInteger IN_FLIGHT = new AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicLong LIFECYCLE = new java.util.concurrent.atomic.AtomicLong();
     private record Region(net.minecraft.resources.ResourceKey<Level> dimension, int x, int z) { }
-    private static final Map<Region, int[]> SUMMARIES = new java.util.LinkedHashMap<>(64, .75F, true);
+    private static final Map<Region, List<LostCityPreview.Chunk>> SUMMARIES = new java.util.LinkedHashMap<>(64, .75F, true);
+    private static long summaryBytes;
     private static volatile ThreadPoolExecutor executor;
     private static volatile boolean loggedFailure;
 
@@ -44,29 +46,27 @@ public final class LostCityHintService {
         if (last != null && now - last < 150_000_000L) return;
         LAST_REQUEST.put(playerId, now);
         if (!ModList.get().isLoaded("lostcities")) {
-            send(player, request, false, new int[0]);
+            send(player, request, false, List.of());
             return;
         }
         Object info;
         try {
-            // Older releases mutate shared planner caches without a dimension lock.
-            Class.forName("mcjty.lostcities.worldgen.lost.BuildingInfo").getDeclaredMethod(
-                    "getDimensionLock", net.minecraft.resources.ResourceKey.class);
+            LostCityPlannerAccess.lock(LostCityHintService.class.getClassLoader(), player.serverLevel().dimension());
             Class<?> mod = Class.forName("mcjty.lostcities.LostCities");
             Object api = mod.getField("lostCitiesImp").get(null);
             info = api.getClass().getMethod("getLostInfo", Level.class).invoke(api, player.serverLevel());
         } catch (ReflectiveOperationException | RuntimeException failure) {
             logFailure(failure);
-            send(player, request, false, new int[0]);
+            send(player, request, false, List.of());
             return;
         }
         if (info == null) {
-            send(player, request, false, new int[0]);
+            send(player, request, false, List.of());
             return;
         }
         Region region = new Region(player.serverLevel().dimension(), request.regionX(), request.regionZ());
         synchronized (SUMMARIES) {
-            int[] cached = SUMMARIES.get(region);
+            List<LostCityPreview.Chunk> cached = SUMMARIES.get(region);
             if (cached != null) { send(player, request, true, cached); return; }
         }
         if (IN_FLIGHT.incrementAndGet() > MAX_QUEUED) {
@@ -78,11 +78,15 @@ public final class LostCityHintService {
         try {
             executor().execute(() -> {
                 try {
-                    int[] chunks = query(info, request.regionX(), request.regionZ());
+                    List<LostCityPreview.Chunk> chunks = LostCityPlanningReader.query(info, level, request.regionX(), request.regionZ());
                     synchronized (SUMMARIES) {
                         if (lifecycle != LIFECYCLE.get()) return;
-                        SUMMARIES.put(region, chunks);
-                        while (SUMMARIES.size() > 512) SUMMARIES.remove(SUMMARIES.keySet().iterator().next());
+                        List<LostCityPreview.Chunk> old = SUMMARIES.put(region, chunks);
+                        summaryBytes += LostCityPreview.retainedBytes(chunks) - (old == null ? 0 : LostCityPreview.retainedBytes(old));
+                        while (SUMMARIES.size() > 128 || summaryBytes > 32L * 1024 * 1024) {
+                            var iterator = SUMMARIES.values().iterator();
+                            summaryBytes -= LostCityPreview.retainedBytes(iterator.next()); iterator.remove();
+                        }
                     }
                     level.getServer().execute(() -> {
                         if (lifecycle == LIFECYCLE.get() && player.isAlive() && player.serverLevel() == level)
@@ -93,7 +97,7 @@ public final class LostCityHintService {
                     logFailure(failure);
                     level.getServer().execute(() -> {
                         if (lifecycle == LIFECYCLE.get() && player.isAlive() && player.serverLevel() == level)
-                            send(player, request, false, new int[0]);
+                            send(player, request, false, List.of());
                     });
                 } finally {
                     IN_FLIGHT.updateAndGet(count -> Math.max(0, count - 1));
@@ -104,39 +108,12 @@ public final class LostCityHintService {
         }
     }
 
-    static int[] query(Object info, int regionX, int regionZ) throws ReflectiveOperationException {
-        ClassLoader loader = info.getClass().getClassLoader();
-        Class<?> infoType = Class.forName("mcjty.lostcities.api.ILostCityInformation", false, loader);
-        Method getChunk = infoType.getMethod("getChunkInfo", int.class, int.class);
-        Method realHeight = infoType.getMethod("getRealHeight", int.class);
-        Class<?> chunkType = Class.forName("mcjty.lostcities.api.ILostChunkInfo", false, loader);
-        Method isCity = chunkType.getMethod("isCity");
-        Method building = chunkType.getMethod("getBuildingId");
-        Method cityLevel = chunkType.getMethod("getCityLevel");
-        Method floors = chunkType.getMethod("getNumFloors");
-        int[] chunks = new int[LostCityHintsS2CPayload.ENTRY_COUNT];
-        for (int z = 0; z < LostCityHintsS2CPayload.REGION_CHUNKS; z++) {
-            for (int x = 0; x < LostCityHintsS2CPayload.REGION_CHUNKS; x++) {
-                if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
-                Object chunk = getChunk.invoke(info, regionX * 8 + x, regionZ * 8 + z);
-                Object id = building.invoke(chunk);
-                int kind = id != null ? 2 : Boolean.TRUE.equals(isCity.invoke(chunk)) ? 1 : 0;
-                if (kind == 0) continue;
-                int ground = (Integer) realHeight.invoke(info, (Integer) cityLevel.invoke(chunk));
-                int count = kind == 2 ? Math.min(127, Math.max(1, (Integer) floors.invoke(chunk))) : 0;
-                int style = id == null ? 0 : id.hashCode() & 15;
-                chunks[z * 8 + x] = pack(kind, ground, count, style);
-            }
-        }
-        return chunks;
-    }
-
-    public static int pack(int kind, int ground, int floors, int style) {
-        return kind & 3 | (ground & 0xffff) << 2 | (floors & 127) << 18 | (style & 15) << 25;
+    static List<LostCityPreview.Chunk> query(Object info, int regionX, int regionZ) throws ReflectiveOperationException {
+        return LostCityPlanningReader.query(info, null, regionX, regionZ);
     }
 
     private static void send(ServerPlayer player, LostCityHintsC2SPayload request,
-                             boolean active, int[] chunks) {
+                             boolean active, List<LostCityPreview.Chunk> chunks) {
         VSSNetworking.sendToPlayer(player, new LostCityHintsS2CPayload(request.dimension(),
                 request.regionX(), request.regionZ(), request.session(), active, chunks));
     }
@@ -155,7 +132,7 @@ public final class LostCityHintService {
 
     public static synchronized void stop() {
         LIFECYCLE.incrementAndGet();
-        synchronized (SUMMARIES) { SUMMARIES.clear(); }
+        synchronized (SUMMARIES) { SUMMARIES.clear(); summaryBytes = 0; }
         if (executor != null) {
             int cancelled = executor.shutdownNow().size();
             IN_FLIGHT.updateAndGet(count -> Math.max(0, count - cancelled));
@@ -163,6 +140,7 @@ public final class LostCityHintService {
         executor = null;
         LAST_REQUEST.clear();
         loggedFailure = false;
+        LostCityPlanningReader.clear();
     }
 
     public static void forgetPlayer(UUID playerId) { LAST_REQUEST.remove(playerId); }
@@ -170,7 +148,7 @@ public final class LostCityHintService {
     private static void logFailure(Exception failure) {
         if (!loggedFailure) {
             loggedFailure = true;
-            VSSLogger.warn("VSS Lost Cities planning unavailable; city preview disabled", failure);
+            VSSLogger.warn("VSS Lost Cities planning unavailable; city preview query failed; client will retry", failure);
         }
     }
 }

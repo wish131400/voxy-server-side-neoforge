@@ -14,6 +14,74 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class PredictionSpriteTableTest {
+    @Test void fullTableKeepsLeafColorAndCanRestoreGeometryWithFlatMaterial() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        var leaf = net.minecraft.world.level.block.Blocks.BIRCH_LEAVES.defaultBlockState();
+        try (var image = contents("overflow_leaves", 0xff808080)) {
+            var sprite = new Sprite(image, 0);
+            int row = VssLodSpriteTable.registerSprite(sprite);
+            var bytes = new java.io.ByteArrayOutputStream();
+            VssLodSpriteTable.writeMaterial(new java.io.DataOutputStream(bytes), row);
+            VssLodSpriteTable.close();
+            for (int i = 0; i < 254; i++) try (var other = contents("full_" + i, 0xff808080)) {
+                assertNotEquals(VssLodSpriteTable.FLAT, VssLodSpriteTable.registerSprite(new Sprite(other, 0)));
+            }
+            assertEquals(VssLodSpriteTable.FLAT, VssLodSpriteTable.registerSprite(sprite));
+            VssLodSpriteTable.rememberFlatAverage(leaf, 1, sprite);
+            assertEquals(0xff808080, VssLodSpriteTable.averageForState(leaf, 1));
+            var colorsField = PredictionMaterialPalette.class.getDeclaredField("atlasColors");
+            colorsField.setAccessible(true); Object previous = colorsField.get(null);
+            int id = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(leaf.getBlock());
+            int[] colors = new int[id + 1]; colors[id] = 0xff619961;
+            try {
+                colorsField.set(null, colors);
+                int color = PredictionMaterialPalette.colorForState(leaf, 0xff686868, 0xffabcdef, 1);
+                assertTrue(((color >> 8) & 255) > ((color >> 16) & 255), "leaf fallback must retain its green tint");
+                assertNotEquals(0xff686868, color);
+            } finally { colorsField.set(null, previous); }
+            assertEquals(VssLodSpriteTable.FLAT, VssLodSpriteTable.readMaterial(
+                    new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray())), name -> sprite));
+            VssLodSpriteTable.close();
+            assertEquals(0, VssLodSpriteTable.averageForState(leaf, 1), "resource reload cannot reuse the old colour");
+        }
+    }
+
+    @Test void grassCutoutsKeepTheirRowsWhenCityMaterialsFillTheRemainingTable() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        var rows = new java.util.HashMap<net.minecraft.world.level.block.state.BlockState, Integer>();
+        var sprites = new java.util.HashMap<net.minecraft.world.level.block.state.BlockState, Sprite>();
+        var images = new java.util.ArrayList<SpriteContents>();
+        try {
+            VssLodSpriteTable.seedGroundCoverMaterials((state, face) -> {
+                assertEquals(1, face.intValue());
+                NativeImage image = new NativeImage(16, 16, false);
+                image.fillRect(0, 0, 16, 16, 0);
+                image.fillRect(6, 3, 4, 13, 0xff55aa55);
+                var contents = new SpriteContents(ResourceLocation.withDefaultNamespace("block/seed_" + images.size()),
+                        new FrameSize(16, 16), image, ResourceMetadata.EMPTY);
+                images.add(contents); var sprite = new Sprite(contents, 0); sprites.put(state, sprite);
+                int row = VssLodSpriteTable.registerSprite(sprite); rows.put(state, row); return row;
+            });
+            assertTrue(rows.containsKey(net.minecraft.world.level.block.Blocks.SHORT_GRASS.defaultBlockState()));
+            for (var state : net.minecraft.world.level.block.Blocks.TALL_GRASS.getStateDefinition().getPossibleStates())
+                assertTrue(rows.containsKey(state), "both halves of tall grass require their own alpha texture");
+            assertTrue(rows.size() <= 64);
+            for (int i = 0; i < 300; i++) try (var other = contents("city_fill_" + i, 0xff808080)) {
+                VssLodSpriteTable.registerSprite(new Sprite(other, 0));
+            }
+            assertTrue(VssLodSpriteTable.diagnostics().startsWith("rows=254,"));
+            for (var entry : rows.entrySet()) {
+                int row = entry.getValue(); assertNotEquals(VssLodSpriteTable.FLAT, row);
+                assertEquals(row, VssLodSpriteTable.registerSprite(sprites.get(entry.getKey())));
+                assertTrue(VssLodSpriteTable.isCutout(row), "grass must retain transparent holes at capacity");
+                var bytes = new java.io.ByteArrayOutputStream();
+                VssLodSpriteTable.writeMaterial(new java.io.DataOutputStream(bytes), row);
+                assertEquals(row, VssLodSpriteTable.readMaterial(new java.io.DataInputStream(
+                        new java.io.ByteArrayInputStream(bytes.toByteArray())), name -> sprites.get(entry.getKey())));
+            }
+        } finally { images.forEach(SpriteContents::close); }
+    }
+
     @BeforeEach
     @AfterEach
     void clearTable() {
@@ -33,6 +101,9 @@ class PredictionSpriteTableTest {
             long revision = VssLodSpriteTable.materialRevision();
             assertTrue(revision > initial);
             assertEquals(block, VssLodSpriteTable.materialBlocks()[row]);
+            assertEquals(block, VssLodSpriteTable.materialBlock(row));
+            assertEquals(block, VssLodSpriteTable.materialBlock(row),
+                    "single-row lookups must use the published representative snapshot");
             assertEquals(row, VssLodSpriteTable.registerModelFace(quad, block));
             assertEquals(revision, VssLodSpriteTable.materialRevision());
             VssLodSpriteTable.close();

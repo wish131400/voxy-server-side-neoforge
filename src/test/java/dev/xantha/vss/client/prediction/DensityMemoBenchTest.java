@@ -56,7 +56,7 @@ class DensityMemoBenchTest {
                 settings, lookup.lookupOrThrow(net.minecraft.core.registries.Registries.NOISE), seed);
         return new ClientTerrainSampler(seed, profile, generator, random,
                 LevelHeightAccessor.create(profile.minY(), profile.height()),
-                settings.seaLevel(), List.of(), null, access);
+                settings.seaLevel(), null, access);
     }
 
     /** Dense 8x8 grid, the shape the client uses for nearby tiles. */

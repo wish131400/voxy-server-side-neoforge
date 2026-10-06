@@ -29,7 +29,7 @@ public abstract class StrictVoxyUploadMixin implements dev.xantha.vss.compat.Str
     @Redirect(method = "run()V", at = @At(value = "INVOKE",
             target = "Ljava/lang/invoke/VarHandle;compareAndSet(Lme/cortex/voxy/client/core/rendering/hierachical/AsyncNodeManager;Ljava/lang/Void;Lme/cortex/voxy/client/core/rendering/hierachical/AsyncNodeManager$SyncResults;)Z"), require = 1)
     private boolean vss$publishWork(VarHandle handle, @Coerce Object owner, Void expected, @Coerce Object result) {
-        ((StrictVoxyPipeline.Batch) result).vss$completedWork().addAll(vss$completed);
+        ((StrictVoxyPipeline.Batch) result).vss$appendCompletedWork(vss$completed);
         vss$completed.clear();
         return handle.compareAndSet(owner, expected, result);
     }
@@ -45,10 +45,17 @@ public abstract class StrictVoxyUploadMixin implements dev.xantha.vss.compat.Str
 
     @Redirect(method = "tick", at = @At(value = "INVOKE", ordinal = 0,
             target = "Ljava/lang/invoke/VarHandle;compareAndSet(Lme/cortex/voxy/client/core/rendering/hierachical/AsyncNodeManager;Ljava/lang/Void;Lme/cortex/voxy/client/core/rendering/hierachical/AsyncNodeManager$SyncResults;)Z"), require = 1)
-    private boolean vss$uploaded(VarHandle handle, @Coerce Object owner, Void expected, @Coerce Object result) {
+    private boolean vss$uploadedPrimary(VarHandle handle, @Coerce Object owner, Void expected, @Coerce Object result) {
+        // GPU uploads have already finished here. The CAS returns ownership of
+        // SyncResults to the worker, which may immediately reset its scatter map
+        // or free/reallocate its native buffer. Read the entire node delta and
+        // complete this batch's mesh work while the render thread still owns it.
+        // A full first cache slot only changes where Voxy recycles the result;
+        // it does not undo the upload. The second CAS therefore needs no hook.
         StrictLodVisibility.uploaded(owner, result);
-        for (var work : ((StrictVoxyPipeline.Batch) result).vss$completedWork()) work.uploaded();
-        ((StrictVoxyPipeline.Batch) result).vss$completedWork().clear();
+        var completed = ((StrictVoxyPipeline.Batch) result).vss$takeCompletedWork();
+        for (var work : completed) work.uploaded();
+        completed.clear();
         return handle.compareAndSet(owner, expected, result);
     }
 }

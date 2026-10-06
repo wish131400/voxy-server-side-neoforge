@@ -53,7 +53,7 @@ class PredictionNetherStructuresTest {
             var generator=new NoiseBasedChunkGenerator(source,settings);
             var random=RandomState.create(settings.value(),lookup.lookupOrThrow(Registries.NOISE),42);
             var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(Level.NETHER.location(),42,0,256,"noise","minecraft:nether",1);
-            var javaTerrain=new ClientTerrainSampler(42,profile,generator,random,LevelHeightAccessor.create(0,256),32,List.of(),null,access) {
+            var javaTerrain=new ClientTerrainSampler(42,profile,generator,random,LevelHeightAccessor.create(0,256),32,null,access) {
                 @Override JsonObject structureTemplates() { return templates; }
             };
             try(var nativeTerrain=new RustTerrainSampler(RustWorldgenBackend.create(42,0,sourceDoc.toString()),profile,javaTerrain)) {

@@ -3,6 +3,7 @@ package dev.xantha.vss.networking.server.generation;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Set;
 
 final class GenerationSchedulingPolicy {
     private GenerationSchedulingPolicy() {
@@ -12,12 +13,20 @@ final class GenerationSchedulingPolicy {
             Map<UUID, Integer> activeCounts,
             Iterable<UUID> callbacks,
             int perPlayerLimit) {
-        int limit = Math.max(0, perPlayerLimit);
+        return hasPerPlayerCapacity(activeCounts, callbacks, perPlayerLimit, Set.of());
+    }
+
+    static boolean hasPerPlayerCapacity(
+            Map<UUID, Integer> activeCounts,
+            Iterable<UUID> callbacks,
+            int perPlayerLimit,
+            Set<UUID> backgroundOwners) {
         Map<UUID, Integer> required = new HashMap<>();
         for (UUID playerUuid : callbacks) {
-            required.merge(playerUuid, 1, Integer::sum);
+            if (!backgroundOwners.contains(playerUuid)) required.merge(playerUuid, 1, Integer::sum);
         }
         for (Map.Entry<UUID, Integer> entry : required.entrySet()) {
+            int limit = Math.max(0, perPlayerLimit);
             if (activeCounts.getOrDefault(entry.getKey(), 0) + entry.getValue() > limit) {
                 return false;
             }

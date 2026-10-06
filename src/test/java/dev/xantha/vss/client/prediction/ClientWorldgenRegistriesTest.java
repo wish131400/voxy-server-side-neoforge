@@ -39,12 +39,13 @@ class ClientWorldgenRegistriesTest {
                 }
                 """).getAsJsonObject();
         var registries = ClientWorldgenRegistries.decode(root, RegistryAccess.EMPTY);
-        var selector = registries.configuredFeature(ResourceLocation.parse("vss:selector"));
+        var configured = registries.access().registryOrThrow(Registries.CONFIGURED_FEATURE);
+        var selector = configured.getOptional(ResourceLocation.parse("vss:selector"));
         assertTrue(selector.isPresent(), "a forward placed-feature reference must not disable all configured models");
         assertEquals(Feature.RANDOM_SELECTOR, selector.get().feature());
         var config = (RandomFeatureConfiguration) selector.get().config();
         assertTrue(config.defaultFeature.isBound());
         assertEquals(Feature.SIMPLE_BLOCK, config.defaultFeature.value().feature().value().feature());
-        assertTrue(registries.configuredFeature(ResourceLocation.parse("vss:ground")).isPresent());
+        assertTrue(configured.getOptional(ResourceLocation.parse("vss:ground")).isPresent());
     }
 }

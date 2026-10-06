@@ -3,6 +3,7 @@ package dev.xantha.vss.networking.server.runtime;
 
 import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import dev.xantha.vss.networking.server.generation.ChunkGenerationService;
+import dev.xantha.vss.networking.server.generation.ChunkyGenerationService;
 import dev.xantha.vss.networking.server.preload.ExistingColumnPreloader;
 import dev.xantha.vss.networking.server.sending.GeneratedColumnFlusher;
 import dev.xantha.vss.networking.server.sending.QueuedColumnSender;
@@ -26,6 +27,7 @@ public final class ServerNetworkingLifecycle {
     private final GeneratedColumnFlusher generatedColumnFlusher;
     private final ExistingColumnPreloader existingColumnPreloader;
     private final QueuedColumnSender queuedColumnSender;
+    private final ChunkyGenerationService chunky;
     private boolean idleMemoryReleased = true;
 
     public ServerNetworkingLifecycle(
@@ -38,7 +40,8 @@ public final class ServerNetworkingLifecycle {
             DiskTaskRuntime diskRuntime,
             GeneratedColumnFlusher generatedColumnFlusher,
             ExistingColumnPreloader existingColumnPreloader,
-            QueuedColumnSender queuedColumnSender) {
+            QueuedColumnSender queuedColumnSender,
+            ChunkyGenerationService chunky) {
         this.playerRegistry = playerRegistry;
         this.generationService = generationService;
         this.columnCache = columnCache;
@@ -49,6 +52,7 @@ public final class ServerNetworkingLifecycle {
         this.generatedColumnFlusher = generatedColumnFlusher;
         this.existingColumnPreloader = existingColumnPreloader;
         this.queuedColumnSender = queuedColumnSender;
+        this.chunky = chunky;
     }
 
     public void applyRuntimeConfig() {
@@ -66,7 +70,7 @@ public final class ServerNetworkingLifecycle {
             state.clearAll();
         }
         generationService.removePlayer(player.getUUID());
-        if (playerRegistry.isEmpty()) {
+        if (playerRegistry.isEmpty() && !chunky.hasActiveJob()) {
             releaseIdleMemory();
         }
     }
@@ -79,11 +83,13 @@ public final class ServerNetworkingLifecycle {
         if (lifecycleGuard.isStopping()) {
             return;
         }
-        if (playerRegistry.isEmpty()) {
+        if (playerRegistry.isEmpty() && !chunky.hasActiveJob()) {
             releaseIdleMemory();
             return;
         }
         generatedColumnFlusher.flush(server);
+        chunky.tick(server);
+        idleMemoryReleased = false;
         existingColumnPreloader.flushColumns(server);
         existingColumnPreloader.scanRegions(server);
         queuedColumnSender.flush(server);
@@ -92,6 +98,7 @@ public final class ServerNetworkingLifecycle {
     }
 
     public void onServerStarting() {
+        chunky.clear();
         lifecycleGuard.start();
         queuedColumnSender.reset();
         diskRuntime.restart();
@@ -105,6 +112,7 @@ public final class ServerNetworkingLifecycle {
     }
 
     public void onServerStopping(MinecraftServer server) {
+        chunky.clear();
         persistentColumnWriter.flushInvalidationsBlocking(server);
         persistentColumnWriter.flushWritesBlocking();
         lifecycleGuard.stop();

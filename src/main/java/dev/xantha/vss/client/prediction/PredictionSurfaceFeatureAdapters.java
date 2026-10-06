@@ -1,7 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
 import java.util.Optional;
-import java.util.stream.Stream;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.WorldGenLevel;
@@ -26,20 +25,23 @@ final class PredictionSurfaceFeatureAdapters {
     static void place(PlacedFeature feature, PredictionDecorationLevel level, ChunkGenerator generator,
                       RandomSource random, BlockPos origin) {
         var configured = feature.feature().value();
-        if (configured.feature() != Feature.END_SPIKE && configured.feature() != Feature.LAKE) {
-            feature.placeWithBiomeCheck(level,generator,random,origin);
+        boolean adapted = configured.feature() == Feature.END_SPIKE || configured.feature() == Feature.LAKE;
+        if (!adapted && !PredictionPlacementExecutor.available()) {
+            feature.placeWithBiomeCheck(level, generator, random, origin);
             return;
         }
         // BiomeFilter must see the original registered placed feature, including
         // its modifiers and global seed index, even when its block adapter differs.
         var context = new PlacementContext(level,generator,Optional.of(feature));
-        Stream<BlockPos> positions = Stream.of(origin);
-        for (var modifier : feature.placement())
-            positions = positions.flatMap(pos -> modifier.getPositions(context,random,pos));
-        positions.forEach(pos -> {
+        java.util.function.Consumer<BlockPos> terminal = pos -> {
             if (configured.feature() == Feature.END_SPIKE)
                 PredictionEndSpikes.place(level,random,(SpikeConfiguration)configured.config(),pos);
-            else new ConfiguredFeature<>(LAKE,(LakeFeature.Configuration)configured.config()).place(level,generator,random,pos);
-        });
+            else if (configured.feature() == Feature.LAKE)
+                new ConfiguredFeature<>(LAKE,(LakeFeature.Configuration)configured.config()).place(level,generator,random,pos);
+            else configured.place(level, generator, random, pos);
+        };
+        if (PredictionPlacementExecutor.available())
+            PredictionPlacementExecutor.visit(feature, context, random, origin, terminal);
+        else PredictionPlacementExecutor.stream(feature, context, random, origin, terminal);
     }
 }

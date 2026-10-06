@@ -27,7 +27,7 @@ import net.minecraft.world.level.levelgen.DensityFunction;
  */
 final class DensityMemo {
     private final ThreadLocal<Slots> slots;
-    private final int capacity;
+    private volatile int capacity;
     // The thread-local value must not retain its owner (and thus its own weak
     // ThreadLocal key) after a world/sampler is retired.
     private final Object identity = new Object();
@@ -68,21 +68,9 @@ final class DensityMemo {
         // mapAll rebuilds every node (see DensityFunctions.Marker.mapAll), so
         // identity is useless here: the same subexpression reaches the visitor
         // as a fresh object each time. Vanilla's NoiseChunk.wrap solves this
-        // with a structural-equality map, and so do we. Pass one therefore
-        // counts the key space pass two will actually use.
-        Map<DensityFunction, Boolean> seen = new HashMap<>();
-        for (DensityFunction root : roots) {
-            if (root == null) continue;
-            root.mapAll(function -> {
-                if (!(function instanceof NonMemoizable)) {
-                    seen.putIfAbsent(function, Boolean.TRUE);
-                }
-                return function;
-            });
-        }
-        DensityMemo memo = new DensityMemo(seen.size());
-        // Pass two keeps one wrapper per structurally equal node, so a shared
-        // subexpression keeps a single memo slot instead of being expanded.
+        // with a structural-equality map. Allocate the memo slot at the same
+        // time as the wrapper so graph construction only walks the roots once.
+        DensityMemo memo = new DensityMemo(0);
         Map<DensityFunction, DensityFunction> wrapped = new HashMap<>();
         PredictionRawDensity analysis = new PredictionRawDensity();
         DensityFunction[] result = new DensityFunction[roots.length];
@@ -102,7 +90,11 @@ final class DensityMemo {
         // A runtime node must also disable caching in parents which contain it.
         if (info.stateful()) return function;
         return wrapped.computeIfAbsent(function,
-                node -> new Memoized(node, wrapped.size(), this, info));
+                node -> new Memoized(node, reserveSlot(), this, info));
+    }
+
+    private synchronized int reserveSlot() {
+        return capacity++;
     }
 
     /**
@@ -117,11 +109,21 @@ final class DensityMemo {
         return capacity;
     }
 
+    Slots slotsFor(DensityFunction.FunctionContext context) {
+        return context instanceof QueryContext query && query.identity == identity ? query.slots : slots.get();
+    }
+
+    DensityFunction.FunctionContext queryContext(Slots slots, DensityFunction.FunctionContext context, boolean pure) {
+        if (!pure || !queryContext || context == slots.context) return context;
+        slots.context.set(context);
+        return slots.context;
+    }
+
     /** Per-thread slot arrays; one entry per node id. */
-    private static final class Slots {
-        private final long[] coords;
-        private final double[] values;
-        private final boolean[] valid;
+    static final class Slots {
+        long[] coords;
+        double[] values;
+        boolean[] valid;
         private final QueryContext context;
 
         Slots(int capacity, Object identity) {
@@ -129,6 +131,17 @@ final class DensityMemo {
             this.values = new double[Math.max(1, capacity)];
             this.valid = new boolean[Math.max(1, capacity)];
             this.context = new QueryContext(identity, this);
+        }
+
+        void ensureCapacity(int required) {
+            if (required <= coords.length) return;
+            synchronized (this) {
+                if (required <= coords.length) return;
+                int next = Math.max(required, coords.length * 2);
+                coords = java.util.Arrays.copyOf(coords, next);
+                values = java.util.Arrays.copyOf(values, next);
+                valid = java.util.Arrays.copyOf(valid, next);
+            }
         }
     }
 
@@ -181,6 +194,11 @@ final class DensityMemo {
             this.horizontal = owner.columnMemo && info.horizontal();
         }
 
+        DensityFunction delegate() { return delegate; }
+        DensityMemo owner() { return owner; }
+        int slotId() { return id; }
+        boolean horizontal() { return horizontal; }
+
         @Override
         public double compute(DensityFunction.FunctionContext context) {
             Slots slots;
@@ -193,6 +211,7 @@ final class DensityMemo {
                     context = slots.context;
                 }
             }
+            slots.ensureCapacity(id + 1);
             long key = pack(context.blockX(), horizontal ? 0 : context.blockY(), context.blockZ());
             if (slots.valid[id] && slots.coords[id] == key) {
                 return slots.values[id];

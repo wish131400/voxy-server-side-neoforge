@@ -12,6 +12,7 @@ import dev.xantha.vss.networking.VSSNetworking;
 import dev.xantha.vss.networking.payloads.BatchResponseS2CPayload;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +69,7 @@ public final class QueuedColumnSender {
             int playerCx = player.getBlockX() >> 4;
             int playerCz = player.getBlockZ() >> 4;
             state.prepareSendOrder(playerCx, playerCz);
+            acknowledgeQueuedRequests(player, state);
             if (state.queuedPayloadCount() == 0) {
                 continue;
             }
@@ -84,7 +86,9 @@ public final class QueuedColumnSender {
         int index = roundRobinCursor.startIndex(playerOrder);
         int noSendAttempts = 0;
         Map<UUID, Integer> prioritySentByPlayer = new HashMap<>();
-        while (noSendAttempts < targets.size() && totalBandwidthLimiter.canSend(configuredLimit)) {
+        int sentPackets = 0;
+        while (noSendAttempts < targets.size() && sentPackets < VSSServerConfig.CONFIG.sendPacketsPerTick
+                && totalBandwidthLimiter.canSend(configuredLimit)) {
             PlayerTarget target = targets.get(index);
             int prioritySent = prioritySentByPlayer.getOrDefault(target.id, 0);
             long expiryLimit = effectiveExpiryBandwidth(configuredLimit, target.state, targets.size());
@@ -97,8 +101,9 @@ public final class QueuedColumnSender {
                     priorityFirstByPlayer.getOrDefault(target.id, true),
                     expiryLimit);
             if (result.sent) {
+                sentPackets++;
                 totalBandwidthLimiter.recordSend(result.wireBytes);
-                if (result.priority) {
+                if (result.priority && result.startedColumn) {
                     prioritySentByPlayer.put(target.id, prioritySent + 1);
                 }
                 if (result.hadBothQueues) {
@@ -127,6 +132,7 @@ public final class QueuedColumnSender {
             int prioritySent,
             boolean priorityFirst,
             long expiryLimit) {
+        if (!VSSNetworking.canSendQueuedToPlayer(player)) return SendResult.NO_SEND;
         boolean hasPriority = state.priorityQueuedPayloadCount() > 0;
         boolean hasNormal = state.normalQueuedPayloadCount() > 0;
         PlayerRequestState.QueuedPayloadBatch priorityBatch = hasPriority
@@ -135,22 +141,22 @@ public final class QueuedColumnSender {
         PlayerRequestState.QueuedPayloadBatch normalBatch = hasNormal
                     ? state.peekNormalQueuedBatch(playerCx, playerCz)
                     : null;
-        boolean canSendPriority = canSendPriority(state, priorityBatch, prioritySent);
-        boolean canSendNormal = normalBatch != null && state.canSend(Long.MAX_VALUE);
-        PlayerRequestState.QueuedPayloadBatch batch = nextBatch(
+        PlayerRequestState.QueuedPayloadBatch batch = chooseBatch(
                     priorityBatch,
                     normalBatch,
                     playerCx,
                     playerCz,
                     priorityFirst,
                     prioritySent,
-                    canSendPriority,
-                    canSendNormal);
-        if (batch == null) {
+                    priorityColumnsPerTick);
+        if (batch == null || !state.canSend(Long.MAX_VALUE)
+                || batch.priority() && !canSendPriority(state, batch, prioritySent)) {
             return SendResult.NO_SEND;
         }
+        boolean startedColumn = !batch.hasSentPayloads();
         int wireBytes = sendQueuedPayloadBatch(player, state, batch, expiryLimit);
-        return wireBytes > 0 ? new SendResult(wireBytes, batch.priority(), hasPriority && hasNormal) : SendResult.NO_SEND;
+        return wireBytes > 0 ? new SendResult(wireBytes, batch.priority(), hasPriority && hasNormal, startedColumn)
+                : SendResult.NO_SEND;
     }
 
     private boolean canSendPriority(
@@ -164,25 +170,6 @@ public final class QueuedColumnSender {
             return false;
         }
         return state.canSend(Long.MAX_VALUE);
-    }
-
-    private PlayerRequestState.QueuedPayloadBatch nextBatch(
-            PlayerRequestState.QueuedPayloadBatch priorityBatch,
-            PlayerRequestState.QueuedPayloadBatch normalBatch,
-            int playerCx,
-            int playerCz,
-            boolean priorityFirst,
-            int prioritySent,
-            boolean canSendPriority,
-            boolean canSendNormal) {
-        return chooseBatch(
-                canSendPriority ? priorityBatch : null,
-                canSendNormal ? normalBatch : null,
-                playerCx,
-                playerCz,
-                priorityFirst,
-                prioritySent,
-                priorityColumnsPerTick);
     }
 
     static PlayerRequestState.QueuedPayloadBatch chooseBatch(
@@ -252,7 +239,7 @@ public final class QueuedColumnSender {
             discardQueuedBatch(state, batch);
             return 0;
         }
-        if (QueuedPayloadExpiryPolicy.isExpired(
+        if (!state.supportsQueuedAcknowledgements() && QueuedPayloadExpiryPolicy.isExpired(
                 batch.queuedNanos(),
                 System.nanoTime(),
                 batch.wireBytes(),
@@ -263,18 +250,38 @@ public final class QueuedColumnSender {
             discardQueuedBatch(state, batch);
             return 0;
         }
+        Runnable encoded = state.sendWindow().acquire(batch.nextPayload().wireBytes());
+        if (encoded == null) return 0;
         PlayerRequestState.QueuedPayload queuedPayload = state.consumeQueuedPayload(batch);
         if (queuedPayload == null) {
+            encoded.run();
             return 0;
         }
         VoxelColumnS2CPayload payload = queuedPayload.payload();
-        VSSNetworking.sendToPlayer(player, payload);
+        VSSNetworking.sendQueuedToPlayer(player, payload, encoded);
         if (payload.completesRequest()) {
             state.clearRequest(requestId);
         }
         state.recordSend(batch.priority(), queuedPayload.wireBytes());
         logColumnSend(player, batch, queuedPayload, state);
         return queuedPayload.wireBytes();
+    }
+
+    private void acknowledgeQueuedRequests(ServerPlayer player, PlayerRequestState state) {
+        if (!VSSNetworking.canSendQueuedToPlayer(player) || !state.sendWindow().hasRoom(32 * 1024)) return;
+        int[] requests = state.queuedRequestIdsForAck(System.nanoTime());
+        // Configured queues may exceed the response codec's batch limit.
+        for (int offset = 0; offset < requests.length; offset += VSSConstants.MAX_BATCH_RESPONSES) {
+            int count = Math.min(VSSConstants.MAX_BATCH_RESPONSES, requests.length - offset);
+            byte[] responses = new byte[count];
+            Arrays.fill(responses, VSSConstants.RESPONSE_COLUMN_QUEUED);
+            Runnable encoded = state.sendWindow().acquire(count * 6 + 32);
+            if (encoded == null) break;
+            VSSNetworking.sendQueuedToPlayer(player, new BatchResponseS2CPayload(responses,
+                    Arrays.copyOfRange(requests, offset, offset + count), count), encoded);
+            totalBandwidthLimiter.recordSend(count * 6 + 32);
+            state.recordSend(count * 6 + 32);
+        }
     }
 
     private static void discardQueuedBatch(PlayerRequestState state, PlayerRequestState.QueuedPayloadBatch batch) {
@@ -350,18 +357,20 @@ public final class QueuedColumnSender {
     }
 
     private static final class SendResult {
-        private static final SendResult NO_SEND = new SendResult(0, false, false);
+        private static final SendResult NO_SEND = new SendResult(0, false, false, false);
 
         private final int wireBytes;
         private final boolean priority;
         private final boolean hadBothQueues;
         private final boolean sent;
+        private final boolean startedColumn;
 
-        private SendResult(int wireBytes, boolean priority, boolean hadBothQueues) {
+        private SendResult(int wireBytes, boolean priority, boolean hadBothQueues, boolean startedColumn) {
             this.wireBytes = wireBytes;
             this.priority = priority;
             this.hadBothQueues = hadBothQueues;
             this.sent = wireBytes > 0;
+            this.startedColumn = startedColumn;
         }
     }
 }

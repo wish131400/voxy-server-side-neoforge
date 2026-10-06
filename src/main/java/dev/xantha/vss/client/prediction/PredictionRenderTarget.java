@@ -70,7 +70,10 @@ final class PredictionRenderTarget implements AutoCloseable {
                     float distance = VanillaPlanes.y / denominator;
                     if (distance > 0.0) reversedDepth = clamp(1.0 / distance, 0.0, 1.0);
                 }
-                if (VoxyDepthAvailable) {
+                // Voxy's final colour/depth blit discards zero-alpha pixels.
+                // Its offscreen depth alone is not evidence of a visible
+                // surface; only refine pixels actually present in main depth.
+                if (VoxyDepthAvailable && depth < 1.0) {
                     float raw = texelFetch(VoxyDepth, ivec2(gl_FragCoord.xy), 0).r;
                     if (raw > 0.0 && raw < 1.0) {
                         vec2 uv = gl_FragCoord.xy / vec2(textureSize(VoxyDepth, 0));
@@ -90,6 +93,7 @@ final class PredictionRenderTarget implements AutoCloseable {
 
     private int framebuffer = -1;
     private int depthTexture = -1;
+    private int seedTexture = -1;
     private int colorTexture = -1;
     private int fullscreenVertexArray = -1;
     private GlProgram writeDepth;
@@ -114,6 +118,7 @@ final class PredictionRenderTarget implements AutoCloseable {
             return;
         }
         ensurePrograms();
+        if (seedTexture != -1) { GL11.glDeleteTextures(seedTexture); seedTexture = -1; }
         if (framebuffer == -1) {
             framebuffer = GlStateManager.glGenFramebuffers();
         }
@@ -124,7 +129,8 @@ final class PredictionRenderTarget implements AutoCloseable {
         height = main.height;
         colorTexture = mainColor;
         depthTexture = TextureUtil.generateTextureId();
-        GlStateManager._bindTexture(depthTexture);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
+        PredictionGlState.bindTexture(depthTexture);
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
         GlStateManager._texParameter(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12Compat.CLAMP_TO_EDGE);
@@ -134,7 +140,7 @@ final class PredictionRenderTarget implements AutoCloseable {
             GlStateManager._texImage2D(GL11.GL_TEXTURE_2D, 0, GL30.GL_DEPTH_COMPONENT32F,
                     width, height, 0, GL11.GL_DEPTH_COMPONENT, GL11.GL_FLOAT, null);
         }
-        GlStateManager._bindTexture(0);
+        PredictionGlState.bindTexture(0);
 
         GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
         GlStateManager._glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0,
@@ -156,6 +162,20 @@ final class PredictionRenderTarget implements AutoCloseable {
         return depthTexture;
     }
 
+    int seedTextureId() { return seedTexture; }
+
+    /** Distinguish new prediction pixels from quantized real depth during Voxy's later water blit. */
+    void captureSeed() {
+        if (seedTexture == -1) {
+            seedTexture = org.lwjgl.opengl.GL45.glCreateTextures(GL11.GL_TEXTURE_2D);
+            org.lwjgl.opengl.GL45.glTextureStorage2D(seedTexture, 1, GL30.GL_DEPTH_COMPONENT32F, width, height);
+            org.lwjgl.opengl.GL45.glTextureParameteri(seedTexture, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+            org.lwjgl.opengl.GL45.glTextureParameteri(seedTexture, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+        }
+        org.lwjgl.opengl.GL43.glCopyImageSubData(depthTexture, GL11.GL_TEXTURE_2D, 0, 0, 0, 0,
+                seedTexture, GL11.GL_TEXTURE_2D, 0, 0, 0, 0, width, height, 1);
+    }
+
     /** Clears prediction depth; the terrain shader tests main depth separately. */
     void beginOpaque(RenderTarget main) {
         if (!available() || main == null) {
@@ -163,14 +183,14 @@ final class PredictionRenderTarget implements AutoCloseable {
         }
         GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
         RenderSystem.viewport(0, 0, width, height);
-        RenderSystem.depthMask(true);
+        PredictionGlState.depthMask(true);
         GL11.glDisable(GL11.GL_STENCIL_TEST);
         // Kept for callers that only need the clear/restore contract.  The
         // renderer uses the projection-aware overload below.
         GlStateManager._clearDepth(0.0D);
         RenderSystem.clear(GL11.GL_DEPTH_BUFFER_BIT, false);
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthFunc(GL11.GL_GEQUAL);
+        PredictionGlState.enableDepthTest();
+        PredictionGlState.depthFunc(GL11.GL_GEQUAL);
     }
 
     /** Same conversion as above with the current vanilla projection. */
@@ -186,11 +206,11 @@ final class PredictionRenderTarget implements AutoCloseable {
         }
         GlStateManager._glBindFramebuffer(GL30.GL_FRAMEBUFFER, framebuffer);
         RenderSystem.viewport(0, 0, width, height);
-        RenderSystem.depthMask(true);
+        PredictionGlState.depthMask(true);
         GL11.glDisable(GL11.GL_STENCIL_TEST);
         ensurePrograms();
-        RenderSystem.activeTexture(GL13.GL_TEXTURE0);
-        RenderSystem.bindTexture(main.getDepthTextureId());
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
+        PredictionGlState.bindTexture(main.getDepthTextureId());
         copyDepth.use();
         GL20.glUniform1i(copyDepth.uniform("MainDepth"), 0);
         GL20.glUniform1i(copyDepth.uniform("VoxyDepth"), 5);
@@ -209,28 +229,28 @@ final class PredictionRenderTarget implements AutoCloseable {
                     numerator.x, numerator.y, numerator.z, numerator.w);
             GL20.glUniform4f(copyDepth.uniform("VoxyDistanceDenominator"),
                     denominator.x, denominator.y, denominator.z, denominator.w);
-            RenderSystem.activeTexture(GL13.GL_TEXTURE5);
-            RenderSystem.bindTexture(voxy.texture());
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0);
+            PredictionGlState.activeTexture(GL13.GL_TEXTURE5);
+            PredictionGlState.bindTexture(voxy.texture());
+            PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
         }
-        RenderSystem.colorMask(false, false, false, false);
+        PredictionGlState.colorMask(false, false, false, false);
         // The fullscreen pass must write every pixel into the depth
         // attachment.  Disabling depth testing here is harmless for colour,
         // but on some drivers it also prevents a depth-only fragment from
         // updating the attachment when the target was just cleared.
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthFunc(GL11.GL_ALWAYS);
-        RenderSystem.depthMask(true);
+        PredictionGlState.enableDepthTest();
+        PredictionGlState.depthFunc(GL11.GL_ALWAYS);
+        PredictionGlState.depthMask(true);
         drawFullscreen();
-        RenderSystem.colorMask(true, true, true, true);
+        PredictionGlState.colorMask(true, true, true, true);
         if (voxyAvailable) {
-            RenderSystem.activeTexture(GL13.GL_TEXTURE5);
-            RenderSystem.bindTexture(0);
-            RenderSystem.activeTexture(GL13.GL_TEXTURE0);
+            PredictionGlState.activeTexture(GL13.GL_TEXTURE5);
+            PredictionGlState.bindTexture(0);
+            PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
         }
-        RenderSystem.bindTexture(0);
+        PredictionGlState.bindTexture(0);
         GlProgram.unuse();
-        RenderSystem.depthFunc(GL11.GL_GEQUAL);
+        PredictionGlState.depthFunc(GL11.GL_GEQUAL);
     }
 
     /** Retains both the opaque colour and reversed depth for fluids. */
@@ -265,10 +285,10 @@ final class PredictionRenderTarget implements AutoCloseable {
         }
         main.bindWrite(false);
         RenderSystem.viewport(0, 0, main.width, main.height);
-        RenderSystem.enableDepthTest();
-        RenderSystem.depthFunc(GL11.GL_LESS);
-        RenderSystem.depthMask(true);
-        RenderSystem.colorMask(false, false, false, false);
+        PredictionGlState.enableDepthTest();
+        PredictionGlState.depthFunc(GL11.GL_LESS);
+        PredictionGlState.depthMask(true);
+        PredictionGlState.colorMask(false, false, false, false);
         GL11.glDisable(GL11.GL_STENCIL_TEST);
         writeDepth.use();
         bindTexture(depthTexture);
@@ -278,7 +298,7 @@ final class PredictionRenderTarget implements AutoCloseable {
                 projection.vanillaA(), projection.vanillaB());
         GL20.glUniform1f(writeDepth.uniform("DepthBias"), DEPTH_BIAS_BLOCKS);
         drawFullscreen();
-        RenderSystem.colorMask(true, true, true, true);
+        PredictionGlState.colorMask(true, true, true, true);
         unbindTexture();
         GlProgram.unuse();
     }
@@ -307,12 +327,12 @@ final class PredictionRenderTarget implements AutoCloseable {
     }
 
     private static void bindTexture(int texture) {
-        RenderSystem.activeTexture(GL13.GL_TEXTURE0);
-        RenderSystem.bindTexture(texture);
+        PredictionGlState.activeTexture(GL13.GL_TEXTURE0);
+        PredictionGlState.bindTexture(texture);
     }
 
     private static void unbindTexture() {
-        RenderSystem.bindTexture(0);
+        PredictionGlState.bindTexture(0);
     }
 
     @Override
@@ -338,6 +358,7 @@ final class PredictionRenderTarget implements AutoCloseable {
             framebuffer = -1;
         }
         colorTexture = -1;
+        if (seedTexture != -1) { GL11.glDeleteTextures(seedTexture); seedTexture = -1; }
         width = 0;
         height = 0;
     }

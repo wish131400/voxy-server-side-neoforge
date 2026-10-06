@@ -183,7 +183,7 @@ class PredictionExteriorColumnsTest {
         for(int y:new int[]{64,112}) {
             var vegetation=PredictionVegetation.Tile.of(Map.of(new net.minecraft.core.BlockPos(0,y,0),
                     Blocks.SNOW.defaultBlockState()),0,0,2,1,1);
-            var mesh=PredictionMeshBuilder.build(samples,null,63,0,1,3,false,null,null,null,0,0,vegetation);
+            var mesh=PredictionMeshBuilder.build(samples,null,63,0,1,3,null,null,0,0,vegetation);
             assertNoWall(mesh,65,112);assertNoWall(mesh,120,173);
             assertTrue(hasHorizontal(mesh,180,1));
             assertTrue(hasHorizontal(mesh,173,-1));
@@ -203,7 +203,7 @@ class PredictionExteriorColumnsTest {
             var samples=new ClientColumnSample[9];Arrays.fill(samples,s);
             var vegetation=PredictionVegetation.Tile.of(Map.of(new net.minecraft.core.BlockPos(0,160,0),
                     Blocks.DIRT.defaultBlockState()),0,0,2*step,step,1);
-            var mesh=PredictionMeshBuilder.build(samples,null,63,0,step,3,false,null,null,null,0,0,vegetation);
+            var mesh=PredictionMeshBuilder.build(samples,null,63,0,step,3,null,null,0,0,vegetation);
             assertNoWall(mesh,98,160);
             var packed=mesh.compactForRendering().packed();
             for(int q=0;q<packed.quadCount();q++) {
@@ -226,7 +226,7 @@ class PredictionExteriorColumnsTest {
             var colors=new int[9];Arrays.fill(colors,tint);
             var vegetation=PredictionVegetation.Tile.of(Map.of(new net.minecraft.core.BlockPos(0,110,0),
                     Blocks.AIR.defaultBlockState()),0,0,2,1,1);
-            var mesh=PredictionMeshBuilder.build(samples,colors,63,0,1,3,false,null,null,null,0,0,vegetation);
+            var mesh=PredictionMeshBuilder.build(samples,colors,63,0,1,3,null,null,0,0,vegetation);
             boolean found=false;
             for(int v=0;v<mesh.vertexCount();v+=6) if(mesh.normalY(v)==1&&mesh.y(v)==110) {
                 found=true;

@@ -1,0 +1,10 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "dev.xantha.vss.mixin.lostcities",
+  "plugin": "dev.xantha.vss.mixin.lostcities.LostCitiesMixinPlugin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "TimedCacheConcurrencyMixin"
+  ]
+}

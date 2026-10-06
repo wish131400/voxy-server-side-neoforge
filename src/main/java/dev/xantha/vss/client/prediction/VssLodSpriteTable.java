@@ -40,6 +40,99 @@ final class VssLodSpriteTable {
     private static final int MAX_SPRITES = 254;
     private static volatile long materialRevision;
     static long materialRevision() { return materialRevision; }
+    /**
+     * Cached representative block ids for the current material table.
+     *
+     * <p>Mesh persistence writes one descriptor per material row.  Rebuilding
+     * this 256-entry mapping for every descriptor used to walk all of the
+     * block/state/model maps repeatedly while holding the table monitor.  The
+     * snapshot is published only after a table mutation and is never exposed
+     * directly to callers (the public package method returns a copy).</p>
+     */
+    private static volatile int[] materialBlocksCache;
+    private static final ResourceLocation[] MATERIAL_NAMES = new ResourceLocation[256];
+    private static final ModelUvKey[] MATERIAL_MODELS = new ModelUvKey[256];
+    // A full GPU row table must not erase CPU material colour. Modpacks can
+    // exceed 254 textures before even reaching their first conifer biome.
+    private static final Map<Long, Integer> FLAT_AVERAGES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<ResourceLocation, Integer> FLAT_SPRITE_AVERAGES = new HashMap<>();
+
+    private static void touchMaterialRevision() {
+        materialRevision++;
+        materialBlocksCache = null;
+    }
+
+    private static int[] materialBlocksSnapshot() {
+        int[] cached = materialBlocksCache;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (VssLodSpriteTable.class) {
+            cached = materialBlocksCache;
+            if (cached != null) {
+                return cached;
+            }
+            int[] blocks = new int[256];
+            java.util.Arrays.fill(blocks, -1);
+            INDEX_BY_BLOCK.forEach((block, row) -> {
+                if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = block;
+            });
+            SIDE_INDEX_BY_BLOCK.forEach((block, row) -> {
+                if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = block;
+            });
+            SIDE_INDEX_BY_FACE_BLOCK.forEach((key, row) -> {
+                if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = (int) (key >> 3);
+            });
+            INDEX_BY_STATE_FACE.forEach((key, row) -> {
+                if (row > 0 && row < FLAT && blocks[row] == -1)
+                    blocks[row] = BuiltInRegistries.BLOCK.getId(Block.stateById((int) (key >> 3)).getBlock());
+            });
+            MODEL_BLOCKS.forEach((row, block) -> blocks[row] = block);
+            for (int kind = 1; kind <= 3; kind++) {
+                int row = FLUID_SPRITES[kind];
+                if (row > 0 && row < FLAT) blocks[row] = BuiltInRegistries.BLOCK.getId(switch (kind) {
+                    case 1 -> net.minecraft.world.level.block.Blocks.WATER;
+                    case 2 -> net.minecraft.world.level.block.Blocks.LAVA;
+                    default -> net.minecraft.world.level.block.Blocks.ICE;
+                });
+            }
+            materialBlocksCache = blocks;
+            return blocks;
+        }
+    }
+
+    /** Returns one representative block id without allocating a 256-entry copy. */
+    static int materialBlock(int row) {
+        return row <= 0 || row >= 256 ? -1 : materialBlocksSnapshot()[row];
+    }
+    /** Immutable worker snapshot; unrecognized resource/model rows retain full geometry. */
+    static synchronized boolean[] aquaticSprites() {
+        boolean[] result = new boolean[256];
+        INDEX_BY_SPRITE.forEach((name, row) -> {
+            if (row > 0 && row < FLAT && name.getNamespace().equals("minecraft")) {
+                result[row] = switch (name.getPath()) {
+                    case "block/kelp", "block/kelp_plant", "block/seagrass",
+                            "block/tall_seagrass_bottom", "block/tall_seagrass_top" -> true;
+                    default -> false;
+                };
+            }
+        });
+        return result;
+    }
+
+    static synchronized boolean[] landPlantSprites() {
+        boolean[] result = new boolean[256];
+        INDEX_BY_SPRITE.forEach((name, row) -> {
+            if (row > 0 && row < FLAT && name.getNamespace().equals("minecraft")) {
+                result[row] = switch (name.getPath()) {
+                    case "block/short_grass", "block/grass", "block/tall_grass_bottom", "block/tall_grass_top",
+                            "block/fern", "block/large_fern_bottom", "block/large_fern_top" -> true;
+                    default -> false;
+                };
+            }
+        });
+        return result;
+    }
     private static final Map<ResourceLocation, Integer> INDEX_BY_SPRITE = new HashMap<>();
     // Read from worker threads (mesh building) while the render thread
     // resolves new blocks, so the maps must be concurrent.  Two rows per
@@ -119,6 +212,7 @@ final class VssLodSpriteTable {
             return;
         }
         seeded = true;
+        seedGroundCoverMaterials(VssLodSpriteTable::indexForState);
         indexForState(net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 1);
         indexForState(net.minecraft.world.level.block.Blocks.SOUL_FIRE.defaultBlockState(), 1);
         for (int blockId : PredictionMaterialPalette.seedBlockIds()) {
@@ -128,6 +222,28 @@ final class VssLodSpriteTable {
             }
         }
     }
+    /** Cutout plants cannot preserve their silhouette with an average colour.
+     * Reserve their real atlas rows before opaque city/terrain variants fill the table. */
+    static void seedGroundCoverMaterials(java.util.function.ToIntBiFunction<net.minecraft.world.level.block.state.BlockState, Integer> register) {
+        java.util.Set<Block> plants = new java.util.LinkedHashSet<>();
+        plants.add(net.minecraft.world.level.block.Blocks.SHORT_GRASS);
+        plants.add(net.minecraft.world.level.block.Blocks.TALL_GRASS);
+        plants.add(net.minecraft.world.level.block.Blocks.FERN);
+        plants.add(net.minecraft.world.level.block.Blocks.LARGE_FERN);
+        for (Block block : BuiltInRegistries.BLOCK) {
+            String name = BuiltInRegistries.BLOCK.getKey(block).getPath();
+            if (block instanceof net.minecraft.world.level.block.GrowingPlantBlock
+                    || block instanceof net.minecraft.world.level.block.BushBlock
+                        && (name.contains("grass") || name.contains("fern"))) plants.add(block);
+        }
+        int states = 0;
+        for (Block block : plants) for (var state : block.getStateDefinition().getPossibleStates()) {
+            // Bound startup work and leave most rows available for terrain/buildings.
+            if (++states > 512 || RECTS.size() >= 64) return;
+            register.applyAsInt(state, 1);
+        }
+    }
+
     private static TextureAtlasSprite atlasToken;
     private static int textureId = -1;
     private static volatile boolean dirty = true;
@@ -142,31 +258,7 @@ final class VssLodSpriteTable {
 
     /** Representative block for each baked row, used for Iris block.properties ids. */
     static synchronized int[] materialBlocks() {
-        int[] blocks = new int[256];
-        java.util.Arrays.fill(blocks, -1);
-        INDEX_BY_BLOCK.forEach((block, row) -> {
-            if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = block;
-        });
-        SIDE_INDEX_BY_BLOCK.forEach((block, row) -> {
-            if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = block;
-        });
-        SIDE_INDEX_BY_FACE_BLOCK.forEach((key, row) -> {
-            if (row > 0 && row < FLAT && blocks[row] == -1) blocks[row] = (int) (key >> 3);
-        });
-        INDEX_BY_STATE_FACE.forEach((key, row) -> {
-            if (row > 0 && row < FLAT && blocks[row] == -1)
-                blocks[row] = BuiltInRegistries.BLOCK.getId(Block.stateById((int) (key >> 3)).getBlock());
-        });
-        MODEL_BLOCKS.forEach((row, block) -> blocks[row] = block);
-        for (int kind = 1; kind <= 3; kind++) {
-            int row = FLUID_SPRITES[kind];
-            if (row > 0 && row < FLAT) blocks[row] = BuiltInRegistries.BLOCK.getId(switch (kind) {
-                case 1 -> net.minecraft.world.level.block.Blocks.WATER;
-                case 2 -> net.minecraft.world.level.block.Blocks.LAVA;
-                default -> net.minecraft.world.level.block.Blocks.ICE;
-            });
-        }
-        return blocks;
+        return materialBlocksSnapshot().clone();
     }
 
     /** Populate CPU appearances before the first mesh worker is scheduled. */
@@ -195,6 +287,8 @@ final class VssLodSpriteTable {
             SIDE_INDEX_BY_FACE_BLOCK.clear();
             INDEX_BY_STATE_FACE.clear();
             TINT_BY_STATE_FACE.clear();
+            FLAT_AVERAGES.clear();
+            FLAT_SPRITE_AVERAGES.clear();
             INDEX_BY_SPRITE.clear();
             java.util.Arrays.fill(FLUID_SPRITES, 0);
             RECTS.clear();
@@ -204,8 +298,10 @@ final class VssLodSpriteTable {
             STATIC_FIRE.clear();
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
+            java.util.Arrays.fill(MATERIAL_NAMES, null);
+            java.util.Arrays.fill(MATERIAL_MODELS, null);
             modelFlags = new byte[256];
-            materialRevision++;
+            touchMaterialRevision();
             averageColorsArgb = null;
             seeded = false;
             broken = false;
@@ -262,7 +358,7 @@ final class VssLodSpriteTable {
         synchronized (VssLodSpriteTable.class) {
             return INDEX_BY_STATE_FACE.computeIfAbsent(key, ignored -> {
                 int row = resolve(state, face);
-                materialRevision++;
+                touchMaterialRevision();
                 return row;
             });
         }
@@ -276,7 +372,21 @@ final class VssLodSpriteTable {
 
     static int averageForState(net.minecraft.world.level.block.state.BlockState state, int face) {
         int sprite = indexForState(state, face);
-        return sprite == FLAT ? 0 : averageForSprite(sprite);
+        return sprite == FLAT ? flatAverage(state, face) : averageForSprite(sprite);
+    }
+
+    private static int flatAverage(net.minecraft.world.level.block.state.BlockState state, int face) {
+        return state == null ? 0 : FLAT_AVERAGES.getOrDefault(((long) Block.getId(state) << 3) | (face & 7), 0);
+    }
+
+    static synchronized void rememberFlatAverage(net.minecraft.world.level.block.state.BlockState state,
+                                                 int face, TextureAtlasSprite sprite) {
+        int color = FLAT_SPRITE_AVERAGES.computeIfAbsent(sprite.contents().name(), ignored -> {
+            float[] average = averageOf(sprite);
+            return average[3] <= 0 ? 0 : 0xff000000 | clamp255(average[0]) << 16
+                    | clamp255(average[1]) << 8 | clamp255(average[2]);
+        });
+        FLAT_AVERAGES.put(((long) Block.getId(state) << 3) | (face & 7), color);
     }
 
     private static int spriteIndex(int blockId, int face) {
@@ -318,7 +428,7 @@ final class VssLodSpriteTable {
                 return cached;
             }
             int index = resolve(blockId, face);
-            materialRevision++;
+            touchMaterialRevision();
             if (face == 0) {
                 INDEX_BY_BLOCK.put(blockId, index);
             } else if (face < 0) {
@@ -367,7 +477,7 @@ final class VssLodSpriteTable {
                 int index = registerSprite(sprite);
                 if (index == FLAT) return 0;
                 FLUID_SPRITES[kind] = index;
-                materialRevision++;
+                touchMaterialRevision();
                 return index;
             } catch (Throwable failure) {
                 return 0;
@@ -403,9 +513,11 @@ final class VssLodSpriteTable {
                 : face < 0
                 ? SIDE_INDEX_BY_BLOCK.get(blockId)
                 : SIDE_INDEX_BY_FACE_BLOCK.get(faceKey(blockId, face));
-        if (index == null || index == FLAT) {
+        if (index == null) {
             return 0;
         }
+        if (index == FLAT) return blockId < 0 || blockId == ClientColumnSample.NO_BLOCK ? 0
+                : flatAverage(BuiltInRegistries.BLOCK.byId(blockId).defaultBlockState(), face);
         return averageForSprite(index);
     }
 
@@ -525,7 +637,9 @@ final class VssLodSpriteTable {
             if (sprite == null) {
                 return FLAT;
             }
-            return registerSprite(sprite);
+            int row = registerSprite(sprite);
+            if (row == FLAT) rememberFlatAverage(state, face, sprite);
+            return row;
         } catch (Throwable failure) {
             // A custom model can require a live block entity. Its fallback
             // must not turn the entire world's already valid atlas into flat color.
@@ -547,6 +661,12 @@ final class VssLodSpriteTable {
         MODEL_UVS.add(new float[0]);
         int index = RECTS.size();
         INDEX_BY_SPRITE.put(name, index);
+        MATERIAL_NAMES[index] = name;
+        MATERIAL_MODELS[index] = null;
+        // registerSprite intentionally does not advance materialRevision for
+        // legacy callers that only need texture rows.  The representative
+        // mapping must still be rebuilt when a new row is appended.
+        materialBlocksCache = null;
         dirty = true;
         return index;
     }
@@ -608,7 +728,9 @@ final class VssLodSpriteTable {
         int row = RECTS.size();
         MODEL_ROWS.put(key, row);
         MODEL_BLOCKS.put(row, key.blockId());
-        materialRevision++;
+        MATERIAL_NAMES[row] = key.sprite();
+        MATERIAL_MODELS[row] = key;
+        touchMaterialRevision();
         byte[] flags = modelFlags.clone();
         flags[row] = (byte) (key.shade() ? 1 : 3);
         modelFlags = flags;
@@ -618,9 +740,17 @@ final class VssLodSpriteTable {
 
     /** Stable material descriptors; persisted packed words never depend on a previous session's row order. */
     static synchronized void writeMaterial(java.io.DataOutputStream out, int row) throws java.io.IOException {
-        ModelUvKey model = null; ResourceLocation name = null;
-        for (var e : MODEL_ROWS.entrySet()) if (e.getValue() == row) { model = e.getKey(); name = model.sprite(); break; }
-        if (name == null) for (var e : INDEX_BY_SPRITE.entrySet()) if (e.getValue() == row) { name = e.getKey(); break; }
+        if (row <= 0 || row >= FLAT) throw new java.io.IOException("mesh material row");
+        ModelUvKey model = MATERIAL_MODELS[row];
+        ResourceLocation name = MATERIAL_NAMES[row];
+        // Rows created before the descriptor arrays were introduced can only
+        // occur in an already-running test/client during a hot reload. Keep a
+        // bounded fallback so such rows remain serializable without restoring
+        // the old per-call full-map scan in the normal path.
+        if (name == null) {
+            for (var e : MODEL_ROWS.entrySet()) if (e.getValue() == row) { model = e.getKey(); name = model.sprite(); break; }
+            if (name == null) for (var e : INDEX_BY_SPRITE.entrySet()) if (e.getValue() == row) { name = e.getKey(); break; }
+        }
         if (name == null) throw new java.io.IOException("unresolved mesh material");
         out.writeUTF(name.toString()); out.writeBoolean(model != null);
         if (model != null) {
@@ -629,7 +759,7 @@ final class VssLodSpriteTable {
         }
         float[] rect = RECTS.get(row - 1);
         out.writeInt(rect[0] < 0 ? (int) rect[1] : -1);
-        out.writeInt(materialBlocks()[row]);
+        out.writeInt(materialBlock(row));
     }
 
     static synchronized int readMaterial(java.io.DataInputStream in) throws java.io.IOException {
@@ -654,8 +784,11 @@ final class VssLodSpriteTable {
         var sprite = atlas.apply(name);
         if (sprite == null || !sprite.contents().name().equals(name)) throw new java.io.IOException("mesh sprite missing");
         int row = model ? registerModel(sprite, key) : fire >= 0 ? registerStaticFire(sprite, fire) : registerSprite(sprite);
-        if (row == FLAT) throw new java.io.IOException("mesh material table full");
-        if (representative >= 0 && !MODEL_BLOCKS.containsKey(row)) { MODEL_BLOCKS.put(row, representative); materialRevision++; }
+        // Packed mesh colours already contain the texture average and tint.
+        // A different registration order may fill this session's table first;
+        // preserve geometry/colour instead of rebuilding the whole tile.
+        if (row == FLAT) return FLAT;
+        if (representative >= 0 && !MODEL_BLOCKS.containsKey(row)) { MODEL_BLOCKS.put(row, representative); touchMaterialRevision(); }
         return row;
     }
 
@@ -846,6 +979,8 @@ final class VssLodSpriteTable {
             SIDE_INDEX_BY_FACE_BLOCK.clear();
             INDEX_BY_STATE_FACE.clear();
             TINT_BY_STATE_FACE.clear();
+            FLAT_AVERAGES.clear();
+            FLAT_SPRITE_AVERAGES.clear();
             INDEX_BY_SPRITE.clear();
             java.util.Arrays.fill(FLUID_SPRITES, 0);
             RECTS.clear();
@@ -855,8 +990,10 @@ final class VssLodSpriteTable {
             STATIC_FIRE.clear();
             MODEL_ROWS.clear();
             MODEL_BLOCKS.clear();
+            java.util.Arrays.fill(MATERIAL_NAMES, null);
+            java.util.Arrays.fill(MATERIAL_MODELS, null);
             modelFlags = new byte[256];
-            materialRevision++;
+            touchMaterialRevision();
         }
         averageColorsArgb = null;
         seeded = false;

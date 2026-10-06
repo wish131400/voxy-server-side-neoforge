@@ -31,7 +31,7 @@ class PredictionVegetationLoadingBenchmark {
             var profile = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),seed,-64,384,"noise","minecraft:overworld",seed);
             var random = RandomState.create(settings.value(), lookup.lookupOrThrow(Registries.NOISE),seed);
             var generator = new NoiseBasedChunkGenerator(source,settings);
-            var context = new ClientTerrainSampler(seed,profile,generator,random,LevelHeightAccessor.create(-64,384),63,List.of());
+            var context = new ClientTerrainSampler(seed,profile,generator,random,LevelHeightAccessor.create(-64,384),63);
             long world=RustWorldgenBackend.create(seed,net.minecraft.world.level.biome.BiomeManager.obfuscateSeed(seed),doc.toString());
             try(var rust=new RustTerrainSampler(world,profile,context)) {
                 int baseX=-512+round*1024,baseZ=-512-round*1024;
@@ -66,7 +66,7 @@ class PredictionVegetationLoadingBenchmark {
                 for(int iteration=0;iteration<10;iteration++) for(int order=0;order<2;order++) {
                     int mode=(iteration+order)%2;
                     start=System.nanoTime();
-                    var mesh=PredictionMeshBuilder.build(samples,mode==0?colors:enabledColors,63,0xff3f76e4,step,66,true,null,leaf,null,
+                    var mesh=PredictionMeshBuilder.build(samples,mode==0?colors:enabledColors,63,0xff3f76e4,step,66,leaf,null,
                             baseX,baseZ,PredictionVegetation.Tile.EMPTY,mode==0?PredictionSimpleVegetation.Result.EMPTY:simple).compactForRendering();
                     long elapsed=System.nanoTime()-start;
                     if(iteration>=4) meshNs[mode]+=elapsed;

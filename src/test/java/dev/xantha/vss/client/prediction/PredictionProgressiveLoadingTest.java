@@ -20,6 +20,9 @@ class PredictionProgressiveLoadingTest {
     private static final DimensionProfile PROFILE = new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),
             42L, -64, 384, "noise", "minecraft:overworld", 123L);
 
+    private PredictionCacheTestFiles.ResourceIdentity resourceIdentity;
+    @org.junit.jupiter.api.BeforeEach void resourceIdentity() throws Exception { resourceIdentity = new PredictionCacheTestFiles.ResourceIdentity(); }
+    @org.junit.jupiter.api.AfterEach void restoreResourceIdentity() throws Exception { resourceIdentity.close(); }
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path cacheDirectory;
@@ -40,16 +43,15 @@ class PredictionProgressiveLoadingTest {
                 var tileKey = key(0,0);
                 var diskKey = PredictionDiskCache.Key.terrain(0,0,0);
                 var grid = new ClientColumnSample[66 * 66]; java.util.Arrays.fill(grid,ground());
-                try (var disk = new PredictionDiskCache(path,123); var lease = disk.lease(diskKey)) {
-                    assertTrue(disk.writeTerrain(lease,grid));
-                }
                 var sampled = new java.util.concurrent.atomic.AtomicInteger();
                 var sampler = new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+                    @Override long colorCacheFingerprint() { return 77; }
                     @Override public ClientColumnSample sample(int x,int z) { sampled.incrementAndGet(); return ground(); }
                     @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
                 };
                 var budget = new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2);
                 var disk = new PredictionDiskCache(path,123);
+                PredictionCacheTestFiles.finishedTerrain(disk, diskKey, grid, sampler);
                 disk.probeTerrain(java.util.List.of(diskKey)); disk.flush();
                 assertEquals(64,disk.cachedTerrainAxis(diskKey));
                 if (corrupt) PredictionCacheTestFiles.corruptPayload(disk,diskKey);
@@ -98,19 +100,19 @@ class PredictionProgressiveLoadingTest {
             var grid=new ClientColumnSample[66*66]; java.util.Arrays.fill(grid,ground());
             for (int x=0;x<8;x++) {
                 keys.add(key(x,0));
-                try (var lease=disk.lease(PredictionDiskCache.Key.terrain(x,0,0))) {
-                    assertTrue(disk.writeTerrain(lease,grid));
-                }
             }
-            disk.probeTerrain(keys.stream().map(k->PredictionDiskCache.Key.terrain(k.tileX(),k.tileZ(),k.lod())).toList());
-            disk.flush();
             var sampler=new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+                @Override long colorCacheFingerprint() { return 77; }
                 @Override public ClientColumnSample sample(int x,int z) { throw new AssertionError("unexpected sampling"); }
                 @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
             };
+            for (var key : keys) PredictionCacheTestFiles.finishedTerrain(disk,
+                    PredictionDiskCache.Key.terrain(key.tileX(), key.tileZ(), key.lod()), grid, sampler);
+            disk.probeTerrain(keys.stream().map(k -> PredictionDiskCache.Key.terrain(k.tileX(), k.tileZ(), k.lod())).toList());
+            disk.flush();
             var budget=new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,2);
             try (var manager=new PredictionTileManager(Level.OVERWORLD,sampler,budget,disk)) {
-                var field=PredictionTileManager.class.getDeclaredField("executor"); field.setAccessible(true);
+                var field=PredictionTileManager.class.getDeclaredField("cacheExecutor"); field.setAccessible(true);
                 executor=(ThreadPoolExecutor)field.get(manager);
                 for (int i=0;i<2;i++) executor.execute(()->{
                     entered.countDown();

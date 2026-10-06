@@ -10,18 +10,19 @@ import net.minecraft.world.level.block.Block;
 final class PredictionMeshCodec {
     // Rebuild walls where a surface replacement consumed the complete suspended roof.
     // Terrain and decoration sample caches remain valid.
-    /** Version 8 adds a cheap pre-decoration identity for early mesh restore. */
-    static final int VERSION = 8, MAX_BYTES = 16 * 1024 * 1024;
+    /** Rebuild old solid-box growing plants; raw terrain and feature caches remain valid. */
+    static final int VERSION = 11, RECORD_VERSION = 9, MAX_BYTES = 16 * 1024 * 1024;
+    record MeshRecord(PredictionMesh mesh, boolean surfaceCompleted,
+                      dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities, byte[] baseIdentity, byte[] fullIdentity) { }
+    private static final int CITY_RECORD_VERSION = 10;
 
-    static byte[] withCityBuildings(byte[] signature, int[] buildings) {
+    static byte[] withCityBuildings(byte[] signature, dev.xantha.vss.common.worldgen.LostCityPreview.Tile buildings) {
         if (signature == null || buildings == null) return signature;
         try {
             var digest = MessageDigest.getInstance("SHA-256");
             digest.update(signature);
-            var data = ByteBuffer.allocate((buildings.length + 2) * Integer.BYTES);
-            data.putInt(0x4C430001).putInt(buildings.length);
-            for (int hint : buildings) data.putInt(hint);
-            return digest.digest(data.array());
+            dev.xantha.vss.common.worldgen.LostCityPreview.fingerprint(digest, buildings);
+            return digest.digest();
         } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
@@ -81,9 +82,12 @@ final class PredictionMeshCodec {
                 out.write(resources); out.writeInt(VERSION); out.writeInt(sea); out.writeInt(fluid);
                 out.writeInt(step); out.writeBoolean(trees); out.writeInt(decorationSettings); out.writeInt(samples.length);
                 for (var s : samples) {
-                    for (int v : new int[]{s.surfaceY(),s.fluidY(),s.biomeIndex(),s.topBlockIndex(),s.structureIndex(),
-                            s.treeKind(),s.treeDensity(),s.treeHeight(),s.fluid(),s.flags(),s.groundFeatureKind(),
-                            s.underBlockIndex(),s.deepBlockIndex(),s.surfaceBottom(),s.lowerTop(),s.lowerBottom(),s.spanFloor()}) out.writeInt(v);
+                    out.writeInt(s.surfaceY()); out.writeInt(s.fluidY()); out.writeInt(s.biomeIndex());
+                    out.writeInt(s.topBlockIndex()); out.writeInt(s.structureIndex()); out.writeInt(s.treeKind());
+                    out.writeInt(s.treeDensity()); out.writeInt(s.treeHeight()); out.writeInt(s.fluid());
+                    out.writeInt(s.flags()); out.writeInt(s.groundFeatureKind()); out.writeInt(s.underBlockIndex());
+                    out.writeInt(s.deepBlockIndex()); out.writeInt(s.surfaceBottom()); out.writeInt(s.lowerTop());
+                    out.writeInt(s.lowerBottom()); out.writeInt(s.spanFloor());
                     var volume = s.volume(); out.writeInt(volume == null ? -1 : volume.size());
                     if (volume != null) for (int i=0;i<volume.size();i++) {
                         out.writeInt(volume.bottom(i));out.writeInt(volume.top(i));out.writeInt(volume.block(i));out.writeInt(volume.fluid(i));
@@ -92,22 +96,8 @@ final class PredictionMeshCodec {
                 for (int[] array : new int[][]{colors,foliage,water}) {
                     out.writeInt(array.length); for (int color : array) out.writeInt(color & 0xffffff);
                 }
-                if (!includeDecoration) return digest.digest();
-                out.writeInt(plants.baseX());out.writeInt(plants.baseZ());out.writeInt(plants.voxelSize());
-                var cells = new TreeMap<>(plants.cells()); out.writeInt(cells.size());
-                for (var cell : cells.entrySet()) {
-                    out.writeInt(cell.getKey());out.writeInt(cell.getValue().size());
-                    for (var v : cell.getValue()) {
-                        out.writeInt(v.x());out.writeInt(v.y());out.writeInt(v.z());out.writeInt(v.size());out.writeInt(Block.getId(v.state()));
-                    }
-                }
-                // Exact blocks drive face culling and mesh-budget fallback; include them as well as voxels.
-                var blocks = new TreeMap<Long,Integer>();plants.blocks().forEach((p,s)->blocks.put(p.asLong(),Block.getId(s)));
-                out.writeInt(blocks.size());for(var e:blocks.entrySet()){out.writeLong(e.getKey());out.writeInt(e.getValue());}
-                for(var map:List.of(plants.exteriorTops(),plants.exteriorFloors())) {
-                    long[] keys=map.keySet().toLongArray();Arrays.sort(keys);out.writeInt(keys.length);
-                    for(long key:keys){out.writeLong(key);out.writeInt(map.get(key));}
-                }
+                if (!includeDecoration) { out.flush(); return digest.digest(); }
+                out.write(plants.signatureCache().data(plants));
                 out.writeInt(simple.forms().size());
                 for (var form : simple.forms()) {
                     out.writeInt(form.cell());out.writeInt(form.x());out.writeInt(form.z());out.writeInt(form.y());
@@ -120,6 +110,32 @@ final class PredictionMeshCodec {
         } catch (IOException | NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
+    static byte[] decorationBytes(PredictionVegetation.Tile plants) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new DataOutputStream(bytes)) {
+            out.writeInt(plants.baseX()); out.writeInt(plants.baseZ()); out.writeInt(plants.voxelSize());
+            int[] cells = plants.cells().keySet().stream().mapToInt(Integer::intValue).sorted().toArray();
+            out.writeInt(cells.length);
+            for (int cell : cells) {
+                var values = plants.cell(cell); out.writeInt(cell); out.writeInt(values.size());
+                for (var voxel : values) {
+                    out.writeInt(voxel.x()); out.writeInt(voxel.y()); out.writeInt(voxel.z());
+                    out.writeInt(voxel.size()); out.writeInt(Block.getId(voxel.state()));
+                }
+            }
+            var blocks = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap(plants.blocks().size());
+            plants.blocks().forEach((pos, state) -> blocks.put(pos.asLong(), Block.getId(state)));
+            long[] keys = blocks.keySet().toLongArray(); Arrays.sort(keys);
+            out.writeInt(keys.length);
+            for (long key : keys) { out.writeLong(key); out.writeInt(blocks.get(key)); }
+            for (var map : List.of(plants.exteriorTops(), plants.exteriorFloors())) {
+                keys = map.keySet().toLongArray(); Arrays.sort(keys); out.writeInt(keys.length);
+                for (long key : keys) { out.writeLong(key); out.writeInt(map.get(key)); }
+            }
+        }
+        return bytes.toByteArray();
+    }
+
     static byte[] encode(PredictionMesh mesh, byte[] signature) throws IOException {
         return encode(mesh, signature, signature, true);
     }
@@ -130,17 +146,33 @@ final class PredictionMeshCodec {
 
     static byte[] encode(PredictionMesh mesh, byte[] signature, byte[] baseSignature,
                          boolean baseSafe) throws IOException {
+        return encode(mesh, signature, baseSignature, baseSafe, false);
+    }
+
+    static byte[] encode(PredictionMesh mesh, byte[] signature, byte[] baseSignature,
+                         boolean baseSafe, boolean surfaceCompleted) throws IOException {
+        return encode(mesh, signature, baseSignature, baseSafe, surfaceCompleted, null, null);
+    }
+
+    static byte[] encode(PredictionMesh mesh, byte[] signature, byte[] baseSignature,
+                         boolean baseSafe, boolean surfaceCompleted, byte[] rawIdentity,
+                         dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) throws IOException {
+        byte[] cityBytes = cities == null ? null : PredictionCityMeshCache.encode(cities);
+        if (cities != null && (rawIdentity == null || rawIdentity.length != 32
+                || !Arrays.equals(baseSignature, withCityBuildings(rawIdentity, PredictionCityMeshCache.buildings(cities)))))
+            throw new IOException("city cache identity");
         var payload=mesh.gpuPayload();
         if(payload==null || signature == null || baseSignature == null
                 || signature.length != 32 || baseSignature.length != 32
-                || mesh.retainedHeapBytes()>MAX_BYTES)throw new IOException("mesh record too large");
+                || surfaceCompleted && !baseSafe
+                || mesh.retainedHeapBytes()>MAX_BYTES)throw new IOException("invalid mesh record");
         var bytes=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(bytes)) {
-            out.writeInt(VERSION);out.write(signature);out.write(baseSignature);out.writeBoolean(baseSafe);out.writeInt(mesh.cellAxis());
+            out.writeInt(cities == null ? RECORD_VERSION : CITY_RECORD_VERSION);out.write(signature);out.write(baseSignature);out.writeBoolean(baseSafe);out.writeInt(mesh.cellAxis());
             out.writeInt(mesh.vertexCount());out.writeInt(mesh.waterVertexCount());
             out.writeInt(payload.terrainQuadCount());out.writeInt(payload.spriteQuadCount());out.writeBoolean(payload.downFaces());
             out.writeInt(payload.morphMinY());out.writeInt(payload.morphMaxY());
-            int[] words = payload.quads();
+            int[] words = payload.cacheWords();
             var used=new BitSet(256);
             for(int i=6;i<words.length;i+=12){int row=words[i]&0xffff;if(row>0 && row!=255)used.set(row);}
             mesh.seamMesh().materialRows(used);
@@ -152,25 +184,60 @@ final class PredictionMeshCodec {
                 out.writeInt(payload.waterRangeFirst(i));out.writeInt(payload.waterRangeCount(i));
             }
             mesh.seamMesh().writeCache(out);
+            out.writeBoolean(surfaceCompleted);
+            if (cityBytes != null) {
+                out.write(rawIdentity); out.write(cityBytes); out.writeInt(32 + cityBytes.length);
+            }
         }
         if(bytes.size()>MAX_BYTES)throw new IOException("mesh record too large");
         return bytes.toByteArray();
     }
 
     static PredictionMesh decode(byte[] bytes, byte[] signature, int expectedAxis) throws IOException {
-        return decode(bytes, signature, null, expectedAxis);
+        MeshRecord result = decodeRecord(bytes, signature, null, expectedAxis);
+        return result == null ? null : result.mesh();
     }
 
     static PredictionMesh decodeBase(byte[] bytes, byte[] baseSignature, int expectedAxis) throws IOException {
-        return decode(bytes, null, baseSignature, expectedAxis);
+        MeshRecord result = decodeBaseRecord(bytes, baseSignature, expectedAxis);
+        return result == null ? null : result.mesh();
     }
 
-    private static PredictionMesh decode(byte[] bytes, byte[] signature, byte[] baseSignature,
-                                         int expectedAxis) throws IOException {
+    static MeshRecord decodeBaseRecord(byte[] bytes, byte[] baseSignature, int expectedAxis) throws IOException {
+        return decodeRecord(bytes, null, baseSignature, expectedAxis);
+    }
+
+    private static MeshRecord decodeRecord(byte[] bytes, byte[] signature, byte[] baseSignature,
+                                            int expectedAxis) throws IOException {
+        return decodeRecord(bytes, signature, baseSignature, expectedAxis, null, null);
+    }
+
+    static MeshRecord decodeCityBaseRecord(byte[] bytes, byte[] rawIdentity, byte[] liveBase, int axis,
+            java.util.function.Predicate<dev.xantha.vss.common.worldgen.LostCityPreview.Tile> validate) throws IOException {
+        return decodeRecord(bytes, null, liveBase, axis, rawIdentity, validate);
+    }
+
+    private static MeshRecord decodeRecord(byte[] bytes, byte[] signature, byte[] baseSignature,
+            int expectedAxis, byte[] rawIdentity,
+            java.util.function.Predicate<dev.xantha.vss.common.worldgen.LostCityPreview.Tile> validate) throws IOException {
         if(bytes.length>MAX_BYTES)throw new IOException("mesh record too large");
         try {
+            dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities = null;
+            int geometryEnd = bytes.length;
+            if (bytes.length >= 4 && ByteBuffer.wrap(bytes).getInt() == CITY_RECORD_VERSION) {
+                int length = ByteBuffer.wrap(bytes).getInt(bytes.length - 4);
+                if (length < 32 || length > bytes.length - 4 - 69) throw new IOException("city mesh footer");
+                geometryEnd = bytes.length - 4 - length;
+                if (rawIdentity != null) {
+                    if (!Arrays.equals(rawIdentity, Arrays.copyOfRange(bytes, geometryEnd, geometryEnd + 32))) return null;
+                    cities = PredictionCityMeshCache.decode(Arrays.copyOfRange(bytes, geometryEnd + 32, bytes.length - 4));
+                    if (!validate.test(cities)) return null;
+                    baseSignature = withCityBuildings(rawIdentity, PredictionCityMeshCache.buildings(cities));
+                }
+            }
             var stream=new ByteArrayInputStream(bytes);var header=new DataInputStream(stream);
-            if(header.readInt()!=VERSION)return null;
+            int recordVersion = header.readInt();
+            if(recordVersion != 8 && recordVersion != RECORD_VERSION && recordVersion != CITY_RECORD_VERSION)return null;
             byte[] fullIdentity=header.readNBytes(32), storedBase=header.readNBytes(32);
             boolean storedBaseSafe=header.readBoolean();
             if(fullIdentity.length != 32 || storedBase.length != 32
@@ -187,9 +254,14 @@ final class PredictionMeshCodec {
                 int old=header.readInt();if(old<=0||old>=255||rows[old]!=-1)throw new IOException("mesh material index");
                 rows[old]=VssLodSpriteTable.readMaterial(header);
             }
-            var in=ByteBuffer.wrap(bytes);in.position(bytes.length-stream.available());
+            var in=ByteBuffer.wrap(bytes);in.limit(geometryEnd);in.position(bytes.length-stream.available());
             int[] words=ints(in);if(words.length%12!=0 || terrain>words.length/12 || sprites>words.length/12)throw new IOException("mesh quads");
-            for(int i=6;i<words.length;i+=12){int old=words[i]&0xffff;if(old>=256||rows[old]<0)throw new IOException("mesh unresolved material");words[i]=(words[i]&0xffff0000)|rows[old];}
+            for(int i=6;i<words.length;i+=12){int old=words[i]&0xffff;if(old>=256||rows[old]<0)throw new IOException("mesh unresolved material");
+                // CPU seam colours use alpha=255 for flat; packed GPU quads
+                // use row zero. Never sample the unallocated atlas row 255.
+                int row=rows[old]==VssLodSpriteTable.FLAT?0:rows[old];
+                words[i]=(words[i]&0xffff0000)|row;
+            }
             int count=VssLodFaceGroup.COUNT;
             int[] tf=new int[count],tc=new int[count],wf=new int[count],wc=new int[count];
             int tend=0,wend=terrain;
@@ -201,10 +273,16 @@ final class PredictionMeshCodec {
             if(tend!=terrain||wend!=words.length/12)throw new IOException("mesh range totals");
             var seams=new PredictionSeamMesh(in,axis);
             seams.remapMaterials(rows);
+            boolean surfaceCompleted = false;
+            if (recordVersion >= RECORD_VERSION) {
+                int complete = in.get() & 255;
+                if (complete > 1 || complete == 1 && !storedBaseSafe)throw new IOException("mesh surface completion");
+                surfaceCompleted = complete == 1;
+            }
             if(in.hasRemaining())throw new IOException("trailing mesh bytes");
             var packed=new PredictionPackedMesh(words,axis,terrain,tf,tc,wf,wc,down,sprites);
             packed.morph(null,min,max); // Parent and upload age belong to this session.
-            return PredictionMesh.restored(vertices,waterVertices,packed,seams);
+            return new MeshRecord(PredictionMesh.restored(vertices,waterVertices,packed,seams), surfaceCompleted, cities, storedBase, fullIdentity);
         } catch (BufferUnderflowException | IndexOutOfBoundsException malformed) { throw new IOException("truncated mesh",malformed); }
     }
 

@@ -65,8 +65,7 @@ class ClientCaptureExtractorTest {
         ClientColumnSample[] grid = new ClientColumnSample[81];
         java.util.Arrays.fill(grid, captured);
         for (int spacing : new int[]{1, 2, 4, 8, 16, 32}) {
-            var mesh = PredictionMeshBuilder.build(grid, null, 63, 0, spacing, 9,
-                    true, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY);
+            var mesh = PredictionMeshBuilder.build(grid, null, 63, 0, spacing, 9, null, null, 0, 0, PredictionVegetation.Tile.EMPTY);
             assertEquals(0, mesh.vertexCount(), "empty authoritative terrain cannot render a floor");
             assertEquals(0, mesh.waterVertexCount());
         }

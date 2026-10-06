@@ -146,8 +146,7 @@ class PredictionTreeTintTest {
             int[] foliage = new int[samples.length];
             Arrays.fill(foliage, BIOME_TINT);
             var vegetation = PredictionVegetation.Tile.of(restored, 0, 0, 32, spacing, Math.max(1, spacing / 2));
-            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, spacing, grid, true,
-                    null, foliage, null, 0, 0, vegetation);
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, spacing, grid, foliage, null, 0, 0, vegetation);
             var dimension = ResourceKey.create(Registries.DIMENSION, ResourceLocation.withDefaultNamespace("overworld"));
             var tile = new PredictionTileManager.PredictionTile(
                     new PredictionTileManager.PredictionTileKey(dimension, 0, 0, 0),

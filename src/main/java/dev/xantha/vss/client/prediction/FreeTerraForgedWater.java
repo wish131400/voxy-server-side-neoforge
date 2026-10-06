@@ -1,5 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -12,7 +13,7 @@ final class FreeTerraForgedWater {
 
     FreeTerraForgedWater(Object context) throws ReflectiveOperationException {
         ClassLoader loader = context.getClass().getClassLoader();
-        String prefix = "raccoonman.reterraforged.world.worldgen.cell.";
+        String prefix = FreeTerraForgedVariant.fromClass(context.getClass()).worldgenClass("cell.");
         levels = context.getClass().getField("levels").get(context);
         scale = levels.getClass().getMethod("scale", float.class);
         ocean = levels.getClass().getField("water").getFloat(levels);

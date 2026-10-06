@@ -52,7 +52,7 @@ class PredictionLodSeamsTest {
                 var packed = patches.getFirst().mesh();
                 assertEquals(fine, patches.getFirst().surface().tile());
                 assertEquals(64 * step * 32D, area(packed), "every fine segment must connect once");
-                for (int q = 0; q < packed.quadCount(); q++) {
+                for (int q = 0; q < packed.terrainQuadCount(); q++) {
                     int[] words = packed.quads();
                     int offset = q * 12;
                     int top = ((words[offset + 4] & 65535) - 32768) / 4;
@@ -262,7 +262,7 @@ class PredictionLodSeamsTest {
         var fine = wetTile(-1, -1, 2, 50, 55, 50);
         var coarse = wetTile(0, -1, 4, 32, 55, 32);
         var mesh = new PredictionLodSeams().update(List.of(surface(fine), surface(coarse))).getFirst().mesh();
-        for (int q = 0; q < mesh.quadCount(); q++) {
+        for (int q = 0; q < mesh.terrainQuadCount(); q++) {
             int i = q * 12; int[] w = mesh.quads();
             for (int corner = 0; corner < 4; corner++) {
                 int yw = w[i + (corner < 2 ? 4 : 5)];
@@ -331,7 +331,7 @@ class PredictionLodSeamsTest {
         var vegetation = PredictionVegetation.Tile.of(Map.of(new net.minecraft.core.BlockPos(0, 150, 0),
                 net.minecraft.world.level.block.Blocks.STONE.defaultBlockState()), 0, 0, 1, 1, 1);
         var mesh = PredictionMeshBuilder.build(new ClientColumnSample[]{low, high, low, high}, null,
-                63, 0, 1, 2, true, null, null, null, 0, 0, vegetation).packed();
+                63, 0, 1, 2, null, null, 0, 0, vegetation).packed();
         int ground = 0, features = 0;
         for (int q = 0; q < mesh.quadCount(); q++) {
             if (mesh.terrainWall(q)) ground++;
@@ -382,8 +382,9 @@ class PredictionLodSeamsTest {
     }
 
     private static double area(PredictionPackedMesh mesh) {
+        // Appended display levels are alternatives, not simultaneously drawn seams.
         double sum = 0;
-        for (int q = 0; q < mesh.quadCount(); q++) {
+        for (int q = 0; q < mesh.terrainQuadCount(); q++) {
             int i = q * 12; int[] w = mesh.quads();
             double length = Math.abs((w[i] & 65535) - (w[i] >>> 16))
                     + Math.abs((w[i + 2] & 65535) - (w[i + 2] >>> 16));

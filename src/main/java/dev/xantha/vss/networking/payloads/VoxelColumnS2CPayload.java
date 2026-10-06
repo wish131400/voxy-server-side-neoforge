@@ -347,6 +347,14 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         return sectionBytes != null ? sectionBytes.length : encodedRawSize;
     }
 
+    public boolean sameSectionData(VoxelColumnS2CPayload other) {
+        return encodedCompression == other.encodedCompression && encodedRawSize == other.encodedRawSize
+                && Arrays.equals(sectionBytes, other.sectionBytes)
+                && Arrays.equals(encodedSectionBytes, other.encodedSectionBytes)
+                && Arrays.equals(encodedSectionYs, other.encodedSectionYs)
+                && Arrays.equals(encodedSectionLengths, other.encodedSectionLengths);
+    }
+
     public int rawEstimatedBytes() {
         return rawSectionBytesLength() + VSSConstants.ESTIMATED_COLUMN_OVERHEAD_BYTES;
     }

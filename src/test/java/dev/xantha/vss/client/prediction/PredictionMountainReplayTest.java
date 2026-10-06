@@ -32,7 +32,7 @@ class PredictionMountainReplayTest {
         var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"),-64,384,"noise","minecraft:overworld",0);
         var javaSampler=new ClientTerrainSampler(seed,profile,generator,random,
-                net.minecraft.world.level.LevelHeightAccessor.create(-64,384),63,List.of());
+                net.minecraft.world.level.LevelHeightAccessor.create(-64,384),63);
         try(var rust=new RustTerrainSampler(RustWorldgenBackend.create(seed,0,doc.toString()),profile,javaSampler)) {
             var legacyRust = new ClientTerrainSampler(seed, profile) {
                 @Override PredictionColumnVolume exteriorColumn(int x, int z) { return rust.exteriorColumn(x, z); }

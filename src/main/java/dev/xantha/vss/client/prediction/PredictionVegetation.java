@@ -21,11 +21,16 @@ import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
+import net.neoforged.fml.ModList;
 
 /** World-coordinate vegetation shared by all prediction LOD levels. */
 final class PredictionVegetation {
+    static final int PREDICATE_SETTINGS_VERSION = 1 << 8;
+    private static final int PREDICATE_SETTINGS = ModList.get() != null && ModList.get().isLoaded("byepregen")
+            ? PREDICATE_SETTINGS_VERSION : 0;
     private static final int MAX_CHUNKS = 512;
     private static final int MAX_BLOCKS = 262_144;
+    private static final GenerationStep.Decoration[] DECORATION_STEPS = GenerationStep.Decoration.values();
     private static final net.minecraft.core.Direction[] EXTERIOR_FACES = {
             net.minecraft.core.Direction.UP, net.minecraft.core.Direction.NORTH,
             net.minecraft.core.Direction.SOUTH, net.minecraft.core.Direction.WEST, net.minecraft.core.Direction.EAST};
@@ -33,13 +38,20 @@ final class PredictionVegetation {
     private final ClientTerrainSampler context;
     private final RegistryAccess access;
     private final List<List<PlacedFeature>> featureSteps;
+    private volatile EnabledFeatures enabledFeatures;
+    private record EnabledFeatures(int settings, int[][] indices) { }
+    private final Set<PlacedFeature> biomeFiltered = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final PredictionSurfaceStructures structures;
     private final PredictionTreeModels treeModels;
     private final PredictionDiskCache diskCache;
     private final int settings;
-    private long cacheRevision;
     private final Map<Long, Map<BlockPos, BlockState>> chunks = new LinkedHashMap<>(64, .75F, true);
-    private final Set<Long> generating = ConcurrentHashMap.newKeySet();
+    private final Map<Long, Generation> generationJobs = new ConcurrentHashMap<>();
+    private static final class Generation {
+        volatile boolean valid = true;
+        final Set<Long> dirtyChunks = new java.util.HashSet<>();
+    }
+    private final PredictionVegetationDisplayCache displayCache = new PredictionVegetationDisplayCache();
     private final Set<PlacedFeature> loggedFailures = ConcurrentHashMap.newKeySet();
     private final Set<PlacedFeature> missingRegistryFailures = ConcurrentHashMap.newKeySet();
     private final Set<PlacedFeature> unsupportedFeatures = ConcurrentHashMap.newKeySet();
@@ -53,9 +65,10 @@ final class PredictionVegetation {
     private final java.util.concurrent.atomic.LongAdder memoryHits = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder diskHits = new java.util.concurrent.atomic.LongAdder();
 
+    static int predicateSettings() { return PREDICATE_SETTINGS; }
+
     boolean available() {
-        for (int step = 0; step < featureSteps.size(); step++)
-            for (var feature : featureSteps.get(step)) if (enabled(step,feature)) return true;
+        for (var step : enabledFeatures().indices()) if (step.length != 0) return true;
         return VSSClientConfig.CONFIG.predictionStructures && structures.available();
     }
 
@@ -63,6 +76,7 @@ final class PredictionVegetation {
         return "features=" + featureSteps.stream().mapToInt(List::size).sum() + ",chunks=" + generatedChunks.sum()
                 + ",blocks=" + generatedBlocks.sum() + ",meshBlocks=" + meshedBlocks.sum()
                 + ",surfaceMemoryHits=" + memoryHits.sum() + ",surfaceDiskHits=" + diskHits.sum()
+                + "," + displayCache.diagnostics()
                 + ",skippedFeatures=" + failedFeatures.sum() + ",disabledRegistryFeatures="
                 + missingRegistryFailures.size() + ",unsupportedFeatures=" + unsupportedFeatures.size()
                 + ",featureFailure=" + lastFeatureFailure + "," + structures.diagnostics()
@@ -83,7 +97,7 @@ final class PredictionVegetation {
         this.terrainColumns = new VssLodSampleCache(terrain.interiorTerrain() ? 512 : 32_768);
         this.diskCache = diskCache;
         this.settings = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0)
-                | (reuseTrees ? 28 : 0) | (terrain.interiorTerrain() ? 96 : 0);
+                | (reuseTrees ? 28 : 0) | (terrain.interiorTerrain() ? 96 : 0) | predicateSettings();
         this.context = terrain.decorationContext();
         this.access = context.decorationAccess();
         this.treeModels = reuseTrees ? new PredictionTreeModels(access, context.generatorContext()) : null;
@@ -102,29 +116,30 @@ final class PredictionVegetation {
             }
         }
         this.featureSteps = List.copyOf(found);
+        for (var step : featureSteps) for (var feature : step) {
+            for (var modifier : feature.placement()) {
+                if (modifier instanceof net.minecraft.world.level.levelgen.placement.BiomeFilter) {
+                    biomeFiltered.add(feature);
+                    break;
+                }
+            }
+        }
         this.structures = new PredictionSurfaceStructures(context);
     }
 
     Tile tile(int baseX, int baseZ, int span, int spacing, boolean trees,
               BiPredicate<Integer, Integer> captured) {
+        return tile(baseX, baseZ, span, spacing, trees, captured, () -> true);
+    }
+
+    Tile tile(int baseX, int baseZ, int span, int spacing, boolean trees,
+              BiPredicate<Integer, Integer> captured, java.util.function.BooleanSupplier current) {
+        requireCurrent(current);
         if (spacing > 8 || !available()) return Tile.EMPTY;
-        int voxelSize = Math.max(1, spacing / 2);
-        Map<BlockPos, BlockState> blocks = new HashMap<>();
-        for (int cz = Math.floorDiv(baseZ, 16) - 1; cz <= Math.floorDiv(baseZ + span - 1, 16) + 1; cz++) {
-            for (int cx = Math.floorDiv(baseX, 16) - 1; cx <= Math.floorDiv(baseX + span - 1, 16) + 1; cx++) {
-                if (Thread.currentThread().isInterrupted()) throw new PredictionMemoryBudget.MeshLimitException();
-                for (var entry : chunk(cx, cz).entrySet()) {
-                    BlockPos pos = entry.getKey();
-                    BlockState state = entry.getValue();
-                    if (pos.getX() < baseX - voxelSize || pos.getX() >= baseX + span + voxelSize
-                            || pos.getZ() < baseZ - voxelSize || pos.getZ() >= baseZ + span + voxelSize
-                            || captured.test(pos.getX(), pos.getZ())) continue;
-                    if (vegetation(state) && !trees || !solid(state) && spacing > 2) continue;
-                    blocks.put(pos, state);
-                }
-            }
-        }
-        Tile tile = boundedTile(blocks, baseX, baseZ, span, spacing, voxelSize);
+        var sources = generationSources(baseX, baseZ, span, current);
+        requireCurrent(current);
+        Tile tile = PredictionVegetationDisplayCache.merge(baseX, baseZ, span, spacing, trees, sources,
+                pos -> captured.test(pos.getX(), pos.getZ()));
         meshedBlocks.add(tile.cells().values().stream().mapToInt(List::size).sum());
         return tile;
     }
@@ -135,39 +150,100 @@ final class PredictionVegetation {
         synchronized (chunks) { return chunks.containsKey(key); }
     }
 
+    Tile tileForRendering(int x, int z, int span, int spacing, boolean trees,
+            java.util.function.LongPredicate captured, java.util.function.BooleanSupplier current) {
+        return tileForRendering(x, z, span, spacing, trees, captured, current,
+                dev.xantha.vss.config.PredictionVegetationDensity.HIGH);
+    }
+
+    Tile tileForRendering(int x, int z, int span, int spacing, boolean trees,
+            java.util.function.LongPredicate captured, java.util.function.BooleanSupplier current,
+            dev.xantha.vss.config.PredictionVegetationDensity density) {
+        requireCurrent(current);
+        if (spacing > 8 || !available()) return Tile.EMPTY;
+        try (var build = displayCache.begin(x, z, span, spacing, trees, density)) {
+            var sources = generationSources(x, z, span, current);
+            requireCurrent(current);
+            var result = displayCache.tile(build, sources, captured);
+            meshedBlocks.add(result.cells().values().stream().mapToInt(List::size).sum());
+            return result;
+        }
+    }
+
+    private List<PredictionVegetationDisplayCache.Source> generationSources(int x, int z, int span,
+            java.util.function.BooleanSupplier current) {
+        var sources = new ArrayList<PredictionVegetationDisplayCache.Source>();
+        for (int cz = Math.floorDiv(z, 16) - 1; cz <= Math.floorDiv(z + span - 1, 16) + 1; cz++)
+            for (int cx = Math.floorDiv(x, 16) - 1; cx <= Math.floorDiv(x + span - 1, 16) + 1; cx++) {
+                requireCurrent(current);
+                sources.add(new PredictionVegetationDisplayCache.Source(
+                        PredictionVegetationDisplayCache.chunkKey(cx, cz), chunk(cx, cz, current)));
+            }
+        return sources;
+    }
+
+    /** Avoid preparing a whole surface tile when one of its required chunks
+     * already belongs to another job. This does not reserve or generate work. */
+    void deferIfRenderingBusy(int x, int z, int span, int spacing,
+                             java.util.function.BooleanSupplier current) {
+        requireCurrent(current);
+        if (generationJobs.isEmpty() || spacing > 8 || !available()) return;
+        // Match tileForRendering's complete source footprint. Captured columns
+        // are filtered after gathering sources, so they remain dependencies.
+        for (int cz = Math.floorDiv(z, 16) - 1; cz <= Math.floorDiv(z + span - 1, 16) + 1; cz++)
+            for (int cx = Math.floorDiv(x, 16) - 1; cx <= Math.floorDiv(x + span - 1, 16) + 1; cx++) {
+                long key = PredictionVegetationDisplayCache.chunkKey(cx, cz);
+                if (!generationJobs.containsKey(key)) continue;
+                synchronized (chunks) {
+                    if (chunks.containsKey(key)) continue;
+                }
+                requireCurrent(current);
+                throw new PredictionWorkDeferred();
+            }
+    }
+
+    Tile cachedDisplayForRendering(int x, int z, int span, int spacing, java.util.function.LongPredicate captured) {
+        return cachedDisplayForRendering(x, z, span, spacing, captured,
+                dev.xantha.vss.config.PredictionVegetationDensity.HIGH);
+    }
+
+    Tile cachedDisplayForRendering(int x, int z, int span, int spacing, java.util.function.LongPredicate captured,
+            dev.xantha.vss.config.PredictionVegetationDensity density) {
+        if (spacing > 8) return Tile.EMPTY;
+        try (var build = displayCache.begin(x, z, span, spacing, VSSClientConfig.CONFIG.predictionTrees, density)) {
+            return displayCache.tile(build, cachedSources(x, z, span), captured);
+        }
+    }
+
+    private List<PredictionVegetationDisplayCache.Source> cachedSources(int x, int z, int span) {
+        var sources = new ArrayList<PredictionVegetationDisplayCache.Source>();
+        int minX = Math.floorDiv(x, 16) - 1, maxX = Math.floorDiv(x + span - 1, 16) + 1;
+        int minZ = Math.floorDiv(z, 16) - 1, maxZ = Math.floorDiv(z + span - 1, 16) + 1;
+        synchronized (chunks) {
+            if ((long) (maxX - minX + 1) * (maxZ - minZ + 1) > chunks.size()) {
+                for (var entry : chunks.entrySet()) {
+                    int cx = (int) (entry.getKey() >> 32), cz = (int) (long) entry.getKey();
+                    if (cx >= minX && cx <= maxX && cz >= minZ && cz <= maxZ)
+                        sources.add(new PredictionVegetationDisplayCache.Source(entry.getKey(), entry.getValue()));
+                }
+            } else for (int cz = minZ; cz <= maxZ; cz++) for (int cx = minX; cx <= maxX; cx++) {
+                long key = PredictionVegetationDisplayCache.chunkKey(cx, cz);
+                var cached = chunks.get(key);
+                if (cached != null) sources.add(new PredictionVegetationDisplayCache.Source(key, cached));
+            }
+        }
+        sources.sort(Comparator.<PredictionVegetationDisplayCache.Source>comparingInt(s -> (int) s.key())
+                .thenComparingInt(s -> (int) (s.key() >> 32)));
+        return sources;
+    }
+
     /** Read existing placement only; this path must never trigger world generation. */
     Tile cachedDisplay(int baseX, int baseZ, int span, int spacing,
                        BiPredicate<Integer,Integer> captured) {
         if (spacing > 8) return Tile.EMPTY;
-        int voxelSize = Math.max(1, spacing / 2);
-        List<Map<BlockPos,BlockState>> existing = new ArrayList<>();
-        synchronized (chunks) {
-            int minX = Math.floorDiv(baseX, 16) - 1, maxX = Math.floorDiv(baseX + span - 1, 16) + 1;
-            int minZ = Math.floorDiv(baseZ, 16) - 1, maxZ = Math.floorDiv(baseZ + span - 1, 16) + 1;
-            // Small fine tiles use direct lookup; wide sparse tiles visit only resident chunks.
-            if ((long) (maxX - minX + 1) * (maxZ - minZ + 1) > chunks.size()) {
-                for (var entry : chunks.entrySet()) {
-                    int cx = (int) (entry.getKey() >> 32), cz = (int) (long) entry.getKey();
-                    if (cx >= minX && cx <= maxX && cz >= minZ && cz <= maxZ) existing.add(entry.getValue());
-                }
-            } else for (int cz = minZ; cz <= maxZ; cz++) {
-                for (int cx = minX; cx <= maxX; cx++) {
-                    var cached = chunks.get((long) cx << 32 | cz & 0xFFFFFFFFL);
-                    if (cached != null) existing.add(cached);
-                }
-            }
-        }
-        Map<BlockPos,BlockState> blocks = new HashMap<>();
-        for (var chunk : existing) for (var e : chunk.entrySet()) {
-            var p = e.getKey(); var state = e.getValue();
-            if (p.getX()<baseX-voxelSize || p.getX()>=baseX+span+voxelSize
-                    || p.getZ()<baseZ-voxelSize || p.getZ()>=baseZ+span+voxelSize
-                    || captured.test(p.getX(),p.getZ())) continue;
-            if (vegetation(state) && !VSSClientConfig.CONFIG.predictionTrees || !solid(state) && spacing > 2) continue;
-            blocks.put(p,state);
-        }
-        // A capture refresh must use the same geometry as the decorated tile.
-        return boundedTile(blocks, baseX, baseZ, span, spacing, voxelSize);
+        return PredictionVegetationDisplayCache.merge(baseX, baseZ, span, spacing,
+                VSSClientConfig.CONFIG.predictionTrees, cachedSources(baseX, baseZ, span),
+                pos -> captured.test(pos.getX(), pos.getZ()));
     }
 
     static Tile cachedRepresentative(Map<BlockPos,BlockState> blocks, int x, int z, int span, int spacing) {
@@ -182,21 +258,22 @@ final class PredictionVegetation {
     }
 
     private final Map<Long,Float> forestCoverage = new ConcurrentHashMap<>();
-    private void noteForest(long chunkKey, Map<BlockPos,BlockState> blocks) {
+    private float forestCoverage(long chunkKey, Map<BlockPos,BlockState> blocks) {
         int cx=(int)(chunkKey>>32), cz=(int)chunkKey;
-        Set<Long> columns=new java.util.HashSet<>();
+        var columns = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
         for(var e:blocks.entrySet()) if(e.getValue().is(BlockTags.LEAVES)) {
             var p=e.getKey();
             if(Math.floorDiv(p.getX(),16)==cx && Math.floorDiv(p.getZ(),16)==cz)
                 columns.add((long)p.getX()<<32 | p.getZ() & 0xffffffffL);
         }
-        forestCoverage.put(chunkKey,Math.min(1,columns.size()/256F));
+        return Math.min(1,columns.size()/256F);
     }
 
     int forestTint(ClientColumnSample sample, int x, int z, int spacing, int grass, int foliage) {
         if (spacing<=8 || !VSSClientConfig.CONFIG.predictionTrees || sample.hasFluid() || sample.snow()
                 || sample.ice() || sample.topBlockIndex()!=PredictionMaterialPalette.grassBlockIndex()) return grass;
         float cover=forestCoverage.getOrDefault((long)Math.floorDiv(x,16)<<32 | Math.floorDiv(z,16)&0xffffffffL,0F);
+        cover *= dev.xantha.vss.config.PredictionVegetationDensity.current().percentage() / 100F;
         return forestTint(grass,foliage,cover);
     }
 
@@ -245,9 +322,10 @@ final class PredictionVegetation {
     }
 
     private static Map<BlockPos, BlockState> fineBlocks(Map<BlockPos, BlockState> blocks, int thinning) {
+        if (thinning <= 1) return blocks;
         Map<BlockPos, BlockState> result = new HashMap<>(blocks.size());
         blocks.forEach((p, state) -> {
-            if (thinning > 1 && (thinGroundCover(state) || state.is(Blocks.BAMBOO))
+            if ((thinGroundCover(state) || state.is(Blocks.BAMBOO))
                     && (Math.floorMod(p.getX(), thinning) != 0 || Math.floorMod(p.getZ(), thinning) != 0)) return;
             // Resource packs may select different leaf models by distance and
             // persistence. Merge matching rendered materials in the mesh, never
@@ -304,8 +382,11 @@ final class PredictionVegetation {
         return size == 1 && renderable(state) && solid(state) && PredictionSurfaceShapes.occludes(state);
     }
 
-    private static boolean thinGroundCover(BlockState state) {
-        return state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS)
+    static boolean thinGroundCover(BlockState state) {
+        // Modded stalks (including BOP high grass) inherit GrowingPlantBlock,
+        // not BushBlock. Keep their complete vertical stacks when thinning.
+        return state.getBlock() instanceof net.minecraft.world.level.block.GrowingPlantBlock
+                || state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS)
                 || state.is(Blocks.FERN) || state.is(Blocks.LARGE_FERN)
                 || state.is(Blocks.KELP) || state.is(Blocks.KELP_PLANT)
                 || state.is(Blocks.SEAGRASS) || state.is(Blocks.TALL_SEAGRASS);
@@ -369,20 +450,24 @@ final class PredictionVegetation {
     }
 
     Map<BlockPos, BlockState> chunk(int x, int z) {
+        return chunk(x, z, () -> true);
+    }
+
+    private Map<BlockPos, BlockState> chunk(int x, int z, java.util.function.BooleanSupplier current) {
+        requireCurrent(current);
         long key = (long) x << 32 | z & 0xFFFFFFFFL;
-        // Cached immutable vegetation does not need a generation permit.
+        Generation job;
+        // Reservation and local invalidation registration must be atomic.
         synchronized (chunks) {
             var cached = chunks.get(key);
             if (cached != null) { memoryHits.increment(); return cached; }
+            if (generationJobs.containsKey(key)) throw new PredictionWorkDeferred();
+            job = new Generation();
+            generationJobs.put(key, job);
         }
-        if (!generating.add(key)) throw new PredictionWorkDeferred();
+        java.util.function.BooleanSupplier generationCurrent = () -> job.valid && current.getAsBoolean();
         try {
-            long revision;
-            synchronized (chunks) {
-                var cached = chunks.get(key);
-                if (cached != null) { memoryHits.increment(); return cached; }
-                revision = cacheRevision;
-            }
+            requireCurrent(generationCurrent);
             Map<BlockPos, BlockState> result;
             try (var lease = diskCache == null ? null : diskCache.lease(PredictionDiskCache.Key.surface(x, z, settings))) {
                 var data = lease == null ? null : diskCache.readSurfaceData(lease);
@@ -393,23 +478,25 @@ final class PredictionVegetation {
                         result = PredictionBamboo.normalize(result);
                         if (treeModels != null) result = PredictionLeafStates.settle(result);
                     }
-                    if (!data.weatherChecked()) result = restoreWeather(x, z, result);
+                    if (!data.weatherChecked()) result = restoreWeather(x, z, result, generationCurrent);
                     if (!data.canonical() || !data.weatherChecked()) {
-                        diskCache.writeSurface(lease, result, true);
+                        diskCache.writeSurfaceLater(lease, result, true);
                     }
                 }
                 if (result == null) {
-                    result = generate(x, z);
+                    result = generate(x, z, generationCurrent);
                     // A toggle during generation cannot save partial content
                     // under the old settings identity.
-                    int current = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0);
-                    if (lease != null && current == (settings & 3)) diskCache.writeSurface(lease, result, true);
+                    int currentSettings = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0);
+                    if (lease != null && currentSettings == (settings & 3)) diskCache.writeSurfaceLater(lease, result, true);
                 }
             }
+            requireCurrent(generationCurrent);
+            float cover = forestCoverage(key, result);
             synchronized (chunks) {
-                if (revision != cacheRevision) return result;
+                requireCurrent(generationCurrent);
                 chunks.put(key, result);
-                noteForest(key, result);
+                forestCoverage.put(key, cover);
                 cachedBlocks += result.size();
                 while (chunks.size() > MAX_CHUNKS || cachedBlocks > MAX_BLOCKS) {
                     var first = chunks.entrySet().iterator();
@@ -421,26 +508,38 @@ final class PredictionVegetation {
             }
             return result;
         } finally {
-            generating.remove(key);
+            synchronized (chunks) {
+                generationJobs.remove(key, job);
+                // A factory can finish after the first local eviction. Do not retain
+                // its old ground assumptions for a subsequent job in this footprint.
+                for (long dirty : job.dirtyChunks)
+                    terrainColumns.removeChunk((int) (dirty >> 32), (int) dirty);
+            }
         }
     }
 
     void invalidate(int chunkX, int chunkZ) {
         synchronized (chunks) {
-            cacheRevision++;
+            displayCache.invalidate(chunkX, chunkZ);
+            terrainColumns.removeChunk(chunkX, chunkZ);
             for (int z = chunkZ - 2; z <= chunkZ + 2; z++) for (int x = chunkX - 2; x <= chunkX + 2; x++) {
                 long key = (long)x << 32 | z & 0xFFFFFFFFL;
+                var job = generationJobs.get(key);
+                if (job != null) {
+                    job.valid = false;
+                    job.dirtyChunks.add(PredictionVegetationDisplayCache.chunkKey(chunkX, chunkZ));
+                }
                 forestCoverage.remove(key);
                 var removed = chunks.remove(key);
                 if (removed != null) cachedBlocks -= removed.size();
             }
         }
-        // Density data is deterministic, but do not keep cached virtual
-        // ground assumptions across authoritative updates.
-        terrainColumns.clear();
+        // Only raw per-coordinate terrain is shared here, never placed blocks or
+        // captures. A local edit cannot change an unrelated raw column sample.
     }
 
-    private Map<BlockPos, BlockState> restoreWeather(int chunkX, int chunkZ, Map<BlockPos, BlockState> blocks) {
+    private Map<BlockPos, BlockState> restoreWeather(int chunkX, int chunkZ, Map<BlockPos, BlockState> blocks,
+                                                       java.util.function.BooleanSupplier current) {
         int step = GenerationStep.Decoration.TOP_LAYER_MODIFICATION.ordinal();
         if (step >= featureSteps.size()) return blocks;
         var features = featureSteps.get(step);
@@ -452,6 +551,7 @@ final class PredictionVegetation {
         var random = new WorldgenRandom(new XoroshiroRandomSource(0));
         long seed = random.setDecorationSeed(terrain.profile().seed(), origin.getX(), origin.getZ());
         for (int index = 0; index < features.size(); index++) {
+            requireCurrent(current);
             var feature = features.get(index);
             if (feature.feature().value().feature() != net.minecraft.world.level.levelgen.feature.Feature.FREEZE_TOP_LAYER
                     || !belongsToColumn(level, feature, origin)) continue;
@@ -461,6 +561,8 @@ final class PredictionVegetation {
             try {
                 feature.placeWithBiomeCheck(level, context.generatorContext(), random, origin);
                 success = true;
+            } catch (java.util.concurrent.CancellationException cancelled) {
+                throw cancelled;
             } catch (RuntimeException failure) {
                 if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS cached snow upgrade skipped: " + failure);
             } finally { level.endFeature(success); }
@@ -470,31 +572,30 @@ final class PredictionVegetation {
         return Map.copyOf(level.placed());
     }
 
-    private Map<BlockPos, BlockState> generate(int chunkX, int chunkZ) {
+    private Map<BlockPos, BlockState> generate(int chunkX, int chunkZ, java.util.function.BooleanSupplier current) {
         var level = new PredictionDecorationLevel(terrain, context, access, chunkX, chunkZ, terrainColumns);
         var random = new WorldgenRandom(new XoroshiroRandomSource(0));
         BlockPos origin = new BlockPos(chunkX * 16, terrain.profile().minY(), chunkZ * 16);
         long seed = random.setDecorationSeed(terrain.profile().seed(), origin.getX(), origin.getZ());
         Map<Boolean, List<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>>> columnBiomes = null;
+        var enabled = enabledFeatures().indices();
         // Native and Java placements share complete cave columns and ordered edits.
         try (var nativeStage = terrain instanceof RustTerrainSampler rust
                 ? new RustVegetationStage(rust, level, chunkX, chunkZ, treeModels != null) : null) {
-            for (int step = 0; step < Math.max(featureSteps.size(), GenerationStep.Decoration.values().length); step++) {
+            for (int step = 0; step < Math.max(featureSteps.size(), DECORATION_STEPS.length); step++) {
+                requireCurrent(current);
                 level.useDisplayTerrain(false);
                 structures.place(level, chunkX, chunkZ, seed, step);
                 List<PlacedFeature> features = step < featureSteps.size() ? featureSteps.get(step) : List.of();
-                int currentStep = step;
-                if (features.stream().noneMatch(feature -> enabled(currentStep,feature))) continue;
+                if (step >= enabled.length || enabled[step].length == 0) continue;
                 if (nativeStage != null) nativeStage.selectStep(features, step);
-                for (int index = 0; index < features.size(); index++) {
-                    if (Thread.currentThread().isInterrupted()) throw new PredictionMemoryBudget.MeshLimitException();
+                for (int index : enabled[step]) {
+                    requireCurrent(current);
                     PlacedFeature feature = features.get(index);
-                    if (!enabled(step,feature)) continue;
                     if (missingRegistryFailures.contains(feature) || unsupportedFeatures.contains(feature)) continue;
                     boolean reusableTree = treeModels != null && treeModels.supports(feature);
                     level.useDisplayTerrain(reusableTree);
-                    if (feature.placement().stream().noneMatch(
-                            modifier -> modifier instanceof net.minecraft.world.level.levelgen.placement.BiomeFilter)) {
+                    if (!biomeFiltered.contains(feature)) {
                         // Unfiltered modded features must still belong to a local biome.
                         if (columnBiomes == null) columnBiomes = new HashMap<>();
                         if (!belongsToColumn(level, feature, origin, columnBiomes)) continue;
@@ -506,10 +607,13 @@ final class PredictionVegetation {
                     random.setFeatureSeed(seed, index, step);
                     level.beginFeature();
                     boolean success = false;
+                    long javaStarted = nativeStage == null ? 0 : System.nanoTime();
                     try {
                         if (reusableTree) treeModels.place(feature, level, random, origin);
                         else PredictionSurfaceFeatureAdapters.place(feature,level,context.generatorContext(),random,origin);
                         success = true;
+                    } catch (java.util.concurrent.CancellationException cancelled) {
+                        throw cancelled;
                     } catch (RuntimeException failure) {
                         if (PredictionMissingRegistry.permanent(failure, access)) missingRegistryFailures.add(feature);
                         else if (failure instanceof UnsupportedOperationException) unsupportedFeatures.add(feature);
@@ -519,12 +623,14 @@ final class PredictionVegetation {
                             VSSLogger.debug("VSS skipped unsupported surface placement: " + feature + ": " + failure);
                     } finally {
                         level.endFeature(success);
-                        if (nativeStage != null) nativeStage.afterJava();
+                        if (nativeStage != null)
+                            nativeStage.afterJava(index, reusableTree, success, System.nanoTime() - javaStarted);
                     }
                 }
                 if (nativeStage != null) nativeStage.finish();
             }
         }
+        requireCurrent(current);
         Map<BlockPos, BlockState> exterior = PredictionBamboo.normalize(surfaceBlocks(level));
         if (treeModels != null) exterior = PredictionLeafStates.settle(exterior);
         generatedChunks.increment();
@@ -532,9 +638,33 @@ final class PredictionVegetation {
         return Map.copyOf(exterior);
     }
 
-    private boolean enabled(int step, PlacedFeature feature) {
+    private static void requireCurrent(java.util.function.BooleanSupplier current) {
+        if (Thread.currentThread().isInterrupted() || !current.getAsBoolean()) {
+            throw new java.util.concurrent.CancellationException("prediction decoration changed");
+        }
+    }
+
+    private EnabledFeatures enabledFeatures() {
+        int flags = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0);
+        var cached = enabledFeatures;
+        if (cached != null && cached.settings() == flags) return cached;
+        var indices = new int[featureSteps.size()][];
+        for (int step = 0; step < indices.length; step++) {
+            var features = featureSteps.get(step);
+            var selected = new int[features.size()];
+            int count = 0;
+            for (int index = 0; index < features.size(); index++)
+                if (enabled(step, features.get(index), (flags & 1) != 0, (flags & 2) != 0)) selected[count++] = index;
+            indices[step] = java.util.Arrays.copyOf(selected, count);
+        }
+        var result = new EnabledFeatures(flags, indices);
+        enabledFeatures = result;
+        return result;
+    }
+
+    private boolean enabled(int step, PlacedFeature feature, boolean trees, boolean structures) {
         return surfaceFeature(step,feature,context.profile().dimension().equals(net.minecraft.world.level.Level.NETHER.location()),
-                VSSClientConfig.CONFIG.predictionTrees,VSSClientConfig.CONFIG.predictionStructures);
+                trees, structures);
     }
 
     private boolean belongsToColumn(PredictionDecorationLevel level, PlacedFeature feature, BlockPos origin) {
@@ -565,8 +695,8 @@ final class PredictionVegetation {
     }
 
     static boolean surfaceFeature(int step, PlacedFeature feature, boolean nether, boolean trees, boolean structures) {
-        if (step < 0 || step >= GenerationStep.Decoration.values().length) return false;
-        var stage = GenerationStep.Decoration.values()[step];
+        if (step < 0 || step >= DECORATION_STEPS.length) return false;
+        var stage = DECORATION_STEPS[step];
         return switch (stage) {
             case RAW_GENERATION, LAKES, LOCAL_MODIFICATIONS, TOP_LAYER_MODIFICATION -> true;
             case SURFACE_STRUCTURES -> structures;
@@ -615,35 +745,19 @@ final class PredictionVegetation {
     static int voxelSize(BlockState state, int treeSize) { return woody(state) ? treeSize : 1; }
 
     static boolean woody(BlockState state) {
-        return state.getBlock() instanceof net.minecraft.world.level.block.LeavesBlock
-                || state.is(BlockTags.LOGS) || state.is(BlockTags.LEAVES)
-                || state.is(Blocks.MUSHROOM_STEM) || state.is(Blocks.RED_MUSHROOM_BLOCK)
-                || state.is(Blocks.BROWN_MUSHROOM_BLOCK) || state.is(Blocks.CRIMSON_STEM) || state.is(Blocks.WARPED_STEM)
-                || state.is(Blocks.NETHER_WART_BLOCK) || state.is(Blocks.WARPED_WART_BLOCK);
+        return PredictionVegetationTraits.of(state).woody();
     }
 
-    static boolean solid(BlockState state) { return !fire(state) && (woody(state) || !vegetation(state) || state.is(Blocks.CACTUS)); }
+    static boolean solid(BlockState state) { return PredictionVegetationTraits.of(state).solid(); }
 
     static boolean fire(BlockState state) { return state.is(Blocks.FIRE) || state.is(Blocks.SOUL_FIRE); }
 
     static boolean renderable(BlockState state) {
-        return !state.isAir() && !state.is(Blocks.BARRIER) && !state.is(Blocks.STRUCTURE_BLOCK)
-                && !state.is(Blocks.STRUCTURE_VOID) && !state.is(Blocks.JIGSAW)
-                && !(state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock);
+        return PredictionVegetationTraits.of(state).renderable();
     }
 
-    private static boolean vegetation(BlockState state) {
-        return woody(state) || state.getBlock() instanceof net.minecraft.world.level.block.BushBlock
-                && !state.is(Blocks.LILY_PAD) || state.is(BlockTags.FLOWERS) || state.is(BlockTags.SAPLINGS)
-                || state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS)
-                || state.is(Blocks.FERN) || state.is(Blocks.LARGE_FERN)
-                || state.is(Blocks.DEAD_BUSH) || state.is(Blocks.BROWN_MUSHROOM)
-                || state.is(Blocks.RED_MUSHROOM) || state.is(Blocks.CACTUS)
-                || state.is(Blocks.SUGAR_CANE) || state.is(Blocks.BAMBOO)
-                || state.is(Blocks.KELP) || state.is(Blocks.KELP_PLANT)
-                || state.is(Blocks.WEEPING_VINES) || state.is(Blocks.WEEPING_VINES_PLANT)
-                || state.is(Blocks.TWISTING_VINES) || state.is(Blocks.TWISTING_VINES_PLANT)
-                || state.is(Blocks.SEAGRASS) || state.is(Blocks.TALL_SEAGRASS);
+    static boolean vegetation(BlockState state) {
+        return PredictionVegetationTraits.of(state).vegetation();
     }
 
     record Voxel(int x, int y, int z, int size, BlockState state) { }
@@ -658,15 +772,39 @@ final class PredictionVegetation {
                 if (current.blocks().isEmpty() || reduction >= 8) throw limit;
                 // Retry geometry from retained blocks, never replay worldgen.
                 // Always reduce from the original map to retain material votes.
-                current = boundedTile(original.blocks(), original.baseX(), original.baseZ(),
+                Tile reduced = boundedTile(original.blocks(), original.baseX(), original.baseZ(),
                         span, spacing, reduction *= 2);
+                if (reduced.blocks().equals(current.blocks()) && reduced.voxelSize() == current.voxelSize()) throw limit;
+                current = reduced;
             }
         }
     }
 
     record Tile(Map<Integer, List<Voxel>> cells, Map<BlockPos, BlockState> blocks,
                 int baseX, int baseZ, int voxelSize, int maxY, it.unimi.dsi.fastutil.longs.Long2IntMap exteriorTops,
-                it.unimi.dsi.fastutil.longs.Long2IntMap exteriorFloors) {
+                it.unimi.dsi.fastutil.longs.Long2IntMap exteriorFloors, SignatureCache signatureCache) {
+        Tile {
+            var immutableCells = new HashMap<Integer, List<Voxel>>();
+            cells.forEach((cell, values) -> immutableCells.put(cell, List.copyOf(values)));
+            cells = Map.copyOf(immutableCells);
+            // BlockPos hashes are linear in X/Y/Z. MapN probes those raw
+            // hashes without mixing, which clusters dense canopy neighbours.
+            blocks = blocks.isEmpty() ? Map.of()
+                    : java.util.Collections.unmodifiableMap(new HashMap<>(blocks));
+            exteriorTops = immutable(exteriorTops);
+            exteriorFloors = immutable(exteriorFloors);
+        }
+
+        private static it.unimi.dsi.fastutil.longs.Long2IntMap immutable(it.unimi.dsi.fastutil.longs.Long2IntMap map) {
+            return map.isEmpty() ? it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP
+                    : it.unimi.dsi.fastutil.longs.Long2IntMaps.unmodifiable(new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap(map));
+        }
+
+        Tile(Map<Integer, List<Voxel>> cells, Map<BlockPos, BlockState> blocks, int baseX, int baseZ,
+                int voxelSize, int maxY, it.unimi.dsi.fastutil.longs.Long2IntMap tops,
+                it.unimi.dsi.fastutil.longs.Long2IntMap floors) {
+            this(cells, blocks, baseX, baseZ, voxelSize, maxY, tops, floors, new SignatureCache());
+        }
         static final Tile EMPTY = new Tile(Map.of(), Map.of(), 0, 0, 1, Integer.MIN_VALUE, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
 
         Tile withoutExteriorEnvelope() {
@@ -697,7 +835,8 @@ final class PredictionVegetation {
             }
             cells.values().forEach(list -> list.sort(Comparator.comparingInt(Voxel::y)
                     .thenComparingInt(Voxel::z).thenComparingInt(Voxel::x)));
-            return new Tile(cells, blocks, baseX, baseZ, voxelSize, maxY, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
+            return new Tile(cells, blocks, baseX, baseZ, voxelSize, maxY,
+                    it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
         }
 
         List<Voxel> cell(int cell) { return cells.getOrDefault(cell, List.of()); }
@@ -705,6 +844,34 @@ final class PredictionVegetation {
         boolean occupied(int x, int y, int z) {
             BlockState state = blocks.get(new BlockPos(baseX + x, y, baseZ + z));
             return state != null && solid(state) && PredictionSurfaceShapes.occludes(state);
+        }
+
+        boolean occupied(int x, int y, int z, BlockPos.MutableBlockPos probe) {
+            BlockState state = blocks.get(probe.set(baseX + x, y, baseZ + z));
+            return state != null && solid(state) && PredictionSurfaceShapes.occludes(state);
+        }
+
+        @Override public boolean equals(Object other) {
+            return other instanceof Tile tile && baseX == tile.baseX && baseZ == tile.baseZ
+                    && voxelSize == tile.voxelSize && maxY == tile.maxY && cells.equals(tile.cells)
+                    && blocks.equals(tile.blocks) && exteriorTops.equals(tile.exteriorTops)
+                    && exteriorFloors.equals(tile.exteriorFloors);
+        }
+
+        @Override public int hashCode() {
+            return java.util.Objects.hash(cells, blocks, baseX, baseZ, voxelSize, maxY, exteriorTops, exteriorFloors);
+        }
+    }
+
+    static final class SignatureCache {
+        private volatile byte[] data;
+        byte[] data(Tile tile) throws java.io.IOException {
+            byte[] result = data;
+            if (result != null) return result;
+            synchronized (this) {
+                if (data == null) data = PredictionMeshCodec.decorationBytes(tile);
+                return data;
+            }
         }
     }
 }

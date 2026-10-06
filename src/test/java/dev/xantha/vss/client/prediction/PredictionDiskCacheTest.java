@@ -14,6 +14,42 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class PredictionDiskCacheTest {
+    @Test void oldCityGroundPollutionIsRepairedWithoutPurgingOtherRecords() throws Exception {
+        int none = ClientColumnSample.NO_SPAN;
+        var temporary = new ClientColumnSample(90, none, 0, PredictionMaterialPalette.grassBlockIndex(),
+                0, 0, 0, 0, 0, ClientColumnSample.FLAG_SURFACE_ONLY | ClientColumnSample.FLAG_APPROXIMATE,
+                0, PredictionMaterialPalette.stoneIndex(), PredictionMaterialPalette.stoneIndex(),
+                none, none, none, none);
+        var key = PredictionDiskCache.Key.terrain(0, 0, 0);
+        var neighbor = PredictionDiskCache.Key.terrain(32, 0, 0);
+        ClientColumnSample[] grid = new ClientColumnSample[66 * 66]; Arrays.fill(grid, temporary);
+        try (var cache = new PredictionDiskCache(directory, 77); var lease = cache.lease(key)) {
+            assertTrue(cache.writeTerrain(lease, grid));
+            assertNotNull(cache.readTerrainData(lease, 0));
+            try (var other = cache.lease(neighbor)) { assertTrue(cache.writeTerrain(other, samples())); }
+            byte[] raw;
+            try (var in = new java.util.zip.InflaterInputStream(new java.io.ByteArrayInputStream(
+                    PredictionCacheTestFiles.read(cache, key)))) { raw = in.readAllBytes(); }
+            var bytes = new java.io.ByteArrayInputStream(raw);
+            var input = new java.io.DataInputStream(bytes);
+            input.skipNBytes(32); int size = input.readInt(), palette = input.readInt();
+            for (int i = 0; i < palette; i++) input.readUTF();
+            int start = raw.length - bytes.available();
+            for (int i = 0; i < size; i++) java.nio.ByteBuffer.wrap(raw)
+                    .putInt(start + i * 68 + 9 * 4, ClientColumnSample.FLAG_SURFACE_ONLY);
+            var encoded = new java.io.ByteArrayOutputStream();
+            try (var output = new java.util.zip.DeflaterOutputStream(encoded)) { output.write(raw); }
+            PredictionCacheTestFiles.legacy(cache, key, encoded.toByteArray());
+            assertNull(cache.readTerrainData(lease, 0));
+            assertTrue(cache.diagnostics().contains("terrainRepairs=1"));
+            try (var other = cache.lease(neighbor)) { assertArrayEquals(samples(), cache.readTerrain(other, 0)); }
+            ClientColumnSample[] repair = new ClientColumnSample[18 * 18]; Arrays.fill(repair, samples()[0]);
+            assertTrue(cache.writeTerrainLater(lease, new PredictionDiskCache.TerrainData(repair,
+                    Long.MIN_VALUE, null, null, null)).get(10, java.util.concurrent.TimeUnit.SECONDS));
+            assertArrayEquals(repair, cache.readTerrain(lease, 0), "a corrupt fine grid must not reject a smaller repair");
+        }
+    }
+
     @TempDir Path directory;
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @org.junit.jupiter.api.AfterEach void awaitBackgroundClose() {

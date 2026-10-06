@@ -63,6 +63,19 @@ final class PredictionTileTable<V> extends AbstractMap<PredictionTileKey,V> {
         long key=pack(x,z);var values=pages[page(lod,key)];var entry=values==null?null:values.get(key);
         return entry==null?null:entry.value();
     }
+    /** Shared pages need no inspection; report only added, removed or replaced values. */
+    void forEachDifference(PredictionTileTable<V> previous, java.util.function.Consumer<PredictionTileKey> changed) {
+        for (int page = 0; page < pages.length; page++) {
+            var before = previous.pages[page]; var after = pages[page];
+            if (before == after) continue;
+            if (before != null) for (var entry : before.long2ObjectEntrySet()) {
+                var replacement = after == null ? null : after.get(entry.getLongKey());
+                if (replacement == null || replacement.value() != entry.getValue().value()) changed.accept(entry.getValue().key());
+            }
+            if (after != null) for (var entry : after.long2ObjectEntrySet())
+                if (before == null || !before.containsKey(entry.getLongKey())) changed.accept(entry.getValue().key());
+        }
+    }
     @Override public V get(Object key) {
         return key instanceof PredictionTileKey tile && valid(tile)?at(tile.tileX(),tile.tileZ(),tile.lod()):null;
     }
@@ -89,7 +102,9 @@ final class PredictionTileTable<V> extends AbstractMap<PredictionTileKey,V> {
         };
     }
     private static int page(int lod,long key) {
-        return lod*BUCKETS+((int)it.unimi.dsi.fastutil.HashCommon.mix(key)&(BUCKETS-1));
+        // Low bits select the slot inside each page; reuse would cluster all
+        // entries in small pages into the same initial slot.
+        return lod*BUCKETS+((int)(it.unimi.dsi.fastutil.HashCommon.mix(key) >>> 32)&(BUCKETS-1));
     }
     private static long pack(int x,int z) { return (long)x<<32 | z&0xffffffffL; }
 }

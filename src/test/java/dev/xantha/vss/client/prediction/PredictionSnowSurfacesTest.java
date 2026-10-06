@@ -60,7 +60,7 @@ class PredictionSnowSurfacesTest {
                 ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_SPAN,
                 ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
         var samples=new ClientColumnSample[4]; java.util.Arrays.fill(samples,sample);
-        var mesh=PredictionMeshBuilder.build(samples,new int[]{-1,-1,-1,-1},63,0,8,2,true,null,null,null,0,0,tile).packed();
+        var mesh=PredictionMeshBuilder.build(samples,new int[]{-1,-1,-1,-1},63,0,8,2,null,null,0,0,tile).packed();
         int snowQuads=0;double roofArea=0;
         for(int q=0;q<mesh.quadCount();q++) {
             if(mesh.y(q,0)<80)continue;

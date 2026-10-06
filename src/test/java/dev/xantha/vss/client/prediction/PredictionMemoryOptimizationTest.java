@@ -13,6 +13,8 @@ class PredictionMemoryOptimizationTest {
         for (int x : new int[]{-17,-16,-1,0,15,16,17}) for (int z : new int[]{-17,-1,0,16})
             assertTrue(index.confirm(Level.OVERWORLD,x,z,start));
         assertFalse(index.owns(Level.OVERWORLD,-1,-1,settled-1));
+        assertTrue(index.contains(Level.OVERWORLD,-1,-1), "data presence need not wait for a timer when GPU readiness is checked");
+        assertFalse(index.contains(Level.NETHER,-1,-1));
         assertTrue(index.owns(Level.OVERWORLD,-1,-1,settled));
         assertFalse(index.owns(Level.NETHER,-1,-1,settled));
         assertFalse(index.confirm(Level.OVERWORLD,-1,-1,settled));
@@ -20,6 +22,7 @@ class PredictionMemoryOptimizationTest {
         assertEquals(0, marked(index.snapshot(Level.OVERWORLD,0,0,32,settled-1)));
         assertEquals(28, marked(index.snapshot(Level.OVERWORLD,0,0,32,settled)));
         assertTrue(index.remove(Level.OVERWORLD,-1,-1));
+        assertFalse(index.contains(Level.OVERWORLD,-1,-1));
         assertFalse(index.remove(Level.OVERWORLD,-1,-1));
         assertEquals(27, marked(index.snapshot(Level.OVERWORLD,0,0,32,settled)));
         int pages = index.pageCount();

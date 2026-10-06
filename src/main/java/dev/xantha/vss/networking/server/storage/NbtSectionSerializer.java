@@ -11,7 +11,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import net.minecraft.core.SectionPos;
-import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -89,7 +88,7 @@ public final class NbtSectionSerializer {
         }
 
         ListTag sections = chunkNbt.getList(ChunkSerializer.SECTIONS_TAG, Tag.TAG_COMPOUND);
-        if (sections.isEmpty()) {
+        if (sections.isEmpty() || height <= 0) {
             return null;
         }
 
@@ -108,10 +107,7 @@ public final class NbtSectionSerializer {
                 defaultBiome);
 
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer(sections.size() * 1024));
-        int countWriterIndex = buf.writerIndex();
-        buf.writeVarInt(0);
         int includedCount = 0;
-        int highestIncludedSectionY = Integer.MIN_VALUE;
         int minSectionY = SectionPos.blockToSectionCoord(minY);
         int maxSectionY = minSectionY + (height >> 4);
         boolean skippedUnserializableSection = false;
@@ -119,7 +115,7 @@ public final class NbtSectionSerializer {
         ArrayList<Integer> includedSectionLengths = new ArrayList<>(sections.size());
         try {
             for (Tag tag : sections) {
-                if (!(tag instanceof CompoundTag sectionTag) || !sectionTag.contains("Y")) {
+                if (!(tag instanceof CompoundTag sectionTag) || !sectionTag.contains("Y", Tag.TAG_ANY_NUMERIC)) {
                     skippedUnserializableSection = true;
                     continue;
                 }
@@ -137,7 +133,7 @@ public final class NbtSectionSerializer {
 
                 ParsedSection section = parseSection(sectionTag, blockStateCodec, biomeCodec, ops, biomeRegistry, defaultBiome);
                 if (section == null) {
-                    if (sectionTag.contains("block_states", Tag.TAG_COMPOUND)) {
+                    if (sectionTag.contains("block_states")) {
                         skippedUnserializableSection = true;
                     }
                     continue;
@@ -165,22 +161,29 @@ public final class NbtSectionSerializer {
                 includedSectionLengths.add(buf.writerIndex() - sectionStart);
                 includedCount++;
                 includedSectionYs.add(sectionY);
-                highestIncludedSectionY = Math.max(highestIncludedSectionY, sectionY);
             }
 
             if (includedCount == 0) {
                 return SectionSerializer.emptyColumn(cx, cz,
-                        !skippedUnserializableSection && isCompleteColumn(chunkNbt, Integer.MIN_VALUE, minY, height));
+                        !skippedUnserializableSection);
             }
 
-            int endWriterIndex = buf.writerIndex();
-            buf.writerIndex(countWriterIndex);
-            buf.writeVarInt(includedCount);
-            buf.writerIndex(endWriterIndex);
-            byte[] serialized = new byte[buf.readableBytes()];
-            buf.readBytes(serialized);
-            boolean completeColumn = !skippedUnserializableSection
-                    && isCompleteColumn(chunkNbt, highestIncludedSectionY, minY, height);
+            byte[] serialized;
+            FriendlyByteBuf column = new FriendlyByteBuf(Unpooled.buffer(buf.readableBytes() + 5));
+            try {
+                // A tall dimension can include >=128 sections. Write its final
+                // VarInt separately so a wider count cannot overwrite section Y.
+                column.writeVarInt(includedCount);
+                column.writeBytes(buf);
+                serialized = new byte[column.readableBytes()];
+                column.readBytes(serialized);
+            } finally {
+                column.release();
+            }
+            // Full chunk NBT is authoritative: missing air sections and stale
+            // heightmaps do not mean terrain was omitted. Parsing/range failures
+            // above still prevent an incomplete column from replacing real LOD.
+            boolean completeColumn = !skippedUnserializableSection;
             int[] sectionYs = includedSectionYs.stream().mapToInt(Integer::intValue).toArray();
             int[] sectionLengths = includedSectionLengths.stream().mapToInt(Integer::intValue).toArray();
             return new LoadedColumnData(
@@ -194,45 +197,6 @@ public final class NbtSectionSerializer {
         } finally {
             buf.release();
         }
-    }
-
-    private static boolean isCompleteColumn(
-            CompoundTag chunkNbt, int highestIncludedSectionY, int minY, int height) {
-        if (height <= 0 || !chunkNbt.contains("Heightmaps", Tag.TAG_COMPOUND)) {
-            return false;
-        }
-        long[] surface = getHeightmapArray(chunkNbt.getCompound("Heightmaps"));
-        int bits = 32 - Integer.numberOfLeadingZeros(height);
-        int valuesPerLong = 64 / bits;
-        if (surface.length != (256 + valuesPerLong - 1) / valuesPerLong) {
-            return false;
-        }
-        // Modern Minecraft pads each long; values never straddle a long boundary.
-        // Heightmap values are relative to the dimension, whose height is not
-        // stored in the vanilla chunk NBT. Use the ServerLevel's actual bounds.
-        SimpleBitStorage heights = new SimpleBitStorage(bits, 256, surface);
-        int highestSurfaceSectionY = Integer.MIN_VALUE;
-        for (int i = 0; i < 256; i++) {
-            int value = heights.get(i);
-            if (value > height) {
-                return false;
-            }
-            if (value != 0) {
-                highestSurfaceSectionY = Math.max(highestSurfaceSectionY,
-                        SectionPos.blockToSectionCoord(minY + value - 1));
-            }
-        }
-        return highestIncludedSectionY >= highestSurfaceSectionY;
-    }
-
-    private static long[] getHeightmapArray(CompoundTag heightmaps) {
-        if (heightmaps.contains("WORLD_SURFACE", Tag.TAG_LONG_ARRAY)) {
-            return heightmaps.getLongArray("WORLD_SURFACE");
-        }
-        if (heightmaps.contains("MOTION_BLOCKING", Tag.TAG_LONG_ARRAY)) {
-            return heightmaps.getLongArray("MOTION_BLOCKING");
-        }
-        return new long[0];
     }
 
     private static ParsedSection parseSection(

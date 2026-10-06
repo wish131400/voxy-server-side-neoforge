@@ -26,7 +26,7 @@ class PredictionVegetationRunsTest {
                 ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
                 ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN));
         java.util.function.Function<PredictionVegetation.Tile,PredictionMesh> build=tile ->
-                PredictionMeshBuilder.build(samples,null,63,0,1,grid,true,null,null,null,0,0,tile);
+                PredictionMeshBuilder.build(samples,null,63,0,1,grid,null,null,0,0,tile);
         assertTrue(build.apply(raw).vertexCount() <= 262144,
                 "equivalent rendered materials may merge before triangle admission");
         var bounded=PredictionVegetation.boundedTile(blocks,0,0,span,1,1);
@@ -46,7 +46,7 @@ class PredictionVegetationRunsTest {
             sizes.add(t.voxelSize());assertEquals(Blocks.FARMLAND.defaultBlockState(),t.blocks().get(p));
             throw new PredictionMemoryBudget.MeshLimitException();
         }));
-        assertEquals(java.util.List.of(1,1,1,1),sizes,"bounded retries must keep one-block geometry");
+        assertEquals(java.util.List.of(1),sizes,"unchanged geometry must not repeat the same failed mesh");
     }
 
     @Test void mergingPreservesEveryExposedFaceAndAirGap() {
@@ -96,8 +96,7 @@ class PredictionVegetationRunsTest {
                 ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN));
         java.util.Arrays.fill(colors, 0xff65934a);
-        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, 1, grid,
-                true, null, colors, null, 0, 0, tile);
+        var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, 1, grid, colors, null, 0, 0, tile);
         assertTrue(mesh.vertexCount() < 100_000, "merge before triangle allocation, without increasing its hard cap");
         for (int vertex = 0; vertex < mesh.vertexCount(); vertex++) {
             if (mesh.y(vertex) <= 64) continue;
@@ -131,7 +130,7 @@ class PredictionVegetationRunsTest {
         assertEquals(blocks,tile.blocks());
         var samples=new ClientColumnSample[grid*grid];
         java.util.Arrays.fill(samples,PredictionExteriorColumnsTest.surface(64));
-        var mesh=PredictionMeshBuilder.build(samples,null,63,0,1,grid,true,null,null,null,0,0,tile);
+        var mesh=PredictionMeshBuilder.build(samples,null,63,0,1,grid,null,null,0,0,tile);
         assertTrue(mesh.vertexCount()<262144,"restored tiers must fit the existing tile limit");
         Set<Integer> tiers=new HashSet<>();
         for(int cell:tile.cells().keySet()) for(var face:PredictionVegetationRuns.faces(tile,cell,(x,z)->64))
@@ -171,6 +170,34 @@ class PredictionVegetationRunsTest {
                 assertEquals(face.state(),blocks.get(new BlockPos(wx,y,wz)),"every face must belong to an original block");
         }
         assertEquals(tops.keySet(),visiblePeaks,"retain every column's upper outline");
+    }
+
+    @Test void runsMatchEveryOriginalFaceAcrossCellsFloorsGapsAndMaterials() {
+        var blocks = new HashMap<BlockPos, BlockState>();
+        var random = new java.util.Random(48271);
+        for (int z = -1; z <= 16; z++) for (int x = -1; x <= 16; x++) for (int y = 68; y < 82; y++) {
+            if (random.nextInt(5) == 0) continue;
+            blocks.put(new BlockPos(x - 32, y, z - 48), random.nextBoolean()
+                    ? Blocks.OAK_LEAVES.defaultBlockState() : Blocks.OAK_LOG.defaultBlockState());
+        }
+        var tile = PredictionVegetation.Tile.of(blocks, -32, -48, 16, 4, 1);
+        java.util.function.IntBinaryOperator floor = (x, z) -> 70 + Math.floorMod(x + z, 3);
+        Set<String> expected = new HashSet<>(), actual = new HashSet<>();
+        for (var voxels : tile.cells().values()) for (var voxel : voxels) {
+            if (voxel.y() < floor.applyAsInt(voxel.x(), voxel.z())) continue;
+            for (int face = 0; face <= 5; face++) {
+                int dx = face == 3 ? -1 : face == 4 ? 1 : 0;
+                int dy = face == 0 ? 1 : face == 5 ? -1 : 0;
+                int dz = face == 1 ? -1 : face == 2 ? 1 : 0;
+                if (!tile.occupied(voxel.x() + dx, voxel.y() + dy, voxel.z() + dz))
+                    expected.add(key(voxel.x(), voxel.y(), voxel.z(), face, voxel.state()));
+            }
+        }
+        for (int cell : tile.cells().keySet()) for (var face : PredictionVegetationRuns.faces(tile, cell, floor, true)) {
+            for (int y = face.bottom(); y < face.top(); y++)
+                assertTrue(actual.add(key(face.x(), y, face.z(), face.direction(), face.state())), "no overlapping runs");
+        }
+        assertEquals(expected, actual);
     }
 
     private static String key(int x, int y, int z, int direction, BlockState state) {

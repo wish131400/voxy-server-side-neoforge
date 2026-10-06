@@ -64,6 +64,7 @@ public class FeatureStampLevel implements WorldGenLevel {
     private static final int HEIGHT = 384;
 
     private final Map<BlockPos, BlockState> placed = new HashMap<>();
+    private final BlockPos.MutableBlockPos predicatePosition = new BlockPos.MutableBlockPos();
     /**
      * Positions written through this level since the last successful upload.
      *
@@ -90,6 +91,13 @@ public class FeatureStampLevel implements WorldGenLevel {
 
     public Map<BlockPos, BlockState> placed() {
         return placed;
+    }
+
+    /** Optional predicate optimizers must read this virtual terrain, not empty chunk sections. */
+    public final BlockState predicateState(BlockPos pos, int offsetX, int offsetY, int offsetZ) {
+        int x = pos.getX() + offsetX, y = pos.getY() + offsetY, z = pos.getZ() + offsetZ;
+        if (isOutsideBuildHeight(y)) return Blocks.VOID_AIR.defaultBlockState();
+        return getBlockState(predicatePosition.set(x, y, z));
     }
 
     /** Positions written since the last upload; see {@link #noteWrite}. */

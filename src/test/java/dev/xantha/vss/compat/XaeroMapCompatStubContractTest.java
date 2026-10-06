@@ -87,6 +87,80 @@ class XaeroMapCompatStubContractTest {
     }
 
     @Test
+    void delayedFirstCommitMarksExistingChunkAndRegionForSaving() {
+        MapRegion region = processor.getLeafMapRegion(Integer.MAX_VALUE, 2, 2, true);
+        var tileChunk = new xaero.map.region.MapTileChunk(region, 16, 16);
+        tileChunk.loadState = 1;
+        region.setChunk(0, 0, tileChunk);
+        bridge.offerPrepared(null, tile(64, 64));
+        bridge.pump();
+        assertEquals(1, bridge.queuedForTest());
+        assertFalse(region.hasHadTerrain);
+
+        tileChunk.loadState = 2;
+        bridge.pump();
+
+        assertEquals(1, bridge.counterForTest("written"));
+        assertTrue(tileChunk.includeInSave());
+        assertTrue(tileChunk.hasHadTerrain);
+        assertTrue(region.hasHadTerrain, "Xaero skips saving regions without terrain");
+    }
+
+    @Test
+    void longRegionSaveDoesNotDiscardReceivedTiles() {
+        MapRegion region = processor.getLeafMapRegion(Integer.MAX_VALUE, 2, 2, true);
+        region.writingPaused = true;
+        bridge.offerPrepared(null, tile(64, 64));
+        bridge.offerPrepared(null, tile(65, 64));
+
+        // A slow save can outlast the former 200-attempt expiry for every tile
+        // in this region. Receiving the column has already completed its request.
+        for (int i = 0; i < 240; i++) bridge.pump();
+        region.writingPaused = false;
+        bridge.pump();
+
+        assertEquals(2, bridge.counterForTest("written"));
+        assertEquals(0, bridge.queuedForTest());
+        assertNotNull(region.getChunk(0, 0).getTile(0, 0));
+        assertNotNull(region.getChunk(0, 0).getTile(1, 0));
+    }
+
+    @Test
+    void longTextureDownloadDoesNotDiscardReceivedTile() {
+        MapRegion region = processor.getLeafMapRegion(Integer.MAX_VALUE, 2, 2, true);
+        var tileChunk = new xaero.map.region.MapTileChunk(region, 16, 16);
+        tileChunk.loadState = 2;
+        tileChunk.leafTexture.downloadFromPBO = true;
+        region.setChunk(0, 0, tileChunk);
+        bridge.offerPrepared(null, tile(64, 64));
+
+        for (int i = 0; i < 240; i++) bridge.pump();
+        tileChunk.leafTexture.downloadFromPBO = false;
+        bridge.pump();
+
+        assertEquals(1, bridge.counterForTest("written"));
+        assertEquals(0, bridge.queuedForTest());
+        assertNotNull(tileChunk.getTile(0, 0));
+    }
+
+    @Test
+    void longTileChunkLoadDoesNotDiscardReceivedTile() {
+        MapRegion region = processor.getLeafMapRegion(Integer.MAX_VALUE, 2, 2, true);
+        var tileChunk = new xaero.map.region.MapTileChunk(region, 16, 16);
+        tileChunk.loadState = 1;
+        region.setChunk(0, 0, tileChunk);
+        bridge.offerPrepared(null, tile(64, 64));
+
+        for (int i = 0; i < 240; i++) bridge.pump();
+        tileChunk.loadState = 2;
+        bridge.pump();
+
+        assertEquals(1, bridge.counterForTest("written"));
+        assertEquals(0, bridge.queuedForTest());
+        assertNotNull(tileChunk.getTile(0, 0));
+    }
+
+    @Test
     void unloadedRegionRequestsOnePacedLoadAndKeepsTheEntry() {
         MapRegion region = new MapRegion();
         region.loadState = 0;

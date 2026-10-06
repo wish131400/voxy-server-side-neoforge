@@ -64,14 +64,18 @@ final class PredictionWorkOrder {
                 Math.min(focus.radius(), SCOPED_SURFACE_RADIUS_BLOCKS), focus.pixelsPerBlock());
     }
 
-    private static VssLodFocus terrainFocus(VssLodFocus focus) {
-        return focus == null ? null : new VssLodFocus(focus.x(), focus.z(),
-                Math.min(focus.radius(), SCOPED_RADIUS_BLOCKS), focus.pixelsPerBlock());
+    static VssLodFocus terrainFocus(VssLodFocus focus) {
+        return focus == null || focus.radius() <= SCOPED_RADIUS_BLOCKS ? focus
+                : new VssLodFocus(focus.x(), focus.z(), SCOPED_RADIUS_BLOCKS, focus.pixelsPerBlock());
     }
 
     static int detailBuildLimit(int workers, boolean previews, boolean scoping) {
         int limit = previews ? Math.max(1, workers - 1) : workers;
         return scoping ? Math.min(limit, Math.max(1, Math.min(3, workers / 2))) : limit;
+    }
+
+    static int surfaceBuildLimit(int workers, int refinementWorkers) {
+        return Math.max(1, Math.min(workers, refinementWorkers));
     }
 
     static boolean scoped(PredictionTileKey key, VssLodLayout layout, VssLodFocus focus) {

@@ -49,14 +49,56 @@ final class PredictionMeshResources {
                     digest.update((byte) 0);
                 }
             }
-            // Numeric state/biome ids occur in the input signature; refuse reuse after registry reordering.
+            // Numeric state ids occur in the input signature; refuse reuse after
+            // registry reordering.  Keep the schema binary and bounded: the
+            // old state.toString() path rebuilt a large String for every state
+            // and dominated startup allocation on modded registries.
+            digest.update((byte) 0x7f);
+            updateInt(digest, net.minecraft.core.registries.BuiltInRegistries.BLOCK.size());
             for (var block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
-                digest.update(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).toString()
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                for (var state : block.getStateDefinition().getPossibleStates())
-                    digest.update(state.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                updateInt(digest, net.minecraft.core.registries.BuiltInRegistries.BLOCK.getId(block));
+                updateString(digest, net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).toString());
+                var properties = new ArrayList<>(block.getStateDefinition().getProperties());
+                var choicesByProperty = new ArrayList<List<?>>(properties.size());
+                updateInt(digest, properties.size());
+                for (var property : properties) {
+                    updateString(digest, property.getName());
+                    var choices = List.copyOf(property.getPossibleValues());
+                    choicesByProperty.add(choices);
+                    updateInt(digest, choices.size());
+                    for (Object choice : choices) updateString(digest, propertyName(property, choice));
+                }
+                var states = block.getStateDefinition().getPossibleStates();
+                updateInt(digest, states.size());
+                for (var state : states) {
+                    updateInt(digest, net.minecraft.world.level.block.Block.getId(state));
+                    for (int i = 0; i < properties.size(); i++) {
+                        var property = properties.get(i);
+                        var choices = choicesByProperty.get(i);
+                        updateInt(digest, choices.indexOf(state.getValue(property)));
+                    }
+                }
             }
             return digest.digest();
         } catch (IOException | RuntimeException | NoSuchAlgorithmException unavailable) { return null; }
+    }
+
+    private static void updateInt(MessageDigest digest, int value) {
+        digest.update((byte) (value >>> 24));
+        digest.update((byte) (value >>> 16));
+        digest.update((byte) (value >>> 8));
+        digest.update((byte) value);
+    }
+
+    private static void updateString(MessageDigest digest, String value) {
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        updateInt(digest, bytes.length);
+        digest.update(bytes);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static String propertyName(net.minecraft.world.level.block.state.properties.Property property,
+                                       Object value) {
+        return property.getName((Comparable) value);
     }
 }

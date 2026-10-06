@@ -69,7 +69,15 @@ class RustVegetationStageTest {
             var stage = new RustVegetationStage(sampler,level,0,0);
             long volume;
             try (stage) {
+                stage.selectStep(List.of(secondFeature),0);
+                assertFalse(stage.place(0), "a different global feature index must retain Java placement");
+                level.beginFeature();
+                level.endFeature(true);
+                stage.afterJava(0,false,true,1_000_000);
                 stage.selectStep(List.of(firstFeature),0);
+                level.beginFeature();
+                level.endFeature(true);
+                stage.afterJava(0,true,true,2_000_000);
                 assertEquals(ResourceLocation.parse("test:first"),registry.getKey(firstFeature));
                 assertArrayEquals(new String[]{"test:first"},sampler.featureOrder()[0]);
                 assertTrue(stage.place(0));
@@ -77,6 +85,23 @@ class RustVegetationStageTest {
                 volume = volumeField.getLong(stage);
                 assertNotEquals(0,volume);
                 assertEquals(Blocks.SHORT_GRASS.defaultBlockState(),level.placed().get(new BlockPos(0,targetY,0)));
+                assertTrue(level.pendingUploads().isEmpty(), "downloaded native edits must not echo into the next upload");
+                var uploadsField = RustVegetationStage.class.getDeclaredField("EDITS_UP");
+                uploadsField.setAccessible(true);
+                var uploads = (java.util.concurrent.atomic.LongAdder) uploadsField.get(null);
+                long beforeNoWriteJava = uploads.sum();
+                level.beginFeature();
+                level.endFeature(true);
+                stage.afterJava(0, false, true, 0);
+                assertTrue(stage.place(0));
+                stage.finish();
+                assertEquals(beforeNoWriteJava, uploads.sum(), "native -> no-write Java -> native must not resend the placed map");
+                level.setBlock(new BlockPos(0,targetY,0),Blocks.AIR.defaultBlockState(),19,0);
+                assertTrue(stage.place(0), "pending edits must transfer even without afterJava or selectStep");
+                stage.finish();
+                assertTrue(uploads.sum() > beforeNoWriteJava);
+                assertEquals(Blocks.SHORT_GRASS.defaultBlockState(),level.placed().get(new BlockPos(0,targetY,0)));
+                assertTrue(level.pendingUploads().isEmpty());
                 // Structures execute between steps without afterJava(). The
                 // next step must upload those edits, including explicit air.
                 level.beginStructure();
@@ -91,7 +116,14 @@ class RustVegetationStageTest {
                 assertEquals(Blocks.DIRT.defaultBlockState(),level.placed().get(new BlockPos(1,targetY,0)));
             }
             assertEquals(0,volumeField.getLong(stage));
+            assertTrue(sampler.diagnostics().contains("compatibilityFeatures=3,"));
+            assertTrue(sampler.diagnostics().contains("javaPlacement={ms=3,withoutWrites=3,failed=0,TREE_MODEL=1,ORDER_MISMATCH=1,"));
             assertThrows(IllegalArgumentException.class,()->RustWorldgenBackend.describe(volume));
+            var cachedFeatures = List.of(firstFeature);
+            sampler.featureDescriptors(cachedFeatures, 0);
+            sampler.close();
+            assertThrows(java.util.concurrent.CancellationException.class, () -> sampler.featureDescriptors(cachedFeatures, 0),
+                    "cached metadata must not bypass the closed native context");
         }
     }
 }

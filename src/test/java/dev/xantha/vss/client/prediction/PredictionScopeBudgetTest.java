@@ -27,6 +27,15 @@ class PredictionScopeBudgetTest {
         for (int i=0;i<full.size();i++) assertArrayEquals(full.get(i).mesh().quads(),result.get(i).mesh().quads());
     }
 
+    @Test void boundedTerrainFocusReusesTheExistingObjectAndDoesNotWidenWork() {
+        assertNull(PredictionWorkOrder.terrainFocus(null));
+        var bounded=new VssLodFocus(8192,0,1024,5000);
+        assertSame(bounded,PredictionWorkOrder.terrainFocus(bounded));
+        var wide=PredictionWorkOrder.terrainFocus(new VssLodFocus(8192,0,4096,5000));
+        assertEquals(1024,wide.radius());
+        assertEquals(bounded,wide);
+    }
+
     @Test void telescopePreservesTerrainPriorityButBoundsFullDecoration() {
         var layout=VssLodLayout.of(16384,6,true,true);
         var focus=new VssLodFocus(8192,0,1024,10000);

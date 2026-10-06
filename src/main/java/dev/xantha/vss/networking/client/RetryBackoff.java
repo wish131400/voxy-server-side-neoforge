@@ -8,6 +8,7 @@ final class RetryBackoff {
     private final Long2LongOpenHashMap retryAfterNanos = new Long2LongOpenHashMap();
     private final Long2IntOpenHashMap retryAttempts = new Long2IntOpenHashMap();
     private final Long2IntOpenHashMap backpressureAttempts = new Long2IntOpenHashMap();
+    private final Long2IntOpenHashMap timeoutAttempts = new Long2IntOpenHashMap();
     private final LongSupplier nanoClock;
     private final RetryBackoffPolicy policy;
 
@@ -53,19 +54,23 @@ final class RetryBackoff {
     }
 
     void markTimeout(long packed) {
-        markTransientDelay(packed, policy.retryDelay(false, false, 1));
+        int attempts = Math.min(5, timeoutAttempts.get(packed) + 1);
+        timeoutAttempts.put(packed, attempts);
+        markTransientDelay(packed, policy.retryDelay(false, false, attempts));
     }
 
     void clear(long packed) {
         retryAfterNanos.remove(packed);
         retryAttempts.remove(packed);
         backpressureAttempts.remove(packed);
+        timeoutAttempts.remove(packed);
     }
 
     void clearAll() {
         retryAfterNanos.clear();
         retryAttempts.clear();
         backpressureAttempts.clear();
+        timeoutAttempts.clear();
     }
 
     private void markTransientDelay(long packed, long delayNanos) {

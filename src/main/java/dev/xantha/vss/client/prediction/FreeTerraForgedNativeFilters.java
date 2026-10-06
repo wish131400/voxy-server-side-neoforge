@@ -1,6 +1,7 @@
 package dev.xantha.vss.client.prediction;
 
 import com.google.gson.JsonObject;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -24,11 +25,16 @@ public final class FreeTerraForgedNativeFilters {
         Object settings = preset.getClass().getMethod("filters").invoke(preset);
         Object levels = context.getClass().getField("levels").get(context);
         Object seed = context.getClass().getField("seed").get(context);
-        JsonObject document = options(settings, (int) seed.getClass().getMethod("root").invoke(seed),
-                levels.getClass().getField("worldHeight").getInt(levels), levels.getClass().getField("waterLevel").getInt(levels));
+        JsonObject document = options(settings, filterSeed(seed), levels);
         Object world = preset.getClass().getMethod("world").invoke(preset);
         Object control = world.getClass().getField("controlPoints").get(world);
         document.addProperty("beach_transition", control.getClass().getField("beach").getFloat(control));
+        if (FreeTerraForgedVariant.fromClass(context.getClass()) == FreeTerraForgedVariant.CURRENT) {
+            document.addProperty("noise_correction", false);
+            var ceilingField = filters.getClass().getDeclaredField("terrainCeiling");
+            ceilingField.setAccessible(true);
+            addTerrainCeiling(document, ceilingField.get(filters));
+        }
         BINDINGS.put(filters, new Binding(document, new Access(context.getClass().getClassLoader())));
     }
 
@@ -57,6 +63,32 @@ public final class FreeTerraForgedNativeFilters {
         return doc;
     }
 
+    static JsonObject options(Object settings, int seed, Object levels) throws ReflectiveOperationException {
+        int scale;
+        try { scale = levels.getClass().getField("terrainScaleFactor").getInt(levels); }
+        catch (NoSuchFieldException legacy) { scale = levels.getClass().getField("worldHeight").getInt(levels); }
+        return options(settings, seed, scale, levels.getClass().getField("waterLevel").getInt(levels));
+    }
+
+    static int filterSeed(Object seed) throws ReflectiveOperationException {
+        Number root = (Number) seed.getClass().getMethod("root").invoke(seed);
+        try {
+            return (int) seed.getClass().getMethod("toInt", long.class).invoke(null, root.longValue());
+        } catch (NoSuchMethodException legacy) {
+            return root.intValue();
+        }
+    }
+
+    static void addTerrainCeiling(JsonObject document, Object ceiling) throws ReflectiveOperationException {
+        if (ceiling == null) return;
+        JsonObject values = new JsonObject();
+        for (var entry : Map.of("compression_start", "compressionStart", "linear_end", "linearEnd",
+                "tail_start", "tailStart", "maximum", "maximum").entrySet()) {
+            values.addProperty(entry.getKey(), (Number) ceiling.getClass().getMethod(entry.getValue()).invoke(ceiling));
+        }
+        document.add("terrain_ceiling", values);
+    }
+
     private record Binding(JsonObject options, Access access) { }
 
     static final class Access {
@@ -66,7 +98,7 @@ public final class FreeTerraForgedNativeFilters {
         private final MethodHandle coast, wetland, shallow, deep, delegate, setTerrain;
         private final Object beachTerrain, beachCategory;
         Access(ClassLoader loader) throws ReflectiveOperationException {
-            String prefix = "raccoonman.reterraforged.world.worldgen.";
+            String prefix = FreeTerraForgedVariant.detect(loader).worldgenClass("");
             filterable = loader.loadClass(prefix + "densityfunction.tile.filter.Filterable");
             Class<?> cell = loader.loadClass(prefix + "cell.Cell");
             var lookup = MethodHandles.publicLookup();

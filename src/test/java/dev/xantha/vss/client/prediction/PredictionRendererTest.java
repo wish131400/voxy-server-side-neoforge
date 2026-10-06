@@ -50,6 +50,29 @@ class PredictionRendererTest {
     }
 
     @Test
+    void residentPredictionMasksNeverYieldToCachedRealColumns() throws Exception {
+        var method = PredictionRenderer.class.getDeclaredMethod("resolveCoverage",
+                PredictionTileManager.PredictionTile.class, int.class, int.class, double.class,
+                PredictionTileManager.RenderSnapshot.class, VssLodFocus.class);
+        method.setAccessible(true);
+        var layout = VssLodLayout.of(4096, 6, true, false);
+        for (int step : new int[]{1, 8, 16, 32, 64}) {
+            var tile = PredictionLodSeamsTest.tile(-1, -1, step, 64);
+            var snapshot = new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,
+                    layout, java.util.Map.of(tile.key(), tile), java.util.Map.of());
+            ClientPredictionState.exactCoverageChanged(snapshot.dimension(), -1, -1);
+            for (int[] player : new int[][]{{0, 0}, {1, 0}, {1, -1}, {0, -1}, {0, 0}}) {
+                var fallback = (PredictionRenderer.TileCoverage) method.invoke(null, tile,
+                        player[0], player[1], 900D, snapshot, null);
+                assertEquals(4096, fallback.rendered(), "a sole resident tile keeps fallback at spacing " + step);
+                assertEquals(0, fallback.authoritativeSkipped());
+                assertEquals(0, fallback.coverageSkipped());
+                for (boolean allowed : fallback.allowed()) assertTrue(allowed);
+            }
+        }
+    }
+
+    @Test
     void geometricLodStepsOneLevelPerDistanceDoubling() {
         // Inverse of the planner's projected-size test: every doubling of
         // distance steps exactly one level, so the renderer requests the

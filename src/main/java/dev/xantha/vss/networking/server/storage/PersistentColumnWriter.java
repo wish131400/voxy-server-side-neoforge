@@ -54,6 +54,26 @@ public final class PersistentColumnWriter {
         scheduleWriteDrain();
     }
 
+    /** Unlike opportunistic writes, explicit pre-generation waits for disk acknowledgement. */
+    public boolean writeConfirmed(MinecraftServer server, ResourceKey<Level> dimension,
+            EncodedColumnData columnData, java.util.function.Consumer<Boolean> completion) {
+        if (VSSServerNetworking.isServerStopping() || !persistentStore.enabled()
+                || columnData == null || !isWriteFresh(dimension, columnData)) {
+            completion.accept(false);
+            return true;
+        }
+        long epoch = VSSServerNetworking.lifecycleEpoch();
+        return diskRuntime.submitWriteUnrestricted(() -> {
+            boolean saved = false;
+            try {
+                saved = !VSSServerNetworking.isLifecycleStale(epoch) && isWriteFresh(dimension, columnData)
+                        && persistentStore.writeConfirmed(server, dimension, columnData);
+            } finally {
+                completion.accept(saved);
+            }
+        }, error -> { });
+    }
+
     private void scheduleWriteDrain() {
         synchronized (this) {
             if (writeDrainScheduled || pendingWrites.isEmpty() || VSSServerNetworking.isServerStopping()) {

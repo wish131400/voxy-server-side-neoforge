@@ -15,6 +15,7 @@ public final class PlayerSendQueue {
     private final BucketedPayloadQueue priorityQueue = new BucketedPayloadQueue();
     private final BucketedPayloadQueue normalQueue = new BucketedPayloadQueue();
     private final IdentityHashMap<PlayerRequestState.QueuedPayload, PlayerRequestState.QueuedPayloadBatch> payloadBatches = new IdentityHashMap<>();
+    private final Map<Integer, PlayerRequestState.QueuedPayloadBatch> requestBatches = new java.util.HashMap<>();
     private int priorityPayloads;
     private long queuedBytes;
     private int orderedForPlayerCx = Integer.MIN_VALUE;
@@ -223,6 +224,7 @@ public final class PlayerSendQueue {
         }
         if (batch.payloadCount() == 0) {
             queueFor(batch).removeBatch(batch);
+            requestBatches.remove(batch.requestId(), batch);
         }
         return payload;
     }
@@ -243,10 +245,24 @@ public final class PlayerSendQueue {
         return queuedBytes;
     }
 
+    public synchronized boolean cancel(int requestId) {
+        PlayerRequestState.QueuedPayloadBatch batch = requestBatches.get(requestId);
+        if (batch == null) return false;
+        queueFor(batch).removeBatch(batch);
+        queueFor(batch).decrementPayloadCount(batch.payloadCount());
+        removeBatchAccounting(batch);
+        return true;
+    }
+
+    public synchronized int[] pendingRequestIds() {
+        return requestBatches.keySet().stream().mapToInt(Integer::intValue).toArray();
+    }
+
     public synchronized void clear() {
         priorityQueue.clear();
         normalQueue.clear();
         payloadBatches.clear();
+        requestBatches.clear();
         priorityPayloads = 0;
         queuedBytes = 0L;
         orderedForPlayerCx = Integer.MIN_VALUE;
@@ -254,6 +270,7 @@ public final class PlayerSendQueue {
     }
 
     private void addBatch(PlayerRequestState.QueuedPayloadBatch batch) {
+        if (batch.requestId() >= 0) requestBatches.put(batch.requestId(), batch);
         for (PlayerRequestState.QueuedPayload payload : batch.payloads()) {
             payloadBatches.put(payload, batch);
         }
@@ -266,6 +283,7 @@ public final class PlayerSendQueue {
     }
 
     private void removeBatchAccounting(PlayerRequestState.QueuedPayloadBatch batch) {
+        requestBatches.remove(batch.requestId(), batch);
         for (PlayerRequestState.QueuedPayload payload : batch.payloads()) {
             payloadBatches.remove(payload);
         }

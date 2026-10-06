@@ -16,9 +16,9 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** Compressed generation results. IO runs on builders or the serial commit worker, never on the render thread. */
+/** Compressed generation results. Deferred snapshots are bounded and encoded on the serial IO worker. */
 final class PredictionDiskCache implements AutoCloseable {
-    private static final int MAGIC = 0x56535044, SCHEMA = 5;
+    private static final int MAGIC = 0x56535044, SCHEMA = 6;
     private static final int MAX_COLUMNS = 66 * 66, MAX_BLOCKS = 262_144;
     private static final ThreadPoolExecutor COMMITS = new ThreadPoolExecutor(1, 1, 0L,
             TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), task -> {
@@ -52,7 +52,7 @@ final class PredictionDiskCache implements AutoCloseable {
     }
     // Schema 3 includes surface features from their actual decoration stages.
     // Old empty/vegetation-only surface entries must regenerate; terrain stays reusable.
-    private static int schema(Key key) { return SCHEMA; }
+    private static int schema(Key key) { return key.kind == 0 ? SCHEMA : 5; }
     final class Lease implements AutoCloseable {
         final Key key;
         final Entry entry;
@@ -70,8 +70,12 @@ final class PredictionDiskCache implements AutoCloseable {
     }
     private final Path root;
     private final long fingerprint;
+    private final PredictionCacheMappings mappings;
     private final Shared shared;
     private volatile boolean closed;
+    private volatile long lastDemandNanos = System.nanoTime();
+    private final LongAdder terrainRepairs = new LongAdder();
+    static final long MAINTENANCE_IDLE_NANOS = TimeUnit.SECONDS.toNanos(15);
     private final LongAdder hits = new LongAdder(), misses = new LongAdder(), writes = new LongAdder(), errors = new LongAdder();
     // P2-12: one counter could not tell "no file yet" (normal on first visit)
     // from "file present but rejected" (a fingerprint or format bug). These
@@ -83,6 +87,40 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<BlockState, String> encodedStates = new LinkedHashMap<>(64, .75F, true);
     private final LongAdder stateDecodes = new LongAdder();
     private final LongAdder meshHits = new LongAdder(), meshMisses = new LongAdder(), meshWrites = new LongAdder();
+    static final int MAX_PENDING_TERRAIN_WRITES = 64;
+    static final long MAX_PENDING_TERRAIN_BYTES = 32L * 1024 * 1024;
+    static final int MAX_MESH_WRITE_ORDERS = 32768;
+    private static final java.util.concurrent.atomic.AtomicInteger TERRAIN_PENDING = new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicLong TERRAIN_PENDING_BYTES = new java.util.concurrent.atomic.AtomicLong();
+    private final LongAdder terrainWriteDeferrals = new LongAdder();
+    private static final Object WRITE_BUDGET = new Object();
+    private final Object pendingLock = new Object();
+    private final Map<Key, PendingWrite> pendingWrites = new HashMap<>();
+    private final Map<Key, Integer> terrainWriteColumns = new LinkedHashMap<>(256, .75F, true);
+    private final Map<Key, MeshWriteOrder> meshWriteOrders = new LinkedHashMap<>(256, .75F, true);
+    private long meshWriteSequence;
+    private static final class MeshWriteOrder {
+        final long sequence;
+        final int axis;
+        final byte[] baseIdentity;
+        final boolean surfaceCompleted;
+        boolean pending = true;
+        MeshWriteOrder(long sequence, int axis, byte[] baseIdentity, boolean surfaceCompleted) {
+            this.sequence = sequence; this.axis = axis; this.baseIdentity = baseIdentity.clone();
+            this.surfaceCompleted = surfaceCompleted;
+        }
+    }
+    private final LongAdder coalescedWrites = new LongAdder(), deferredEncodes = new LongAdder(), deferredEncodeNanos = new LongAdder();
+    private final class PendingWrite {
+        final Lease lease;
+        final int version;
+        final Encoder encoder;
+        final long bytes;
+        final CompletableFuture<Boolean> result = new CompletableFuture<>();
+        PendingWrite(Lease lease, int version, Encoder encoder, long bytes) {
+            this.lease = lease; this.version = version; this.encoder = encoder; this.bytes = bytes;
+        }
+    }
     private static final java.util.concurrent.atomic.AtomicLong MESH_QUEUED = new java.util.concurrent.atomic.AtomicLong();
     private static final ThreadPoolExecutor MESH_WRITES = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(2), task -> {
@@ -111,17 +149,37 @@ final class PredictionDiskCache implements AutoCloseable {
      * dirty captures and resource fingerprints still invalidate it.
      */
     PredictionMesh readMeshBase(Lease terrain, byte[] baseIdentity, int axis) {
+        var record = readMeshBaseRecord(terrain, baseIdentity, axis);
+        return record == null ? null : record.mesh();
+    }
+
+    PredictionMeshCodec.MeshRecord readMeshBaseRecord(Lease terrain, byte[] baseIdentity, int axis) {
+        return readMeshBaseRecord(terrain, baseIdentity, axis, null, null);
+    }
+
+    PredictionMeshCodec.MeshRecord readMeshBaseRecord(Lease terrain, byte[] baseIdentity, int axis,
+            byte[] rawIdentity, java.util.function.Predicate<dev.xantha.vss.common.worldgen.LostCityPreview.Tile> validate) {
         if (baseIdentity == null || !terrain.valid() || !terrain.readable) return null;
         try (var lease = lease(Key.mesh(terrain.key))) {
-            var mesh = read(lease, (input, version) -> {
+            var record = read(lease, (input, version) -> {
                 int length = bounded(input.readInt(), PredictionMeshCodec.MAX_BYTES);
                 byte[] bytes = input.readNBytes(length);
                 if (bytes.length != length) throw new EOFException("mesh payload");
-                return PredictionMeshCodec.decodeBase(bytes, baseIdentity, axis);
+                return rawIdentity == null ? PredictionMeshCodec.decodeBaseRecord(bytes, baseIdentity, axis)
+                        : PredictionMeshCodec.decodeCityBaseRecord(bytes, rawIdentity, baseIdentity, axis, validate);
             });
             if (!terrain.valid()) return null;
-            if (mesh == null) meshMisses.increment(); else meshHits.increment();
-            return mesh;
+            if (record == null) meshMisses.increment(); else {
+                meshHits.increment();
+                if (record.surfaceCompleted()) synchronized (shared) {
+                    if (terrain.valid() && !meshWriteOrders.containsKey(lease.key) && makeMeshOrderRoom()) {
+                        var order = new MeshWriteOrder(0, axis, record.baseIdentity(), true);
+                        order.pending = false;
+                        meshWriteOrders.put(lease.key, order);
+                    }
+                }
+            }
+            return record;
         }
     }
 
@@ -136,24 +194,75 @@ final class PredictionDiskCache implements AutoCloseable {
 
     void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
                         boolean baseSafe) {
+        writeMeshLater(terrain, identity, mesh, baseIdentity, baseSafe, false);
+    }
+
+    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
+                        boolean baseSafe, boolean surfaceCompleted) {
+        writeMeshLater(terrain, identity, mesh, baseIdentity, baseSafe, surfaceCompleted, null, null);
+    }
+
+    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
+                        boolean baseSafe, boolean surfaceCompleted, byte[] rawIdentity,
+                        dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) {
         if (identity == null || baseIdentity == null || !terrain.valid()
                 || MESH_WRITES.getQueue().remainingCapacity() == 0) return;
+        long sequence;
+        synchronized (shared) {
+            if (!terrain.valid()) return;
+            sequence = ++meshWriteSequence;
+        }
         byte[] bytes;
-        try { bytes = PredictionMeshCodec.encode(mesh, identity, baseIdentity, baseSafe); }
+        try { bytes = PredictionMeshCodec.encode(mesh, identity, baseIdentity, baseSafe, surfaceCompleted, rawIdentity, cities); }
         catch (IOException | RuntimeException unavailable) { return; }
         if (MESH_QUEUED.addAndGet(bytes.length) > 32L * 1024 * 1024) { MESH_QUEUED.addAndGet(-bytes.length); return; }
-        Lease owned;
+        Key meshKey = Key.mesh(terrain.key);
+        MeshWriteOrder order = new MeshWriteOrder(sequence, mesh.cellAxis(), baseIdentity, surfaceCompleted);
         synchronized (shared) {
-            if (!terrain.valid()) { MESH_QUEUED.addAndGet(-bytes.length); return; }
-            owned = lease(Key.mesh(terrain.key));
+            MeshWriteOrder previous = meshWriteOrders.get(meshKey);
+            if (!terrain.valid() || previous != null && (previous.axis > order.axis
+                    || previous.axis == order.axis && (previous.sequence > sequence
+                        || previous.surfaceCompleted && !surfaceCompleted && Arrays.equals(previous.baseIdentity, baseIdentity)))
+                    || previous == null && !makeMeshOrderRoom()) {
+                MESH_QUEUED.addAndGet(-bytes.length);
+                return;
+            }
+            Lease owned = lease(meshKey);
+            try {
+                MESH_WRITES.execute(() -> {
+                    try (owned) {
+                        if (meshWriteCurrent(owned, order) && write(owned, schema(meshKey),
+                                output -> { output.writeInt(bytes.length); output.write(bytes); },
+                                () -> meshWriteCurrent(owned, order))) meshWrites.increment();
+                    } finally {
+                        synchronized (shared) { order.pending = false; }
+                        MESH_QUEUED.addAndGet(-bytes.length);
+                    }
+                });
+                // Publish only after admission succeeds. A full queue must not revoke an accepted fine result.
+                meshWriteOrders.put(meshKey, order);
+            } catch (RejectedExecutionException busy) { owned.close(); MESH_QUEUED.addAndGet(-bytes.length); }
         }
-        try {
-            MESH_WRITES.execute(() -> {
-                try (owned) {
-                    if (write(owned, output -> { output.writeInt(bytes.length); output.write(bytes); })) meshWrites.increment();
-                } finally { MESH_QUEUED.addAndGet(-bytes.length); }
-            });
-        } catch (RejectedExecutionException busy) { owned.close(); MESH_QUEUED.addAndGet(-bytes.length); }
+    }
+
+    private boolean meshWriteCurrent(Lease lease, MeshWriteOrder order) {
+        synchronized (shared) { return lease.valid() && meshWriteOrders.get(lease.key) == order; }
+    }
+
+    private boolean makeMeshOrderRoom() {
+        if (meshWriteOrders.size() < MAX_MESH_WRITE_ORDERS) return true;
+        var iterator = meshWriteOrders.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var candidate = iterator.next();
+            Key key = candidate.getKey();
+            // An older encoder retains its terrain lease before it has a mesh token.
+            // Keep that key's accepted order until no such producer can finish late.
+            if (!candidate.getValue().pending && !shared.active.containsKey(Key.terrain(key.x, key.z, key.detail))) {
+                iterator.remove();
+                return true;
+            }
+        }
+        return false;
     }
     private final java.util.concurrent.atomic.AtomicBoolean loggedError = new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Key, Integer> terrainHints = new LinkedHashMap<>(256, .75F, true);
@@ -192,14 +301,17 @@ final class PredictionDiskCache implements AutoCloseable {
                 for (Lease lease : batch) try (lease) {
                     int axis = 0;
                     if (lease.valid() && lease.readable) {
-                        try (var input = new DataInputStream(new ByteArrayInputStream(shared.regions.header(lease.key)))) {
-                            int magic = input.readInt(), version = input.readInt();
-                            if (magic == MAGIC && version >= 1 && version <= SCHEMA && input.readLong() == fingerprint
-                                    && input.readInt() == 0 && input.readInt() == lease.key.x
-                                    && input.readInt() == lease.key.z && input.readInt() == lease.key.detail) {
-                                int count = input.readInt(), candidate = (int) Math.sqrt(count) - 2;
-                                if (candidate > 0 && candidate <= 64 && (candidate & (candidate - 1)) == 0
-                                        && (candidate + 2) * (candidate + 2) == count) axis = candidate;
+                        try {
+                            byte[] header = shared.regions.header(lease.key);
+                            if (header != null) try (var input = new DataInputStream(new ByteArrayInputStream(header))) {
+                                int magic = input.readInt(), version = input.readInt();
+                                if (magic == MAGIC && version >= 1 && version <= SCHEMA && input.readLong() == fingerprint
+                                        && input.readInt() == 0 && input.readInt() == lease.key.x
+                                        && input.readInt() == lease.key.z && input.readInt() == lease.key.detail) {
+                                    int count = input.readInt(), candidate = (int) Math.sqrt(count) - 2;
+                                    if (candidate > 0 && candidate <= 64 && (candidate & (candidate - 1)) == 0
+                                            && (candidate + 2) * (candidate + 2) == count) axis = candidate;
+                                }
                             }
                         } catch (IOException | RuntimeException ignored) { }
                     }
@@ -233,8 +345,13 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     PredictionDiskCache(Path root, long fingerprint) {
+        this(root, fingerprint, null);
+    }
+
+    PredictionDiskCache(Path root, long fingerprint, PredictionCacheMappings mappings) {
         this.root = root.toAbsolutePath().normalize();
         this.fingerprint = fingerprint;
+        this.mappings = mappings;
         shared = ROOTS.computeIfAbsent(this.root, ignored -> new Shared());
         synchronized (shared) {
             if (shared.regions == null) shared.regions = new PredictionRegionStorage(this.root);
@@ -251,7 +368,10 @@ final class PredictionDiskCache implements AutoCloseable {
         }, 30, TimeUnit.SECONDS);
     }
 
+    PredictionCacheMappings mappings() { return mappings; }
+
     Lease lease(Key key) {
+        lastDemandNanos = System.nanoTime();
         synchronized (shared) {
             Entry entry = shared.active.computeIfAbsent(key, ignored -> new Entry());
             entry.users++;
@@ -276,7 +396,7 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     TerrainData readTerrainData(Lease lease, int count) {
-        return read(lease, (input, version) -> {
+        TerrainData data = read(lease, (input, version) -> {
             int size = bounded(input.readInt(), MAX_COLUMNS);
             if (count > 0 && size != count) throw new IOException("grid size changed");
             int paletteSize = bounded(input.readInt(), MAX_COLUMNS * 3);
@@ -287,9 +407,18 @@ final class PredictionDiskCache implements AutoCloseable {
                 if (!name.isEmpty() && (id == null || !BuiltInRegistries.BLOCK.containsKey(id))) throw new IOException("block unavailable: " + name);
                 palette[i] = name.isEmpty() ? ClientColumnSample.NO_BLOCK : BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.get(id));
             }
+            int[] biomes = null;
+            if (version >= 6) {
+                if (mappings == null) throw new IOException("Biome mapping unavailable");
+                int biomeCount = bounded(input.readInt(), MAX_COLUMNS);
+                biomes = new int[biomeCount];
+                for (int i = 0; i < biomeCount; i++) biomes[i] = mappings.biomeId(input.readUTF());
+            }
             ClientColumnSample[] samples = new ClientColumnSample[size];
             for (int i = 0; i < size; i++) {
                 int y = input.readInt(), fluidY = input.readInt(), biome = input.readInt();
+                biome = biomes != null ? biomes[index(biome, biomes.length)]
+                        : mappings == null ? biome : mappings.legacyBiome(biome);
                 int top = palette[index(input.readInt(), palette.length)];
                 int structure = input.readInt(), tree = input.readInt(), density = input.readInt(), height = input.readInt();
                 int fluid = input.readInt(), flags = input.readInt(), ground = input.readInt();
@@ -320,6 +449,17 @@ final class PredictionDiskCache implements AutoCloseable {
             }
             return new TerrainData(samples, colors, surface, foliage, water);
         });
+        if (data != null && Arrays.stream(data.samples()).anyMatch(ClientColumnSample::cityGround)) {
+            // Only contaminated terrain is rebuilt; captures and decoration
+            // records stay intact. Do not let its old fine grid block repair.
+            synchronized (shared) { terrainWriteColumns.remove(lease.key); }
+            terrainRepairs.increment();
+            return null;
+        }
+        if (data != null) synchronized (shared) {
+            if (lease.valid()) rememberWriteColumns(lease.key, data.samples().length);
+        }
+        return data;
     }
 
     boolean writeTerrain(Lease lease, ClientColumnSample[] samples) {
@@ -327,10 +467,38 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     boolean writeTerrain(Lease lease, TerrainData terrain) {
+        if (terrain.samples().length > MAX_COLUMNS
+                || Arrays.stream(terrain.samples()).anyMatch(ClientColumnSample::cityGround)) return false;
+        boolean volumes = java.util.Arrays.stream(terrain.samples()).anyMatch(sample -> sample.volume() != null);
+        return write(lease, mappings != null ? 6 : volumes ? 3 : 2, terrainEncoder(terrain));
+    }
+
+    CompletableFuture<Boolean> writeTerrainLater(Lease lease, TerrainData terrain) {
+        if (terrain.samples().length > MAX_COLUMNS
+                || Arrays.stream(terrain.samples()).anyMatch(ClientColumnSample::cityGround))
+            return CompletableFuture.completedFuture(false);
+        long bytes = bytesOf(terrain);
+        boolean colors = terrain.colorsMatch(terrain.colorFingerprint());
+        return defer(lease, bytes, terrain.samples().length, () -> {
+            var snapshot = new TerrainData(terrain.samples().clone(), terrain.colorFingerprint(),
+                    colors ? terrain.surfaceTints().clone() : null, colors ? terrain.foliageTints().clone() : null,
+                    colors ? terrain.waterTints().clone() : null);
+            boolean volumes = Arrays.stream(snapshot.samples()).anyMatch(sample -> sample.volume() != null);
+            return new PendingWrite(retain(lease), mappings != null ? 6 : volumes ? 3 : 2, terrainEncoder(snapshot), bytes);
+        });
+    }
+
+    private static long bytesOf(TerrainData terrain) {
+        long bytes = 128L + terrain.samples().length * 112L;
+        for (var sample : terrain.samples()) if (sample.volume() != null) bytes += sample.volume().bytes();
+        if (terrain.colorsMatch(terrain.colorFingerprint())) bytes += 48L + terrain.samples().length * 12L;
+        return bytes;
+    }
+
+    private Encoder terrainEncoder(TerrainData terrain) {
         ClientColumnSample[] samples = terrain.samples();
-        if (samples.length > MAX_COLUMNS) return false;
-        boolean volumes = java.util.Arrays.stream(samples).anyMatch(sample -> sample.volume() != null);
-        return write(lease, volumes ? 3 : 2, output -> {
+        boolean volumes = mappings != null || java.util.Arrays.stream(samples).anyMatch(sample -> sample.volume() != null);
+        return output -> {
             Map<Integer, Integer> palette = new LinkedHashMap<>();
             for (var sample : samples) for (int block : new int[]{sample.topBlockIndex(), sample.underBlockIndex(), sample.deepBlockIndex()}) {
                 palette.computeIfAbsent(block, ignored -> palette.size());
@@ -343,8 +511,15 @@ final class PredictionDiskCache implements AutoCloseable {
             output.writeInt(palette.size());
             for (int block : palette.keySet()) output.writeUTF(block == ClientColumnSample.NO_BLOCK ? ""
                     : BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString());
+            Map<Integer, Integer> biomes = new LinkedHashMap<>();
+            if (mappings != null) {
+                for (var sample : samples) biomes.computeIfAbsent(sample.biomeIndex(), ignored -> biomes.size());
+                output.writeInt(biomes.size());
+                for (int biome : biomes.keySet()) output.writeUTF(mappings.biomeName(biome));
+            }
             for (var sample : samples) {
-                output.writeInt(sample.surfaceY()); output.writeInt(sample.fluidY()); output.writeInt(sample.biomeIndex());
+                output.writeInt(sample.surfaceY()); output.writeInt(sample.fluidY());
+                output.writeInt(mappings == null ? sample.biomeIndex() : biomes.get(sample.biomeIndex()));
                 output.writeInt(palette.get(sample.topBlockIndex())); output.writeInt(sample.structureIndex());
                 output.writeInt(sample.treeKind()); output.writeInt(sample.treeDensity()); output.writeInt(sample.treeHeight());
                 output.writeInt(sample.fluid()); output.writeInt(sample.flags()); output.writeInt(sample.groundFeatureKind());
@@ -366,7 +541,7 @@ final class PredictionDiskCache implements AutoCloseable {
             if(colors)for(int i=0;i<samples.length;i++) {
                 output.writeInt(terrain.surfaceTints()[i]);output.writeInt(terrain.foliageTints()[i]);output.writeInt(terrain.waterTints()[i]);
             }
-        });
+        };
     }
 
     Map<BlockPos, BlockState> readSurface(Lease lease) {
@@ -397,7 +572,136 @@ final class PredictionDiskCache implements AutoCloseable {
 
     boolean writeSurface(Lease lease, Map<BlockPos, BlockState> blocks, boolean canonical) {
         if (blocks.size() > MAX_BLOCKS) return false;
-        return write(lease, canonical ? 5 : 3, output -> {
+        return write(lease, canonical ? 5 : 3, surfaceEncoder(blocks));
+    }
+
+    CompletableFuture<Boolean> writeSurfaceLater(Lease lease, Map<BlockPos, BlockState> blocks, boolean canonical) {
+        if (blocks.size() > MAX_BLOCKS) return CompletableFuture.completedFuture(false);
+        long bytes = 128L + blocks.size() * 112L;
+        return defer(lease, bytes, 0, () -> {
+            Map<BlockPos, BlockState> snapshot = new LinkedHashMap<>();
+            blocks.forEach((pos, state) -> snapshot.put(pos.immutable(), state));
+            return new PendingWrite(retain(lease), canonical ? 5 : 3, surfaceEncoder(snapshot), bytes);
+        });
+    }
+
+    private Lease retain(Lease lease) {
+        synchronized (shared) {
+            lease.entry.users++;
+            return new Lease(lease.key, lease.entry, lease.readable);
+        }
+    }
+
+    private CompletableFuture<Boolean> defer(Lease lease, long bytes, int columns,
+                                             java.util.function.Supplier<PendingWrite> snapshot) {
+        PendingWrite superseded = null;
+        try {
+            synchronized (pendingLock) {
+                synchronized (shared) {
+                    if (!lease.valid() || Thread.currentThread().isInterrupted()
+                            || columns > 0 && columns < terrainWriteColumns.getOrDefault(lease.key, 0))
+                        return CompletableFuture.completedFuture(false);
+                }
+                PendingWrite previous = pendingWrites.get(lease.key);
+                int count = previous == null ? 1 : 0;
+                if (!reserveWrites(count, bytes)) {
+                    terrainWriteDeferrals.increment();
+                    return CompletableFuture.completedFuture(false);
+                }
+                PendingWrite write = null;
+                boolean accepted = false;
+                try {
+                    // Samples, states and volumes are immutable; only their mutable containers need copying.
+                    // This lock belongs to the writer queue, so snapshotting never holds the cache metadata lock.
+                    write = snapshot.get();
+                    synchronized (shared) {
+                        if (!write.lease.valid()) return CompletableFuture.completedFuture(false);
+                        if (columns > 0) rememberWriteColumns(lease.key, columns);
+                    }
+                    pendingWrites.put(lease.key, write);
+                    if (previous != null) {
+                        previous.lease.close();
+                        superseded = previous;
+                        releaseWrites(0, previous.bytes);
+                        coalescedWrites.increment();
+                    } else {
+                        Key key = lease.key;
+                        COMMITS.execute(() -> drainWrite(key));
+                    }
+                    accepted = true;
+                    return write.result;
+                } finally {
+                    if (!accepted) {
+                        if (write != null) pendingWrites.remove(lease.key, write);
+                        if (write != null) write.lease.close();
+                        releaseWrites(count, bytes);
+                    }
+                }
+            }
+        } catch (RuntimeException failure) {
+            error(failure);
+            return CompletableFuture.completedFuture(false);
+        } finally { if (superseded != null) superseded.result.complete(false); }
+    }
+
+    private void rememberWriteColumns(Key key, int columns) {
+        terrainWriteColumns.merge(key, columns, Math::max);
+        while (terrainWriteColumns.size() > 32768)
+            terrainWriteColumns.remove(terrainWriteColumns.keySet().iterator().next());
+    }
+
+    private static boolean reserveWrites(int count, long bytes) {
+        synchronized (WRITE_BUDGET) {
+            if (TERRAIN_PENDING.get() + count > MAX_PENDING_TERRAIN_WRITES
+                    || TERRAIN_PENDING_BYTES.get() + bytes > MAX_PENDING_TERRAIN_BYTES) return false;
+            TERRAIN_PENDING.addAndGet(count);
+            TERRAIN_PENDING_BYTES.addAndGet(bytes);
+            return true;
+        }
+    }
+
+    private static void releaseWrites(int count, long bytes) {
+        synchronized (WRITE_BUDGET) {
+            TERRAIN_PENDING.addAndGet(-count);
+            TERRAIN_PENDING_BYTES.addAndGet(-bytes);
+        }
+    }
+
+    private void drainWrite(Key key) {
+        PendingWrite write;
+        synchronized (pendingLock) {
+            write = pendingWrites.get(key);
+            if (write == null) return;
+            synchronized (shared) {
+                // A new capture may replace an invalid queued write before its tombstone is drained.
+                // Keep the latest snapshot and put it behind the already queued deletion.
+                if (write.lease.valid() && shared.deleting && shared.invalidations.containsKey(key)) {
+                    COMMITS.execute(() -> drainWrite(key));
+                    return;
+                }
+            }
+            pendingWrites.remove(key);
+        }
+        if (write == null) return;
+        boolean committed = false;
+        Path temporary = null;
+        try (write.lease) {
+            if (!write.lease.valid()) return;
+            long started = System.nanoTime();
+            deferredEncodes.increment();
+            try { temporary = encodeTemporary(write.lease, write.version, write.encoder); }
+            finally { deferredEncodeNanos.add(System.nanoTime() - started); }
+            committed = commit(write.lease, temporary);
+        } catch (IOException | RuntimeException failure) { error(failure); }
+        finally {
+            deleteTemporary(temporary);
+            releaseWrites(1, write.bytes);
+            write.result.complete(committed);
+        }
+    }
+
+    private Encoder surfaceEncoder(Map<BlockPos, BlockState> blocks) {
+        return output -> {
             Map<BlockState, Integer> palette = new LinkedHashMap<>();
             blocks.values().forEach(state -> palette.computeIfAbsent(state, ignored -> palette.size()));
             output.writeInt(blocks.size()); output.writeInt(palette.size());
@@ -406,7 +710,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 BlockPos p = entry.getKey();
                 output.writeInt(p.getX()); output.writeInt(p.getY()); output.writeInt(p.getZ()); output.writeInt(palette.get(entry.getValue()));
             }
-        });
+        };
     }
 
     private BlockState decodeState(String json) {
@@ -440,11 +744,12 @@ final class PredictionDiskCache implements AutoCloseable {
         // enters the inflater once per byte for every column field.
         try {
             var record = shared.regions.read(lease.key);
+            if (record == null) { missAbsent.increment(); misses.increment(); return null; }
             try (var input = new DataInputStream(new BufferedInputStream(
                     new InflaterInputStream(new ByteArrayInputStream(record.bytes())), 32 * 1024))) {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
-            if ((version != schema(lease.key) && version != 4 && version != 3 && !(lease.key.kind == 0 && (version == 1 || version == 2))) || input.readLong() != fingerprint
+            if ((version != schema(lease.key) && version != 5 && version != 4 && version != 3 && !(lease.key.kind == 0 && (version == 1 || version == 2))) || input.readLong() != fingerprint
                     || input.readInt() != lease.key.kind || input.readInt() != lease.key.x || input.readInt() != lease.key.z
                     || input.readInt() != lease.key.detail) { missIdentity.increment(); throw new IOException("cache identity mismatch"); }
             T result = decoder.read(input, version);
@@ -469,7 +774,33 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     private boolean write(Lease lease, int version, Encoder encoder) {
-        if (!lease.valid() || Thread.currentThread().isInterrupted()) return false;
+        return write(lease, version, encoder, () -> true);
+    }
+
+    private boolean write(Lease lease, int version, Encoder encoder, java.util.function.BooleanSupplier current) {
+        if (!lease.valid() || Thread.currentThread().isInterrupted() || !current.getAsBoolean()) return false;
+        Path temporary = null;
+        try {
+            temporary = encodeTemporary(lease, version, encoder);
+            Path completed = temporary;
+            var result = new CompletableFuture<Boolean>();
+            COMMITS.execute(() -> {
+                boolean committed = false;
+                try { committed = commit(lease, completed, current); }
+                catch (IOException | RuntimeException failure) { error(failure); }
+                finally { deleteTemporary(completed); result.complete(committed); }
+            });
+            temporary = null;
+            return result.get();
+        }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        catch (ExecutionException failure) { error(failure); }
+        catch (IOException | RuntimeException failure) { error(failure); }
+        finally { deleteTemporary(temporary); }
+        return false;
+    }
+
+    private Path encodeTemporary(Lease lease, int version, Encoder encoder) throws IOException {
         Path temporary = null;
         try {
             Path target = file(lease.key);
@@ -485,32 +816,32 @@ final class PredictionDiskCache implements AutoCloseable {
                 encoder.write(output);
             } finally { compressor.end(); }
             Path completed = temporary;
-            // Only a path is queued. The potentially large sample/block map is
-            // never retained in an asynchronous write queue.
-            Future<Boolean> commit;
-            synchronized (shared) {
-                commit = COMMITS.submit(() -> {
-                    try {
-                        synchronized (shared) {
-                            if (!lease.valid() || shared.invalidations.containsKey(lease.key)) return false;
-                        }
-                        shared.regions.write(lease.key, completed);
-                        writes.increment();
-                        synchronized (shared) { terrainHints.remove(lease.key); }
-                        scheduleMaintenance();
-                        return true;
-                    } finally { Files.deleteIfExists(completed); }
-                });
-            }
-            temporary = null; // commit owns cleanup even when this worker is interrupted
-            return commit.get();
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        } catch (IOException | ExecutionException | RuntimeException failure) { error(failure); }
-        finally {
-            if (temporary != null) try { Files.deleteIfExists(temporary); } catch (IOException ignored) { }
+            temporary = null;
+            return completed;
+        } finally { deleteTemporary(temporary); }
+    }
+
+    private boolean commit(Lease token, Path completed) throws IOException {
+        return commit(token, completed, () -> true);
+    }
+
+    private boolean commit(Lease token, Path completed, java.util.function.BooleanSupplier current) throws IOException {
+        synchronized (shared) {
+            if (!token.valid() || shared.invalidations.containsKey(token.key) || !current.getAsBoolean()) return false;
         }
-        return false;
+        shared.regions.write(token.key, completed);
+        if (!token.valid() || !current.getAsBoolean()) {
+            shared.regions.delete(token.key);
+            return false;
+        }
+        writes.increment();
+        synchronized (shared) { terrainHints.remove(token.key); }
+        scheduleMaintenance();
+        return token.valid();
+    }
+
+    private void deleteTemporary(Path temporary) {
+        if (temporary != null) try { Files.deleteIfExists(temporary); } catch (IOException failure) { error(failure); }
     }
 
     /** Marks leases immediately; deletions coalesce on the IO thread. */
@@ -521,6 +852,8 @@ final class PredictionDiskCache implements AutoCloseable {
             for (Key key : keys) if (key.kind == 0) expanded.add(Key.mesh(key));
             for (Key key : expanded) {
                 terrainHints.remove(key);
+                terrainWriteColumns.remove(key);
+                meshWriteOrders.remove(key);
                 Entry entry = shared.active.remove(key);
                 if (entry != null) entry.valid = false;
                 shared.invalidations.put(key, ++shared.revision);
@@ -535,11 +868,12 @@ final class PredictionDiskCache implements AutoCloseable {
     private void drainInvalidations() {
         Map<Key, Long> pending;
         synchronized (shared) { pending = new HashMap<>(shared.invalidations); }
+        var failures = shared.regions.deleteAll(pending.keySet());
         for (var entry : pending.entrySet()) {
-            try {
-                shared.regions.delete(entry.getKey());
+            IOException failure = failures.get(entry.getKey());
+            if (failure == null) {
                 synchronized (shared) { shared.invalidations.remove(entry.getKey(), entry.getValue()); }
-            } catch (IOException failure) {
+            } else {
                 // Leave a tombstone in memory: a failed deletion must not let
                 // stale data re-enter the current world. No hot retry loop.
                 error(failure);
@@ -579,8 +913,7 @@ final class PredictionDiskCache implements AutoCloseable {
             shared.maintenanceQueued = true;
             COMPACTIONS.schedule(() -> {
                 try {
-                    if (!closed && shared.owner == this && COMMITS.getActiveCount() == 0
-                            && COMMITS.getQueue().isEmpty()) shared.regions.compactOne();
+                    if (maintenanceIdle()) shared.regions.compactOne(this::maintenanceIdle);
                 } catch (IOException | RuntimeException failure) { error(failure); }
                 finally {
                     synchronized (shared) { shared.maintenanceQueued = false; }
@@ -590,23 +923,49 @@ final class PredictionDiskCache implements AutoCloseable {
         }
     }
 
-    static Set<Key> affected(int chunkX, int chunkZ) {
-        Set<Key> keys = new HashSet<>();
+    private boolean maintenanceIdle() {
+        return !closed && shared.owner == this
+                && System.nanoTime() - lastDemandNanos >= MAINTENANCE_IDLE_NANOS
+                && COMMITS.getActiveCount() == 0 && COMMITS.getQueue().isEmpty()
+                && TERRAIN_PENDING.get() == 0 && MESH_QUEUED.get() == 0;
+    }
+
+    private static void addAffectedTerrain(Set<Key> keys, int chunkX, int chunkZ, boolean capture) {
         for (int lod = 0; lod <= PredictionTileManager.MAX_LOD_LEVEL; lod++) {
             long spacing = 1L << lod, span = 64 * spacing, margin = Math.max(16, span / 8);
             for (long z = Math.floorDiv(chunkZ * 16L - margin, span); z <= Math.floorDiv(chunkZ * 16L + 15 + margin, span); z++) {
                 for (long x = Math.floorDiv(chunkX * 16L - margin, span); x <= Math.floorDiv(chunkX * 16L + 15 + margin, span); x++) {
-                    keys.add(Key.terrain((int) x, (int) z, lod));
+                    Key key = Key.terrain((int) x, (int) z, lod);
+                    if (!capture || captureIntersects(key, chunkX, chunkZ)) keys.add(key);
                 }
             }
         }
+    }
+
+    static Set<Key> affected(int chunkX, int chunkZ) {
+        return affected(it.unimi.dsi.fastutil.longs.LongSets.singleton((long) chunkX << 32 | chunkZ & 0xFFFFFFFFL));
+    }
+
+    static Set<Key> affected(it.unimi.dsi.fastutil.longs.LongSet columns) {
+        Set<Key> keys = new HashSet<>();
+        var sources = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
         // Decoration can read 32 blocks beyond its source chunk and place
         // into neighbors. Invalidate every source whose bounded reads overlap.
-        for (int z = chunkZ - 2; z <= chunkZ + 2; z++) for (int x = chunkX - 2; x <= chunkX + 2; x++) {
+        for (long column : columns) {
+            int chunkX = (int) (column >> 32), chunkZ = (int) column;
+            addAffectedTerrain(keys, chunkX, chunkZ, false);
+            for (int z = chunkZ - 2; z <= chunkZ + 2; z++) for (int x = chunkX - 2; x <= chunkX + 2; x++)
+                sources.add((long) x << 32 | z & 0xFFFFFFFFL);
+        }
+        for (long source : sources) {
+            int x = (int) (source >> 32), z = (int) source;
             // Bit 2 separates reusable visual trees from exact feature replay.
             for (int settings = 0; settings < 32; settings++) {
                 keys.add(Key.surface(x, z, settings));
                 keys.add(Key.surface(x, z, settings | 96));
+                // Corrected predicate semantics have a separate surface identity.
+                keys.add(Key.surface(x, z, settings | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                keys.add(Key.surface(x, z, settings | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
             }
         }
         return keys;
@@ -614,13 +973,20 @@ final class PredictionDiskCache implements AutoCloseable {
 
     void invalidateChunk(int x, int z) { invalidate(affected(x, z)); }
 
+    void invalidateChunks(it.unimi.dsi.fastutil.longs.LongSet columns) { invalidate(affected(columns)); }
+
     void invalidateCapture(int x, int z) {
-        var keys = affected(x, z);
+        invalidateCaptures(it.unimi.dsi.fastutil.longs.LongSets.singleton((long) x << 32 | z & 0xFFFFFFFFL));
+    }
+
+    void invalidateCaptures(it.unimi.dsi.fastutil.longs.LongSet columns) {
+        Set<Key> keys = new HashSet<>();
         // Authoritative arrivals only replace sampled columns. Match the live
         // manager's sparse-grid dependency check for unloaded tiles too; otherwise
         // a chunk between far grid points deletes useful persisted ancestors.
         // Explicit world edits still use the conservative invalidateChunk path.
-        keys.removeIf(key -> key.kind != 0 || !captureIntersects(key, x, z));
+        for (long column : columns)
+            addAffectedTerrain(keys, (int) (column >> 32), (int) column, true);
         invalidate(keys);
     }
 
@@ -635,6 +1001,11 @@ final class PredictionDiskCache implements AutoCloseable {
     String diagnostics() { return "disk={hits=" + hits.sum() + ",misses=" + misses.sum() + ",writes=" + writes.sum()
             + ",meshHits=" + meshHits.sum() + ",meshMisses=" + meshMisses.sum() + ",meshWrites=" + meshWrites.sum()
             + ",meshQueuedBytes=" + MESH_QUEUED.get()
+            + ",terrainPending=" + TERRAIN_PENDING.get() + ",terrainPendingBytes=" + TERRAIN_PENDING_BYTES.get()
+            + ",terrainWriteDeferrals=" + terrainWriteDeferrals.sum()
+            + ",terrainRepairs=" + terrainRepairs.sum()
+            + ",coalescedWrites=" + coalescedWrites.sum() + ",deferredEncodes=" + deferredEncodes.sum()
+            + ",deferredEncodeMs=" + deferredEncodeNanos.sum() / 1_000_000
             + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"
             // Why the misses happened. `absent` is the healthy case (nothing
             // written yet); `identity`/`corrupt` mean a stored entry was
@@ -645,21 +1016,43 @@ final class PredictionDiskCache implements AutoCloseable {
     Path root() { return root; }
     long hits() { return hits.sum(); }
     void flushMeshes() {
-        try { MESH_WRITES.submit(() -> { }).get(); }
+        var barrier = new FutureTask<Void>(() -> null);
+        try {
+            MESH_WRITES.prestartCoreThread();
+            MESH_WRITES.getQueue().put(barrier);
+            barrier.get();
+        }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         catch (ExecutionException failure) { error(failure); }
     }
     void flush() {
-        try { COMMITS.submit(() -> { }).get(); }
+        List<CompletableFuture<Boolean>> pending;
+        synchronized (pendingLock) { pending = pendingWrites.values().stream().map(write -> write.result).toList(); }
+        try {
+            COMMITS.submit(() -> { }).get();
+            for (var result : pending) result.get();
+        }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         catch (ExecutionException failure) { error(failure); }
     }
     @Override public void close() {
         closed = true;
+        List<PendingWrite> cancelled;
+        synchronized (pendingLock) {
+            cancelled = new ArrayList<>(pendingWrites.values());
+            pendingWrites.clear();
+        }
+        for (PendingWrite write : cancelled) {
+            write.lease.close();
+            releaseWrites(1, write.bytes);
+            write.result.complete(false);
+        }
         synchronized (decodedStates) { decodedStates.clear(); }
         synchronized (encodedStates) { encodedStates.clear(); }
         synchronized (shared) {
             terrainHints.clear();
+            terrainWriteColumns.clear();
+            meshWriteOrders.clear();
             probeQueue.clear();
             if (shared.owner == this) {
                 shared.active.values().forEach(entry -> entry.valid = false);

@@ -4,6 +4,73 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class RustGridReuseTest {
+    @Test void taskOwnedGridWindowsPreserveEdgesAndCachedRecordsAcrossBatches() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), -64, 384,
+                "noise", "minecraft:overworld", 1L);
+        var doc = LithostitchedNativeTest.document();
+        doc.add("possible_biomes", new com.google.gson.JsonArray());
+        try (var sampler = new RustTerrainSampler(RustWorldgenBackend.create(1, 0, doc.toString()), profile,
+                new ClientTerrainSampler(1, profile))) {
+            int gridSize = 10;
+            var grid = new ClientColumnSample[gridSize * gridSize];
+            var retained = sampler.sample(-24, -24);
+            grid[11] = retained;
+            for (int z = 0; z < gridSize; z += 8) for (int x = 0; x < gridSize; x += 8) {
+                int width = Math.min(8, gridSize - x), height = Math.min(8, gridSize - z);
+                var before = grid.clone();
+                assertSame(grid, sampler.sampleGridInPlace(-32 + x * 8, -32 + z * 8, 8,
+                        width, height, grid, z * gridSize + x, gridSize, false));
+                for (int index = 0; index < grid.length; index++) {
+                    boolean inside = index / gridSize >= z && index / gridSize < z + height
+                            && index % gridSize >= x && index % gridSize < x + width;
+                    if (!inside) assertSame(before[index], grid[index], "window changed another batch");
+                }
+            }
+            assertSame(retained, grid[11]);
+            assertEquals(99, sampler.gridComputedPoints.sum());
+            for (int z = 0; z < gridSize; z++) for (int x = 0; x < gridSize; x++)
+                assertEquals(sampler.sample(-32 + x * 8, -32 + z * 8), grid[z * gridSize + x],
+                        "a decoded scratch record must not alias another cache entry");
+            var before = grid.clone();
+            assertThrows(IllegalArgumentException.class,
+                    () -> sampler.sampleGridInPlace(0, 0, 1, 8, 8, grid, 50, 10, false));
+            assertThrows(IllegalArgumentException.class,
+                    () -> sampler.sampleGridInPlace(0, 0, 1, 8, 8, grid, 0, 7, false));
+            assertArrayEquals(before, grid);
+            sampler.close();
+            assertThrows(java.util.concurrent.CancellationException.class,
+                    () -> sampler.sampleGridInPlace(0, 0, 1, 8, 8, grid, 0, 10, false));
+        }
+    }
+
+    @Test void displayGridWindowDoesNotKeepApproximateRecordsWhenRefining() throws Exception {
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+        assertTrue(RustTerrainSampler.available());
+        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), -64, 384,
+                "noise", "minecraft:overworld", 1L);
+        var doc = LithostitchedNativeTest.document();
+        doc.add("possible_biomes", new com.google.gson.JsonArray());
+        try (var sampler = new RustTerrainSampler(RustWorldgenBackend.create(1, 0, doc.toString()), profile,
+                new ClientTerrainSampler(1, profile))) {
+            var grid = new ClientColumnSample[100];
+            assertSame(grid, sampler.sampleDisplayGridInPlace(-16, -16, 1, 8, 8, grid, 11, 10));
+            long approximate = java.util.Arrays.stream(grid).filter(java.util.Objects::nonNull)
+                    .filter(ClientColumnSample::approximate).count();
+            assertTrue(approximate > 0);
+            long computed = sampler.gridComputedPoints.sum();
+            sampler.sampleGridInPlace(-16, -16, 1, 8, 8, grid, 11, 10, false);
+            assertEquals(computed + approximate, sampler.gridComputedPoints.sum());
+            for (int z = 0; z < 8; z++) for (int x = 0; x < 8; x++)
+                assertEquals(sampler.sample(-16 + x, -16 + z), grid[11 + z * 10 + x]);
+            assertNull(grid[0]);
+            assertNull(grid[99]);
+        }
+    }
+
     @Test void exteriorFootprintJniValidatesBeforeWritingAndHonorsCancellation() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         assertTrue(RustTerrainSampler.available());

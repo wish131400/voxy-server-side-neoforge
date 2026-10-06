@@ -5,6 +5,7 @@ import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
 import com.mojang.serialization.Lifecycle;
 import dev.xantha.vss.common.worldgen.WorldgenRegistryDependencies;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.List;
@@ -22,6 +23,16 @@ class FreeTerraForgedCompatTest {
         if (releaseLoader == null) releaseLoader = new URLClassLoader(new java.net.URL[]{
                 Path.of(System.getProperty("vss.freeTerraForgedJar")).toUri().toURL()}, FreeTerraForgedCompatTest.class.getClassLoader());
         return releaseLoader;
+    }
+
+    static FreeTerraForgedVariant releaseVariant() throws Exception {
+        return FreeTerraForgedVariant.detect(releaseLoader());
+    }
+
+    static Object defaultPreset(ClassLoader loader) throws Exception {
+        var variant = FreeTerraForgedVariant.detect(loader);
+        return loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.Presets")
+                .getMethod("make" + variant.abbreviation + "Default").invoke(null);
     }
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
@@ -56,17 +67,19 @@ class FreeTerraForgedCompatTest {
             assertFalse(api.overworld.get());
             FreeTerraForgedCompat.scoped(api.overworld, true, () -> { assertTrue(api.overworld.get()); return null; });
             assertFalse(api.overworld.get());
-            String prefix = "raccoonman.reterraforged.";
+            var variant = api.variant;
+            String prefix = variant.packagePrefix;
             Class<?> presetType = loader.loadClass(prefix + "data.worldgen.preset.settings.Preset");
             Codec<Object> codec = (Codec<Object>) presetType.getField("DIRECT_CODEC").get(null);
-            Object preset = loader.loadClass(prefix + "data.worldgen.preset.settings.Presets")
-                    .getMethod("makeRTFDefault").invoke(null);
-            var key = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse("reterraforged:worldgen/preset"));
-            var id = ResourceKey.create(key, ResourceLocation.parse("reterraforged:preset"));
+            Object preset = defaultPreset(loader);
+            var key = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse(variant.namespace + ":worldgen/preset"));
+            var id = ResourceKey.create(key, ResourceLocation.parse(variant.namespace + ":preset"));
             var registry = new MappedRegistry<Object>(key, Lifecycle.stable());
             registry.register(id, preset, RegistrationInfo.BUILT_IN);
             registry.freeze();
             var server = new RegistryAccess.ImmutableRegistryAccess(List.of(registry));
+            assertTrue(variant.hasPreset(server));
+            assertFalse(variant.hasPreset(RegistryAccess.EMPTY));
             List<RegistryDataLoader.RegistryData<?>> codecs = List.of(new RegistryDataLoader.RegistryData<>(key, codec, false));
             var dependencies = new WorldgenRegistryDependencies(server, codecs);
             assertTrue(dependencies.encode().entrySet().isEmpty(), "preset is a runtime dependency, not a density holder");
@@ -76,7 +89,7 @@ class FreeTerraForgedCompatTest {
             assertNotSame(preset, decoded);
             assertEquals(codec.encodeStart(JsonOps.INSTANCE, preset).getOrThrow(),
                     codec.encodeStart(JsonOps.INSTANCE, decoded).getOrThrow());
-            assertThrows(IllegalStateException.class, () -> dependencies.require(ResourceLocation.parse("reterraforged:missing")));
+            assertThrows(IllegalStateException.class, () -> dependencies.require(ResourceLocation.parse(variant.namespace + ":missing")));
             assertThrows(IllegalStateException.class, () -> api.initialize(new Object(), client.access()));
 
             // Verify the full surface/tile interface against the actual published JAR.
@@ -96,7 +109,8 @@ class FreeTerraForgedCompatTest {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void assertNoiseSnapshotSamples(ClassLoader loader, Object preset, Codec<Object> presetCodec,
             ResourceKey<Registry<Object>> presetKey, Registry<Object> presets) throws Exception {
-        String prefix = "raccoonman.reterraforged.";
+        var variant = FreeTerraForgedVariant.detect(loader);
+        String prefix = variant.packagePrefix;
         for (String type : List.of("module.Noises", "domain.Domains", "function.CurveFunctions")) {
             loader.loadClass(prefix + "world.worldgen.noise." + type).getMethod("bootstrap").invoke(null);
         }
@@ -107,7 +121,7 @@ class FreeTerraForgedCompatTest {
         var registers = (java.util.Map<?, ?>) registersField.get(null);
         var entriesField = net.neoforged.neoforge.registries.DeferredRegister.class.getDeclaredField("entries");
         entriesField.setAccessible(true);
-        for (var field : loader.loadClass(prefix + "registries.RTFBuiltInRegistries").getFields()) {
+        for (var field : loader.loadClass(prefix + "registries." + variant.abbreviation + "BuiltInRegistries").getFields()) {
             if (!(field.get(null) instanceof Registry target)) continue;
             Object deferred = registers.get(target.key());
             if (deferred == null) continue;
@@ -115,7 +129,7 @@ class FreeTerraForgedCompatTest {
                     entriesField.get(deferred);
             for (var entry : entries.entrySet()) Registry.register(target, entry.getKey().getId(), entry.getValue().get());
         }
-        var noiseKey = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse("reterraforged:worldgen/noise"));
+        var noiseKey = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse(variant.namespace + ":worldgen/noise"));
         var noises = new MappedRegistry<Object>(noiseKey, Lifecycle.stable());
         var registration = noises.createRegistrationLookup();
         var bootstrap = new net.minecraft.data.worldgen.BootstrapContext<Object>() {
@@ -163,8 +177,8 @@ class FreeTerraForgedCompatTest {
 
     private static void assertActualInitializerSamples(ClassLoader loader, RegistryAccess source,
             RegistryAccess decoded) throws Exception {
-        String prefix = "raccoonman.reterraforged.world.worldgen.";
         var api = new FreeTerraForgedCompat.Api(loader);
+        String prefix = api.variant.worldgenClass("");
         var contexts = new java.util.ArrayList<Object>();
         try {
             var fieldType = loader.loadClass(prefix + "densityfunction.CellSampler$Field");
@@ -181,7 +195,7 @@ class FreeTerraForgedCompatTest {
             for (RegistryAccess access : List.of(source, decoded)) {
                 // Execute the released Mixin's real constructor redirect and initializer.
                 // A proxy supplies its @Implements interface outside a running Mixin environment.
-                var mixinType = loader.loadClass("raccoonman.reterraforged.mixin.MixinRandomState");
+                var mixinType = loader.loadClass(api.variant.packagePrefix + "mixin.MixinRandomState");
                 var constructor = mixinType.getDeclaredConstructor();
                 constructor.setAccessible(true);
                 Object mixin = constructor.newInstance();
@@ -201,7 +215,8 @@ class FreeTerraForgedCompatTest {
                 });
                 Object proxy = java.lang.reflect.Proxy.newProxyInstance(loader, new Class<?>[]{api.stateType},
                         (p, method, args) -> {
-                            var target = mixinType.getDeclaredMethod("reterraforged$RTFRandomState$" + method.getName(), method.getParameterTypes());
+                            var target = mixinType.getDeclaredMethod(api.variant.namespace + "$" + api.variant.abbreviation
+                                    + "RandomState$" + method.getName(), method.getParameterTypes());
                             target.setAccessible(true);
                             return target.invoke(mixin, args);
                         });
@@ -209,6 +224,7 @@ class FreeTerraForgedCompatTest {
                 Object context = api.context.invoke(proxy);
                 assertNotNull(context, "the real initializer must build a terrain context");
                 contexts.add(context);
+                assertClimateContextCopy(loader, api.variant, context);
                 functions.add(FreeTerraForgedDensity.map(context, mapped).finalDensity());
                 assertFalse(api.overworld.get());
             }
@@ -274,7 +290,7 @@ class FreeTerraForgedCompatTest {
             assertEquals(expectedWater, water.surfaceY(cell), "match this release's own surface hydrology");
             assertTrue(water.surfaceY(cell) > oceanTop, "uplift rivers must not be flattened to sea level");
         } finally {
-            var registryField = loader.loadClass("raccoonman.reterraforged.concurrent.cache.CacheManager").getDeclaredField("CACHES");
+            var registryField = loader.loadClass(api.variant.packagePrefix + "concurrent.cache.CacheManager").getDeclaredField("CACHES");
             registryField.setAccessible(true);
             var caches = (java.util.List<?>) registryField.get(null);
             for (Object context : contexts) {
@@ -283,8 +299,33 @@ class FreeTerraForgedCompatTest {
                 assertEquals(before - 1, caches.size(), "release only this context's tile cache");
             }
             // The test owns this isolated classloader's scheduler, never the game's scheduler.
-            Class<?> cacheClass = loader.loadClass("raccoonman.reterraforged.concurrent.cache.Cache");
+            Class<?> cacheClass = loader.loadClass(api.variant.packagePrefix + "concurrent.cache.Cache");
             ((java.util.concurrent.ExecutorService) cacheClass.getField("SCHEDULER").get(null)).shutdownNow();
         }
+    }
+
+    private static void assertClimateContextCopy(ClassLoader loader, FreeTerraForgedVariant variant, Object context) throws Exception {
+        assertDoesNotThrow(() -> FreeTerraForgedCompat.copyClimateContext(new Object(), new Object()));
+        if (variant != FreeTerraForgedVariant.CURRENT) return;
+        var api = loader.loadClass(variant.worldgenClass("biome.FTFClimateSampler"));
+        Object preset = context.getClass().getField("preset").get(context);
+        var spawn = new net.minecraft.core.BlockPos(731, 80, -127);
+        Object source = java.lang.reflect.Proxy.newProxyInstance(loader, new Class<?>[]{api}, (proxy, method, args) -> switch (method.getName()) {
+            case "getUndergroundBiomeBandingPreset" -> preset;
+            case "getUndergroundBiomeBandingSeed" -> 918273645123L;
+            case "getUndergroundBiomeSurfaceContext" -> context;
+            case "getSpawnSearchCenter" -> spawn;
+            default -> throw new UnsupportedOperationException(method.getName());
+        });
+        var copied = new java.util.HashMap<String, Object[]>();
+        Object target = java.lang.reflect.Proxy.newProxyInstance(loader, new Class<?>[]{api}, (proxy, method, args) -> {
+            copied.put(method.getName(), args);
+            return null;
+        });
+        FreeTerraForgedCompat.copyClimateContext(source, target);
+        assertEquals(3, copied.size());
+        assertArrayEquals(new Object[]{preset, 918273645123L}, copied.get("setUndergroundBiomeBandingPreset"));
+        assertArrayEquals(new Object[]{context}, copied.get("setUndergroundBiomeSurfaceContext"));
+        assertArrayEquals(new Object[]{spawn}, copied.get("setSpawnSearchCenter"));
     }
 }

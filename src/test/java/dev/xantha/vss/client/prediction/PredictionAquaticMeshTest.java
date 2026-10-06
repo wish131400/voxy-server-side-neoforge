@@ -20,7 +20,7 @@ class PredictionAquaticMeshTest {
                     ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
                     ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN,ClientColumnSample.NO_SPAN);
             var mesh=PredictionMeshBuilder.build(new ClientColumnSample[]{sample,sample,sample,sample},null,
-                    63,0xb22d78c5,1,2,true,null,null,null,0,0,tile);
+                    63,0xb22d78c5,1,2,null,null,0,0,tile);
             assertEquals(18,mesh.vertexCount(),"one ground quad plus two plant planes");
             assertEquals(6,mesh.waterVertexCount(),"plant must not punch a hole in the water");
         }

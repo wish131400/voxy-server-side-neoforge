@@ -26,6 +26,7 @@ public final class PredictionFogBridge {
 
     /** Only the ordinary final colour blit is patched; unknown shader layouts stay intact. */
     public static String patch(String path, String source) {
+        source = PredictionNormalDepthBridge.patch(path, source);
         if (!"voxy:post/blit_texture_depth_cutout.frag".equals(path) || source == null) return source;
         String color = "colour = texture(colourTex, UV.xy);";
         if (!source.contains(color) || !source.contains("vec3 point = rev3d(")) return source;

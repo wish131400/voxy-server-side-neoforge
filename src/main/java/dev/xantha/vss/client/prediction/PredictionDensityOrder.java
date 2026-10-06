@@ -1,6 +1,7 @@
 package dev.xantha.vss.client.prediction;
 
 import java.lang.reflect.RecordComponent;
+import java.lang.reflect.Array;
 import java.util.IdentityHashMap;
 import net.minecraft.core.Holder;
 import net.minecraft.world.level.levelgen.DensityFunction;
@@ -21,6 +22,12 @@ final class PredictionDensityOrder {
         catch (ReflectiveOperationException | RuntimeException unsupported) { return true; }
     }
 
+    /** Only known positional vanilla nodes may retain a mapped NoiseChunk graph. */
+    static boolean canReuseColumnContext(NoiseRouter router) {
+        try { return !new PredictionDensityOrder().inspect(router,0).unknown; }
+        catch (ReflectiveOperationException | RuntimeException unsupported) { return false; }
+    }
+
     private Info inspect(Object value, int depth) throws ReflectiveOperationException {
         if (value == null || value instanceof Number || value instanceof String
                 || value instanceof Enum<?> && !(value instanceof DensityFunction)) return PURE;
@@ -31,10 +38,14 @@ final class PredictionDensityOrder {
         if(value instanceof Holder<?> holder) result=inspect(holder.value(),depth+1);
         else if(value instanceof Iterable<?> list) {
             result=PURE;for(Object child:list)result=result.plus(inspect(child,depth+1));
+        } else if(value.getClass().isArray()) {
+            result=PURE;
+            if(!value.getClass().getComponentType().isPrimitive())
+                for(int i=0;i<Array.getLength(value);i++)result=result.plus(inspect(Array.get(value,i),depth+1));
         } else if(value instanceof DensityFunctions.MarkerOrMarked marker) {
             Info child=inspect(marker.wrapped(),depth+1);
             String kind=((Enum<?>)marker.type()).name();
-            result=switch(kind) {
+            result=!value.getClass().getName().equals("net.minecraft.world.level.levelgen.DensityFunctions$Marker") ? UNKNOWN : switch(kind) {
                 case "FlatCache" -> new Info(false,child.unknown,child.unknown);
                 case "Cache2D" -> new Info(child.vertical,child.ordered||child.vertical,child.unknown);
                 default -> child;
@@ -54,7 +65,7 @@ final class PredictionDensityOrder {
                 result=PURE;
                 for(RecordComponent component:type.getRecordComponents()) {
                     Class<?> t=component.getType();
-                    if(t.isPrimitive() || t.isArray() || t.isEnum() || t==DensityFunction.NoiseHolder.class) continue;
+                    if(t.isPrimitive() || t.isEnum() || t==DensityFunction.NoiseHolder.class) continue;
                     var read=component.getAccessor(); read.setAccessible(true);
                     result=result.plus(inspect(read.invoke(value),depth+1));
                 }

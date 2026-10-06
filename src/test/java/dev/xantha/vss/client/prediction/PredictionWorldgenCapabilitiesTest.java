@@ -64,6 +64,22 @@ class PredictionWorldgenCapabilitiesTest {
         assertFalse(PredictionWorldgenCapabilities.nativeSafe(JsonParser.parseString("{\"type\":\"lithostitched:future_noise\"}")));
     }
 
+    @Test void freeTerraForgedNamespaceMigrationPreservesNativeBoundaries() {
+        for (String namespace : new String[]{"reterraforged", "freeterraforged"}) {
+            for (String name : new String[]{"noise", "perlin", "simplex2", "white", "shift", "map",
+                    "clamp_to_nearest_unit", "linear_spline"}) {
+                var node = new com.google.gson.JsonObject();
+                node.addProperty("type", namespace + ":" + name);
+                assertTrue(PredictionWorldgenCapabilities.nativeSafe(node));
+            }
+            for (String name : new String[]{"cell", "future_noise"}) {
+                var node = new com.google.gson.JsonObject();
+                node.addProperty("type", namespace + ":" + name);
+                assertFalse(PredictionWorldgenCapabilities.nativeSafe(node));
+            }
+        }
+    }
+
     @Test void dataPackIdentifiersDoNotDisableVanillaNoiseButCustomCodecsSelectJava() {
         assertTrue(PredictionWorldgenCapabilities.nativeSafe(JsonParser.parseString("""
                 {"tectonic:mountains":{"type":"minecraft:add","argument1":"terralith:height","argument2":1}}

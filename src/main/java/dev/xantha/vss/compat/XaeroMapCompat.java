@@ -29,7 +29,7 @@ import java.util.function.BooleanSupplier;
  * writes VSS-delivered LOD columns into Xaero's World Map so the map records
  * terrain far beyond vanilla render distance. Pure reflection — zero compile-time
  * dependency, zero mixins (the bridge supports the 1.40.x legacy surface and
- * the 1.42–1.45 surface, verified against Xaero WM 1.40.16/1.45.0) — following
+ * the 1.42–1.46 surface, verified against Xaero WM 1.40.16/1.45.0/1.46.0) — following
  * the {@code VoxyCompat}/
  * {@code MoonriseReadCompat} interop discipline: any resolve failure disables the
  * bridge with one warn (diag shows {@code state=unavailable}); runtime failures
@@ -92,15 +92,12 @@ final class XaeroMapCompat {
     static final int PENDING_UPDATES_HARD_CAP = 1024;
     static final int INTAKE_UPDATES_HIGH_WATERMARK = PENDING_UPDATES_SOFT_CAP;
     static final int INTAKE_UPDATES_LOW_WATERMARK = PENDING_UPDATES_SOFT_CAP / 2;
-    static final int UPDATE_MAX_STALL_PUMPS = 1200;
     static final int UPDATE_MAX_DEFER_PUMPS = 4 * UPDATE_IDLE_PUMPS;
     static final long UPDATE_NANOS_BUDGET = 2_000_000L;
     static final long UPDATE_BORROW_NANOS = PUMP_NANOS_BUDGET;
     static final int FRAME_MAX_REBUILDS = 1;
     private static final int COMPLETE_TILE_MASK = 0xFFFF;
     static final int FLUSH_PROBE_EXEMPT_FLOOR = 8;
-    /** Ladder-ready deferrals (busy region, PBO download) before an entry drops. */
-    static final int DEFER_CAP = 200;
     /** Consecutive failures (commit-side or extraction-side) before the bridge
      *  latches dead for the SESSION (re-armed at disconnect). */
     static final int THROW_LATCH = 5;
@@ -260,7 +257,6 @@ final class XaeroMapCompat {
     private final AtomicLong deferEvents = new AtomicLong();
     private final AtomicLong droppedOverflow = new AtomicLong();
     private final AtomicLong droppedStale = new AtomicLong();
-    private final AtomicLong droppedExpired = new AtomicLong();
     private final AtomicLong commitFailures = new AtomicLong();
     private final AtomicLong loadRequests = new AtomicLong();
     private volatile boolean dead;
@@ -274,7 +270,6 @@ final class XaeroMapCompat {
     int updateIdlePumps = UPDATE_IDLE_PUMPS;
     int pendingUpdatesSoftCap = PENDING_UPDATES_SOFT_CAP;
     int pendingUpdatesHardCap = PENDING_UPDATES_HARD_CAP;
-    int updateMaxStallPumps = UPDATE_MAX_STALL_PUMPS;
     int updateMaxDeferPumps = UPDATE_MAX_DEFER_PUMPS;
     long updateBorrowNanos = UPDATE_BORROW_NANOS;
     int frameMaxRebuilds = FRAME_MAX_REBUILDS;
@@ -335,7 +330,6 @@ final class XaeroMapCompat {
         volatile XaeroTileExtractor.PreparedTile tile; // replaced under queueLock (latest wins)
         final Object dimension;
         int bytes; // under queueLock
-        int ladderReadyDeferrals; // main thread only
 
         Entry(Object dimension, XaeroTileExtractor.PreparedTile tile, int bytes) {
             this.dimension = dimension;
@@ -582,7 +576,6 @@ final class XaeroMapCompat {
             case "defer_events" -> this.deferEvents.get();
             case "dropped_overflow" -> this.droppedOverflow.get();
             case "dropped_stale" -> this.droppedStale.get();
-            case "dropped_expired" -> this.droppedExpired.get();
             case "commit_failures" -> this.commitFailures.get();
             case "load_requests" -> this.loadRequests.get();
             case "buffer_updates" -> this.bufferUpdates.get();
@@ -596,8 +589,7 @@ final class XaeroMapCompat {
 
     String describe() {
         String state = this.dead ? "dead" : this.enabled.getAsBoolean() ? "active" : "disabled";
-        long dropped = this.droppedOverflow.get() + this.droppedStale.get()
-                + this.droppedExpired.get();
+        long dropped = this.droppedOverflow.get() + this.droppedStale.get();
         return "XaeroMap: state=" + state + ", queued=" + queuedForTest()
                 + ", written=" + this.written.get()
                 + ", skipped_loaded=" + this.skippedLoaded.get()
@@ -759,20 +751,12 @@ final class XaeroMapCompat {
                         commits++;
                     }
                     case DEFERRED_TILE -> {
+                        // VSS has already accepted this column. Xaero's save/load
+                        // and PBO waits must not turn it into a permanent map hole.
                         this.deferEvents.incrementAndGet();
-                        if (++entry.ladderReadyDeferrals > DEFER_CAP) {
-                            removeIfCurrent(pending.key(), entry, tile);
-                            this.droppedExpired.incrementAndGet();
-                        }
                     }
                     case DEFERRED_REGION -> {
                         this.deferEvents.incrementAndGet();
-                        for (var sibling : bucket) {
-                            if (++sibling.entry().ladderReadyDeferrals > DEFER_CAP) {
-                                removeIfCurrent(sibling.key(), sibling.entry(), sibling.tile());
-                                this.droppedExpired.incrementAndGet();
-                            }
-                        }
                         continue bucketLoop;
                     }
                     case AWAITING_REQUESTABLE, AWAITING_PARKED, AWAITING_IN_FLIGHT -> {
@@ -1014,10 +998,12 @@ final class XaeroMapCompat {
                 this.h.getBlockStateShortShapeCache.invoke(mp), mp);
         this.h.setWrittenOnce.invoke(mapTile, true);
         this.h.setLoaded.invoke(mapTile, true);
+        // A previous attempt or Xaero's cache loader can create the chunk before
+        // pixels are writable. Its first successful commit still needs this flag.
+        if ((boolean) this.h.includeInSave.invoke(tileChunk)) {
+            this.h.setHasHadTerrain.invoke(tileChunk);
+        }
         if (createdTileChunk) {
-            if ((boolean) this.h.includeInSave.invoke(tileChunk)) {
-                this.h.setHasHadTerrain.invoke(tileChunk);
-            }
             Object highlights = this.h.getMapRegionHighlightsPreparer.invoke(mp);
             this.h.highlightsPrepare.invoke(highlights, region, localTcX, localTcZ, false);
         }
@@ -1217,13 +1203,10 @@ final class XaeroMapCompat {
                     }
                 }
                 case NOT_READY -> {
+                    // The committed pixels are not visible until this rebuild.
+                    // Keep it owed while Xaero is busy; the hard cap bounds intake.
                     if (update.stalledSincePump < 0) {
                         update.stalledSincePump = this.pumpCount;
-                    } else if (this.pumpCount - update.stalledSincePump
-                            >= this.updateMaxStallPumps) {
-                        it.remove();
-                        removed++;
-                        this.droppedUpdates.incrementAndGet();
                     }
                 }
                 case FAILED -> {

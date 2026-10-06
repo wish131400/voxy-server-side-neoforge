@@ -3,7 +3,22 @@ package dev.xantha.vss.client.prediction;
 /** Shared X/Z displacement: tops and walls can never disagree at one vertex. */
 final class PredictionMorph {
     static final long DURATION_NANOS = 350_000_000L;
+    /**
+     * GPU batch records store a compact, stable start time instead of the
+     * already evaluated animation amount.  Keeping the origin close to the
+     * process start makes the value representable as a float for the whole
+     * client session while the actual frame time remains a single uniform.
+     */
+    private static final long CLOCK_ORIGIN_NANOS = System.nanoTime();
     private PredictionMorph() { }
+
+    static float seconds(long nanoTime) {
+        return (float) ((nanoTime - CLOCK_ORIGIN_NANOS) * 1.0e-9D);
+    }
+
+    static float startSeconds(long uploadedAt) {
+        return seconds(uploadedAt);
+    }
 
     static float[] field(PredictionTileManager.PredictionTile child, PredictionTileManager.PredictionTile parent) {
         int axis = child.cellAxis() + 1;

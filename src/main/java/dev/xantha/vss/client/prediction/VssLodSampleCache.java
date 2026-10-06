@@ -96,6 +96,13 @@ public final class VssLodSampleCache {
         entries.remove(key);
     }
 
+    /** Removes only the edited chunk's column coordinates, including negative chunks. */
+    public void removeChunk(int chunkX, int chunkZ) {
+        int baseX = chunkX * 16, baseZ = chunkZ * 16;
+        for (int z = baseZ; z < baseZ + 16; z++) for (int x = baseX; x < baseX + 16; x++)
+            entries.remove((long) x << 32 | z & 0xffffffffL);
+    }
+
     public void clear() {
         entries.clear();
     }

@@ -24,6 +24,7 @@ final class PredictionRenderResidency {
     private RenderSnapshot retainedSource;
     private long retainedRevision = -1;
     private RenderSnapshot pendingSource;
+    private long pendingRevision = -1;
     private final java.util.ArrayList<PredictionTile> pendingUploads = new java.util.ArrayList<>();
 
     /** Changes whenever a tile becomes drawable or is retired from the GPU set. */
@@ -52,7 +53,8 @@ final class PredictionRenderResidency {
         while (iterator.hasNext()) {
             var key = iterator.next();
             if (key.lod() >= source.layout().levelCount()
-                    || distanceReduced && !source.tiles().containsKey(key)) {
+                    || distanceReduced && !source.tiles().containsKey(key)
+                    || source.voxyOwned().contains(key)) {
                 iterator.remove();
                 tiles.remove(key); index.remove(key);scopeIndex.remove(key);
                 changed(key);
@@ -81,6 +83,25 @@ final class PredictionRenderResidency {
 
     boolean contains(PredictionTile tile) { return tiles.get(tile.key()) == tile; }
 
+    PredictionTile resident(PredictionTileKey key) { return tiles.get(key); }
+    boolean hasFallback(PredictionTileKey key) {
+        if (layout == null) return false;
+        for (int lod = key.lod() + 1; lod < layout.levelCount(); lod++) {
+            int shift = lod - key.lod();
+            var parent = tiles.get(new PredictionTileKey(key.dimension(), key.tileX() >> shift, key.tileZ() >> shift, lod));
+            if (parent != null && !parent.scopeOnly() && parent.mesh().gpuPayload() != null
+                    && parent.mesh().gpuPayload().quadCount() > 0) return true;
+        }
+        return false;
+    }
+    void evict(PredictionTileKey key) {
+        if (tiles.remove(key) == null) return;
+        index.remove(key); scopeIndex.remove(key); retiring.remove(key);
+        changed(key); epochs.remove(key);
+        // An evicted tile must reappear even when the worker source is unchanged.
+        pendingSource = null; pendingRevision = -1;
+    }
+
     /**
      * Returns whether a pending upload that matters to the current view is
      * still waiting. The renderer uses this before reusing a stable frame
@@ -99,8 +120,14 @@ final class PredictionRenderResidency {
             pendingUploads.clear();
             pendingUploads.addAll(source.tiles().values());
             pendingSource = source;
+            pendingRevision = -1;
         }
-        pendingUploads.removeIf(tile -> contains(tile) || tile.mesh().gpuPayload() == null);
+        // Payloads are fixed before snapshot publication. Only completed uploads
+        // or retirement can change this list for the same source snapshot.
+        if (pendingRevision != revision) {
+            pendingUploads.removeIf(tile -> contains(tile) || tile.mesh().gpuPayload() == null);
+            pendingRevision = revision;
+        }
         return pendingUploads;
     }
 
@@ -155,6 +182,7 @@ final class PredictionRenderResidency {
 
     void clear() {
         pendingSource = null;
+        pendingRevision = -1;
         pendingUploads.clear();
         tiles.clear();
         index.clear();scopeIndex.clear();changes.clear();snapshotChanges.clear();retiring.clear();

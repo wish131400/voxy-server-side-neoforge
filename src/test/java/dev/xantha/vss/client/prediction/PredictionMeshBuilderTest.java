@@ -47,11 +47,9 @@ class PredictionMeshBuilderTest {
         java.util.Arrays.fill(samples, ground);
         int[] buildings = new int[16];
         buildings[0] = 2 | 64 << 2 | 3 << 18;
-        PredictionMesh empty = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid,
-                false, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
+        PredictionMesh empty = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
                 PredictionSimpleVegetation.Result.EMPTY, null);
-        PredictionMesh city = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid,
-                false, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
+        PredictionMesh city = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
                 PredictionSimpleVegetation.Result.EMPTY, buildings);
         assertTrue(city.vertexCount() > empty.vertexCount());
         assertTrue(city.vertexCount() - empty.vertexCount() < 500,
@@ -66,11 +64,9 @@ class PredictionMeshBuilderTest {
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
         for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++)
             samples[z * grid + x] = captured;
-        PredictionMesh capturedEmpty = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid,
-                false, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
+        PredictionMesh capturedEmpty = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
                 PredictionSimpleVegetation.Result.EMPTY, null);
-        PredictionMesh real = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid,
-                false, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
+        PredictionMesh real = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
                 PredictionSimpleVegetation.Result.EMPTY, buildings);
         assertEquals(capturedEmpty.vertexCount(), real.vertexCount(),
                 "captured terrain must replace the city silhouette");
@@ -78,8 +74,7 @@ class PredictionMeshBuilderTest {
         java.util.Arrays.fill(samples, ground);
         buildings[0] = 0;
         buildings[15] = 2 | 64 << 2 | 3 << 18;
-        PredictionMesh edge = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid,
-                false, null, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
+        PredictionMesh edge = PredictionMeshBuilder.build(samples, null, 63, 0, 4, grid, null, null, 0, 0, PredictionVegetation.Tile.EMPTY,
                 PredictionSimpleVegetation.Result.EMPTY, buildings);
         assertTrue(java.util.stream.IntStream.range(0, edge.vertexCount())
                 .anyMatch(vertex -> edge.y(vertex) == 82.0F));
@@ -352,24 +347,24 @@ class PredictionMeshBuilderTest {
         java.util.Arrays.fill(samples, forestWithoutTree);
 
         PredictionMesh noCanopy = PredictionMeshBuilder.build(samples, null, 63,
-                0xB22D78C5, 1, grid, true, new PredictionFeatureStampCache());
+                0xB22D78C5, 1, grid, true);
         samples[0] = treeColumn;
         PredictionMesh withCanopy = PredictionMeshBuilder.build(samples, null, 63,
-                0xB22D78C5, 1, grid, true, new PredictionFeatureStampCache());
+                0xB22D78C5, 1, grid, true);
 
         assertEquals(16 * 16 * 6, noCanopy.vertexCount());
         assertEquals(noCanopy.vertexCount(), withCanopy.vertexCount());
 
         PredictionMesh coarseCanopy = PredictionMeshBuilder.build(samples, null, 63,
-                0xB22D78C5, 4, grid, true, new PredictionFeatureStampCache());
+                0xB22D78C5, 4, grid, true);
         assertEquals(16 * 16 * 6, coarseCanopy.vertexCount(),
                 "spacing 4 cannot manufacture a tree from a density hint");
         PredictionMesh boxCanopy = PredictionMeshBuilder.build(samples, null, 63,
-                0xB22D78C5, 8, grid, true, new PredictionFeatureStampCache());
+                0xB22D78C5, 8, grid, true);
         assertEquals(16 * 16 * 6, boxCanopy.vertexCount(),
                 "spacing 8 cannot fall back to canopy boxes");
         PredictionMesh horizonCanopy = PredictionMeshBuilder.build(samples, null, 63,
-                0xB22D78C5, 16, grid, true, new PredictionFeatureStampCache());
+                0xB22D78C5, 16, grid, true);
         assertEquals(16 * 16 * 6, horizonCanopy.vertexCount(),
                 "spacing 16 omits individual tree geometry");
     }

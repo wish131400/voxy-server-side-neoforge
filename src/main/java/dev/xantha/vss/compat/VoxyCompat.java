@@ -577,6 +577,7 @@ final class VoxyCompat {
         }
 
         private static boolean has(ConcurrentHashMap<Long, long[]> regions, int chunkX, int chunkZ) {
+            if (regions.isEmpty()) return false;
             int regionX = Math.floorDiv(chunkX, 32);
             int regionZ = Math.floorDiv(chunkZ, 32);
             int slot = (chunkX & 31) | ((chunkZ & 31) << 5);

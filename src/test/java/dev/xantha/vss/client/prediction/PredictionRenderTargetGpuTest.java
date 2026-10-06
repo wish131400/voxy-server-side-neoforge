@@ -198,6 +198,7 @@ class PredictionRenderTargetGpuTest {
                 verifyForeignPixelUnpackState();
                 verifyPublishedCoverageAndSeamBatch();
                 verifyIncrementalScene();
+                verifyVoxySceneHandoff();
                 verifySharedVoxyFog(vao);
             } finally {
                 glDeleteVertexArrays(vao);
@@ -414,6 +415,10 @@ class PredictionRenderTargetGpuTest {
             }
             glUniform3f(glGetUniformLocation(program, "VanillaMaskOrigin"), 1024, 1024, 1024);
             verifyReadyColumnHandoff(terrain, target, main, buffers, iris);
+            verifyEyeLevelSlopeDoesNotStretch(terrain, target, main, buffers, iris);
+            verifyIndexedSeabedBackground(terrain, target, main, buffers, iris);
+            verifyRegionalIndexHandoff(terrain, target, main, buffers, iris);
+            verifyNearbyCutWallHandoff(terrain, target, main, buffers, iris);
             verifyPredictionHorizon(terrain, target, main, buffers, iris);
             if (!iris) verifyFarVoxyDepth(terrain, target, main, buffers);
             if (!iris) {
@@ -589,6 +594,7 @@ class PredictionRenderTargetGpuTest {
             pending.setAccessible(true);
             pending.set(exactMask, java.util.concurrent.CompletableFuture.completedFuture(exactColumns));
         } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        exactMask.update(null, net.minecraft.world.phys.Vec3.ZERO, 32);
         exactMask.bind(null, net.minecraft.world.phys.Vec3.ZERO, 32,
                 glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "ExactCoverage"), exactGrid);
         int exactTexture = glGetInteger(GL_TEXTURE_BINDING_2D);
@@ -643,6 +649,26 @@ class PredictionRenderTargetGpuTest {
                     if (px < 32) assertEquals(0, red, "handoff must cover oblique rays as well as the centre");
                     else assertTrue(red > 100, "every missing real pixel retains prediction");
                 }
+                // Keep the cached column mask unchanged while the current
+                // Voxy draw moves across the screen, then leaves it entirely.
+                // A cached node/column can never claim a missing frame pixel.
+                for (int frame = 0; frame < 5; frame++) {
+                    for (int py = 0; py < 64; py++) for (int px = 0; px < 64; px++) {
+                        boolean drawn = frame == 0 ? px < 32 : frame == 1 ? py < 32
+                                : frame == 2 ? px >= 32 : frame == 3 && py >= 32;
+                        partial[py * 64 + px] = drawn ? (float)realDepth : iris ? 0 : 1;
+                    }
+                    RenderSystem.activeTexture(GL_TEXTURE7); RenderSystem.bindTexture(main.getDepthTextureId());
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, partial);
+                    var turnedPixels = terrainPixels();
+                    for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++) {
+                        boolean drawn = frame == 0 ? px < 32 : frame == 1 ? py < 32
+                                : frame == 2 ? px >= 32 : frame == 3 && py >= 32;
+                        int red = turnedPixels.get((py * 64 + px) * 4) & 255;
+                        if (drawn) assertEquals(0, red, "current Voxy surface keeps ownership on frame " + frame);
+                        else assertTrue(red > 100, "fallback returns immediately in every direction on frame " + frame);
+                    }
+                }
                 saveHandoffPixels("ready-column-" + iris + "-" + (int)height + "-" + (int)fov, pixels);
                 // A distant wall beyond the confirmed frontier cannot steal
                 // foreground prediction inside that frontier.
@@ -660,6 +686,244 @@ class PredictionRenderTargetGpuTest {
             }
         } finally { terrain.setRealCoverage(0, 0, 0, 0); glUniform3f(exactGrid, 0, 0, 0); glDeleteTextures(exactTexture); }
         System.out.println("PASS: ready-column handoff with height mismatch, partial real draw, sky fallback and distant walls; Iris=" + iris);
+    }
+
+    private static void verifyEyeLevelSlopeDoesNotStretch(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, boolean iris) {
+        var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(70), 1, .05F, 65536));
+        terrain.setCamera(new Matrix4f(), projection.matrix());
+        if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+        terrain.setTile(-4, -1, -20, 8, 1, true);
+        terrain.setOpaqueAlpha(1);
+        terrain.setRealCoverage(0, 0, 0, 0);
+        terrain.setVoxyOwnershipDistance(0);
+        main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+        target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+        int low = 32768, high = 32768 + 2 * 4;
+        int program = glGetInteger(GL_CURRENT_PROGRAM);
+        int morphUniform = glGetUniformLocation(program, "TerrainMorph");
+        glUniform2f(glGetUniformLocation(program, "MorphBounds"), 0, 4);
+        try {
+            for (boolean initiallyFlat : new boolean[]{false, true}) {
+                int front = initiallyFlat ? low : high;
+                // Appended field raises the front edge during refinement.
+                int[] slope = {8 << 16, 8, 0, 8 | (8 << 16), front | (front << 16), low | (low << 16),
+                        0, 0x00FF00, 0, 0x100FF00, 0x00FF00, 0x00FF00, 512, 512, 0, 0};
+                glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, slope, GL_STATIC_DRAW);
+                for (float morph : new float[]{0, .5F, 1}) {
+                    glUniform2f(morphUniform, 3, morph);
+                    var pixels = terrainPixels();
+                    int visible = 0, stray = 0;
+                    for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+                        if ((pixels.get((y * 64 + x) * 4 + 1) & 255) == 0) continue;
+                        visible++;
+                        // Includes every projected corner throughout the morph.
+                        if (x < 15 || x > 48 || y < 25 || y > 40) stray++;
+                    }
+                    assertTrue(visible > 5, "eye-level sloping terrain must remain visible");
+                    assertEquals(0, stray, "partial vertex rejection must not stretch terrain toward the upper-right clip corner; Iris="
+                            + iris + ", initiallyFlat=" + initiallyFlat + ", morph=" + morph);
+                }
+            }
+        } finally {
+            glUniform2f(morphUniform, 0, 0);
+        }
+        System.out.println("PASS: eye-level sloping and initially flat quads stay inside projected bounds throughout morph; Iris=" + iris);
+    }
+
+    private static void verifyIndexedSeabedBackground(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, boolean iris) {
+        int program = glGetInteger(GL_CURRENT_PROGRAM);
+        int exactGrid = glGetUniformLocation(program, "ExactCoverageGrid");
+        int exact = texture(8, GL_R8, 1, 1, GL_RED, new float[]{1});
+        glUniform1i(glGetUniformLocation(program, "ExactCoverage"), 8);
+        var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(70), 1, .05F, 65536));
+        terrain.setCamera(new Matrix4f().lookAlong(0, -1, 0, 0, 0, -1), projection.matrix());
+        if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+        terrain.setTile(-128, -160, -128, 256, 1, true);
+        terrain.setRealCoverage(0, 0, 0, 0);
+        terrain.setRealRenderDistance(8192);
+        terrain.setVoxyOwnershipDistance(480);
+        main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT);
+        target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+        try {
+            ByteBuffer reference = null;
+            for (boolean indexed : new boolean[]{false, true}) {
+                // Camera-relative cell contains the centre ray's water AND seabed.
+                glUniform3f(exactGrid, -8, -8, indexed ? 1 : 0);
+                glClearColor(.65F, .75F, 1, 1); glClear(GL_COLOR_BUFFER_BIT);
+                for (boolean water : new boolean[]{false, true}) {
+                    int y = 32768 + (water ? 63 : 32) * 4;
+                    int color = water ? 0x2050B0 : 0x404040;
+                    int[] plane = {256 << 16, 256, 0, 256 | (256 << 16), y | (y << 16), y | (y << 16),
+                            water ? 1 << PredictionPackedMesh.FLAGS_FLUID_SHIFT : 0,
+                            color, 0, color | 0x1000000, color, color};
+                    glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, plane, GL_STATIC_DRAW);
+                    terrain.setOpaqueAlpha(water ? 0 : 1);
+                    if (water) { RenderSystem.enableBlend(); RenderSystem.blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+                    else RenderSystem.disableBlend();
+                    compareInstanceDraw(new PredictionDrawRanges(new int[]{0}, new int[]{1}, 1));
+                }
+                var pixels = BufferUtils.createByteBuffer(64 * 64 * 4);
+                glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                if (!indexed) reference = pixels;
+                else for (int y = 30; y <= 33; y++) for (int x = 30; x <= 33; x++)
+                    for (int c = 0; c < 3; c++) assertEquals(reference.get((y * 64 + x) * 4 + c), pixels.get((y * 64 + x) * 4 + c),
+                            "an indexed column with no actual Voxy pixel must not remove the seabed and blend water over sky; Iris=" + iris);
+            }
+        } finally {
+            RenderSystem.disableBlend(); terrain.setOpaqueAlpha(1);
+            terrain.setVoxyOwnershipDistance(0); glUniform3f(exactGrid, 0, 0, 0); glDeleteTextures(exact);
+        }
+        System.out.println("PASS: missing Voxy pixels retain the opaque background under transparent water; Iris=" + iris);
+    }
+
+    private static void verifyRegionalIndexHandoff(PredictionTerrainProgram terrain, TextureTarget target,
+            TextureTarget main, int[] buffers, boolean iris) {
+        var index = new PredictionExactCoverageIndex();
+        for (int z = -96; z <= 96; z++) for (int x = 0; x <= 96; x++)
+            index.confirm(net.minecraft.world.level.Level.OVERWORLD, x, z, 0);
+        var columns = index.snapshot(net.minecraft.world.level.Level.OVERWORLD, 0, 0, 64, ExactCoverageGate.SETTLE_NANOS);
+        var mask = new PredictionExactCoverageMask();
+        try {
+            var pending = PredictionExactCoverageMask.class.getDeclaredField("pending"); pending.setAccessible(true);
+            pending.set(mask, java.util.concurrent.CompletableFuture.completedFuture(columns));
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        int exactGrid = glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "ExactCoverageGrid");
+        mask.update(null, net.minecraft.world.phys.Vec3.ZERO, 64);
+        mask.bind(null, net.minecraft.world.phys.Vec3.ZERO, 64,
+                glGetUniformLocation(glGetInteger(GL_CURRENT_PROGRAM), "ExactCoverage"), exactGrid);
+        int texture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        var projection = VssLodProjection.of(new Matrix4f().perspective((float)Math.toRadians(70), 1, .05F, 65536));
+        terrain.setCamera(new Matrix4f().lookAlong(0, -1, 0, 0, 0, -1), projection.matrix());
+        if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+        terrain.setTile(-8192, -152, -8192, 8, 1, true);
+        terrain.setRealCoverage(0, 0, 0, 0);
+        terrain.setRealRenderDistance(8192);
+        terrain.setVoxyOwnershipDistance(480);
+        terrain.setOpaqueAlpha(1);
+        try {
+            for (int frame = 0; frame < 120; frame++) {
+                int y = 32768 + 96 * 4, fluid = (frame / 2) % 4;
+                int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                        1 | (fluid << PredictionPackedMesh.FLAGS_FLUID_SHIFT), 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+                glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, roof, GL_STATIC_DRAW);
+                main.bindWrite(true);
+                glClearDepth(frame % 2 == 0 ? (iris ? 0 : 1)
+                        : iris ? 1.0 / 1024 : VssLodProjection.distanceToVanillaDepth(1024, projection));
+                glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+                terrain.bindMainDepth(main.getDepthTextureId(), projection);
+                var pixels = terrainPixels();
+                for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++) {
+                    int red = pixels.get((py * 64 + px) * 4) & 255;
+                    double worldX = ((px + .5) / 32 - 1) * (152 - 96) * Math.tan(Math.toRadians(35));
+                    double worldZ = -((py + .5) / 32 - 1) * (152 - 96) * Math.tan(Math.toRadians(35));
+                    // Existing ground preference also owns the indexed edge
+                    // when both ray endpoints are within 32 blocks in X/Z.
+                    boolean groundPreference = fluid == 0 && worldX >= 0
+                            && Math.max(Math.abs(worldX), Math.abs(worldZ)) * (1024.0 / 56 - 1) <= 32;
+                    if (frame % 2 != 0 && (worldX >= 16 && fluid != 1 || groundPreference)) assertEquals(0, red, "actual ground/interior ownership must still win; frame=" + frame);
+                    else assertTrue(red > 100, "missing/index-edge terrain, clear-depth interior and water with absent/distant actual depth retain fallback; frame=" + frame);
+                }
+            }
+            // The transition must still yield to actual visible ground. A
+            // lower ground surface in the indexed edge has the same owner.
+            int y = 32768 + 96 * 4;
+            int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                    1, 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+            // Water fallback must not add another layer where a real water
+            // pixel already exists, including the settled interior columns.
+            roof[6] |= 1 << PredictionPackedMesh.FLAGS_FLUID_SHIFT;
+            glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, roof, GL_STATIC_DRAW);
+            main.bindWrite(true);
+            glClearDepth(iris ? 1.0 / 56 : VssLodProjection.distanceToVanillaDepth(56, projection));
+            glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+            assertEquals(0, terrainPixels().get((32 * 64 + 52) * 4) & 255,
+                    "existing water owns its pixels even when index-only water rejection is bypassed");
+            roof[6] = 1;
+            glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, roof, GL_STATIC_DRAW);
+            main.bindWrite(true);
+            glClearDepth(iris ? 1.0 / 60 : VssLodProjection.distanceToVanillaDepth(60, projection));
+            glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+            assertEquals(0, terrainPixels().get((32 * 64 + 36) * 4) & 255,
+                    "indexed edge gives way to actual nearby ground even when prediction is higher");
+            main.bindWrite(true); glClearDepth(iris ? 0 : 1); glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+            terrain.setVoxyOwnershipDistance(0);
+            assertTrue((terrainPixels().get((32 * 64 + 32) * 4) & 255) > 100, "disabling Voxy range restores prediction");
+            terrain.setVoxyOwnershipDistance(480);
+            terrain.setTile(-8192, -1000, -8192, 8, 1, true);
+            assertTrue((terrainPixels().get((32 * 64 + 32) * 4) & 255) > 100, "high altitude cannot yield to out-of-range Voxy");
+            terrain.setTile(-8192, -152, -8192, 8, 1, true);
+            RenderSystem.activeTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, texture);
+            try (var unpack = PredictionPixelUnpack.begin()) {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, columns.size(), columns.size(), GL_RED, GL_UNSIGNED_BYTE,
+                        java.nio.ByteBuffer.allocateDirect(columns.columns().length));
+            }
+            assertTrue((terrainPixels().get((32 * 64 + 32) * 4) & 255) > 100, "definite index removal restores pixels without mesh rebuild");
+        } finally {
+            terrain.setVoxyOwnershipDistance(0); glUniform3f(exactGrid, 0, 0, 0); glDeleteTextures(texture);
+        }
+        System.out.println("PASS: spatial index solid ownership, depth-tested water and edge fallback, 120 stable terrain/fluid frames, partial tiles, range/altitude exit and removal; Iris=" + iris);
+    }
+
+    private static void verifyNearbyCutWallHandoff(PredictionTerrainProgram terrain, TextureTarget target,
+                                                   TextureTarget main, int[] buffers, boolean iris) {
+        // Match the reported 16-block boundary: camera Y=181, prediction Y=80,
+        // and a rear Voxy wall 109 blocks away. Its visible pixel is below the
+        // prediction, but within the old 16-block depth preference.
+        int y = 32768 + 80 * 4;
+        int[] roof = {16384 << 16, 16384, 0, 16384 | (16384 << 16), y | (y << 16), y | (y << 16),
+                1, 0xBF4D13, 0, 0x1BF4D13, 0xBF4D13, 0xBF4D13};
+        glBindBuffer(GL_TEXTURE_BUFFER, buffers[0]); glBufferData(GL_TEXTURE_BUFFER, roof, GL_STATIC_DRAW);
+        terrain.setTile(-8192, -181, -8192, 8, 1, true);
+        terrain.setOpaqueAlpha(1);
+        terrain.setRealRenderDistance(65536);
+        terrain.setRealCoverage(-10000, -10000, 10000, 10000);
+        try {
+            for (float fov : new float[]{70, 7}) for (float direction : new float[]{-1, 1})
+                    for (boolean translated : new boolean[]{false, true}) {
+                var vanilla = new Matrix4f().perspective((float)Math.toRadians(fov), 1, .05F, 65536);
+                var projection = VssLodProjection.of(vanilla);
+                var view = new Matrix4f().lookAlong(0, -1, direction, 0, 1, 0);
+                if (translated) view.translate(.125F, -.25F, .375F);
+                var origin = new org.joml.Matrix4d(view).invert().transformPosition(new org.joml.Vector3d());
+                var mainMvp = new org.joml.Matrix4d(iris ? projection.matrix() : vanilla)
+                        .mul(new org.joml.Matrix4d(view));
+                var inverse = new org.joml.Matrix4d(projection.matrix()).mul(new org.joml.Matrix4d(view)).invert();
+                terrain.setCamera(view, projection.matrix());
+                if (iris) terrain.setIrisFrame(new Matrix4f(projection.matrix()).invert(), 64, 64, false, new int[256]);
+                for (int surface : new int[]{0, 1, 2, 3, 4}) {
+                    float[] sceneDepth = new float[4096];
+                    for (int py = 0; py < 64; py++) for (int px = 0; px < 64; px++) {
+                        if (surface == 3 && px >= 32) { sceneDepth[py * 64 + px] = iris ? 0 : 1; continue; }
+                        var ray = inverse.transformProject(new org.joml.Vector3d((px + .5) / 32 - 1, (py + .5) / 32 - 1, 0)).sub(origin);
+                        if (surface == 1 || surface == 3) ray.mul((64 - 181 - origin.y) / ray.y);
+                        else if (surface == 4) ray.mul((80 - 181 - origin.y) / ray.y);
+                        else ray.mul((direction * (surface == 2 ? 97 : 109) - origin.z) / ray.z);
+                        ray.add(origin);
+                        double depth = mainMvp.transformProject(ray).z * .5 + .5;
+                        sceneDepth[py * 64 + px] = iris ? (float)depth
+                                : (float)(Math.rint(depth * 16777215) / 16777215);
+                    }
+                    main.bindWrite(true);
+                    RenderSystem.activeTexture(GL_TEXTURE7); RenderSystem.bindTexture(main.getDepthTextureId());
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64, GL_DEPTH_COMPONENT, GL_FLOAT, sceneDepth);
+                    target.bindWrite(true); terrain.bindMainDepth(main.getDepthTextureId(), projection);
+                    var pixels = terrainPixels();
+                    int red = pixels.get((32 * 64 + 32) * 4) & 255;
+                    if (surface == 0) assertTrue(red > 100,
+                            "near rear cut wall cannot erase foreground prediction; Iris=" + iris + " FOV=" + fov
+                                    + " translated=" + translated);
+                    else if (surface == 3) {
+                        assertEquals(0, pixels.get((32 * 64 + 31) * 4) & 255, "rendered real ground still owns its pixels");
+                        assertTrue(red > 100, "a missing real pixel retains prediction at the same boundary");
+                    } else assertEquals(0, red, surface == 1 || surface == 4
+                            ? "real ground still wins a height disagreement"
+                            : "a genuine cliff closer than prediction remains visible");
+                }
+            }
+        } finally { terrain.setRealCoverage(0, 0, 0, 0); }
+        System.out.println("PASS: near rear cut walls, real ground height disagreement, foreground cliffs and missing pixels; Iris=" + iris);
     }
 
     private static void verifyPlanarHandoff(PredictionTerrainProgram terrain, TextureTarget target,
@@ -1148,8 +1412,7 @@ class PredictionRenderTargetGpuTest {
             if (mode == 6) for (int z=0; z<32; z++) for (int x=16; x<32; x++)
                 snow.put(new net.minecraft.core.BlockPos(x,64,z),net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState());
             var decoration = PredictionVegetation.Tile.of(snow,0,0,32,step,1);
-            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, step, grid, false,
-                    null,null,null,0,0,decoration).compactForRendering();
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, step, grid,null,null,0,0,decoration).compactForRendering();
             var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                     net.minecraft.world.level.Level.OVERWORLD, 0, 0, 4), new int[0], new int[0], samples, mesh,
                     new PredictionDepthBound(64, 120), 0, 1, axis, step);
@@ -1240,7 +1503,7 @@ class PredictionRenderTargetGpuTest {
         var plants = PredictionVegetation.Tile.of(java.util.Map.of(
                 new net.minecraft.core.BlockPos(0,64,0),
                 net.minecraft.world.level.block.Blocks.DANDELION.defaultBlockState()),0,0,1,1,1);
-        var mesh = PredictionMeshBuilder.build(samples,null,63,0,1,2,true,null,null,null,0,0,plants);
+        var mesh = PredictionMeshBuilder.build(samples,null,63,0,1,2,null,null,0,0,plants);
         var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                 net.minecraft.world.level.Level.OVERWORLD,0,0,0),new int[4],new int[4],samples,mesh,
                 new PredictionDepthBound(64,65),0,1,1,1);
@@ -1426,6 +1689,8 @@ class PredictionRenderTargetGpuTest {
         int externalQuery = glGenQueries();
         try {
             System.setProperty("vss.renderTimings", "true");
+            PredictionRenderTimings.reset();
+            PredictionRenderTimings.frame(1);
             PredictionRenderTimings.frame(30);
             glBeginQuery(GL_TIME_ELAPSED, externalQuery);
             int query = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE);
@@ -1441,14 +1706,66 @@ class PredictionRenderTargetGpuTest {
             assertEquals(-1, PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE),
                     "unsampled frames issue no GPU queries");
             PredictionRenderTimings.frame(60);
-            int[] queries = new int[16];
-            for (int i = 0; i < queries.length; i++) {
-                queries[i] = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.WATER);
-                assertTrue(queries[i] >= 0);
+            int[][] queries = new int[7][16];
+            PredictionRenderTimings.Stage[] stages = {
+                    PredictionRenderTimings.Stage.WATER,
+                    PredictionRenderTimings.Stage.OPAQUE,
+                    PredictionRenderTimings.Stage.ANTIALIAS,
+                    PredictionRenderTimings.Stage.HZB_REDUCE,
+                    PredictionRenderTimings.Stage.GPU_FILTER,
+                    PredictionRenderTimings.Stage.INDIRECT_SUBMIT,
+                    PredictionRenderTimings.Stage.PREPARE
+            };
+            for (int pool = 0; pool < stages.length; pool++) {
+                for (int i = 0; i < queries[pool].length; i++) {
+                    PredictionRenderTimings.Stage stage = pool == 2 && i % 2 != 0
+                            ? PredictionRenderTimings.Stage.DEPTH_COPY : stages[pool];
+                    queries[pool][i] = PredictionRenderTimings.gpuStart(stage);
+                    assertTrue(queries[pool][i] >= 0,
+                            "a saturated earlier pool must not consume another pass's quota: " + stage);
+                }
+                assertEquals(-1, PredictionRenderTimings.gpuStart(stages[pool]),
+                        "a full per-pass ring drops a sample instead of blocking or allocating");
             }
-            assertEquals(-1, PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.WATER),
-                    "a full ring drops a sample instead of blocking or allocating");
-            for (int queryId : queries) PredictionRenderTimings.gpuEnd(queryId);
+            assertEquals(-1, PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.DEPTH_COPY),
+                    "post stages share the bounded POST quota");
+            assertTrue(PredictionRenderTimings.diagnostics().endsWith(",dropped=8"));
+            var distinct = new java.util.HashSet<Integer>();
+            for (int[] pool : queries) for (int queryId : pool) {
+                assertTrue(distinct.add(queryId), "tokens are distinct across pools");
+                PredictionRenderTimings.gpuEnd(queryId);
+                PredictionRenderTimings.gpuEnd(queryId); // A duplicated end must not overwrite its timestamp.
+            }
+            // Query results stay pending until a later frame. The explicit
+            // wait remains confined to the GPU regression fixture.
+            glFinish();
+            PredictionRenderTimings.frame(61);
+            String diagnostics = PredictionRenderTimings.diagnostics();
+            for (PredictionRenderTimings.Stage stage : new PredictionRenderTimings.Stage[]{
+                    PredictionRenderTimings.Stage.OPAQUE, PredictionRenderTimings.Stage.WATER,
+                    PredictionRenderTimings.Stage.ANTIALIAS, PredictionRenderTimings.Stage.DEPTH_COPY,
+                    PredictionRenderTimings.Stage.HZB_REDUCE, PredictionRenderTimings.Stage.GPU_FILTER,
+                    PredictionRenderTimings.Stage.INDIRECT_SUBMIT,
+                    PredictionRenderTimings.Stage.PREPARE}) {
+                assertTrue(diagnostics.contains(stage + "GpuMs="), "resolved GPU sample for " + stage);
+            }
+            PredictionRenderTimings.frame(90);
+            int pending = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.WATER);
+            int unfinished = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE);
+            assertTrue(pending >= 0 && unfinished >= 0);
+            PredictionRenderTimings.gpuEnd(pending);
+            PredictionRenderTimings.reset();
+            PredictionRenderTimings.frame(91);
+            assertEquals("sampleEvery=30,dropped=0", PredictionRenderTimings.diagnostics(),
+                    "reset discards pending samples and clears statistics on the render thread");
+            PredictionRenderTimings.gpuEnd(pending);
+            PredictionRenderTimings.gpuEnd(unfinished);
+            PredictionRenderTimings.gpuEnd(Integer.MAX_VALUE);
+            PredictionRenderTimings.gpuEnd(-1);
+            PredictionRenderTimings.frame(120);
+            int reused = PredictionRenderTimings.gpuStart(PredictionRenderTimings.Stage.OPAQUE);
+            assertTrue(reused >= 0, "pools can allocate fresh queries after reset");
+            PredictionRenderTimings.gpuEnd(reused);
             assertEquals(GL_NO_ERROR, glGetError());
         } finally {
             PredictionRenderTimings.reset(); PredictionRenderTimings.frame(61);
@@ -1456,7 +1773,7 @@ class PredictionRenderTargetGpuTest {
             if (previous == null) System.clearProperty("vss.renderTimings");
             else System.setProperty("vss.renderTimings", previous);
         }
-        System.out.println("PASS: asynchronous GPU timestamps, external query coexistence, bounded ring and cleanup");
+        System.out.println("PASS: asynchronous GPU timestamps, external query coexistence, independent bounded pass pools, pending/reset cleanup");
     }
 
     @SuppressWarnings("unchecked")
@@ -1525,6 +1842,93 @@ class PredictionRenderTargetGpuTest {
                 var drain=PredictionRenderer.class.getDeclaredMethod("drainRetiredTiles");drain.setAccessible(true);
                 for(int i=0;i<8;i++) drain.invoke(null);
             } catch(ReflectiveOperationException failure) { throw new AssertionError(failure); }
+            RenderSystem.activeTexture(GL_TEXTURE0);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void verifyVoxySceneHandoff() {
+        PredictionRenderer.resetOcclusion();
+        dev.xantha.vss.compat.StrictLodVisibility.reset();
+        java.lang.reflect.Field hook = null;
+        boolean oldHook = false;
+        try {
+            Class<?> visibility = dev.xantha.vss.compat.StrictLodVisibility.class;
+            hook = visibility.getDeclaredField("renderHookSeen"); hook.setAccessible(true);
+            oldHook = hook.getBoolean(null); hook.setBoolean(null, true);
+            for (String name : new String[]{"dimension", "uploadedNodes", "meshPipeline"}) {
+                var member = visibility.getDeclaredField(name); member.setAccessible(true);
+                member.set(null, switch (name) {
+                    case "dimension" -> net.minecraft.world.level.Level.OVERWORLD;
+                    case "uploadedNodes" -> true;
+                    default -> new dev.xantha.vss.compat.StrictVoxyPipeline();
+                });
+            }
+            var nodeField = visibility.getDeclaredField("NODES"); nodeField.setAccessible(true);
+            var nodes = (dev.xantha.vss.compat.StrictVoxyNodeIndex) nodeField.get(null);
+            dev.xantha.vss.compat.StrictLodVisibility.updateRenderWindow(
+                    net.minecraft.world.level.Level.OVERWORLD, 0, 0, 512);
+            var field = PredictionRenderer.class.getDeclaredField("gpuTiles");
+            field.setAccessible(true);
+            var gpu = (java.util.Map<PredictionTileManager.PredictionTileKey, PredictionGpuTile>) field.get(null);
+            var a = PredictionLodSeamsTest.tile(0, -2, 1, 64);
+            var b = PredictionLodSeamsTest.tile(16, -2, 1, 67);
+            for (var tile : java.util.List.of(a, b)) {
+                var resident = new PredictionGpuTile(tile.key());
+                resident.ensureMesh(tile);
+                gpu.put(tile.key(), resident);
+            }
+            var layout = VssLodLayout.of(4096, 6, true, true);
+            var source = new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,
+                    layout, java.util.Map.of(a.key(), a, b.key(), b), java.util.Map.of());
+            var residency = new PredictionRenderResidency();
+            residency.retain(source); residency.uploaded(a); residency.uploaded(b);
+            var snapshot = residency.snapshot(source);
+            var scene = new PredictionRenderer.Scene();
+            var camera = new net.minecraft.world.phys.Vec3(0, 100, 0);
+            var view = new PredictionRenderer.CoverageView(0, 0, 1300, null);
+            var matrix = new Matrix4f();
+            var first = scene.prepare(snapshot, residency.drainChanges(), view, camera, 4096, 32,
+                    matrix, matrix, null);
+            assertEquals(2, first.stream().filter(draw -> !draw.seam()).count());
+            long before = scene.worldVisits();
+            for (int i = 0; i < 120; i++) {
+                // Both tiles lie under these uploaded ancestors. Empty and
+                // resident meshes remain independent of the current draw list.
+                int mesh = switch (i % 3) { case 0 -> 123; case 1 -> 0xFFFFFE; default -> -1; };
+                nodes.update(1, dev.xantha.vss.compat.StrictVoxyNodeIndex.key(4, 0, 0, -1), mesh);
+                nodes.update(2, dev.xantha.vss.compat.StrictVoxyNodeIndex.key(4, 2, 0, -1), mesh);
+                ClientPredictionState.exactCoverageChanged(net.minecraft.world.level.Level.OVERWORLD, 0, -8);
+                assertSame(first, scene.prepare(snapshot, java.util.Set.of(), view, camera, 4096, 32,
+                        matrix, matrix, null), "Voxy uploads/retractions and real columns cannot erase fallback or rebuild the scene");
+            }
+            assertEquals(before, scene.worldVisits());
+            for (var position : java.util.List.of(camera.add(16, 0, 0), camera.add(16, 0, -16),
+                    camera.add(0, 0, -16), camera)) {
+                var movedView = new PredictionRenderer.CoverageView((int)Math.floor(position.x / 16),
+                        (int)Math.floor(position.z / 16), 1300, null);
+                var turned = new Matrix4f().rotateY((float)Math.atan2(position.z - 1, position.x + 1));
+                var moved = scene.prepare(snapshot, java.util.Set.of(), movedView, position, 4096, 32,
+                        turned, matrix, null);
+                assertEquals(2, moved.stream().filter(draw -> !draw.seam()).count(),
+                        "changing movement direction must preserve both resident fallback tiles");
+                for (var draw : moved) if (!draw.seam())
+                    for (boolean allowed : draw.allowed()) assertTrue(allowed);
+            }
+            assertEquals(GL_NO_ERROR, glGetError());
+            scene.clear();
+            System.out.println("PASS: fallback survives movement direction changes; 120 Voxy upload/empty/retraction frames reuse the unchanged scene");
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        finally {
+            dev.xantha.vss.compat.StrictLodVisibility.reset();
+            try { if (hook != null) hook.setBoolean(null, oldHook); }
+            catch (IllegalAccessException failure) { throw new AssertionError(failure); }
+            PredictionRenderer.resetOcclusion();
+            try {
+                var drain = PredictionRenderer.class.getDeclaredMethod("drainRetiredTiles");
+                drain.setAccessible(true);
+                for (int i = 0; i < 8; i++) drain.invoke(null);
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
             RenderSystem.activeTexture(GL_TEXTURE0);
         }
     }

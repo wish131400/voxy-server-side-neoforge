@@ -29,7 +29,7 @@ public final class PredictionFramePace {
         NONE,
         /** Halve ordinary refinement and stop background work. */
         REDUCE,
-        /** Stop ordinary refinement and background work entirely. */
+        /** Suspend ordinary work; current targets may use the bounded CPU-budget trickle. */
         PAUSE
     }
 

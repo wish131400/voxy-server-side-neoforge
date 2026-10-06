@@ -56,7 +56,8 @@ class PredictionMemoryLifecycleTest {
             var resident = new HashSet<PredictionTileManager.PredictionTileKey>();
             manager.readyTiles().forEach(tile -> resident.add(tile.key()));
             assertFalse(previouslyCovered.isEmpty(), "the constrained view must establish coverage");
-            assertNotNull(manager.coveringTile(2261 >> 4, 3901 >> 4, 0), "near coverage must survive exhaustion");
+            assertNotNull(manager.coveringTile(2261 >> 4, 3901 >> 4, 0),
+                    "near coverage must survive exhaustion: " + manager.surfaceDiagnostics());
             for (var key : resident) {
                 if (key.lod() == manager.layout().levelCount() - 1) continue;
                 assertTrue(resident.contains(new PredictionTileManager.PredictionTileKey(key.dimension(),
@@ -113,7 +114,7 @@ class PredictionMemoryLifecycleTest {
                 if (resident.containsAll(roots) && resident.stream().anyMatch(key -> key.lod() < top)) break;
             }
             assertTrue(manager.readyTiles().stream().map(PredictionTileManager.PredictionTile::key)
-                    .collect(java.util.stream.Collectors.toSet()).containsAll(roots));
+                    .collect(java.util.stream.Collectors.toSet()).containsAll(roots), manager.surfaceDiagnostics());
             var fineBefore = manager.readyTiles().stream().filter(tile -> tile.key().lod() < top)
                     .map(PredictionTileManager.PredictionTile::key).toList();
             assertFalse(fineBefore.isEmpty(), "test needs resident detail before ingest");
@@ -353,21 +354,27 @@ class PredictionMemoryLifecycleTest {
             var epochs = PredictionTileManager.class.getDeclaredField("captureEpochs");
             epochs.setAccessible(true);
             assertTrue(((java.util.Map<?, ?>) epochs.get(manager)).isEmpty());
-            coarsePlan(manager);
+            // Exercise one already-running task. Queued tasks are allowed to
+            // start with the new capture epoch, and the planner may select new keys.
+            var key = new PredictionTileManager.PredictionTileKey(PROFILE.levelKey(), 0, 0,
+                    manager.layout().levelCount() - 1);
+            var desired = PredictionTileManager.class.getDeclaredField("desiredKeys");
+            desired.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            var desiredKeys = (java.util.Set<PredictionTileManager.PredictionTileKey>) desired.get(manager);
+            desiredKeys.add(key);
+            var enqueue = PredictionTileManager.class.getDeclaredMethod("enqueue",
+                    PredictionTileManager.PredictionTileKey.class, int.class, int.class, boolean.class);
+            enqueue.setAccessible(true);
+            enqueue.invoke(manager, key, 0, 0, false);
             assertTrue(entered.await(3, TimeUnit.SECONDS));
-            var plan = PredictionTileManager.withCoarseCoverage(PredictionLodPlanner.plan(
-                    PROFILE.levelKey(), 64, 100, 64, manager.layout(), null, .01,
-                    PROFILE.minY(), PROFILE.minY() + PROFILE.height()), manager.layout());
-            for (var key : plan) {
-                int span = manager.layout().tileBlocks(key.lod()) / 16;
-                manager.capturedTerrainChanged(key.tileX() * span, key.tileZ() * span);
-            }
+            manager.capturedTerrainChanged(0, 0);
             release.countDown();
             await(() -> manager.pendingCount() == 0);
             assertEquals(0, manager.readyCount(), "pre-capture mesh cannot publish after capture");
-            coarsePlan(manager);
+            enqueue.invoke(manager, key, 0, 0, false);
             await(() -> manager.pendingCount() == 0);
-            assertTrue(manager.readyCount() > 0, "fresh builds resume after stale work is discarded");
+            assertEquals(1, manager.readyCount(), "the same tile rebuilds with the current capture epoch");
         } finally {
             release.countDown();
             VSSClientConfig.CONFIG.rememberTerrain = remember;

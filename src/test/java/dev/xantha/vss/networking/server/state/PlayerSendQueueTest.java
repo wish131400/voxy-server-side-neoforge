@@ -9,6 +9,42 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class PlayerSendQueueTest {
+    @Test
+    void cancelledPartialColumnReleasesOnlyTheRemainingFragments() {
+        PlayerSendQueue queue = new PlayerSendQueue();
+        var parts = List.of(splitPayload(7, 0, 0, 0, 3),
+                splitPayload(7, 0, 0, 1, 3), splitPayload(7, 0, 0, 2, 3));
+        queue.enqueue(parts, true, 10, 1_000_000, false);
+        var batch = queue.peekPriorityBatch(0, 0);
+        queue.consumeBatchPayload(batch);
+        assertEquals(2, queue.queuedPayloadCount());
+        assertEquals(2, queue.priorityQueuedPayloadCount());
+        queue.cancel(7);
+        assertEquals(0, queue.queuedPayloadCount());
+        assertEquals(0, queue.priorityQueuedPayloadCount());
+        assertEquals(0L, queue.queuedBytes());
+        assertEquals(0, queue.pendingRequestIds().length);
+        assertNull(queue.consumeBatchPayload(batch));
+    }
+
+    @Test
+    void cancellationReleasesSplitPayloadsEvenWhenNotAtQueueHead() {
+        PlayerSendQueue queue = new PlayerSendQueue();
+        var cleared = new ArrayList<Integer>();
+        enqueue(queue, payload(1, 1, 1), false, 10, 1_000_000, cleared);
+        enqueue(queue, payload(2, 20, 20), true, 10, 1_000_000, cleared);
+        queue.prepareOrder(0, 0);
+        queue.cancel(2);
+        assertEquals(1, queue.queuedPayloadCount());
+        assertEquals(0, queue.priorityQueuedPayloadCount());
+        assertEquals(payload(1, 1, 1).estimatedWireBytes(false), queue.queuedBytes());
+        assertEquals(1, queue.pendingRequestIds().length);
+        queue.cancel(1);
+        assertEquals(0L, queue.queuedBytes());
+        assertEquals(0, queue.queuedPayloadCount());
+        assertEquals(0, queue.pendingRequestIds().length);
+    }
+
 
     @Test
     void priorityPayloadIsPeekedBeforeNormalPayloads() {

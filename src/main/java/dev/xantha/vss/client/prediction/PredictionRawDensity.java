@@ -33,9 +33,22 @@ final class PredictionRawDensity {
         };
         if (parts == null || parts.length <= index || parts[index].getType() != double.class)
             throw new NoSuchFieldException("Unknown vanilla noise record layout");
-        var read = parts[index].getAccessor();
-        read.setAccessible(true);
-        return ((Number) read.invoke(noise)).doubleValue();
+        return ((Number) recordValue(noise, parts[index])).doubleValue();
+    }
+
+    static Object recordValue(Object record, RecordComponent part) throws ReflectiveOperationException {
+        var read = part.getAccessor();
+        if (read != null) {
+            read.setAccessible(true);
+            return read.invoke(record);
+        }
+        // Forge can remap an interface accessor independently of its record component.
+        // The Record attribute still identifies the exact backing field, including its SRG name.
+        var field = record.getClass().getDeclaredField(part.getName());
+        if (field.getType() != part.getType() || java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+            throw new NoSuchFieldException("Unknown density record field");
+        field.setAccessible(true);
+        return field.get(record);
     }
 
     Info inspect(Object value) {
@@ -47,6 +60,7 @@ final class PredictionRawDensity {
         if (value == null || value instanceof Number || value instanceof String) return HORIZONTAL;
         if (value instanceof DensityMemo.NonMemoizable) return new Info(false, false, true);
         if (value instanceof DensityMemo.Memoized memo) return memo.info;
+        if (value instanceof DensityCompilation.Root compiled) return inspect(compiled.original(), depth + 1);
         if (value instanceof Enum<?> && !(value instanceof DensityFunction)) return HORIZONTAL;
         Info cached = seen.get(value);
         if (cached != null) return cached;
@@ -72,9 +86,7 @@ final class PredictionRawDensity {
                     Class<?> t = part.getType();
                     if (t.isPrimitive() || t.isEnum() || t == float[].class
                             || t == DensityFunction.NoiseHolder.class) continue;
-                    var accessor = part.getAccessor();
-                    accessor.setAccessible(true);
-                    result = result.and(inspect(accessor.invoke(value), depth + 1));
+                    result = result.and(inspect(recordValue(value, part), depth + 1));
                 }
                 if (Set.of("YClampedGradient", "Shift", "WeirdScaledSampler", "BlendDensity").contains(simple))
                     result = result.and(VERTICAL);

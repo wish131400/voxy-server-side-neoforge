@@ -64,8 +64,7 @@ class PredictionSurfacePipelineTest {
                 0, 0, 0, 0, 0, 0, 0, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
         var samples = new ClientColumnSample[9]; java.util.Arrays.fill(samples, sample);
-        var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, 1, 3,
-                true, new PredictionFeatureStampCache(), null, null, 0, 0, surface);
+        var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, 1, 3, null, null, 0, 0, surface);
         var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                 Level.OVERWORLD, 0, 0, 0), new int[9], new int[9], samples, mesh,
                 new PredictionDepthBound(64, 66), 0, 1, 2, 1);

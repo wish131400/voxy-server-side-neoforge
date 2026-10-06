@@ -29,18 +29,28 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     private final String[][] featureOrder;
     private final Map<BlockState,Integer> stateIds = new IdentityHashMap<>();
     private final Map<String,Boolean> support = new ConcurrentHashMap<>();
+    private final RustVegetationDescriptors.Cache featureDescriptors = new RustVegetationDescriptors.Cache();
     private final PredictionTintCache tints = new PredictionTintCache(65536);
     private final java.util.concurrent.atomic.LongAdder tintNativeCalls = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder tintSeeded = new java.util.concurrent.atomic.LongAdder();
     private volatile long colorFingerprint = Long.MIN_VALUE;
     private final java.util.concurrent.atomic.LongAdder nativeFeatures = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder javaFeatures = new java.util.concurrent.atomic.LongAdder();
+    enum JavaFeatureReason { TREE_MODEL, ORDER_MISMATCH, UNSUPPORTED, TRANSACTION, PROXY, UNREGISTERED }
+    private final java.util.concurrent.atomic.LongAdder[] javaFeatureReasons =
+            java.util.Arrays.stream(JavaFeatureReason.values()).map(ignored -> new java.util.concurrent.atomic.LongAdder())
+                    .toArray(java.util.concurrent.atomic.LongAdder[]::new);
+    private final java.util.concurrent.atomic.LongAdder javaWithoutWrites = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder javaFailed = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder javaFeatureNanos = new java.util.concurrent.atomic.LongAdder();
     final java.util.concurrent.atomic.LongAdder gridCacheHits = new java.util.concurrent.atomic.LongAdder();
     final java.util.concurrent.atomic.LongAdder gridComputedPoints = new java.util.concurrent.atomic.LongAdder();
     private final it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<int[]> points =
             new it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<>(1024);
     private final ThreadLocal<ByteBuffer> scratch = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(256 * 40).order(ByteOrder.LITTLE_ENDIAN));
     private final ThreadLocal<ByteBuffer> positions = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(64 * 8).order(ByteOrder.LITTLE_ENDIAN));
+    private final ThreadLocal<int[]> missingScratch = ThreadLocal.withInitial(() -> new int[64]);
+    private final ThreadLocal<int[]> decodedScratch = ThreadLocal.withInitial(() -> new int[10]);
     private final ThreadLocal<ByteBuffer> wallColumn = ThreadLocal.withInitial(() ->
             ByteBuffer.allocateDirect(16 + profile().height() * 4).order(ByteOrder.LITTLE_ENDIAN));
 
@@ -167,6 +177,11 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     boolean terrablenderRouting() { return terrablenderRouting; }
     BlockState[] states() { return states; }
     String[][] featureOrder() { return featureOrder; }
+    RustVegetationDescriptors featureDescriptors(List<net.minecraft.world.level.levelgen.placement.PlacedFeature> features, int step) {
+        handle();
+        var registry = context.decorationAccess().registryOrThrow(net.minecraft.core.registries.Registries.PLACED_FEATURE);
+        return featureDescriptors.get(features, step, registry, featureOrder, this::supports);
+    }
     int stateId(BlockState state) { return stateIds.getOrDefault(state,-1); }
     boolean supports(String name) {
         return support.computeIfAbsent(name,key -> JsonParser.parseString(
@@ -240,15 +255,28 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         synchronized(points) {points.clear();}
     }
     void nativeFeatureCompleted() {nativeFeatures.increment();}
-    void javaFeatureCompleted() {javaFeatures.increment();}
-    // Exact records and vegetation are unchanged; keep existing world caches.
-    // Display records carry explicit quality flags within the terrain payload.
-    String cacheAlgorithm() { return "vanilla-rust-abi2-r3" + (signedSqrt ? ":signed-sqrt-r1" : ""); }
+    void javaFeatureCompleted(JavaFeatureReason reason, int writes, boolean success, long nanos) {
+        javaFeatures.increment();
+        javaFeatureReasons[reason.ordinal()].increment();
+        if (writes == 0) javaWithoutWrites.increment();
+        if (!success) javaFailed.increment();
+        javaFeatureNanos.add(nanos);
+    }
+
+    private String javaFeatureDiagnostics() {
+        var out = new StringBuilder("javaPlacement={ms=").append(javaFeatureNanos.sum()/1_000_000)
+                .append(",withoutWrites=").append(javaWithoutWrites.sum()).append(",failed=").append(javaFailed.sum());
+        for (var reason : JavaFeatureReason.values())
+            out.append(',').append(reason.name()).append('=').append(javaFeatureReasons[reason.ordinal()].sum());
+        return out.append('}').toString();
+    }
+    boolean signedSqrt() { return signedSqrt; }
 
     String diagnostics() {return "backend="+ALGORITHM+",nativeFeatures="+nativeFeatures.sum()+",compatibilityFeatures="+javaFeatures.sum()
+            +","+javaFeatureDiagnostics()
             +",tintCache={"+tints.diagnostics()+",nativeCalls="+tintNativeCalls.sum()+",seeded="+tintSeeded.sum()+"}"
             +",gridCacheHits="+gridCacheHits.sum()+",gridSubmittedPoints="+gridComputedPoints.sum()
-            +","+RustVegetationStage.diagnostics()+",groundQueries="+groundDiagnostics();}
+            +","+RustVegetationStage.diagnostics()+","+featureDescriptors.diagnostics()+",groundQueries="+groundDiagnostics();}
     private String groundDiagnostics() {
         long id=world;
         if(id==0 || cancelled) return "closed";
@@ -271,41 +299,60 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         synchronized(points) { points.putAndMoveToLast(key,data); while(points.size()>65536) points.removeFirst(); }
     }
     ClientColumnSample[] sampleGrid(int x,int z,int spacing,int axis) {
-        return sampleGrid(x, z, spacing, axis, axis);
+        return sampleGrid(x, z, spacing, axis, axis, new ClientColumnSample[axis * axis], false, false, false);
     }
     ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height) {
-        return sampleGrid(x,z,spacing,width,height,new ClientColumnSample[width*height]);
+        return sampleGrid(x,z,spacing,width,height,new ClientColumnSample[width * height], false, false, false);
     }
     ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained) {
-        return sampleGrid(x,z,spacing,width,height,retained,false);
+        return sampleGrid(x,z,spacing,width,height,retained,false,false,true);
     }
     ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained,boolean preview) {
-        return sampleGrid(x,z,spacing,width,height,retained,preview,false);
+        return sampleGrid(x,z,spacing,width,height,retained,preview,false,true);
     }
     ClientColumnSample[] sampleDisplayGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained) {
-        return sampleGrid(x,z,spacing,width,height,retained,false,true);
+        return sampleGrid(x,z,spacing,width,height,retained,false,true,true);
     }
-    private ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,ClientColumnSample[] retained,boolean preview,boolean display) {
+    /** Fills one window of the tile builder's task-owned grid without copying its references. */
+    ClientColumnSample[] sampleGridInPlace(int x,int z,int spacing,int width,int height,
+                                           ClientColumnSample[] retained,int offset,int rowStride,boolean preview) {
+        return sampleGrid(x,z,spacing,width,height,retained,offset,rowStride,preview,false);
+    }
+    ClientColumnSample[] sampleDisplayGridInPlace(int x,int z,int spacing,int width,int height,
+                                                  ClientColumnSample[] retained,int offset,int rowStride) {
+        return sampleGrid(x,z,spacing,width,height,retained,offset,rowStride,false,true);
+    }
+    private ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,
+                                            ClientColumnSample[] retained,boolean preview,boolean display,
+                                            boolean copyRetained) {
         if(width<1||width>8||height<1||height>8||spacing<1) throw new IllegalArgumentException("Native grid dimensions");
         if(retained.length!=width*height) throw new IllegalArgumentException("Retained grid dimensions");
+        return sampleGrid(x,z,spacing,width,height,copyRetained ? retained.clone() : retained,0,width,preview,display);
+    }
+    private ClientColumnSample[] sampleGrid(int x,int z,int spacing,int width,int height,
+                                            ClientColumnSample[] result,int offset,int rowStride,
+                                            boolean preview,boolean display) {
+        if(width<1||width>8||height<1||height>8||spacing<1) throw new IllegalArgumentException("Native grid dimensions");
+        if(offset<0||rowStride<width||(long)offset+(long)(height-1)*rowStride+width>result.length)
+            throw new IllegalArgumentException("Retained grid window");
         handle(); // Cached requests must still honor world cancellation.
-        ClientColumnSample[] result=retained.clone();
         ByteBuffer input=positions.get(),output=scratch.get();input.clear();
-        int[] missing=new int[result.length];
+        int[] missing=missingScratch.get();
         int count=0;
-        for(int i=0;i<result.length;i++) {
-            if(result[i]!=null && !(display ? result[i].reusableForDisplay() : result[i].reusableFor(preview))) result[i]=null;
-            if(result[i]!=null) continue;
+        for(int i=0;i<width*height;i++) {
+            int target=offset+i/width*rowStride+i%width;
+            if(result[target]!=null && !(display ? result[target].reusableForDisplay() : result[target].reusableFor(preview))) result[target]=null;
+            if(result[target]!=null) continue;
             int xx=x+i%width*spacing,zz=z+i/width*spacing;
             long key=(long)xx<<32|zz&0xffffffffL;
             int[] cached;
             synchronized(points) { cached=points.getAndMoveToLast(key); }
-            if(cached!=null) { result[i]=sampleRecord(cached,0); continue; }
+            if(cached!=null) { result[target]=sampleRecord(cached,0); continue; }
             missing[count++]=i;
         }
         // Refinement grids share aligned columns with their parents. Only
         // submit cache misses; previously every stage recomputed those columns.
-        gridCacheHits.add(result.length-count);
+        gridCacheHits.add(width*height-count);
         if(count==0) return result;
         // Surface refinement computes only requested columns. The native
         // batch shares noise/aquifer context without generating a full chunk.
@@ -318,14 +365,17 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
                 : preview ? RustWorldgenBackend.previewPoints(handle(),input,output,count)
                 : RustWorldgenBackend.surfacePoints(handle(),input,output,count);
         if(written!=count) throw new IllegalStateException("Incomplete native grid");
+        int[] decoded=decodedScratch.get();
         gridComputedPoints.add(count);
         for(int n=0;n<count;n++) {
             int i=missing[n];
-            int[] data=new int[10];for(int j=0;j<10;j++) data[j]=output.getInt((n*10+j)*4);
+            for(int j=0;j<10;j++) decoded[j]=output.getInt((n*10+j)*4);
             int xx=x+i%width*spacing,zz=z+i/width*spacing;
-            rememberColors(xx,zz,data,tintGeneration);
-            if(!preview && (data[3] & ClientColumnSample.FLAG_APPROXIMATE)==0) rememberPoint((long)xx<<32|zz&0xffffffffL,data);
-            result[i]=sampleRecord(data,0);
+            rememberColors(xx,zz,decoded,tintGeneration);
+            boolean cache = !preview && (decoded[3] & ClientColumnSample.FLAG_APPROXIMATE)==0;
+            int[] data = cache ? java.util.Arrays.copyOf(decoded, decoded.length) : decoded;
+            if(cache) rememberPoint((long)xx<<32|zz&0xffffffffL,data);
+            result[offset+i/width*rowStride+i%width]=sampleRecord(data,0);
         }
         return result;
     }
@@ -462,12 +512,9 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         try {
             try { RustWorldgenBackend.cancel(id); } finally { RustWorldgenBackend.close(id); }
         } finally {
+            featureDescriptors.clear();
             synchronized(points) { points.clear(); } synchronized(tints) { tints.clear(); }
-            if (context instanceof AutoCloseable owned) {
-                try { owned.close(); }
-                catch (RuntimeException | Error failure) { throw failure; }
-                catch (Exception failure) { throw new IllegalStateException("Could not release native prediction context", failure); }
-            }
+            context.close();
         }
     }
 }

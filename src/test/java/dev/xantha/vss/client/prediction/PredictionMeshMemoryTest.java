@@ -27,7 +27,7 @@ class PredictionMeshMemoryTest {
                         x > 8 && z % 5 == 0 ? ClientColumnSample.FLAG_TREE_HERE : 0);
             }
             PredictionMesh mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699,
-                    spacing, grid, true, new PredictionFeatureStampCache(), null, null, 0, 0);
+                    spacing, grid, null, null, 0, 0);
             PredictionPackedMesh before = PredictionPackedMesh.pack(tile(mesh, spacing));
             long originalBytes = mesh.retainedHeapBytes();
             PredictionMesh compact = mesh.compactForRendering();
@@ -91,7 +91,7 @@ class PredictionMeshMemoryTest {
         ClientColumnSample[] samples = new ClientColumnSample[grid * grid];
         Arrays.fill(samples, column(53, 1, 0));
         var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699,
-                1, grid, true, null, null, null, 0, 0);
+                1, grid, null, null, 0, 0);
         int[] heights = new int[grid * grid];
         Arrays.fill(heights, 53);
         var tile = new PredictionTileManager.PredictionTile(
@@ -115,8 +115,7 @@ class PredictionMeshMemoryTest {
             for (int z = 0; z < grid; z++) for (int x = 0; x < grid; x++)
                 samples[z * grid + x] = column(x < 6 ? 45 : 64 + (x + z) % 3 * 8,
                         x < 6 ? 1 : 0, x > 9 && z % 5 == 0 ? ClientColumnSample.FLAG_TREE_HERE : 0);
-            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699, spacing, grid,
-                    true, new PredictionFeatureStampCache(), null, null, 0, 0);
+            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xB2336699, spacing, grid, null, null, 0, 0);
             assertPublishedCompaction(mesh, spacing);
         }
     }
@@ -168,9 +167,11 @@ class PredictionMeshMemoryTest {
         long perBuild = (bean.getThreadAllocatedBytes(thread) - before) / 8;
         long payload = packed.quads().length * 4L;
         assertTrue(packed.quadCount() > 8_000);
-        assertTrue(perBuild < payload + 65_536,
-                "packing should allocate the flat payload plus fixed scratch, not arrays per quad: " + perBuild);
+        long indexes = packed.ownershipRuns.ends.length * 28L + packed.occlusionBounds.values.length * 4L;
+        assertTrue(perBuild < payload + indexes + 65_536,
+                "packing should allocate final payload/index arrays plus fixed scratch, not per-quad objects or growth copies: " + perBuild);
         System.out.println("packing allocation: quads=" + packed.quadCount() + ", payloadBytes=" + payload
+                + ", ownershipRuns=" + packed.ownershipRuns.ends.length + ", indexBytes=" + indexes
                 + ", allocatedBytesPerBuild=" + perBuild);
     }
 
@@ -185,8 +186,7 @@ class PredictionMeshMemoryTest {
                     net.minecraft.world.level.block.Blocks.MUSHROOM_STEM.defaultBlockState());
         var vegetation = PredictionVegetation.Tile.of(blocks, 0, 0, 64, 1, 1);
         assertThrows(PredictionMemoryBudget.MeshLimitException.class, () ->
-                PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, true,
-                        new PredictionFeatureStampCache(), null, null, 0, 0, vegetation));
+                PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, null, null, 0, 0, vegetation));
         var bounded = PredictionVegetation.boundedTile(blocks, 0, 0, 64, 1, 1);
         assertFalse(bounded.cells().isEmpty(), "budgeted forest must retain vegetation");
         assertEquals(blocks,bounded.blocks(),"the cap must not be met by deleting lower disconnected layers");
@@ -194,8 +194,7 @@ class PredictionMeshMemoryTest {
         // faces cannot fit the fixed budget; keep the coarse tile through the
         // existing geometry-limit gate instead of silently erasing geometry.
         assertThrows(PredictionMemoryBudget.MeshLimitException.class, () ->
-                PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, true,
-                        null, null, null, 0, 0, bounded));
+                PredictionMeshBuilder.build(dense, null, 63, 0xB2336699, 1, 66, null, null, 0, 0, bounded));
     }
 
     private static PredictionTileManager.PredictionTile tile(PredictionMesh mesh, int spacing) {

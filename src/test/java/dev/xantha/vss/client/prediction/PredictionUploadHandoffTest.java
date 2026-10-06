@@ -14,6 +14,22 @@ class PredictionUploadHandoffTest {
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     private static final VssLodLayout LAYOUT = VssLodLayout.of(65536, 6, true, true);
 
+    @Test void smallCachedTilesShareOneFrameWithoutExceedingTimeOrBytes() {
+        var budget = new PredictionUploadBudget();
+        int uploaded = 0;
+        while (budget.allows(64 * 1024)) {
+            budget.record(64 * 1024, 100_000);
+            uploaded++;
+        }
+        assertEquals(16, uploaded, "small cache hits should not be limited to two per frame");
+        budget.reset();
+        budget.record(1, PredictionUploadBudget.MAX_NANOS);
+        assertFalse(budget.allows(1), "measured upload time must still stop the burst");
+        budget.reset();
+        budget.record(PredictionUploadBudget.MAX_BYTES, 0);
+        assertFalse(budget.allows(1), "byte budget must still stop the burst");
+    }
+
     @Test void uploadCandidatesDrainAndRefreshForReplacementAndReset() {
         var state = new PredictionRenderResidency();
         var a = PredictionLodSeamsTest.tile(0, 0, 2, 64);
@@ -35,6 +51,37 @@ class PredictionUploadHandoffTest {
         assertEquals(2, state.pendingUploads(next).size());
     }
 
+    @Test void unchangedPendingListsAvoidResidentScansButStillObserveChangingViewsAndUploads() throws Exception {
+        var state = new PredictionRenderResidency();
+        var counted = new HashMap<PredictionTileKey, PredictionTile>() {
+            int reads;
+            @Override public PredictionTile get(Object key) { reads++; return super.get(key); }
+        };
+        var tilesField = PredictionRenderResidency.class.getDeclaredField("tiles");
+        tilesField.setAccessible(true);
+        tilesField.set(state, counted);
+        var tile = PredictionLodSeamsTest.tile(0, 0, 2, 64);
+        var initial = source(Map.of(tile.key(), tile));
+        state.retain(initial);
+        assertFalse(state.hasPendingUploads(initial, pending -> false));
+        int reads = counted.reads;
+        for (int frame = 0; frame < 120; frame++) {
+            assertEquals(java.util.List.of(tile), state.pendingUploads(initial));
+            assertTrue(state.hasPendingUploads(initial, pending -> true), "entering the horizon must see retained pending work immediately");
+        }
+        assertEquals(reads, counted.reads, "unchanged pending work must not scan GPU residents each frame");
+        state.uploaded(tile);
+        assertFalse(state.hasPendingUploads(initial, pending -> true));
+        var replacement = PredictionLodSeamsTest.tile(0, 0, 2, 96);
+        var next = source(Map.of(replacement.key(), replacement));
+        state.retain(next);
+        assertEquals(java.util.List.of(replacement), state.pendingUploads(next));
+        assertSame(tile, state.snapshot(next).tiles().get(tile.key()));
+        state.clear();
+        state.retain(next);
+        assertTrue(state.hasPendingUploads(next, pending -> true));
+    }
+
     @Test void frameBudgetKeepsCoarseCoverageUntilEachChildHasActuallyUploaded() {
         var state = new PredictionRenderResidency();
         var root = tile(0, 0, 1, 1);
@@ -54,7 +101,7 @@ class PredictionUploadHandoffTest {
         var budget = new PredictionUploadBudget();
         for (var tile : sourceTiles.values()) if (tile != root && budget.allows(1024)) {
             state.uploaded(tile);
-            budget.record(1024, 100_000);
+            budget.record(1024, 1_000_000);
         }
         var halfway = state.snapshot(completedOnWorkers);
         assertEquals(3, halfway.tiles().size(), "one parent and two uploaded children");
@@ -65,7 +112,7 @@ class PredictionUploadHandoffTest {
         budget.reset();
         for (var tile : sourceTiles.values()) if (!state.contains(tile) && budget.allows(1024)) {
             state.uploaded(tile);
-            budget.record(1024, 100_000);
+            budget.record(1024, 1_000_000);
         }
         assertEquals(5, state.snapshot(completedOnWorkers).tiles().size());
         var child = sourceTiles.get(new PredictionTileKey(Level.OVERWORLD, 0, 0, 0));
@@ -175,6 +222,31 @@ class PredictionUploadHandoffTest {
         var refined = source(Map.of(fullParent.key(),fullParent,fullChild.key(),fullChild));
         for (int desired=0; desired<11; desired++) assertSame(fullChild,refined.coveringTile(512,-520,desired),
                 "Already loaded distant detail must survive closing the telescope");
+    }
+
+    @Test void telescopeRefinementKeepsUploadedOrdinaryDetailThroughPreviewAndUpload() {
+        var state=new PredictionRenderResidency();
+        var parent=tile(8,-1,3,1);
+        var initial=source(Map.of(parent.key(),parent));
+        state.retain(initial); state.uploaded(parent);
+        var before=state.snapshot(initial);
+        var childKey=new PredictionTileKey(Level.OVERWORLD,16,-1,2);
+        var preview=new PredictionTile(childKey,new int[0],new int[0],new ClientColumnSample[0],null,
+                new PredictionDepthBound(64,64),0,2,8,32,true);
+        var published=source(Map.of(parent.key(),parent,preview.key(),preview));
+        state.retain(published);
+        assertSame(parent,state.snapshot(published).coveringTileAtDetail(256,-1,0),"CPU publication cannot transfer ownership before upload");
+        state.uploaded(preview);
+        assertSame(parent,state.snapshot(published).coveringTileAtDetail(256,-1,0),"a smaller tile with coarser actual samples cannot replace detail");
+        var child=new PredictionTile(childKey,new int[0],new int[0],new ClientColumnSample[0],null,
+                new PredictionDepthBound(64,64),0,3,64,4,true);
+        var completed=source(Map.of(parent.key(),parent,child.key(),child));
+        state.retain(completed);
+        assertSame(parent,state.snapshot(completed).coveringTileAtDetail(256,-1,0),"the finished child also waits for a GPU upload");
+        state.uploaded(child);
+        assertSame(child,state.snapshot(completed).coveringTileAtDetail(256,-1,0));
+        assertSame(parent,state.snapshot(completed).coveringTileAtDetail(272,-1,0),"unreplaced neighboring chunks keep their parent");
+        assertSame(parent,before.coveringTileAtDetail(256,-1,0),"the previously rendered frame stays immutable");
     }
 
     private static RenderSnapshot source(Map<PredictionTileKey, PredictionTile> tiles) {

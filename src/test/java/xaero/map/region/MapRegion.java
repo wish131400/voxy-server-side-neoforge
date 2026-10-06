@@ -12,6 +12,7 @@ public class MapRegion extends LeveledRegion<Object> {
     public boolean resting = true;
     public boolean canRequestReload = true;
     public int visits;
+    public boolean hasHadTerrain;
     public Boolean beingWritten; // null until first set — pins "set true, never cleared"
     public final MapTileChunk[][] chunks = new MapTileChunk[8][8];
 
@@ -70,4 +71,3 @@ public class MapRegion extends LeveledRegion<Object> {
 
     public void setChunk(int x, int z, MapTileChunk chunk) { this.chunks[x][z] = chunk; }
 }
-

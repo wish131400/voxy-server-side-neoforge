@@ -7,6 +7,19 @@ import org.junit.jupiter.api.Test;
 
 class RetryBackoffTest {
     @Test
+    void repeatedTimeoutsBackOffAndSuccessfulDeliveryRestoresFastRetry() {
+        ManualClock clock = new ManualClock(0L);
+        RetryBackoff backoff = backoff(clock);
+        for (int i = 0; i < 100; i++) backoff.markTimeout(42L);
+        assertTrue(backoff.isCoolingDown(42L, 15_999L));
+        assertFalse(backoff.isCoolingDown(42L, 16_000L));
+        backoff.clear(42L);
+        backoff.markTimeout(42L);
+        assertTrue(backoff.isCoolingDown(42L, 999L));
+        assertFalse(backoff.isCoolingDown(42L, 1_000L));
+    }
+
+    @Test
     void sustainedBackpressureSlowsRetriesButSuccessfulDeliveryRestoresFastRetry() {
         ManualClock clock = new ManualClock(0L);
         RetryBackoff backoff = backoff(clock);
@@ -123,7 +136,7 @@ class RetryBackoffTest {
     }
 
     @Test
-    void timeoutUsesFixedDelayAndClearsPreviousExponentialAttemptState() {
+    void firstTimeoutUsesBaseDelayAndClearsPreviousExponentialAttemptState() {
         ManualClock clock = new ManualClock(0L);
         RetryBackoff backoff = backoff(clock);
 

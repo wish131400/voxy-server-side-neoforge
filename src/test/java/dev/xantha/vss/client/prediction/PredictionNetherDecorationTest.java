@@ -72,7 +72,7 @@ class PredictionNetherDecorationTest {
         var generator = new NoiseBasedChunkGenerator(new FixedBiomeSource(biomes.getHolderOrThrow(biome)), settings);
         var random = RandomState.create(settings.value(), lookup.lookupOrThrow(Registries.NOISE), 42);
         var profile = new DimensionProfile(Level.NETHER.location(),42,0,256,"noise","minecraft:nether",1);
-        return new ClientTerrainSampler(42, profile, generator, random, LevelHeightAccessor.create(0,256),32,List.of(),null,registries) {
+        return new ClientTerrainSampler(42, profile, generator, random, LevelHeightAccessor.create(0,256),32,null,registries) {
             @Override ClientColumnSample sampleInterior(int x, int z) {
                 return synthetic ? resolveInterior(cavern().asSample(),x,z) : super.sampleInterior(x,z);
             }
@@ -159,6 +159,7 @@ class PredictionNetherDecorationTest {
                 var types=new java.util.TreeSet<String>();
                 expected.values().forEach(m->m.values().forEach(s->types.add(BuiltInRegistries.BLOCK.getKey(s.getBlock()).toString())));
                 System.out.println("NETHER_FEATURE_BLOCKS "+types);
+                cache.flush();
             }
             assertTrue(stems>0,"registered huge fungi must survive placement and extraction");
             assertTrue(plants>0,"registered ground vegetation must survive extraction");
@@ -211,7 +212,7 @@ class PredictionNetherDecorationTest {
         assertEquals(4,blocks.size(),"buried replacements also survive for volume editing");
         var tile=PredictionVegetation.Tile.of(blocks,0,0,4,1,1).withExteriorEnvelope();
         var samples=new ClientColumnSample[25]; Arrays.fill(samples,cavern().asSample());
-        var mesh=PredictionMeshBuilder.build(samples,null,32,0,1,5,true,null,null,null,0,0,tile);
+        var mesh=PredictionMeshBuilder.build(samples,null,32,0,1,5,null,null,0,0,tile);
         boolean lower=false,upper=false,bottom=false;
         for(int v=0;v<mesh.vertexCount();v++) {
             if(mesh.y(v)==60) lower=true;
@@ -246,7 +247,7 @@ class PredictionNetherDecorationTest {
                 new BlockPos(2,90,2),Blocks.SOUL_FIRE.defaultBlockState());
         var tile=PredictionVegetation.Tile.of(blocks,0,0,4,1,1);
         var samples=new ClientColumnSample[25]; Arrays.fill(samples,new PredictionColumnVolume(new int[0]).asSample());
-        var mesh=PredictionMeshBuilder.build(samples,null,32,0,1,5,true,null,null,null,0,0,tile);
+        var mesh=PredictionMeshBuilder.build(samples,null,32,0,1,5,null,null,0,0,tile);
         assertEquals(24,mesh.vertexCount(),"two crossed quads per fire, no horizontal tile or cube");
         for(int v=0;v<mesh.vertexCount();v+=6) {
             float lo=Float.POSITIVE_INFINITY,hi=Float.NEGATIVE_INFINITY;
@@ -273,7 +274,7 @@ class PredictionNetherDecorationTest {
             assertTrue(edits.column(4,3,false).occupied(46,true),"adjacent unedited rock remains solid");
             assertFalse(edits.column(3,3,false).occupied(43,true),"foundation must replace the original rock");
             assertTrue(edits.column(3,3,true).occupied(43,true),"foundation still occludes neighboring terrain");
-            var mesh=PredictionMeshBuilder.build(samples,null,32,0,spacing,grid,true,null,null,null,0,0,tile);
+            var mesh=PredictionMeshBuilder.build(samples,null,32,0,spacing,grid,null,null,0,0,tile);
             boolean floor=false,ceiling=false;
             for(int v=0;v<mesh.vertexCount();v++) {
                 if(mesh.y(v)==44 && mesh.normalY(v)==1) floor=true;

@@ -83,7 +83,14 @@ final class ClientWorldgenProfileDecoder {
         // Templates belong to the Java surface stage. Avoid parsing/copying
         // several MiB of Base64 building data into every native terrain graph.
         registryRoot.remove("structure_templates");
-        return new Session(payload, clientRegistries, registryRoot, registries, inputs);
+        return new Session(payload, clientRegistries, registryRoot, registries, inputs,
+                () -> {
+                    try {
+                        byte[] legacyJson = LodByteCompression.decompress(payload.registries(), payload.registriesCompression(),
+                                payload.registriesRawSize(), WorldgenProfileS2CPayload.MAX_REGISTRIES_RAW_BYTES);
+                        return dev.xantha.vss.common.worldgen.WorldgenJson.sha256(parse(legacyJson));
+                    } catch (IOException failure) { throw new java.io.UncheckedIOException(failure); }
+                });
     }
 
     /** Registry/compact-palette inputs belong to one accepted profile, never to a global cache. */
@@ -91,14 +98,17 @@ final class ClientWorldgenProfileDecoder {
         private final WorldgenProfileS2CPayload payload;
         private final RegistryAccess clientRegistries;
         private final JsonObject registryRoot;
+        private java.util.function.Supplier<String> legacyRegistryHash;
         private final ClientWorldgenRegistries registries;
         private final RustWorldgenDocument.SharedInputs shared;
         private final boolean ownsInputs;
         private boolean closed;
         Session(WorldgenProfileS2CPayload payload, RegistryAccess clientRegistries,
-                JsonObject registryRoot, ClientWorldgenRegistries registries, RustWorldgenDocument.SharedInputs inputs) {
+                JsonObject registryRoot, ClientWorldgenRegistries registries, RustWorldgenDocument.SharedInputs inputs,
+                java.util.function.Supplier<String> legacyRegistryHash) {
             this.payload = payload; this.clientRegistries = clientRegistries;
             this.registryRoot = registryRoot; this.registries = registries;
+            this.legacyRegistryHash = legacyRegistryHash;
             ownsInputs = inputs == null;
             shared = ownsInputs ? new RustWorldgenDocument.SharedInputs() : inputs;
         }
@@ -108,25 +118,24 @@ final class ClientWorldgenProfileDecoder {
             for (DimensionProfile profile : payload.dimensions().stream().filter(p -> p.levelKey().equals(dimension)).toList()) {
                 checkActive(active);
                 var dimensionTiming = new PredictionInitializationTiming(profile.dimension().toString());
-                java.util.Optional<ClientTerrainSampler> custom = PredictionTerrainBackends.open(
-                        profile, profile.seed(), clientRegistries, registries, shared);
-                if (custom.isPresent()) {
-                    publish(profile, custom.get(), active, ready);
-                    dimensionTiming.finish();
-                    continue;
-                }
-                if (profile.generatorData().length == 0) {
-                    VSSLogger.warn("VSS prediction unavailable for " + profile.dimension()
-                            + ": generator supplied no reproducible snapshot (" + profile.generatorType() + ")");
-                    continue;
-                }
                 try {
-                    byte[] generatorJson = LodByteCompression.decompress(
-                            profile.generatorData(),
-                            profile.generatorCompression(),
-                            profile.generatorRawSize(),
-                            WorldgenProfileS2CPayload.MAX_GENERATOR_RAW_BYTES);
-                    JsonObject generatorRoot = parse(generatorJson);
+                    JsonObject generatorRoot = profile.generatorData().length == 0 ? null : parse(LodByteCompression.decompress(
+                            profile.generatorData(), profile.generatorCompression(), profile.generatorRawSize(),
+                            WorldgenProfileS2CPayload.MAX_GENERATOR_RAW_BYTES));
+                    java.util.function.Supplier<String> legacyIdentity = () -> PredictionCacheMigration.contentHash(
+                            payload.formatVersion(), payload.seed(), profile, legacyRegistryHash.get(), generatorRoot);
+                    java.util.Optional<ClientTerrainSampler> custom = PredictionTerrainBackends.open(
+                            profile, profile.seed(), clientRegistries, registries, shared);
+                    if (custom.isPresent()) {
+                        publish(profile, custom.get(), legacyIdentity, active, ready);
+                        dimensionTiming.finish();
+                        continue;
+                    }
+                    if (generatorRoot == null) {
+                        VSSLogger.warn("VSS prediction unavailable for " + profile.dimension()
+                                + ": generator supplied no reproducible snapshot (" + profile.generatorType() + ")");
+                        continue;
+                    }
                     String unsupported = PredictionWorldgenCapabilities.rejection(generatorRoot);
                     if (unsupported != null) {
                         VSSLogger.warn("VSS prediction unavailable for " + profile.dimension() + ": " + unsupported);
@@ -155,7 +164,7 @@ final class ClientWorldgenProfileDecoder {
                     ClientTerrainSampler betterEndSampler = javaSampler == null ? null
                             : BetterEndCompat.wrap(profile, javaSampler);
                     if (betterEndSampler != null) {
-                        publish(profile, betterEndSampler, active, ready);
+                        publish(profile, betterEndSampler, legacyIdentity, active, ready);
                         dimensionTiming.finish();
                         continue;
                     }
@@ -165,13 +174,13 @@ final class ClientWorldgenProfileDecoder {
                     ClientTerrainSampler rustSampler = javaSampler != null && nativeRejection == null
                             ? RustTerrainSampler.open(profile, generatorRoot, registryRoot, javaSampler, shared) : null;
                     if (rustSampler != null) {
-                        publish(profile, rustSampler, active, ready);
+                        publish(profile, rustSampler, legacyIdentity, active, ready);
                         dimensionTiming.mark("nativeAndPublish");
                         dimensionTiming.finish();
                         continue;
                     }
                     if (javaSampler != null) {
-                        publish(profile, javaSampler, active, ready);
+                        publish(profile, javaSampler, legacyIdentity, active, ready);
                         dimensionTiming.finish();
                         if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging) {
                             VSSLogger.debug("VSS prediction backend: dimension=" + profile.dimension()
@@ -189,7 +198,7 @@ final class ClientWorldgenProfileDecoder {
                 }
             }
         }
-        @Override public void close() { closed = true; if (ownsInputs) shared.close(); }
+        @Override public void close() { closed = true; legacyRegistryHash = null; if (ownsInputs) shared.close(); }
     }
 
     static java.util.List<DimensionProfile> orderedDimensions(java.util.List<DimensionProfile> dimensions,
@@ -205,15 +214,17 @@ final class ClientWorldgenProfileDecoder {
     }
 
     private static void publish(DimensionProfile profile, ClientTerrainSampler sampler,
+            java.util.function.Supplier<String> legacyIdentity,
             java.util.function.BooleanSupplier active,
             java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> ready) {
         try {
             checkActive(active);
+            sampler.legacyCacheIdentity(legacyIdentity);
             ready.accept(profile.levelKey(), sampler);
         } catch (RuntimeException | Error failure) {
             PredictionResources.releaseSampler(sampler);
             throw failure;
-        }
+        } finally { sampler.legacyCacheIdentity(null); }
     }
 
     static ClientTerrainSampler decodeJavaSampler(DimensionProfile profile,
@@ -253,7 +264,7 @@ final class ClientWorldgenProfileDecoder {
                 profile, generator, randomState, heights, registries, clientRegistries);
         ClientTerrainSampler sampler = new ClientTerrainSampler(
                 profile.seed(), profile, generator, randomState, heights, settings.seaLevel(),
-                registries.structureIds(), registries, clientRegistries);
+                registries, clientRegistries);
         // Epic Terrain uses height-dependent cache_2d nodes. Its surface needs
         // NoiseChunk's evaluation order, including when no native library loads.
         return registries.hasDensityNamespace("etn") ? new MinecraftColumnTerrainSampler(sampler) : sampler;

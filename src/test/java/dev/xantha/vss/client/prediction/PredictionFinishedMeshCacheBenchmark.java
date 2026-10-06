@@ -76,7 +76,7 @@ class PredictionFinishedMeshCacheBenchmark {
     }
 
     private static Snapshot build(ClientColumnSample[] samples,int grid,PredictionVegetation.Tile vegetation) throws Exception {
-        var mesh=PredictionMeshBuilder.build(samples,null,63,0xb22d78c5,1,grid,true,null,null,null,0,0,vegetation).compactForRendering();
+        var mesh=PredictionMeshBuilder.build(samples,null,63,0xb22d78c5,1,grid,null,null,0,0,vegetation).compactForRendering();
         int axis=mesh.cellAxis(),n=(axis+1)*(axis+1);int[] heights=new int[n];Arrays.fill(heights,70);
         var tile=new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
                 net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION,ResourceLocation.withDefaultNamespace("overworld")),0,0,0),

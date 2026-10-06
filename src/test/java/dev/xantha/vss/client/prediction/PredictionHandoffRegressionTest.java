@@ -62,7 +62,7 @@ class PredictionHandoffRegressionTest {
                     net.minecraft.world.level.block.Blocks.MUSHROOM_STEM.defaultBlockState());
             var plants = PredictionVegetation.Tile.of(blocks, 0, 0, 16 * step, step, size);
             PredictionMesh mesh = PredictionMeshBuilder.build(forest, null, 63, 0xB22D78C5,
-                    step, GRID, true, null, null, null, 0, 0, plants);
+                    step, GRID, null, null, 0, 0, plants);
             assertTrue(mesh.vertexCount() > 256 * 6, "forest missing at spacing " + step);
             assertEquals(256 * 6 + 30, mesh.vertexCount(), "one placed voxel emits five exterior faces");
         }
@@ -86,8 +86,7 @@ class PredictionHandoffRegressionTest {
     }
 
     private static PredictionMesh build(ClientColumnSample[] samples, int step, int[] waterColors) {
-        return PredictionMeshBuilder.build(samples, null, 63, 0xB22D78C5, step, GRID,
-                true, new PredictionFeatureStampCache(), null, waterColors, 2304, 3904);
+        return PredictionMeshBuilder.build(samples, null, 63, 0xB22D78C5, step, GRID, null, waterColors, 2304, 3904);
     }
 
     private static ClientColumnSample[] filled(ClientColumnSample sample) {

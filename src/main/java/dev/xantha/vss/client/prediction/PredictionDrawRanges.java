@@ -4,6 +4,11 @@ package dev.xantha.vss.client.prediction;
 final class PredictionDrawRanges {
     final int[] first, count;
     final int quads;
+    /** Already selected ordered ranges, including plans with more than 32 runs. */
+    PredictionDrawRanges(int[] first, int[] count) {
+        this.first = first; this.count = count;
+        this.quads = java.util.Arrays.stream(count).sum();
+    }
     PredictionDrawRanges(int[] starts, int[] counts, int visible) {
         int[] f=new int[counts.length], c=new int[counts.length];
         int size=0,total=0;

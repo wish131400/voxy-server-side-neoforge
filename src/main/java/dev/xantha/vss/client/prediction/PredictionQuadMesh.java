@@ -129,12 +129,12 @@ public final class PredictionQuadMesh {
                         && mesh.z(first) == (cell / cellAxis) * spacing
                         && mesh.x(first + 1) == (cell % cellAxis + 1) * spacing
                         && mesh.z(first + 5) == (cell / cellAxis + 1) * spacing;
-                // Only perfectly flat, equal-colour cells are merged. Sloped
-                // cells retain their own quad so the height field stays exact.
-                if (completeTops[cell] && flat && c0 == c1 && c0 == c2 && c0 == c3) {
-                    // A repeated gradient cannot be stretched across a merged
-                    // rectangle without changing its interpolated colours.
-                    TopSignature signature = new TopSignature(y0, c0, c1, c2, c3);
+                // A shared affine colour field is exact under either triangulation.
+                // Repeated per-cell gradients and bilinear/nonlinear fields remain separate.
+                TopSignature signature = completeTops[cell] && flat
+                        && (mesh.affineTintSafe || c0 == c1 && c0 == c2 && c0 == c3)
+                        ? topSignature(y0, cell % cellAxis, cell / cellAxis, c0, c1, c2, c3) : null;
+                if (signature != null) {
                     final int materialId = nextMaterial++;
                     topKeys[cell] = topMaterials.computeIfAbsent(signature,
                             ignored -> materialId);
@@ -176,12 +176,21 @@ public final class PredictionQuadMesh {
             if (rect.material() == Integer.MIN_VALUE) continue;
             int cell = rect.z() * cellAxis + rect.x();
             int first = mesh.cellOffsets == null ? cell * 6 : mesh.cellOffsets[cell];
-            // The second/fourth source corners already sit one cell from the
-            // origin, so add only the remaining cell intervals.
-            int stepX = (rect.width() - 1) * Math.round(mesh.x(first + 1) - mesh.x(first));
-            int stepZ = (rect.height() - 1) * Math.round(mesh.z(first + 5) - mesh.z(first));
-            terrain.append(mesh, first, first + 1, first + 2, first + 5,
-                    cell, rect.width(), rect.height(), TOP | (completeTops[cell] ? LOD_TEXTURE_SCALE : 0), stepX, stepZ);
+            // Copy the real outer corners, including their colours. Extending the
+            // first cell's corners would stretch its gradient across the whole rectangle.
+            int farX = cell + rect.width() - 1;
+            int farZ = cell + (rect.height() - 1) * cellAxis;
+            int farXZ = farZ + rect.width() - 1;
+            int fX = mesh.cellOffsets == null ? farX * 6 : mesh.cellOffsets[farX];
+            int fZ = mesh.cellOffsets == null ? farZ * 6 : mesh.cellOffsets[farZ];
+            int fXZ = mesh.cellOffsets == null ? farXZ * 6 : mesh.cellOffsets[farXZ];
+            // A public template can start with a hedge side when the base is
+            // covered or cleared. Preserve that face's direction for culling.
+            int group = VssLodFaceGroup.ofNormal(mesh.normalX(first), mesh.normalY(first), mesh.normalZ(first));
+            if (completeTops[cell]) group |= LOD_TEXTURE_SCALE;
+            else if (mesh.normalY(first) == 0 && mesh.terrainEnds != null && first < mesh.terrainEnds[cell]) group |= TERRAIN_WALL;
+            terrain.append(mesh, first, fX + 1, fXZ + 2, fZ + 5,
+                    cell, rect.width(), rect.height(), group, 0, 0);
         }
         java.util.List<VssLodGreedyMesher.Rectangle> waterRects =
                 VssLodGreedyMesher.merge(waterKeys, cellAxis, maxMergedCells, maxMergedCells);
@@ -252,7 +261,80 @@ public final class PredictionQuadMesh {
                 water.widths(), water.heights(), water.count(), cellAxis);
     }
 
-    private record TopSignature(int y, int c0, int c1, int c2, int c3) {
+    /** Cell-disjoint worker segments become one upload, preserving their exact faces. */
+    static PredictionQuadMesh combine(java.util.List<PredictionQuadMesh> parts) {
+        if (parts.isEmpty()) throw new IllegalArgumentException("missing mesh segments");
+        if (parts.size() == 1) return parts.get(0);
+        int axis = parts.get(0).cellAxis;
+        int count = 0, waterCount = 0;
+        boolean compact = true, waterCompact = true;
+        for (var part : parts) {
+            if (part.cellAxis != axis) throw new IllegalArgumentException("segment topology differs");
+            count = Math.addExact(count, part.quadCount);
+            waterCount = Math.addExact(waterCount, part.waterQuadCount);
+            compact &= part.normals.length == part.quadCount * 3;
+            waterCompact &= part.waterNormals.length == part.waterQuadCount * 3;
+        }
+        float[] positions = new float[count * 12], normals = new float[count * (compact ? 3 : 12)];
+        int[] colors = new int[count * 4], cells = new int[count], origins = new int[count];
+        byte[] groups = new byte[count];
+        short[] widths = new short[count], heights = new short[count];
+        float[] waterPositions = new float[waterCount * 12];
+        float[] waterNormals = new float[waterCount * (waterCompact ? 3 : 12)];
+        int[] waterColors = new int[waterCount * 4], waterCells = new int[waterCount];
+        short[] waterWidths = new short[waterCount], waterHeights = new short[waterCount];
+        int offset = 0, waterOffset = 0;
+        for (var part : parts) {
+            int n = part.quadCount, w = part.waterQuadCount;
+            System.arraycopy(part.positions, 0, positions, offset * 12, n * 12);
+            copyNormals(part.normals, normals, offset, n, compact);
+            System.arraycopy(part.colors, 0, colors, offset * 4, n * 4);
+            System.arraycopy(part.cells, 0, cells, offset, n);
+            System.arraycopy(part.originCells, 0, origins, offset, n);
+            System.arraycopy(part.groups, 0, groups, offset, n);
+            System.arraycopy(part.widths, 0, widths, offset, n);
+            System.arraycopy(part.heights, 0, heights, offset, n);
+            System.arraycopy(part.waterPositions, 0, waterPositions, waterOffset * 12, w * 12);
+            copyNormals(part.waterNormals, waterNormals, waterOffset, w, waterCompact);
+            System.arraycopy(part.waterColors, 0, waterColors, waterOffset * 4, w * 4);
+            System.arraycopy(part.waterCells, 0, waterCells, waterOffset, w);
+            System.arraycopy(part.waterWidths, 0, waterWidths, waterOffset, w);
+            System.arraycopy(part.waterHeights, 0, waterHeights, waterOffset, w);
+            offset += n;
+            waterOffset += w;
+        }
+        return new PredictionQuadMesh(positions, normals, colors, cells, groups, origins, widths, heights, count,
+                waterPositions, waterNormals, waterColors, waterCells, waterWidths, waterHeights, waterCount, axis);
+    }
+
+    private static void copyNormals(float[] source, float[] target, int offset, int count, boolean compact) {
+        if (compact || source.length == count * 12) {
+            int stride = compact ? 3 : 12;
+            System.arraycopy(source, 0, target, offset * stride, count * stride);
+        } else for (int quad = 0; quad < count; quad++) for (int corner = 0; corner < 4; corner++)
+            System.arraycopy(source, quad * 3, target, (offset + quad) * 12 + corner * 3, 3);
+    }
+
+    private record TopSignature(int y, int sprite, long red, long green, long blue) {
+    }
+
+    private static TopSignature topSignature(int y, int x, int z, int c0, int c1, int c2, int c3) {
+        int sprite = c0 >>> 24;
+        if (sprite != c1 >>> 24 || sprite != c2 >>> 24 || sprite != c3 >>> 24) return null;
+        long red = colorPlane(16, x, z, c0, c1, c2, c3);
+        long green = colorPlane(8, x, z, c0, c1, c2, c3);
+        long blue = colorPlane(0, x, z, c0, c1, c2, c3);
+        return red == Long.MIN_VALUE || green == Long.MIN_VALUE || blue == Long.MIN_VALUE
+                ? null : new TopSignature(y, sprite, red, green, blue);
+    }
+
+    private static long colorPlane(int shift, int x, int z, int c0, int c1, int c2, int c3) {
+        int a = c0 >>> shift & 255, b = c1 >>> shift & 255;
+        int c = c2 >>> shift & 255, d = c3 >>> shift & 255;
+        if (a + c != b + d) return Long.MIN_VALUE;
+        int dx = b - a, dz = d - a;
+        return (a - x * dx - z * dz & 0xffffffffL)
+                | ((long) (dx & 511) << 32) | ((long) (dz & 511) << 41);
     }
 
     private record WallKey(int top, int bottom, int normalX, int normalY, int normalZ,

@@ -33,15 +33,42 @@ final class TerrablenderUniqueness {
      * 2001, and {@code regionSize} normal zooms from salt 1001.
      */
     static Tree build(long worldSeed, int regionSize, List<Region> regions) {
-        Tree tree = new Initial(worldSeed, 1L, List.copyOf(regions));
-        tree = new Zoom(tree, worldSeed, 2000L, true);
+        Tree tree = new Cached(new Initial(worldSeed, 1L, List.copyOf(regions)));
+        tree = new Cached(new Zoom(tree, worldSeed, 2000L, true));
         for (int i = 0; i < 3; i++) {
-            tree = new Zoom(tree, worldSeed, 2001L + i, false);
+            tree = new Cached(new Zoom(tree, worldSeed, 2001L + i, false));
         }
         for (int i = 0; i < regionSize; i++) {
-            tree = new Zoom(tree, worldSeed, 1001L + i, false);
+            tree = new Cached(new Zoom(tree, worldSeed, 1001L + i, false));
         }
         return tree;
+    }
+
+    private static final class Cached implements Tree {
+        private static final int SIZE = 1024;
+        private final Tree source;
+        private final ThreadLocal<Entries> workers = ThreadLocal.withInitial(Entries::new);
+
+        Cached(Tree source) { this.source = source; }
+
+        @Override public int get(int x, int z) {
+            Entries entries = workers.get();
+            int hash = x * 0x9E3779B9 ^ Integer.rotateLeft(z * 0x85EBCA6B, 11);
+            int slot = (hash ^ hash >>> 16) & (SIZE - 1);
+            if (entries.valid[slot] && entries.x[slot] == x && entries.z[slot] == z)
+                return entries.value[slot];
+            int value = source.get(x, z);
+            entries.x[slot] = x;
+            entries.z[slot] = z;
+            entries.value[slot] = value;
+            entries.valid[slot] = true;
+            return value;
+        }
+
+        private static final class Entries {
+            final int[] x = new int[SIZE], z = new int[SIZE], value = new int[SIZE];
+            final boolean[] valid = new boolean[SIZE];
+        }
     }
 
     /** Vanilla {@code net.minecraft.util.LinearCongruentialGenerator}. */

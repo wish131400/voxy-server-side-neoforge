@@ -14,6 +14,8 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.util.SimpleBitStorage;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -70,20 +72,70 @@ class NbtSectionSerializerTest {
         assertTrue(complete(chunk(0,256,3,64),0,256));
         assertTrue(complete(chunk(-128,512,5,224),-128,512));
     }
-    @Test void genuinelyMissingSurfaceStillRequiresLoading() {
-        assertFalse(complete(chunk(-64,384,0,144),-64,384));
+    @Test void staleHeightmapAboveActualTerrainDoesNotRejectFullChunk() {
+        assertTrue(complete(chunk(-64,384,0,144),-64,384));
+        assertTrue(complete(chunk(-64,2096,0,2064),-64,2096));
     }
     @Test void outOfRangeBlockSectionIsNotSilentlyIgnored() {
         var tag=chunk(-64,384,19,384);tag.getList("sections",10).add(stoneSection(20));
         assertFalse(complete(tag,-64,384));
     }
-    @Test void truncatedHeightmapCannotCertifyCompleteness() {
+    @Test void truncatedHeightmapDoesNotOverrideValidSectionData() {
         var tag=chunk(-64,384,19,384);
         tag.getCompound("Heightmaps").putLongArray("WORLD_SURFACE",new long[]{0});
+        assertTrue(complete(tag,-64,384));
+    }
+    @Test void invalidHeightValueDoesNotOverrideValidSectionData() {
+        assertTrue(complete(chunk(-64,384,19,511),-64,384));
+    }
+    @Test void missingHeightmapsDoNotOverrideValidSectionData() {
+        var tag=chunk(-64,384,4,144);tag.remove("Heightmaps");
+        assertTrue(complete(tag,-64,384));
+    }
+    @Test void malformedBlockSectionStillRejectsColumn() {
+        var tag=chunk(-64,384,4,144);
+        tag.getList("sections",10).getCompound(0).put("block_states",new CompoundTag());
         assertFalse(complete(tag,-64,384));
     }
-    @Test void invalidHeightValueCannotCertifyCompleteness() {
-        assertFalse(complete(chunk(-64,384,19,511),-64,384));
+    @Test void protoChunkStillRequiresGeneration() {
+        var tag=chunk(-64,384,4,144);tag.putString("Status","minecraft:noise");
+        assertNull(NbtSectionSerializer.serializeTag(registries,-64,384,1,2,Optional.of(tag)));
+    }
+    @Test void invalidSectionTagTypesStillRejectColumn() {
+        var tag=chunk(-64,384,4,144);
+        tag.getList("sections",10).getCompound(0).putString("block_states","invalid");
+        assertFalse(complete(tag,-64,384));
+        tag=chunk(-64,384,4,144);
+        tag.getList("sections",10).getCompound(0).putString("Y","invalid");
+        assertFalse(complete(tag,-64,384));
+    }
+    @Test void tallDimensionCountDoesNotOverwriteTheFirstSection() {
+        var tag=chunk(-64,2096,0,2064);var sections=new ListTag();
+        for(int y=-4;y<127;y++) sections.add(stoneSection(y));
+        tag.put("sections",sections);
+        var result=NbtSectionSerializer.serializeTag(registries,-64,2096,1,2,Optional.of(tag));
+        assertNotNull(result);assertTrue(result.completeColumn());
+        assertEquals(131,result.sectionYs().length);
+        var buf=new net.minecraft.network.FriendlyByteBuf(io.netty.buffer.Unpooled.wrappedBuffer(result.sectionBytes()));
+        try {
+            assertEquals(131,buf.readVarInt());
+            int[] lengths=result.sectionLengths();
+            for(int y=-4;y<127;y++) {
+                int start=buf.readerIndex();
+                assertEquals(y,buf.readByte());
+                assertEquals(4096,buf.readShort());
+                buf.readerIndex(start+lengths[y+4]);
+            }
+            assertEquals(0,buf.readableBytes());
+        } finally { buf.release(); }
+    }
+    @Test void liveCompletenessUsesActualNonAirSections() {
+        var section=new LevelChunkSection(registries.registryOrThrow(Registries.BIOME));
+        section.setBlockState(0,0,0,Blocks.STONE.defaultBlockState());
+        LevelChunkSection[] sections={null,section};
+        assertTrue(SectionSerializer.isCompleteColumn(sections,-4,-3));
+        assertFalse(SectionSerializer.isCompleteColumn(sections,-4,-4));
+        assertTrue(SectionSerializer.isCompleteColumn(new LevelChunkSection[2],-4,Integer.MIN_VALUE));
     }
     @Test void validEmptyColumnRemainsComplete() {
         var tag=chunk(-64,384,0,0);var sections=new ListTag();

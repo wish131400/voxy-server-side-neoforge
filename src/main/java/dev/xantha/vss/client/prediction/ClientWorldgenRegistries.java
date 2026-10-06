@@ -11,7 +11,6 @@ import java.util.Optional;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.List;
-import java.util.ArrayList;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.RegistrationInfo;
@@ -64,7 +63,6 @@ final class ClientWorldgenRegistries {
      */
     private final Set<ResourceKey<? extends Registry<?>>> snapshotRegistries = new HashSet<>();
     private final Set<ResourceKey<? extends Registry<?>>> disabledCustom = new HashSet<>();
-    private final Map<ResourceLocation, Integer> structureSetSalts = new HashMap<>();
     private final RegistryAccess fallback;
     private final RegistryOps<JsonElement> ops;
     /** Verbatim decoded snapshot; the Rust document reads registry sections from it. */
@@ -139,7 +137,6 @@ final class ClientWorldgenRegistries {
         registries.registerOptional(registries.structures, root, "structures", Structure.DIRECT_CODEC);
         registries.registerOptional(registries.structureSets, root, "structure_sets",
                 StructureSet.DIRECT_CODEC);
-        registries.captureStructureSetSalts(root.getAsJsonObject("structure_sets"));
         registries.noises.freeze();
         registries.densityFunctions.freeze();
         registries.extraRegistries.values().forEach(MappedRegistry::freeze);
@@ -219,76 +216,6 @@ final class ClientWorldgenRegistries {
 
     boolean hasDensityNamespace(String namespace) {
         return densityFunctions.keySet().stream().anyMatch(id -> id.getNamespace().equals(namespace));
-    }
-
-    List<ResourceLocation> structureIds() {
-        if (disabledCustom.contains(Registries.STRUCTURE)) return List.of();
-        return new ArrayList<>(structures.keySet());
-    }
-
-    List<StructurePlacementInfo> structurePlacements() {
-        if (disabledCustom.contains(Registries.STRUCTURE_SET)
-                || disabledCustom.contains(Registries.STRUCTURE)) {
-            return List.of();
-        }
-        List<StructurePlacementInfo> result = new ArrayList<>();
-        for (Map.Entry<ResourceKey<StructureSet>, StructureSet> setEntry : structureSets.entrySet()) {
-            StructureSet set = setEntry.getValue();
-            net.minecraft.world.level.levelgen.structure.placement.StructurePlacement placement = set.placement();
-            if (!(placement instanceof net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement spread)) {
-                continue;
-            }
-            for (StructureSet.StructureSelectionEntry entry : set.structures()) {
-                ResourceLocation id = entry.structure().unwrapKey()
-                        .map(key -> key.location()).orElse(null);
-                if (id == null) continue;
-                java.util.Set<ResourceLocation> biomes = new java.util.HashSet<>();
-                Optional<Structure> structure = entry.structure().unwrapKey()
-                        .flatMap(key -> structures.getHolder(key).map(holder -> holder.value()));
-                structure.ifPresent(value -> value.biomes().stream()
-                        .map(holder -> holder.unwrapKey().map(key -> key.location()).orElse(null))
-                        .filter(java.util.Objects::nonNull).forEach(biomes::add));
-                // StructurePlacement.salt is intentionally protected in
-                // vanilla; the codec's stable structure id supplies an
-                // equivalent deterministic salt for the client probe.
-                int salt = structureSetSalts.getOrDefault(setEntry.getKey().location(), id.hashCode());
-                result.add(new StructurePlacementInfo(id, spread.spacing(), spread.separation(),
-                        salt, spread.spreadType(), java.util.Set.copyOf(biomes)));
-            }
-        }
-        return List.copyOf(result);
-    }
-
-    record StructurePlacementInfo(ResourceLocation id, int spacing, int separation, int salt,
-                                  net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType spreadType,
-                                  java.util.Set<ResourceLocation> biomes) { }
-
-    private void captureStructureSetSalts(JsonObject object) {
-        if (object == null) return;
-        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
-            JsonElement placement = entry.getValue().isJsonObject()
-                    ? entry.getValue().getAsJsonObject().get("placement") : null;
-            if (placement != null && placement.isJsonObject()
-                    && placement.getAsJsonObject().has("salt")) {
-                structureSetSalts.put(ResourceLocation.parse(entry.getKey()),
-                        placement.getAsJsonObject().get("salt").getAsInt());
-            }
-        }
-    }
-
-    /** Returns a decoded configured feature from the server snapshot. */
-    java.util.Optional<ConfiguredFeature<?, ?>> configuredFeature(ResourceLocation id) {
-        if (id == null || disabledCustom.contains(Registries.CONFIGURED_FEATURE)) {
-            return java.util.Optional.empty();
-        }
-        ResourceKey<ConfiguredFeature<?, ?>> key = ResourceKey.create(
-                Registries.CONFIGURED_FEATURE, id);
-        return configuredFeatures.getHolder(key).map(holder -> holder.value());
-    }
-
-    List<ResourceLocation> configuredFeatureIds() {
-        if (disabledCustom.contains(Registries.CONFIGURED_FEATURE)) return List.of();
-        return new ArrayList<>(configuredFeatures.keySet());
     }
 
     private <T> void registerInfo(MappedRegistry<T> registry) {

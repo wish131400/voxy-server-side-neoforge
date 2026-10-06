@@ -20,7 +20,7 @@ class DeferredColumnQueueTest {
 
         assertEquals(1, queue.size());
         assertEquals(1, queue.queuedEntries());
-        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10));
     }
 
     @Test
@@ -33,7 +33,7 @@ class DeferredColumnQueueTest {
         queue.defer(normal);
         queue.defer(urgent, true);
 
-        assertIterableEquals(List.of(urgent, normal), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(urgent, normal), queue.pollClosestCandidates(10));
     }
 
     @Test
@@ -51,7 +51,7 @@ class DeferredColumnQueueTest {
         assertTrue(queue.contains(near));
         assertTrue(queue.contains(middle));
         assertFalse(queue.contains(far));
-        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10));
     }
 
     @Test
@@ -61,7 +61,7 @@ class DeferredColumnQueueTest {
         queue.defer(1L);
         queue.remove(1L);
 
-        assertIterableEquals(List.of(), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(), queue.pollClosestCandidates(10));
         assertEquals(0, queue.queuedEntries());
     }
 
@@ -70,11 +70,11 @@ class DeferredColumnQueueTest {
         DeferredColumnQueue queue = new DeferredColumnQueue(10);
 
         queue.defer(1L);
-        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10));
         queue.requeue(1L, false);
 
         assertTrue(queue.contains(1L));
-        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(1L), queue.pollClosestCandidates(10));
     }
 
     @Test
@@ -89,7 +89,7 @@ class DeferredColumnQueueTest {
 
         assertEquals(1, queue.size());
         assertEquals(1, queue.queuedEntries());
-        assertIterableEquals(List.of(packed), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(packed), queue.pollClosestCandidates(10));
         assertEquals(0, queue.queuedEntries());
     }
 
@@ -105,7 +105,7 @@ class DeferredColumnQueueTest {
 
         queue.recenter(10, 0);
 
-        assertIterableEquals(List.of(east, west), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(east, west), queue.pollClosestCandidates(10));
     }
 
     @Test
@@ -140,11 +140,11 @@ class DeferredColumnQueueTest {
         assertTrue(queue.contains(near));
         assertTrue(queue.contains(middle));
         assertFalse(queue.contains(far));
-        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(near, middle), queue.pollClosestCandidates(10));
     }
 
     @Test
-    void urgentOnlyPollingSkipsNormalCandidates() {
+    void urgentPollingKeepsNormalCandidatesForTheNextBatch() {
         DeferredColumnQueue queue = new DeferredColumnQueue(10);
         long normal = position(1, 0);
         long urgent = position(4, 0);
@@ -153,9 +153,9 @@ class DeferredColumnQueueTest {
         queue.defer(normal);
         queue.defer(urgent, true);
 
-        assertIterableEquals(List.of(urgent), queue.pollClosestCandidates(10, true));
+        assertIterableEquals(List.of(urgent), queue.pollClosestCandidates(1));
         assertTrue(queue.contains(normal));
-        assertIterableEquals(List.of(normal), queue.pollClosestCandidates(10, false));
+        assertIterableEquals(List.of(normal), queue.pollClosestCandidates(10));
     }
 
     private static long position(int cx, int cz) {

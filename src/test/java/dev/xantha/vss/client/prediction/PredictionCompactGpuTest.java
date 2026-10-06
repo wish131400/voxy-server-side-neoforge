@@ -89,9 +89,9 @@ class PredictionCompactGpuTest {
                             var ranges=p.drawRanges(water,split?5:VssLodFaceGroup.ALL);if(ranges.quads==0)continue;
                             if(mode==2 && i%3!=1){assertTrue(batch.add(draw,ranges,camera,water,true,0));continue;}
                             if(mode==2)batch.flush();
-                            draw.gpu().bindTerrain(activeProgram);draw.gpu().bindYield(3);
+                            draw.gpu().bindTerrain(activeProgram, water);draw.gpu().bindYield(3);
                             activeProgram.setTile((float)(draw.tile().baseBlockX()-camera.x),(float)-camera.y,(float)(draw.tile().baseBlockZ()-camera.z),1,p.cellAxis(),true);
-                            activeProgram.setMorph(p,water?0:0.5f);activeProgram.setBoundaryReplacement(!water);PredictionRenderer.submitRanges(ranges);
+                            activeProgram.setMorph(p,water?0:0.5f);activeProgram.setBoundaryReplacement(!water);PredictionRenderer.submitRanges(ranges, p, water);
                         }
                         if(mode==2){assertTrue(batch.end()>0);assertEquals(sentinel,glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING,7));assertEquals(128,glGetInteger64i(GL_SHADER_STORAGE_BUFFER_SIZE,7));assertEquals(sentinel,glGetInteger(GL_DRAW_INDIRECT_BUFFER_BINDING));}
                         glBindBufferBase(GL_SHADER_STORAGE_BUFFER,7,0);glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);glBindBuffer(GL_DRAW_INDIRECT_BUFFER,0);glDeleteBuffers(sentinel);

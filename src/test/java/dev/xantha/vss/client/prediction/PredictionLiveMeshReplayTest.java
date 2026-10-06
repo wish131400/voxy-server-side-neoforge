@@ -47,7 +47,7 @@ class PredictionLiveMeshReplayTest {
                     assertEquals(0,missing,"replay needs complete chunk inputs");
                     var bounded=PredictionVegetation.boundedTile(blocks,tx*128,tz*128,128,2,1);
                     var result=PredictionVegetation.meshWithinBudget(bounded,128,2,t -> PredictionMeshBuilder.build(
-                            data.samples(),materialColors,63,0xb22d78c5,2,(int)Math.sqrt(data.samples().length),true,null,
+                            data.samples(),materialColors,63,0xb22d78c5,2,(int)Math.sqrt(data.samples().length),
                             data.foliageTints(),data.waterTints(),tx*128,tz*128,t));
                     assertTrue(result.vertexCount()>0 && result.vertexCount()<=262144);
                     PredictionMeshMemoryTest.assertPublishedCompaction(result, 2);
@@ -57,7 +57,7 @@ class PredictionLiveMeshReplayTest {
                         long started=System.nanoTime();
                         var tile=size==0 ? PredictionVegetation.Tile.of(blocks,tx*128,tz*128,128,2,1) : PredictionVegetation.boundedTile(blocks,tx*128,tz*128,128,2,size);
                         try {
-                            var mesh=PredictionMeshBuilder.build(data.samples(),materialColors,63,0xb22d78c5,2,(int)Math.sqrt(data.samples().length),true,null,data.foliageTints(),data.waterTints(),tx*128,tz*128,tile);
+                            var mesh=PredictionMeshBuilder.build(data.samples(),materialColors,63,0xb22d78c5,2,(int)Math.sqrt(data.samples().length),data.foliageTints(),data.waterTints(),tx*128,tz*128,tile);
                             System.out.println("REPLAY size="+size+" actual="+tile.voxelSize()+" vertices="+mesh.vertexCount()+" ms="+(System.nanoTime()-started)/1e6);
                         } catch(PredictionMemoryBudget.MeshLimitException e) {System.out.println("REPLAY size="+size+" actual="+tile.voxelSize()+" LIMIT ms="+(System.nanoTime()-started)/1e6);}
                     }

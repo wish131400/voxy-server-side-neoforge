@@ -44,8 +44,7 @@ class PredictionSimpleVegetationTest {
             assertTrue(forms.forms().size() <= PredictionSimpleVegetation.MAX_FORMS);
             assertTrue(forms.forms().stream().allMatch(f -> f.height() >= 1 && f.height() <= 8));
             var plain = PredictionMeshBuilder.build(samples, colors(), 63, 0, step, 66, true);
-            var mesh = PredictionMeshBuilder.build(samples, colors(), 63, 0, step, 66, true,
-                    null, colors(), colors(), -512, -512, PredictionVegetation.Tile.EMPTY, forms);
+            var mesh = PredictionMeshBuilder.build(samples, colors(), 63, 0, step, 66, colors(), colors(), -512, -512, PredictionVegetation.Tile.EMPTY, forms);
             assertTrue(mesh.vertexCount() > plain.vertexCount());
             assertTrue(mesh.packed().quadCount() > plain.packed().quadCount());
             assertTrue(mesh.vertexCount() - plain.vertexCount() <= 60 * forms.forms().size());
@@ -112,8 +111,7 @@ class PredictionSimpleVegetationTest {
                 int mode = (round + order) % 2;
                 long start = System.nanoTime();
                 var simple = mode == 0 ? PredictionSimpleVegetation.Result.EMPTY : build(samples, step, forest());
-                var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, step, 66, true,
-                        null, colors, colors, 0, 0, PredictionVegetation.Tile.EMPTY, simple).compactForRendering();
+                var mesh = PredictionMeshBuilder.build(samples, colors, 63, 0, step, 66, colors, colors, 0, 0, PredictionVegetation.Tile.EMPTY, simple).compactForRendering();
                 long elapsed = System.nanoTime() - start;
                 if (round >= 8) { times[mode] += elapsed; quads[mode] += mesh.packed().quadCount(); }
             }

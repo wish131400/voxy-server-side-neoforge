@@ -25,6 +25,8 @@ public final class PredictionMesh {
     final int[] waterCounts;
     private final int cellAxis;
     final int spacingBlocks;
+    // Set only before packing dry fine meshes: no later water lighting or terrain morph.
+    boolean affineTintSafe;
     /** Worker-only end of ground geometry, before vegetation and structure faces. */
     int[] terrainEnds;
     /** Worker-side quad view, released after preparing a compact published mesh. */
@@ -46,6 +48,15 @@ public final class PredictionMesh {
                 new int[0], new boolean[0], vertices, waterVertices, axis * axis, null, null, null, null, axis);
         mesh.gpuPayload = payload;
         mesh.seamMesh = seams;
+        return mesh;
+    }
+
+    static PredictionMesh fromQuads(PredictionQuadMesh quads, int vertices, int waterVertices, int spacing) {
+        int axis = quads.cellAxis();
+        var mesh = new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
+                new int[0], new boolean[0], vertices, waterVertices, axis * axis,
+                null, null, null, null, axis, spacing);
+        mesh.packed = quads;
         return mesh;
     }
 
@@ -158,7 +169,7 @@ public final class PredictionMesh {
 
     /** Worker-only handoff retaining packed rendering and counts, without triangle access. */
     PredictionMesh compactForRendering() {
-        if (gpuPayload != null) return this;
+        if (gpuPayload != null || positions.length == 0 && waterPositions.length == 0 && packed != null) return this;
         PredictionQuadMesh quads = packed();
         PredictionMesh compact = new PredictionMesh(new float[0], new float[0], new int[0],
                 new float[0], new float[0], new int[0], new boolean[0],

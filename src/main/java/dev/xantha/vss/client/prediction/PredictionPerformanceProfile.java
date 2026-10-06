@@ -5,11 +5,12 @@ import dev.xantha.vss.config.VSSClientConfig;
 /**
  * Coarse resource presets for the prediction workers. The tiers only change
  * how many cores the prediction pool may occupy and when the frame-rate fuse
- * sheds background work; terrain distance, mesh detail and quality toggles
+ * sheds background work. All tiers also share CPU/frame admission with local
+ * generation; terrain distance, mesh detail and quality toggles
  * stay shared so a tier never produces a coarser world than a higher one.
  */
 public enum PredictionPerformanceProfile {
-    /** Quarter of the machine: prediction never competes with the render thread. */
+    /** Quarter of the logical processors, with the strictest frame-rate fuse. */
     LOW {
         @Override
         public int poolSize(int logicalProcessors) {
@@ -43,7 +44,7 @@ public enum PredictionPerformanceProfile {
             return FrameFuse.REDUCE;
         }
     },
-    /** Historical 0.3 behavior: every logical core but two, no automatic fuse. */
+    /** Every logical core but two; shared CPU/frame admission still applies. */
     HIGH {
         @Override
         public int poolSize(int logicalProcessors) {
@@ -84,7 +85,7 @@ public enum PredictionPerformanceProfile {
         return MEDIUM;
     }
 
-    /** Worker threads of the shared prediction executor. */
+    /** Maximum worker threads per dimension and base admission across dimensions. */
     public abstract int poolSize(int logicalProcessors);
 
     /** Concurrent ordinary-refinement slots when the config leaves them on auto. */
@@ -94,11 +95,11 @@ public enum PredictionPerformanceProfile {
 
     /** What the frame-rate fuse does to ordinary/background work. */
     public enum FrameFuse {
-        /** Never sheds work on slow frames. */
+        /** No additional tier fuse; the shared CPU/frame budget still applies. */
         NONE,
         /** Halves ordinary refinement and stops background work on slow frames. */
         REDUCE,
-        /** Stops ordinary refinement and background work entirely on slow frames. */
+        /** Pauses ordinary work; important current targets retain bounded trickle progress. */
         PAUSE
     }
 }

@@ -1,14 +1,23 @@
 package dev.xantha.vss.client.prediction;
 
 import java.util.Arrays;
+import dev.xantha.vss.common.worldgen.LostCityPreview;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 /** Builds a compact triangle grid from a 17x17 height sample. */
 public final class PredictionMeshBuilder {
     private static final int GRID_SIZE = 17;
     private static final int CELL_COUNT = (GRID_SIZE - 1) * (GRID_SIZE - 1);
     private static final int VERTICES_PER_CELL = 6;
+    private static final int SEGMENT_VERTEX_TARGET = 196_608;
     private static final int[] LOST_CITY_WALLS = {
             0xFF787D80, 0xFF737B6F, 0xFF666B72, 0xFF92918B
+    };
+    private static final int[][] FLUID_EDGES = {
+            {0, 0, 1, 0, 0, -1}, {1, 0, 1, 1, 1, 0},
+            {1, 1, 0, 1, 0, 1}, {0, 1, 0, 0, -1, 0}
     };
 
     /**
@@ -17,10 +26,13 @@ public final class PredictionMeshBuilder {
      * still-water line at the shoreline.
      */
     static final float FLUID_SURFACE_DROP = 1.001F - 8.0F / 9.0F;
-    /** Percentage of sampler-marked cells that actually grow a ground
-     *  plant; vanilla ground cover is patchy, not one cross per cell. */
-
     private PredictionMeshBuilder() {
+    }
+
+    private static void requireCurrent(java.util.function.BooleanSupplier current) {
+        if (Thread.currentThread().isInterrupted() || !current.getAsBoolean()) {
+            throw new java.util.concurrent.CancellationException("prediction mesh changed");
+        }
     }
 
     public static PredictionMesh build(int[] heights, int stepBlocks) {
@@ -132,77 +144,101 @@ public final class PredictionMeshBuilder {
      */
     public static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                        int seaLevel, int fluidColor, int stepBlocks) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, GRID_SIZE, true);
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, GRID_SIZE);
     }
 
     /** Builds a The finest-resolution mesh. The legacy overload remains 17x17 for API compatibility. */
     public static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                        int seaLevel, int fluidColor, int stepBlocks,
                                        int gridSize) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize, true);
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                null, null, 0, 0);
     }
 
+    /** Compatibility entry point; vegetation geometry is supplied explicitly by the caller. */
     public static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                        int seaLevel, int fluidColor, int stepBlocks,
-                                       int gridSize, boolean treesEnabled) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
-                treesEnabled, null);
-    }
-
-    static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
-                                int seaLevel, int fluidColor, int stepBlocks,
-                                int gridSize, boolean treesEnabled,
-                                PredictionFeatureStampCache featureStamps) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
-                treesEnabled, featureStamps, null);
-    }
-
-    /**
-     * @param foliageColors per-column {@code 0xFFRRGGBB} foliage tint (or
-     *        null) so feature stamps take the column biome's leaf colour
-     *        instead of the spawn-biome registry tint.
-     */
-    static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
-                                int seaLevel, int fluidColor, int stepBlocks,
-                                int gridSize, boolean treesEnabled,
-                                PredictionFeatureStampCache featureStamps,
-                                int[] foliageColors) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
-                treesEnabled, featureStamps, foliageColors, null, 0, 0);
+                                       int gridSize, boolean ignoredTreesEnabled) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize);
     }
 
     static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
-                                boolean treesEnabled, PredictionFeatureStampCache featureStamps,
                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ) {
         return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
-                treesEnabled, featureStamps, foliageColors, waterColors, baseX, baseZ, null);
+                foliageColors, waterColors, baseX, baseZ, null);
     }
 
     static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
-                                boolean treesEnabled, PredictionFeatureStampCache featureStamps,
                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
                                 PredictionVegetation.Tile vegetation) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize, treesEnabled,
-                featureStamps, foliageColors, waterColors, baseX, baseZ, vegetation, PredictionSimpleVegetation.Result.EMPTY);
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, PredictionSimpleVegetation.Result.EMPTY);
     }
 
     static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
-                                boolean treesEnabled, PredictionFeatureStampCache featureStamps,
                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple) {
-        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize, treesEnabled,
-                featureStamps, foliageColors, waterColors, baseX, baseZ, vegetation, simple, null);
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple, null);
     }
 
     static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
-                                boolean treesEnabled, PredictionFeatureStampCache featureStamps,
                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
                                 int[] cityBuildings) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple, cityBuildings, () -> true);
+    }
+
+    static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
+                                int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
+                                int[] cityBuildings, java.util.function.BooleanSupplier current) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple, cityBuildings, current, false);
+    }
+
+    static PredictionMesh buildForRendering(ClientColumnSample[] samples, int[] materialColors,
+                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
+                                 int[] cityBuildings, java.util.function.BooleanSupplier current) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple, cityBuildings, current, true);
+    }
+
+    /** Rendering entry point for the bounded Lost Cities exterior preview. */
+    static PredictionMesh buildForRenderingWithCityPreview(ClientColumnSample[] samples, int[] materialColors,
+                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
+                                 LostCityPreview.Tile cityBuildings, java.util.function.BooleanSupplier current) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple, null, cityBuildings, current, true);
+    }
+
+    private static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
+                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
+                                 int[] cityBuildings, java.util.function.BooleanSupplier current, boolean segmented) {
+        return build(samples, materialColors, seaLevel, fluidColor, stepBlocks, gridSize,
+                foliageColors, waterColors, baseX, baseZ, vegetation, simple,
+                cityBuildings, null, current, segmented);
+    }
+
+    private static PredictionMesh build(ClientColumnSample[] samples, int[] materialColors,
+                                 int seaLevel, int fluidColor, int stepBlocks, int gridSize,
+                                 int[] foliageColors, int[] waterColors, int baseX, int baseZ,
+                                 PredictionVegetation.Tile vegetation, PredictionSimpleVegetation.Result simple,
+                                 int[] legacyCityBuildings, LostCityPreview.Tile cityBuildings,
+                                 java.util.function.BooleanSupplier current, boolean segmented) {
+        requireCurrent(current);
         if (gridSize < 2 || gridSize > 257) {
             throw new IllegalArgumentException("gridSize outside supported range: " + gridSize);
         }
@@ -242,9 +278,23 @@ public final class PredictionMeshBuilder {
                 }
             }
             return build(cropped, croppedColors, seaLevel, fluidColor, stepBlocks, croppedGrid,
-                    treesEnabled, featureStamps, croppedFoliage, croppedWater, baseX, baseZ, vegetation, simple,
-                    cityBuildings);
+                    croppedFoliage, croppedWater, baseX, baseZ, vegetation, simple,
+                    legacyCityBuildings, cityBuildings, current, segmented);
         }
+        // Lost Cities flattens the planned city surface before placing roads and
+        // structures.  Apply that inexpensive display-only correction to the
+        // prediction copy; the raw samples used by disk cache and refinements
+        // remain untouched by this method's caller.
+        if (cityBuildings != null) {
+            vegetation = PredictionCityGeometry.vegetation(vegetation, cityBuildings, samples,
+                    baseX, baseZ, stepBlocks, gridSize);
+            var cityGround = PredictionCityGeometry.ground(samples, cityBuildings, baseX, baseZ,
+                    stepBlocks, gridSize, materialColors);
+            samples = cityGround.samples();
+            materialColors = cityGround.colors();
+        }
+        PredictionCityGeometry cityGeometry = cityBuildings == null ? null
+                : new PredictionCityGeometry(cityBuildings, baseX, baseZ, gridSize - 1, stepBlocks, samples);
         int cellAxis = gridSize - 1;
         int cellCount = cellAxis * cellAxis;
         // A normal cell is two triangles (six vertices). Walls and feature
@@ -262,8 +312,10 @@ public final class PredictionMeshBuilder {
         // Precompute the the height field once so corner lighting,
         // wall exposure and the median filter all see the same values.
         int[] cornerHeights = new int[samples.length];
+        boolean affineTintSafe = stepBlocks <= 2;
         for (int i = 0; i < samples.length; i++) {
-            cornerHeights[i] = terrainHeight(samples[i], seaLevel);
+            cornerHeights[i] = samples[i].surfaceY();
+            affineTintSafe &= !samples[i].hasFluid();
         }
         stabilizeGeneratedSurface(samples, cornerHeights, stepBlocks, gridSize);
         // the reference UseAverage path: at spacing >= 4 each column's top quad
@@ -279,28 +331,29 @@ public final class PredictionMeshBuilder {
         var interiorPlants = vegetation == null ? null : vegetation.withoutExteriorEnvelope();
         var interiorEdits = new PredictionInteriorEdits(samples, vegetation, baseX, baseZ, stepBlocks, gridSize);
         int[] terrainEnds = new int[cellCount];
+        MeshSegments segments = segmented ? new MeshSegments(stepBlocks) : null;
         for (int z = 0; z < cellAxis; z++) {
+            requireCurrent(current);
             for (int x = 0; x < cellAxis; x++) {
                 int cell = z * cellAxis + x;
                 terrain.beginCell(vegetation != null && !vegetation.blocks().isEmpty());
                 cellOffsets[cell] = terrain.vertexCount();
                 ClientColumnSample s00 = samples[index(x, z, gridSize)];
-                ClientColumnSample s10 = samples[index(x + 1, z, gridSize)];
-                ClientColumnSample s01 = samples[index(x, z + 1, gridSize)];
-                ClientColumnSample s11 = samples[index(x + 1, z + 1, gridSize)];
                 int h00 = cornerHeights[index(x, z, gridSize)];
-                int h10 = cornerHeights[index(x + 1, z, gridSize)];
-                int h01 = cornerHeights[index(x, z + 1, gridSize)];
-                int h11 = cornerHeights[index(x + 1, z + 1, gridSize)];
                 int c00 = materialColors == null ? 0 : materialColors[index(x, z, gridSize)];
-                int c10 = materialColors == null ? 0 : materialColors[index(x + 1, z, gridSize)];
-                int c01 = materialColors == null ? 0 : materialColors[index(x, z + 1, gridSize)];
-                int c11 = materialColors == null ? 0 : materialColors[index(x + 1, z + 1, gridSize)];
+                var cityChunk = cityGeometry == null ? LostCityPreview.EMPTY : cityGeometry.chunk(x, z);
+                boolean citySurface = !s00.captured() && PredictionCityGeometry.surface(cityChunk);
+                int foliageTint = foliageColors == null ? 0 : foliageColors[index(x, z, gridSize)];
                 // Block-level topology: this cell emits only its own
                 // north-west column; the other three corners belong to the
                 // neighbouring cells, so a dense grid emits every column
                 // exactly once.
-                if (PredictionExteriorColumns.interiorVolume(s00)) {
+                if (citySurface) {
+                    // Template ground participates in boundary replacement;
+                    // hedges and props remain features after terrainEnds.
+                    addLostCityPreview(terrain, cityGeometry.faces(cell), foliageTint, cityChunk.ground(), 1);
+                    addColumnWalls(terrain, samples, cornerHeights, x, z, stepBlocks, gridSize, h00, c00, seaLevel);
+                } else if (PredictionExteriorColumns.interiorVolume(s00)) {
                     addVolume(terrain, samples, x, z, stepBlocks, gridSize, false, interiorEdits);
                 } else if (surfaceEdits.affects(cell)) {
                     addEditedGround(terrain, samples, cornerHeights, materialColors, surfaceEdits,
@@ -333,19 +386,23 @@ public final class PredictionMeshBuilder {
                 terrainEnds[cell] = terrain.vertexCount();
                 // Features after this offset never participate in boundary replacement.
                 terrain.beginCell(vegetation != null && !vegetation.blocks().isEmpty());
-                int foliageTint = foliageColors == null
-                        ? 0 : foliageColors[index(x, z, gridSize)];
-                int cityHint = cityBuildings == null || s00.captured() ? 0
-                        : lostCityHint(cityBuildings, x, z, stepBlocks, cellAxis);
-                boolean cityBuilding = LostCityHints.kind(cityHint) == 2;
-                if (vegetation != null && !cityBuilding) {
+                int cityHint = legacyCityBuildings == null || s00.captured() ? 0
+                        : lostCityHint(legacyCityBuildings, x, z, stepBlocks, cellAxis);
+                boolean cityBuilding = cityGeometry != null ? !s00.captured() && cityChunk.building()
+                        : LostCityHints.kind(cityHint) == 2;
+                boolean cityVegetation = cityBuilding || citySurface;
+                if (vegetation != null && !cityVegetation) {
                     boolean interior = PredictionExteriorColumns.interiorVolume(s00);
                     addPlacedVegetation(terrain, interior ? interiorPlants : vegetation,
                             cell, interior ? Integer.MIN_VALUE : h00, foliageTint, surfaceEdits, interior);
                 }
-                if (cityBuilding) addLostCityBuilding(terrain, cityHint, x, z, stepBlocks);
+                if (cityGeometry != null && cityVegetation)
+                    addLostCityPreview(terrain, cityGeometry.faces(cell), foliageTint, cityChunk.ground(), citySurface ? 2 : 0);
+                else if (cityGeometry == null && cityBuilding) addLostCityBuilding(terrain, cityHint, x, z, stepBlocks);
+                if (cityGeometry != null && !s00.captured())
+                    addLostCityPreview(terrain, cityGeometry.overlays(cell), foliageTint, 0, 0);
                 var representative = simpleCells.get(cell);
-                if (representative != null && !cityBuilding)
+                if (representative != null && !cityVegetation)
                     addSimpleVegetation(terrain, representative, foliageTint);
 
                 boolean fluid = s00.hasFluid();
@@ -376,19 +433,62 @@ public final class PredictionMeshBuilder {
                 waterCounts[cell] = water.vertexCount() - waterOffsets[cell];
                 waterCells[cell] = waterCounts[cell] > 0;
                 cellCounts[cell] = terrain.vertexCount() - cellOffsets[cell];
+                if (segmented && (terrain.vertexCount() >= SEGMENT_VERTEX_TARGET || water.vertexCount() >= SEGMENT_VERTEX_TARGET)) {
+                    requireCurrent(current);
+                    segments.add(triangleMesh(terrain, water, waterCells, cellOffsets, cellCounts,
+                            waterOffsets, waterCounts, terrainEnds, cellAxis, stepBlocks, affineTintSafe));
+                    terrain = new VertexAccumulator(Math.min(cellCount * 8, 16_384));
+                    water = new VertexAccumulator(Math.min(cellCount * 8, 16_384));
+                    waterCells = new boolean[cellCount];
+                    cellOffsets = new int[cellCount]; cellCounts = new int[cellCount];
+                    waterOffsets = new int[cellCount]; waterCounts = new int[cellCount];
+                    terrainEnds = new int[cellCount];
+                }
             }
         }
+        PredictionMesh result = triangleMesh(terrain, water, waterCells, cellOffsets, cellCounts,
+                waterOffsets, waterCounts, terrainEnds, cellAxis, stepBlocks, affineTintSafe);
+        if (!segmented) return result;
+        requireCurrent(current);
+        if (segments.parts.isEmpty() || result.vertexCount() != 0 || result.waterVertexCount() != 0) segments.add(result);
+        return segments.finish();
+    }
+
+    private static PredictionMesh triangleMesh(VertexAccumulator terrain, VertexAccumulator water,
+            boolean[] waterCells, int[] cellOffsets, int[] cellCounts, int[] waterOffsets, int[] waterCounts,
+            int[] terrainEnds, int cellAxis, int stepBlocks, boolean affineTintSafe) {
         PredictionMesh result = new PredictionMesh(terrain.positions(), terrain.normals(), terrain.colors(),
                 water.positions(), water.normals(), water.colors(), waterCells,
-                terrain.vertexCount(), water.vertexCount(), cellCount,
+                terrain.vertexCount(), water.vertexCount(), cellAxis * cellAxis,
                 cellOffsets, cellCounts, waterOffsets, waterCounts, cellAxis, stepBlocks);
         result.terrainEnds = terrainEnds;
+        result.affineTintSafe = affineTintSafe;
         return result;
     }
 
-    private static int terrainHeight(ClientColumnSample sample, int seaLevel) {
-        return seaLevel != Integer.MIN_VALUE && sample.fluid() != 0
-                ? sample.surfaceY() : sample.surfaceY();
+    private static final class MeshSegments {
+        private final java.util.List<PredictionQuadMesh> parts = new java.util.ArrayList<>();
+        private final int spacing;
+        private long bytes;
+        private int vertices, waterVertices;
+
+        MeshSegments(int spacing) { this.spacing = spacing; }
+
+        void add(PredictionMesh mesh) {
+            PredictionQuadMesh part = mesh.packed();
+            bytes += part.retainedHeapBytes();
+            // Bound detached geometry while keeping the temporary triangle buffer small.
+            if (bytes > PredictionMeshCodec.MAX_BYTES) throw new PredictionMemoryBudget.MeshLimitException();
+            parts.add(part);
+            vertices = Math.addExact(vertices, mesh.vertexCount());
+            waterVertices = Math.addExact(waterVertices, mesh.waterVertexCount());
+        }
+
+        PredictionMesh finish() {
+            var quads = PredictionQuadMesh.combine(parts);
+            parts.clear();
+            return PredictionMesh.fromQuads(quads, vertices, waterVertices, spacing);
+        }
     }
 
     /**
@@ -457,22 +557,6 @@ public final class PredictionMeshBuilder {
     }
 
     /**
-     * Emits the two-triangle top face with the per-corner vertex
-     * lighting.  Each corner colour is the column's own material tint
-     * multiplied by the ambient-occlusion factor derived from the three
-     * neighbouring heights around that corner.  Shared corners therefore
-     * interpolate smoothly instead of one flat average per cell.
-     */
-    /**
-     * Emits the block-style top face: one flat quad at the cell's own
-     * height, exactly like the {@code emitCell}.  the never
-     * triangulates the four corner heights into a slope; height differences
-     * between neighbouring columns are shown by the wall faces, which is
-     * what makes the LOD read as individual blocks instead of a smooth
-     * height field.  The cell renders at its minimum corner so a higher
-     * neighbour column exposes its wall down to this surface.
-     */
-    /**
      * One Minecraft-block-style column: a flat top quad at the column's own
      * height over its step-sized footprint plus one wall face for every
      * direction where the neighbouring column is lower.  This replaces the
@@ -491,47 +575,43 @@ public final class PredictionMeshBuilder {
         float[] up = {0.0F, 1.0F, 0.0F};
         int x0 = x * step;
         int z0 = z * step;
+        int vA, vB, vC, vD;
         if (blendColors != null) {
             // UseAverage path: each corner's colour is the average of the
             // four columns meeting at that corner, shaded by that corner's
             // own occluder count (the top-corner rule).  Flat regions still
             // carry equal corner colours so greedy merging survives.
-            int vA = cornerColor(samples, heights, blendColors, x, z, x, z, height, gridSize);
-            int vB = cornerColor(samples, heights, blendColors, x, z, x + 1, z, height, gridSize);
-            int vC = cornerColor(samples, heights, blendColors, x, z, x + 1, z + 1, height, gridSize);
-            int vD = cornerColor(samples, heights, blendColors, x, z, x, z + 1, height, gridSize);
-            int sprite = topSprite(samples[index(x, z, gridSize)]);
-            vA = packSprite(vA, sprite);
-            vB = packSprite(vB, sprite);
-            vC = packSprite(vC, sprite);
-            vD = packSprite(vD, sprite);
-            out.triangle(x0, height, z0, up, vA,
-                    x0 + step, height, z0, up, vB,
-                    x0 + step, height, z0 + step, up, vC);
-            out.triangle(x0, height, z0, up, vA,
-                    x0 + step, height, z0 + step, up, vC,
-                    x0, height, z0 + step, up, vD);
+            vA = cornerColor(samples, heights, blendColors, x, z, x, z, height, gridSize);
+            vB = cornerColor(samples, heights, blendColors, x, z, x + 1, z, height, gridSize);
+            vC = cornerColor(samples, heights, blendColors, x, z, x + 1, z + 1, height, gridSize);
+            vD = cornerColor(samples, heights, blendColors, x, z, x, z + 1, height, gridSize);
         } else {
             // Detail path: vanilla-style per-corner ambient occlusion.  Each
             // corner darkens by the neighbouring columns meeting there, so
             // blocks against a slope or cliff shade smoothly like real chunk
             // geometry instead of one flat tone per column.
-            int vA = detailCorner(heights, x, z, x, z, height, color, gridSize);
-            int vB = detailCorner(heights, x, z, x + 1, z, height, color, gridSize);
-            int vC = detailCorner(heights, x, z, x + 1, z + 1, height, color, gridSize);
-            int vD = detailCorner(heights, x, z, x, z + 1, height, color, gridSize);
-            int sprite = topSprite(samples[index(x, z, gridSize)]);
-            vA = packSprite(vA, sprite);
-            vB = packSprite(vB, sprite);
-            vC = packSprite(vC, sprite);
-            vD = packSprite(vD, sprite);
-            out.triangle(x0, height, z0, up, vA,
-                    x0 + step, height, z0, up, vB,
-                    x0 + step, height, z0 + step, up, vC);
-            out.triangle(x0, height, z0, up, vA,
-                    x0 + step, height, z0 + step, up, vC,
-                    x0, height, z0 + step, up, vD);
+            vA = detailCorner(heights, x, z, x, z, height, color, gridSize);
+            vB = detailCorner(heights, x, z, x + 1, z, height, color, gridSize);
+            vC = detailCorner(heights, x, z, x + 1, z + 1, height, color, gridSize);
+            vD = detailCorner(heights, x, z, x, z + 1, height, color, gridSize);
         }
+        int sprite = topSprite(samples[index(x, z, gridSize)]);
+        vA = packSprite(vA, sprite);
+        vB = packSprite(vB, sprite);
+        vC = packSprite(vC, sprite);
+        vD = packSprite(vD, sprite);
+        out.triangle(x0, height, z0, up, vA,
+                x0 + step, height, z0, up, vB,
+                x0 + step, height, z0 + step, up, vC);
+        out.triangle(x0, height, z0, up, vA,
+                x0 + step, height, z0 + step, up, vC,
+                x0, height, z0 + step, up, vD);
+        addColumnWalls(out, samples, heights, x, z, step, gridSize, height, color, seaLevel);
+    }
+
+    private static void addColumnWalls(VertexAccumulator out, ClientColumnSample[] samples,
+                                       int[] heights, int x, int z, int step, int gridSize,
+                                       int height, int color, int seaLevel) {
         // Walls toward lower neighbours; tile-border columns skip the face
         // pointing outward (the neighbouring tile owns that seam).
         emitColumnWall(out, samples, heights, x, z, step, gridSize, height, color, seaLevel, 1, 0);
@@ -660,8 +740,6 @@ public final class PredictionMeshBuilder {
                 VssLodSpriteTable.indexForState(topState, face));
         int underColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
                 underBlock, surfaceColor, face), underBlock, face);
-        // Use the same selected sprite and average at both ends of the band.
-        int topBandBottom = topColor;
         int deepColor = withSideSprite(PredictionMaterialPalette.colorForIndex(
                 deepBlock, surfaceColor, face),
                 deepBlock, face);
@@ -677,8 +755,7 @@ public final class PredictionMeshBuilder {
         // degenerate instead of inverted.
         for (var interval : exposed) {
             int bottom = interval.bottom(), top = interval.top();
-            emitBandGradient(out, ax, az, bx, bz, top, Math.max(bottom, height - 1),
-                    topColor, topBandBottom, normal, step);
+            emitBand(out, ax, az, bx, bz, top, Math.max(bottom, height - 1), topColor, normal, step);
             emitBand(out, ax, az, bx, bz, Math.min(top, height - 1), Math.max(bottom, height - 2), underColor, normal, step);
             emitBand(out, ax, az, bx, bz, Math.min(top, height - 2), bottom, deepColor, normal, step);
         }
@@ -696,25 +773,6 @@ public final class PredictionMeshBuilder {
         out.triangle(ax * step, top, az * step, normal, color,
                 bx * step, bottom, bz * step, normal, color,
                 ax * step, bottom, az * step, normal, color);
-    }
-
-    /**
-     * Wall band with a vertical colour gradient — the top edge keeps the
-     * surface tint while the bottom edge sinks into the under-stratum
-     * colour, approximating vanilla's grass-side rim.
-     */
-    private static void emitBandGradient(VertexAccumulator out, int ax, int az, int bx, int bz,
-                                         int top, int bottom, int cTop, int cBottom,
-                                         float[] normal, int step) {
-        if (bottom >= top) {
-            return;
-        }
-        out.triangle(ax * step, top, az * step, normal, cTop,
-                bx * step, top, bz * step, normal, cTop,
-                bx * step, bottom, bz * step, normal, cBottom);
-        out.triangle(ax * step, top, az * step, normal, cTop,
-                bx * step, bottom, bz * step, normal, cBottom,
-                ax * step, bottom, az * step, normal, cBottom);
     }
 
     /** Converts the column-neighbour direction to the face id. */
@@ -814,8 +872,48 @@ public final class PredictionMeshBuilder {
         return buildings[chunkZ * side + chunkX];
     }
 
+    /** Emits the actual bounded Lost Cities exterior rectangles for one mesh cell. */
+    private static void addLostCityPreview(VertexAccumulator out,
+                                           java.util.List<PredictionCityGeometry.Face> faces,
+                                           int foliageTint, int ground, int phase) {
+        for (PredictionCityGeometry.Face face : faces) {
+            if (face.dx() <= 0 && face.dz() <= 0 && face.dy() <= 0) continue;
+            boolean foundation = face.y() + face.dy() <= ground + 1;
+            if (phase == 1 && !foundation || phase == 2 && foundation) continue;
+            BlockState state = safeBlockState(face.state());
+            int direction = face.direction();
+            int fallback = direction == 0 ? 0xFF777777 : 0xFF686868;
+            int color = PredictionMaterialPalette.colorForState(state, fallback, foliageTint, direction);
+            int material = packSprite(color, spriteOf(state, direction));
+            int x = face.x(), z = face.z(), y = face.y();
+            if (direction == 0) {
+                int width = Math.max(1, face.dx()), depth = Math.max(1, face.dz());
+                addFeatureTop(out, x, z, y, width, depth, material, material, material, material);
+            } else if (direction == 5) {
+                addFeatureBottom(out, x, z, y, face.dx(), face.dz(), material);
+            } else if (direction == 1 || direction == 2) {
+                int width = Math.max(1, face.dx()), height = Math.max(1, face.dy());
+                addFeatureZ(out, x, z, y, width, height,
+                        material, material, material, material, direction == 1 ? -1 : 1);
+            } else if (direction == 3 || direction == 4) {
+                int width = Math.max(1, face.dz()), height = Math.max(1, face.dy());
+                addFeatureX(out, x, z, y, width, height,
+                        material, material, material, material, direction == 3 ? -1 : 1);
+            }
+        }
+    }
+
+    private static BlockState safeBlockState(int stateId) {
+        try {
+            BlockState state = Block.stateById(stateId);
+            return state == null ? Blocks.STONE.defaultBlockState() : state;
+        } catch (RuntimeException invalidId) {
+            return Blocks.STONE.defaultBlockState();
+        }
+    }
+
     private static void addLostCityBuilding(VertexAccumulator out, int hint,
-                                            int cellX, int cellZ, int step) {
+                                             int cellX, int cellZ, int step) {
         int chunkX = cellX * step / 16, chunkZ = cellZ * step / 16;
         int ground = LostCityHints.ground(hint);
         int top = LostCityHints.top(hint);
@@ -1124,7 +1222,7 @@ public final class PredictionMeshBuilder {
                                     float width, float height, int c0, int c1, int c2, int c3,
                                     int direction) {
         float[] n = {0, 0, direction};
-        // StampMesher already stores the actual face plane: north is z and
+        // Surface faces use their actual plane: north is z and
         // south is z + 1. Adding one for the negative face moved the face
         // into the block and made cutout plants/snow overlap their ground.
         float zz = z;
@@ -1153,9 +1251,7 @@ public final class PredictionMeshBuilder {
         if (step >= 64) {
             return;
         }
-        int[][] edges = {{x, z, x + 1, z, 0, -1}, {x + 1, z, x + 1, z + 1, 1, 0},
-                {x + 1, z + 1, x, z + 1, 0, 1}, {x, z + 1, x, z, -1, 0}};
-        for (int[] edge : edges) {
+        for (int[] edge : FLUID_EDGES) {
             int nx = x + edge[4], nz = z + edge[5];
             // Missing neighbours are not shorelines. East/south margin samples
             // are valid too; a continuous ocean must never get tile-sized water walls.
@@ -1168,8 +1264,9 @@ public final class PredictionMeshBuilder {
             float bottom = Math.max((float) Math.ceil(topY) - 1.0F, neighbor.surfaceY());
             if (bottom >= topY) continue;
             int axis = edge[4] == 0 ? 2 : 1;
-            float plane = (axis == 1 ? edge[0] : edge[1]) * step;
-            int u0 = Math.min(axis == 1 ? edge[1] : edge[0], axis == 1 ? edge[3] : edge[2]) * step;
+            float plane = (axis == 1 ? x + edge[0] : z + edge[1]) * step;
+            int u0 = (axis == 1 ? z + Math.min(edge[1], edge[3])
+                    : x + Math.min(edge[0], edge[2])) * step;
             var face = new PredictionFluidOcclusion.Rect(u0, bottom, u0 + step, topY);
             for (var rect : occlusion.visible(cell, axis, plane, face))
                 addFluidRectangle(out, axis, plane, rect, color, kind, axis == 1 ? edge[4] : edge[5]);
@@ -1182,11 +1279,9 @@ public final class PredictionMeshBuilder {
         float u1 = (float) rect.u1(), v1 = (float) rect.v1();
         float[] normal = {axis == 1 ? direction : 0, kind / 3F, axis == 2 ? direction : 0};
         // Keep top-first wall order used by the greedy wall-run collector.
-        float[] p = axis == 0 ? new float[]{u0,plane,v0, u1,plane,v0, u1,plane,v1, u0,plane,v1}
-                : axis == 1 ? new float[]{plane,v1,u0, plane,v1,u1, plane,v0,u1, plane,v0,u0}
-                : new float[]{u0,v1,plane, u1,v1,plane, u1,v0,plane, u0,v0,plane};
-        for (int c : new int[]{0, 1, 2, 0, 2, 3})
-            out.vertex(p[c * 3], p[c * 3 + 1], p[c * 3 + 2], normal, color);
+        if (axis == 0) out.quad(u0, plane, v0, u1, plane, v0, u1, plane, v1, u0, plane, v1, normal, color);
+        else if (axis == 1) out.quad(plane, v1, u0, plane, v1, u1, plane, v0, u1, plane, v0, u0, normal, color);
+        else out.quad(u0, v1, plane, u1, v1, plane, u1, v0, plane, u0, v0, plane, normal, color);
     }
 
     private static int fluidSurfaceColor(int kind, int fallback) {
@@ -1200,18 +1295,19 @@ public final class PredictionMeshBuilder {
     }
 
     private static final class VertexAccumulator {
-        private float[] positions;
-        private float[] normals;
-        private int[] colors;
+        private static final float[] EMPTY_FLOATS = new float[0];
+        private static final int[] EMPTY_COLORS = new int[0];
+        private float[] positions = EMPTY_FLOATS;
+        private float[] normals = EMPTY_FLOATS;
+        private int[] colors = EMPTY_COLORS;
+        private final int initialCapacity;
         private int count;
         private int offsetX, offsetZ;
         private int mergeStart = -1;
         private final float[] mergeBounds = new float[10];
 
         private VertexAccumulator(int capacity) {
-            positions = new float[Math.max(18, capacity * 3)];
-            normals = new float[positions.length];
-            colors = new int[Math.max(6, capacity)];
+            initialCapacity = Math.max(6, capacity);
         }
 
         int vertexCount() { return count; }
@@ -1222,6 +1318,12 @@ public final class PredictionMeshBuilder {
                       float x1, float y1, float z1, float[] n1, int c1,
                       float x2, float y2, float z2, float[] n2, int c2) {
             vertex(x0, y0, z0, n0, c0); vertex(x1, y1, z1, n1, c1); vertex(x2, y2, z2, n2, c2);
+        }
+
+        void quad(float x0, float y0, float z0, float x1, float y1, float z1,
+                  float x2, float y2, float z2, float x3, float y3, float z3, float[] normal, int color) {
+            triangle(x0, y0, z0, normal, color, x1, y1, z1, normal, color, x2, y2, z2, normal, color);
+            triangle(x0, y0, z0, normal, color, x2, y2, z2, normal, color, x3, y3, z3, normal, color);
         }
 
         void vertex(float x, float y, float z, float[] normal, int color) {
@@ -1243,15 +1345,21 @@ public final class PredictionMeshBuilder {
                 throw new PredictionMemoryBudget.MeshLimitException();
             }
             if (required * 3 <= positions.length && required <= colors.length) return;
+            if (positions.length == 0) {
+                positions = new float[initialCapacity * 3];
+                normals = new float[positions.length];
+                colors = new int[initialCapacity];
+                return;
+            }
             int newCapacity = Math.min(262_150, Math.max(required, count * 2 + 6));
             positions = java.util.Arrays.copyOf(positions, newCapacity * 3);
             normals = java.util.Arrays.copyOf(normals, newCapacity * 3);
             colors = java.util.Arrays.copyOf(colors, newCapacity);
         }
 
-        float[] positions() { return java.util.Arrays.copyOf(positions, count * 3); }
-        float[] normals() { return java.util.Arrays.copyOf(normals, count * 3); }
-        int[] colors() { return java.util.Arrays.copyOf(colors, count); }
+        float[] positions() { return count == 0 ? EMPTY_FLOATS : java.util.Arrays.copyOf(positions, count * 3); }
+        float[] normals() { return count == 0 ? EMPTY_FLOATS : java.util.Arrays.copyOf(normals, count * 3); }
+        int[] colors() { return count == 0 ? EMPTY_COLORS : java.util.Arrays.copyOf(colors, count); }
     }
 
     private static int writeVertex(float[] positions, float[] normals, int[] colors, int vertex,

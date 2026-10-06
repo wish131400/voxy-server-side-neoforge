@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 class StrictLodFrontierTest {
-    @Test void distantCacheCannotBypassMissingCenterEvenAfterRepeatedRetries() {
+    @Test void completedCoverageBoundsCannotIncludeAMissingCenter() {
         StrictLodFrontier f = new StrictLodFrontier();
         f.center(0, 0, 128);
         for (int retry = 0; retry < 10000; retry++) {
@@ -26,8 +26,7 @@ class StrictLodFrontierTest {
         assertFalse(f.visible(1, 1));
         assertTrue(f.advance((x,z) -> true, (x,z) -> true));
         assertTrue(f.visible(-1, -1));
-        assertTrue(f.requestable(2, 0));
-        assertFalse(f.requestable(3, 0));
+        assertEquals(2, f.requestRing());
     }
     @Test void movementOnlyRetainsAnAlreadyCompleteInteriorAndTeleportClosesIt() {
         StrictLodFrontier f = new StrictLodFrontier();
