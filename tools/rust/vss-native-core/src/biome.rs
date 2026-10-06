@@ -48,9 +48,14 @@ impl Biome {
             match e.get(key) {
                 None => Ok(None),
                 Some(v) => v
-                    .as_u64()
-                    .filter(|v| *v <= 0xffffff)
-                    .map(|v| Some(v as u32))
+                    // BiomeSpecialEffects stores colors as a Java int. Modded
+                    // registries can therefore contain signed ARGB, while the
+                    // tint consumer reads only the three RGB bytes. Accept the
+                    // entire signed-int contract, not an arbitrary JSON number
+                    // or an out-of-range integer, and normalize before blending.
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .map(|v| Some((v as u32) & 0xffffff))
                     .ok_or_else(|| format!("invalid biome color {key}")),
             }
         };

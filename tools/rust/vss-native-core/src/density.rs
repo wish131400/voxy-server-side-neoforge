@@ -92,7 +92,7 @@ enum Node {
     Select(Id, Id, Vec<(f64, f64, Id)>),
     CoordinateShift(Id, [Id; 3]),
     FastNoise(Box<fastnoise_lite::FastNoiseLite>, f64, f64, [Id; 3]),
-    FtfNoise(std::sync::Arc<crate::freeterraforged_noise::Noise>),
+    FtfNoise(std::sync::Arc<crate::freeterraforged_noise::Noise>, i32),
     FtfUnit(Id, i32),
     LinearSpline(Id, Vec<(f64, Id)>),
 }
@@ -429,7 +429,7 @@ impl Graph {
         let mut dependencies = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
             let uses_y = match node {
-                Node::Constant(_) | Node::End(_) | Node::FtfNoise(_) => false,
+                Node::Constant(_) | Node::End(_) | Node::FtfNoise(..) => false,
                 Node::FtfUnit(input, _) => dependencies[*input],
                 Node::LinearSpline(input, points) => {
                     dependencies[*input] || points.iter().any(|(_, n)| dependencies[*n])
@@ -877,7 +877,7 @@ impl Graph {
         let [x, y, z] = p;
         let ev = |n, s: &mut Scratch| self.compute(n, p, mode, s);
         let v = match &self.nodes[id] {
-            Node::FtfNoise(noise) => noise.compute(x as f32, z as f32, self.seed as i32) as f64,
+            Node::FtfNoise(noise, seed) => noise.compute(x as f32, z as f32, *seed) as f64,
             Node::FtfUnit(input, resolution) => ftf_unit(ev(*input, s), *resolution),
             Node::LinearSpline(input, points) => {
                 let value = ev(*input, s);
@@ -1398,13 +1398,15 @@ impl Builder<'_> {
             let full_type = string(v, "type")?;
             let t = full_type.strip_prefix("minecraft:").unwrap_or(full_type);
             match t {
-                "reterraforged:noise" => Node::FtfNoise(
-                    crate::freeterraforged_noise::Noise::parse(&v["noise"], self.doc)?,
+                "reterraforged:noise" | "freeterraforged:noise" => Node::FtfNoise(
+                    crate::freeterraforged_noise::Noise::parse(&v["noise"], self.doc,
+                        t.split_once(':').unwrap().0)?,
+                    crate::freeterraforged_noise::world_seed(self.graph.seed, t.starts_with("freeterraforged:")),
                 ),
-                "reterraforged:clamp_to_nearest_unit" => {
+                "reterraforged:clamp_to_nearest_unit" | "freeterraforged:clamp_to_nearest_unit" => {
                     Node::FtfUnit(self.parse(&v["function"])?, integer(v, "resolution")?)
                 }
-                "reterraforged:linear_spline" => {
+                "reterraforged:linear_spline" | "freeterraforged:linear_spline" => {
                     let input = self.parse(&v["input"])?;
                     let mut points = Vec::new();
                     for point in v["points"].as_array().ok_or("missing FTF spline points")? {

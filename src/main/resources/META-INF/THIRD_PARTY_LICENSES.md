@@ -49,6 +49,8 @@ https://github.com/ETcodehome/FreeTerraForged
 
 The native tile filters, noise modules and density operators derive from
 ReTerraForged's MIT-licensed sources and preserve their numerical operations.
+The FreeTerraForged 1.0.0 adapter also ports its terrain ceiling compression and
+full-width world seed conversion, under the same MIT license.
 
 MIT License
 

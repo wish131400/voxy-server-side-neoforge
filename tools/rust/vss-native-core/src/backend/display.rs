@@ -4,6 +4,39 @@
 use super::*;
 const DISPLAY: i32 = (1 << 26) | (1 << 27) | (1 << 28);
 
+// Experimental visual-envelope sampling.  Level two uses four-block sample
+// spacing, where the player usually cannot resolve every interior column.  The
+// perimeter remains exact so neighbouring tiles keep a shared seam.  Keep the
+// thresholds deliberately small; this is a visual approximation, never an
+// authorization to change the exact terrain cache.
+const EXPERIMENTAL_MAX_STEP: i32 = 4;
+const EXPERIMENTAL_HEIGHT_RESIDUAL: f64 = 0.75;
+const EXPERIMENTAL_COLOR_CHANNEL_DELTA: i32 = 12;
+
+fn color_close(a: i32, b: i32) -> bool {
+    let a = a as u32;
+    let b = b as u32;
+    [0, 8, 16, 24].into_iter().all(|shift| {
+        let left = ((a >> shift) & 0xff) as i32;
+        let right = ((b >> shift) & 0xff) as i32;
+        (left - right).abs() <= EXPERIMENTAL_COLOR_CHANNEL_DELTA
+    })
+}
+
+fn bilinear_color(corners: [i32; 4], x: f64, z: f64) -> i32 {
+    let mut result = 0u32;
+    for shift in [0, 8, 16, 24] {
+        let c00 = ((corners[0] as u32 >> shift) & 0xff) as f64;
+        let c10 = ((corners[1] as u32 >> shift) & 0xff) as f64;
+        let c01 = ((corners[2] as u32 >> shift) & 0xff) as f64;
+        let c11 = ((corners[3] as u32 >> shift) & 0xff) as f64;
+        let top = c00 * (1. - x) + c10 * x;
+        let bottom = c01 * (1. - x) + c11 * x;
+        result |= ((top * (1. - z) + bottom * z).round().clamp(0., 255.) as u32) << shift;
+    }
+    result as i32
+}
+
 #[cfg(test)]
 mod admission_probe {
     use super::*;
@@ -387,12 +420,18 @@ impl World {
         }
         let (x, z) = points[0];
         let step = points[1].0 - x;
-        if !(1..=2).contains(&step)
+        if !(1..=EXPERIMENTAL_MAX_STEP).contains(&step)
             || !points
                 .iter()
                 .enumerate()
                 .all(|(i, &p)| p == (x + (i % 8) as i32 * step, z + (i / 8) as i32 * step))
         {
+            return Ok(None);
+        }
+        // Keep the process-local escape hatch before any experimental probes
+        // are evaluated, so the strict A/B path has the same work as the
+        // pre-experiment step<=2 admission.
+        if step > 2 && std::env::var_os("VSS_STRICT_DISPLAY").is_some() {
             return Ok(None);
         }
         // Borders are exact display queries so adjacent batches always share
@@ -401,7 +440,12 @@ impl World {
             .filter(|i| {
                 let x = i % 8;
                 let z = i / 8;
-                x == 0 || x == 7 || z == 0 || z == 7 || ((x == 3 || x == 4) && (z == 3 || z == 4))
+                x == 0 || x == 7 || z == 0 || z == 7
+                    || ((x == 3 || x == 4) && (z == 3 || z == 4))
+                    // Four extra probes are only needed for the new step=4
+                    // path. They catch a narrow interior ridge without
+                    // turning the grid back into a full 64-point query.
+                    || (step >= 4 && (x == 2 || x == 5) && (z == 2 || z == 5))
             })
             .collect();
         let probes: Vec<_> = indices.iter().map(|&i| points[i]).collect();
@@ -409,9 +453,20 @@ impl World {
         let first = values[0].values;
         if first[3] & (1 << 29) != 0
             || first[3] & (1 << 26) == 0
-            || values
-                .iter()
-                .any(|r| r.values[2..] != first[2..] || first[2] != 0 && r.values[1] != first[1])
+            || values.iter().any(|r| {
+                // Fluid kind, snow/ice/empty flags and the three visible
+                // material layers remain exact. Only smoothly varying colour
+                // summaries may use the visual envelope.
+                r.values[2] != first[2]
+                    || r.values[3] != first[3]
+                    || r.values[4..7] != first[4..7]
+                    || (first[2] != 0 && r.values[1] != first[1])
+                    || if step >= 4 {
+                        (7..10).any(|i| !color_close(r.values[i], first[i]))
+                    } else {
+                        r.values[7..10] != first[7..10]
+                    }
+            })
         {
             return Ok(None);
         }
@@ -433,17 +488,32 @@ impl World {
                 + heights[2] as f64 * (1. - x) * z
                 + heights[3] as f64 * x * z
         };
+        let height_residual = if step >= 4 {
+            EXPERIMENTAL_HEIGHT_RESIDUAL
+        } else {
+            0.5
+        };
         if indices
             .iter()
-            .any(|&i| (result[i].values[0] as f64 - height(i)).abs() > 0.5)
+            .any(|&i| (result[i].values[0] as f64 - height(i)).abs() > height_residual)
         {
             return Ok(None);
         }
+        let colors = [
+            [result[0].values[7], result[7].values[7], result[56].values[7], result[63].values[7]],
+            [result[0].values[8], result[7].values[8], result[56].values[8], result[63].values[8]],
+            [result[0].values[9], result[7].values[9], result[56].values[9], result[63].values[9]],
+        ];
         for i in 0..64 {
             if !indices.contains(&i) {
                 let y = height(i).round() as i32;
                 result[i].values[0] = y;
                 result[i].values[1] = if first[2] == 0 { y } else { first[1] };
+                let x = (i % 8) as f64 / 7.;
+                let z = (i / 8) as f64 / 7.;
+                for (channel, corners) in colors.iter().enumerate() {
+                    result[i].values[7 + channel] = bilinear_color(*corners, x, z);
+                }
             }
         }
         // Interpolated interiors are not placed in the per-point cache: other

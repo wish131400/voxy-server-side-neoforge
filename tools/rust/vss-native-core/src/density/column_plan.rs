@@ -32,7 +32,7 @@ impl ColumnPlan {
         let mut count = 0;
         for node in &g.nodes {
             let y = match node {
-                Node::Constant(_) | Node::End(_) | Node::FtfNoise(_) => false,
+                Node::Constant(_) | Node::End(_) | Node::FtfNoise(..) => false,
                 Node::Axis(a) => *a == 1,
                 Node::Gradient(_, _, a, b) => a != b,
                 Node::Noise(_, _, scale) => *scale != 0.,
@@ -77,16 +77,23 @@ impl ColumnPlan {
             match s {
                 Spline::Constant(v) => v.is_finite().then_some((*v as f64).abs()),
                 Spline::Multipoint { coordinate, points } => {
-                    let (lo,hi)=bounds[*coordinate];
-                    if !lo.is_finite() || !hi.is_finite() || points.is_empty()
-                        || points.windows(2).any(|p| p[0].0 > p[1].0) { return None; }
-                    let mut magnitude=lo.abs().max(hi.abs());
-                    let (mut value,mut derivative)=(0f64,0f64);
-                    for (x,s,d) in points {
-                        if !x.is_finite() || !d.is_finite() { return None; }
-                        magnitude=magnitude.max((*x as f64).abs());
-                        value=value.max(spline_bound(s,bounds)?);
-                        derivative=derivative.max((*d as f64).abs());
+                    let (lo, hi) = bounds[*coordinate];
+                    if !lo.is_finite()
+                        || !hi.is_finite()
+                        || points.is_empty()
+                        || points.windows(2).any(|p| p[0].0 > p[1].0)
+                    {
+                        return None;
+                    }
+                    let mut magnitude = lo.abs().max(hi.abs());
+                    let (mut value, mut derivative) = (0f64, 0f64);
+                    for (x, s, d) in points {
+                        if !x.is_finite() || !d.is_finite() {
+                            return None;
+                        }
+                        magnitude = magnitude.max((*x as f64).abs());
+                        value = value.max(spline_bound(s, bounds)?);
+                        derivative = derivative.max((*d as f64).abs());
                     }
                     // Covers endpoint extrapolation and every Hermite term,
                     // with generous f32 rounding headroom. Tiny knot gaps can
@@ -95,10 +102,12 @@ impl ColumnPlan {
                     // last <= coordinate and the first > coordinate, so an
                     // interpolation interval never has two equal endpoints.
                     if points.windows(2).any(|p| {
-                        let gap=p[1].0-p[0].0;
-                        gap>0. && gap<f32::MIN_POSITIVE
-                    }) { return None; }
-                    let bound=16.*(1.+value+derivative*magnitude);
+                        let gap = p[1].0 - p[0].0;
+                        gap > 0. && gap < f32::MIN_POSITIVE
+                    }) {
+                        return None;
+                    }
+                    let bound = 16. * (1. + value + derivative * magnitude);
                     (bound < f32::MAX as f64 / 16. && magnitude < f32::MAX as f64 / 16.)
                         .then_some(bound)
                 }
@@ -108,14 +117,21 @@ impl ColumnPlan {
             let value = match node {
                 Node::Constant(v) => (*v, *v),
                 Node::Gradient(_, _, a, b) => (a.min(*b), a.max(*b)),
-                Node::Noise(n, xz, y) if xz.is_finite() && y.is_finite()
-                    && xz.abs()<1e100 && y.abs()<1e100 => {
+                Node::Noise(n, xz, y)
+                    if xz.is_finite() && y.is_finite() && xz.abs() < 1e100 && y.abs() < 1e100 =>
+                {
                     let v = g.noises[*n].absolute_bound();
                     (-v, v)
                 }
-                Node::Shifted(n, xz, y, shifts) if xz.is_finite() && y.is_finite()
-                    && xz.abs()<1e100 && y.abs()<1e100
-                    && shifts.iter().all(|id| bounds[*id].0.abs().max(bounds[*id].1.abs())<1e100) => {
+                Node::Shifted(n, xz, y, shifts)
+                    if xz.is_finite()
+                        && y.is_finite()
+                        && xz.abs() < 1e100
+                        && y.abs() < 1e100
+                        && shifts
+                            .iter()
+                            .all(|id| bounds[*id].0.abs().max(bounds[*id].1.abs()) < 1e100) =>
+                {
                     let v = g.noises[*n].absolute_bound();
                     (-v, v)
                 }
@@ -125,10 +141,10 @@ impl ColumnPlan {
                 }
                 Node::Blended(n) => (n.min_value(), n.max_value()),
                 Node::Weird(n, _, two) => {
-                    let v=g.noises[*n].absolute_bound()*if *two {3.} else {2.};
-                    (0.,v)
+                    let v = g.noises[*n].absolute_bound() * if *two { 3. } else { 2. };
+                    (0., v)
                 }
-                Node::Spline(s) => spline_bound(s,&bounds).map_or(unknown,|v|(-v,v)),
+                Node::Spline(s) => spline_bound(s, &bounds).map_or(unknown, |v| (-v, v)),
                 Node::Marker(_, n) => bounds[*n],
                 Node::Clamp(n, a, b) if bounds[*n].0.is_finite() && bounds[*n].1.is_finite() => {
                     let (l, h) = bounds[*n];
@@ -163,7 +179,7 @@ impl ColumnPlan {
                             if h > 0. { h } else { h * 0.25 },
                         ),
                         Unary::Squeeze => (-0.458333333333334, 0.458333333333334),
-                        Unary::Reciprocal if l>0. || h<0. => (1./h,1./l),
+                        Unary::Reciprocal if l > 0. || h < 0. => (1. / h, 1. / l),
                         _ => unknown,
                     }
                 }

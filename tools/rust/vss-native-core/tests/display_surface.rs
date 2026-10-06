@@ -228,6 +228,70 @@ fn adaptive_grid_keeps_shared_edges_and_surface_removal_rules() {
         }
     }
 }
+
+#[test]
+fn step_four_visual_envelope_preserves_edges_and_protected_surface_data() {
+    let mut d = document();
+    d["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});
+    d["settings"]["aquifers_enabled"] = json!(false);
+    d["settings"]["surface_rule"] =
+        json!({"type":"minecraft:block","result_state":{"Name":"minecraft:stone"}});
+    d["settings"]["noise_router"]["final_density"] = json!({
+        "type":"minecraft:y_clamped_gradient","from_y":64,"to_y":65,
+        "from_value":1.0,"to_value":-1.0
+    });
+    let visual = World::new(0, 0, d.clone()).unwrap();
+    let oracle = World::new(0, 0, d).unwrap();
+    let points: Vec<_> = (0..64).map(|i| (-64 + i % 8 * 4, -64 + i / 8 * 4)).collect();
+    let actual = visual.display_points(&points).unwrap();
+    let expected = oracle.surface_points(&points).unwrap();
+    assert_eq!(visual.display_query_stats()[2], 1, "step four grid should be admitted");
+    for (i, (a, b)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(a.values[0], b.values[0], "height at {i}");
+        assert_eq!(a.values[1], b.values[1], "fluid height at {i}");
+        assert_eq!(a.values[2], b.values[2], "fluid kind at {i}");
+        assert_eq!(a.values[3] & !(1 << 26 | 1 << 27 | 1 << 28),
+                   b.values[3] & !(1 << 26 | 1 << 27 | 1 << 28),
+                   "surface flags at {i}");
+        assert_eq!(a.values[4..7], b.values[4..7], "surface materials at {i}");
+        if i % 8 == 0 || i % 8 == 7 || i / 8 == 0 || i / 8 == 7 {
+            let mut edge = a.values;
+            edge[3] &= !(1 << 26 | 1 << 27 | 1 << 28);
+            let mut oracle_edge = b.values;
+            oracle_edge[3] &= !(1 << 26 | 1 << 27 | 1 << 28);
+            assert_eq!(edge, oracle_edge, "exact shared edge at {i}");
+        }
+    }
+}
+
+#[test]
+fn step_four_visual_envelope_rejects_an_interior_ridge() {
+    let mut d = document();
+    d["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});
+    d["settings"]["aquifers_enabled"] = json!(false);
+    d["settings"]["surface_rule"] =
+        json!({"type":"minecraft:block","result_state":{"Name":"minecraft:stone"}});
+    d["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:max",
+        "argument1":{"type":"minecraft:y_clamped_gradient","from_y":64,"to_y":65,
+            "from_value":1.0,"to_value":-1.0},
+        "argument2":{"type":"minecraft:range_choice",
+            "input":{"type":"lithostitched:axis","axis":"x"},
+            "min_inclusive":-1,"max_exclusive":1,"when_out_of_range":-1.0,
+            "when_in_range":{"type":"minecraft:y_clamped_gradient","from_y":100,"to_y":101,
+                "from_value":1.0,"to_value":-1.0}}});
+    let visual = World::new(0, 0, d.clone()).unwrap();
+    let oracle = World::new(0, 0, d).unwrap();
+    let points: Vec<_> = (0..64).map(|i| (-16 + i % 8 * 4, -16 + i / 8 * 4)).collect();
+    let actual = visual.display_points(&points).unwrap();
+    let expected = oracle.surface_points(&points).unwrap();
+    for (a, b) in actual.iter().zip(&expected) {
+        assert_eq!(a.values[0..3], b.values[0..3]);
+        assert_eq!(a.values[3] & !(1 << 26 | 1 << 27 | 1 << 28),
+                   b.values[3] & !(1 << 26 | 1 << 27 | 1 << 28));
+        assert_eq!(a.values[4..], b.values[4..]);
+    }
+    assert_eq!(visual.display_query_stats()[2], 0, "interior ridge must reject the envelope");
+}
 #[test]
 fn sign_plan_preserves_zero_tiny_scales_and_nonfinite_fallbacks() {
     let y = json!({"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":-64.,"to_value":320.});

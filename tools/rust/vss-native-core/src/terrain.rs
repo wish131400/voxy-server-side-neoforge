@@ -328,24 +328,35 @@ impl Terrain {
     /// Work remains local to one bounded batch; no proof survives the caller.
     pub fn exterior_footprints(&self, requests: &[(i32, i32, i32, i32, i32)]) -> Result<Option<Vec<Option<Vec<u8>>>>> {
         if requests.len() > 8 { return Err("exterior batch size".into()); }
-        if self.graph.requires_complete_column_order() || self.graph.has_stateful_queries() {
+        if self.graph.requires_complete_column_order() {
             return Ok(None);
         }
         let mut cells = FxHashSet::default();
+        let width = self.cell_width.max(16);
+        let mut scopes = FxHashSet::default();
         let mut overlap = false;
+        let mut scope_overlap = false;
         for &(x, z, step, bottom, top) in requests {
             if ![1, 2, 4].contains(&step) || bottom < self.min_y || top > self.min_y + self.height || bottom >= top
                 || x < -30_000_000 || z < -30_000_000 || x > 30_000_000 - step || z > 30_000_000 - step {
                 return Err("exterior batch bounds".into());
             }
             let mut request_cells = FxHashSet::default();
+            let mut request_scopes = FxHashSet::default();
             for dz in 0..step { for dx in 0..step {
                 let cell = ((x + dx).div_euclid(self.cell_width), (z + dz).div_euclid(self.cell_width));
+                let scope = ((x + dx).div_euclid(width), (z + dz).div_euclid(width));
                 if request_cells.insert(cell) && !cells.insert(cell) { overlap = true; }
-                if cells.len() > 8 { return Ok(None); }
+                if request_scopes.insert(scope) && !scopes.insert(scope) { scope_overlap = true; }
+                if scopes.len() > 8 { return Ok(None); }
             }}
         }
-        if !overlap { return Ok(None); }
+        let chunk_scope = self.graph.has_stateful_queries() || cells.len() > 8 || !overlap;
+        if chunk_scope && !scope_overlap { return Ok(None); }
+        if chunk_scope && self.cell_width < 16 && 16 % self.cell_width != 0 { return Ok(None); }
+        // Sheltered Flat caches and adjacent noise cells can share one covered
+        // chunk lattice. Exposed stateful graphs retain their scalar ordering.
+        let width = if chunk_scope { width } else { self.cell_width };
         let mut jobs = HashMap::default();
         let mut results = Vec::with_capacity(requests.len());
         for &(x, z, step, bottom, top) in requests {
@@ -354,9 +365,9 @@ impl Terrain {
             let mut rejected = false;
             for dz in 0..step { for dx in 0..step {
                 let (xx, zz) = (x + dx, z + dz);
-                let cell = (xx.div_euclid(self.cell_width), zz.div_euclid(self.cell_width));
+                let cell = (xx.div_euclid(width), zz.div_euclid(width));
                 if !jobs.contains_key(&cell) {
-                    jobs.insert(cell, self.job(xx, zz, true)?);
+                    jobs.insert(cell, self.job(xx, zz, !chunk_scope || self.cell_width >= 16)?);
                 }
                 let job = jobs.get_mut(&cell).unwrap();
                 for y in (bottom..top).rev() {
@@ -1369,6 +1380,55 @@ mod exterior_batch_probe {
         Ok((results, retained_scratch))
     }
 
+    fn legacy_batch(t: &Terrain, requests: &[Request]) -> Result<Option<Vec<Option<Vec<u8>>>>> {
+        if t.graph.requires_complete_column_order() || t.graph.has_stateful_queries() { return Ok(None); }
+        let mut cells = FxHashSet::default();
+        let mut overlap = false;
+        for &(x, z, step, _, _) in requests {
+            let mut local = FxHashSet::default();
+            for dz in 0..step { for dx in 0..step {
+                let cell = ((x + dx).div_euclid(t.cell_width), (z + dz).div_euclid(t.cell_width));
+                if local.insert(cell) && !cells.insert(cell) { overlap = true; }
+                if cells.len() > 8 { return Ok(None); }
+            }}
+        }
+        if !overlap { return Ok(None); }
+        Ok(Some(shared_footprints(t, requests)?.0))
+    }
+
+    fn chunk_footprints(t: &Terrain, requests: &[Request]) -> Result<(Vec<Option<Vec<u8>>>, usize)> {
+        let width = t.cell_width.max(16);
+        let mut jobs = HashMap::default();
+        let mut results = Vec::with_capacity(requests.len());
+        for &(x, z, step, bottom, top) in requests {
+            let mut occupied = vec![0; (top - bottom) as usize];
+            let mut missing = occupied.len();
+            let mut rejected = false;
+            for dz in 0..step {
+                for dx in 0..step {
+                    let (xx, zz) = (x + dx, z + dz);
+                    let scope = (xx.div_euclid(width), zz.div_euclid(width));
+                    if !jobs.contains_key(&scope) {
+                        jobs.insert(scope, t.job(xx, zz, t.cell_width >= 16)?);
+                    }
+                    let job = jobs.get_mut(&scope).unwrap();
+                    for y in (bottom..top).rev() {
+                        let i = (y - bottom) as usize;
+                        if occupied[i] != 0 { continue; }
+                        let solid = job.base_substance([xx, y, zz]) != Substance::Air;
+                        if dx == 0 && dz == 0 && y == top - 1 && !solid { rejected = true; break; }
+                        if solid { occupied[i] = 1; missing -= 1; }
+                    }
+                    if rejected || missing == 0 { break; }
+                }
+                if rejected || missing == 0 { break; }
+            }
+            results.push(if rejected { None } else { Some(occupied) });
+        }
+        let bytes = jobs.values().map(|job: &Job<'_>| job.scratch.retained_bytes()).sum();
+        Ok((results, bytes))
+    }
+
     fn median(times: &mut [Duration]) -> f64 {
         times.sort();
         times[times.len() / 2].as_secs_f64() * 1000.
@@ -1402,16 +1462,22 @@ mod exterior_batch_probe {
     fn adjacent_footprint_reuse() {
         let (document, seed, centres) = match std::env::var("VSS_SAMPLING_DOCUMENT") {
             Ok(path) => {
-                let value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                let mut value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                if let Ok(registries) = std::env::var("VSS_SAMPLING_REGISTRIES") {
+                    let registries: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(registries).unwrap()).unwrap();
+                    for (key, item) in registries.as_object().unwrap() {
+                        if value.get(key).is_none() { value[key] = item.clone(); }
+                    }
+                }
                 let seed = std::env::var("VSS_SAMPLING_SEED").ok().map(|value| value.parse().unwrap())
                     .unwrap_or(5052304137288917019_i64);
-                (value, seed, [(-4588, -1531), (1605, -1456)])
+                (value, seed, vec![(424, -348), (448, -479), (-4588, -1531), (1605, -1456)])
             }
             Err(_) => {
                 let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("tests/fixtures/worldgen/overworld.json");
                 (serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap(), 917,
-                    [(-49, 33), (127, -65)])
+                    vec![(-49, 33), (127, -65)])
             }
         };
         let terrain = Terrain::from_document(seed, &document).unwrap();
@@ -1437,7 +1503,7 @@ mod exterior_batch_probe {
             let mut baseline_counts = (0, 0, 0);
             let mut shared_counts = (0, 0, 0);
             let mut memory_bytes = 0;
-            for round in 0..6 {
+            for round in 0..14 {
                 let mut baseline = None;
                 let mut shared = None;
                 for candidate in if round % 2 == 0 { [false, true] } else { [true, false] } {
@@ -1468,17 +1534,20 @@ mod exterior_batch_probe {
                 baseline_counts.1, shared_counts.1, baseline_counts.2, shared_counts.2);
             let mut scalar_times = Vec::new();
             let mut production_times = Vec::new();
+            let mut chunk_times = Vec::new();
+            let mut chunk_bytes = 0;
             let mut reused_batches = 0;
-            for round in 0..6 {
+            for round in 0..14 {
                 let mut scalar = None;
                 let mut batched = None;
-                for candidate in if round % 2 == 0 { [false, true] } else { [true, false] } {
+                let mut chunked = None;
+                for candidate in if round % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] } {
                     let start = Instant::now();
-                    if candidate {
+                    if candidate == 1 {
                         let mut result = Vec::with_capacity(requests.len());
                         let mut hits = 0;
                         for batch in requests.chunks(8) {
-                            if let Some(values) = terrain.exterior_footprints(batch).unwrap() {
+                            if let Some(values) = legacy_batch(&terrain, batch).unwrap() {
                                 result.extend(values);
                                 hits += 1;
                             } else {
@@ -1489,20 +1558,89 @@ mod exterior_batch_probe {
                         production_times.push(start.elapsed());
                         reused_batches = hits;
                         batched = Some(result);
-                    } else {
+                    } else if candidate == 0 {
                         let result: Vec<_> = requests.iter().map(|&(x, z, step, bottom, top)|
                             terrain.exterior_footprint(x, z, step, bottom, top).unwrap()).collect();
                         scalar_times.push(start.elapsed());
                         scalar = Some(result);
+                    } else {
+                        let mut result = Vec::with_capacity(requests.len());
+                        for batch in requests.chunks(8) {
+                            if let Some(values) = terrain.exterior_footprints(batch).unwrap() { result.extend(values); }
+                            else { result.extend(batch.iter().map(|&(x,z,step,bottom,top)|
+                                terrain.exterior_footprint(x,z,step,bottom,top).unwrap())); }
+                        }
+                        chunk_times.push(start.elapsed());
+                        chunked = Some(result);
                     }
                 }
                 assert_eq!(scalar, batched, "production batch changed footprint at step {step}, round {round}");
+                for batch in requests.chunks(8) {
+                    let (_, bytes) = chunk_footprints(&terrain, batch).unwrap();
+                    chunk_bytes = chunk_bytes.max(bytes);
+                }
+                assert_eq!(scalar, chunked, "chunk batch changed footprint at step {step}, round {round}");
             }
             let scalar_ms = median(&mut scalar_times[1..]);
             let production_ms = median(&mut production_times[1..]);
             eprintln!("FOOTPRINT_PRODUCTION step={step} requests={} reused_batches={reused_batches} total_batches={} scalar_ms={scalar_ms:.3} production_ms={production_ms:.3} ratio={:.3}",
                 requests.len(), requests.len().div_ceil(8), scalar_ms / production_ms);
+            let chunk_ms = median(&mut chunk_times[1..]);
+            let reused = requests.chunks(8).filter(|batch| terrain.exterior_footprints(batch).unwrap().is_some()).count();
+            eprintln!("FOOTPRINT_CHUNK step={step} requests={} production_ms={production_ms:.3} chunk_ms={chunk_ms:.3} ratio={:.3} reused_batches={reused} scratch_upper_bound_bytes={chunk_bytes}", requests.len(), production_ms / chunk_ms);
             profile_bounds(&terrain, &requests);
+        }
+    }
+
+    #[test]
+    fn bounded_batch_preserves_full_depth_roofs_fluids_and_sheltered_caches() {
+        use serde_json::json;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
+        for file in ["overworld.json", "amplified.json", "nether.json", "end.json"] {
+            let original: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join(file)).unwrap()).unwrap();
+            for horizontal in [1, 2, 3, 4, 5, 8, 16] {
+                for sheltered in [false, true] {
+                    let mut doc = original.clone();
+                    doc["settings"]["noise"]["size_horizontal"] = json!(horizontal);
+                    if sheltered {
+                        let density = doc["settings"]["noise_router"]["final_density"].clone();
+                        doc["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:add",
+                            "argument1":density,"argument2":{"type":"minecraft:mul","argument1":0.05,
+                            "argument2":{"type":"minecraft:flat_cache","argument":{"type":"minecraft:cache_2d",
+                            "argument":{"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":-1.,"to_value":1.}}}}});
+                    }
+                    let t = Terrain::from_document(-917, &doc).unwrap();
+                    for step in [1, 2, 4] {
+                        let requests: Vec<_> = [(15,-17),(16,-16),(12,-16),(28,-16),(-17,15),(-16,16),(-20,16),(-4,16)]
+                            .into_iter().map(|(x,z)| (x,z,step,t.min_y,t.base_column(x,z).unwrap().surface_height.max(t.min_y+1))).collect();
+                        let expected: Vec<_> = requests.iter().map(|&(x,z,step,bottom,top)|
+                            t.exterior_footprint(x,z,step,bottom,top).unwrap()).collect();
+                        if let Some(actual) = t.exterior_footprints(&requests).unwrap() { assert_eq!(actual,expected,"{file} width={horizontal} sheltered={sheltered} step={step}"); }
+                        else { assert!(t.graph.requires_complete_column_order() || 16 % t.cell_width != 0); }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_chunk_checks_keep_thin_solid_sheets_and_invalid_roofs() {
+        use serde_json::json;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen/overworld.json");
+        let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root).unwrap()).unwrap();
+        doc["settings"]["aquifers_enabled"] = json!(false);
+        doc["settings"]["noise_router"]["final_density"] = json!({"type":"minecraft:range_choice",
+            "input":{"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":-64.,"to_value":320.},
+            "min_inclusive":105,"max_exclusive":106,"when_out_of_range":-1.,
+            "when_in_range":{"type":"minecraft:range_choice","input":{"type":"lithostitched:axis","axis":"x"},
+                "min_inclusive":-2,"max_exclusive":-1,"when_in_range":1.,"when_out_of_range":-1.}});
+        let t = Terrain::from_document(0,&doc).unwrap();
+        for step in [1,2,4] {
+            let requests: Vec<_> = [-4,-3,-2,-1,-2,-4,-3,-2].into_iter().map(|x| (x,-4,step,64,106)).collect();
+            let expected: Vec<_> = requests.iter().map(|&(x,z,step,bottom,top)| t.exterior_footprint(x,z,step,bottom,top).unwrap()).collect();
+            assert_eq!(t.exterior_footprints(&requests).unwrap(),Some(expected));
+            let incorrect: Vec<_> = requests.iter().map(|&(x,z,s,b,_)| (x,z,s,b,107)).collect();
+            assert_eq!(t.exterior_footprints(&incorrect).unwrap(),Some(vec![None;8]));
         }
     }
 }

@@ -1,4 +1,4 @@
-//! FreeTerraForged 0.0.6005 optional tile filters (MIT, ReTerraForged 2023).
+//! FreeTerraForged 0.0.6005/1.0 tile filters (MIT, ReTerraForged 2023).
 //! Cells use one compact allocation; erosion brushes are shared by edge shape.
 use crate::density::{integer, number, Result};
 use serde_json::Value;
@@ -92,6 +92,8 @@ struct Options {
     water_level: f32,
     beach: f32,
     optional: bool,
+    noise_correction: bool,
+    ceiling: Option<[f32; 4]>,
 }
 impl Options {
     fn parse(v: &Value) -> Result<Self> {
@@ -123,6 +125,25 @@ impl Options {
             optional: v["optional"]
                 .as_bool()
                 .ok_or("missing optional filters flag")?,
+            noise_correction: if let Some(value) = v.get("noise_correction") {
+                value.as_bool().ok_or("invalid FTF noise correction flag")?
+            } else {
+                true
+            },
+            ceiling: if let Some(value) = v.get("terrain_ceiling") {
+                let values = [
+                    number(value, "compression_start")? as f32,
+                    number(value, "linear_end")? as f32,
+                    number(value, "tail_start")? as f32,
+                    number(value, "maximum")? as f32,
+                ];
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err("invalid FTF terrain ceiling".into());
+                }
+                Some(values)
+            } else {
+                None
+            },
         };
         if !(16..=1024).contains(&size)
             || size % 16 != 0
@@ -190,6 +211,11 @@ pub fn run(input: &[u8], document: &Value) -> Result<Vec<u8>> {
         smooth(&mut cells, &o);
     }
     required(&mut cells, &o);
+    if let Some([start, end, tail, maximum]) = o.ceiling {
+        for cell in &mut cells {
+            cell.values[0] = compress_height(cell.values[0], start, end, tail, maximum);
+        }
+    }
     let mut out = Vec::with_capacity(input.len());
     for cell in cells {
         for value in cell.values {
@@ -199,6 +225,25 @@ pub fn run(input: &[u8], document: &Value) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+fn compress_height(height: f32, start: f32, end: f32, tail: f32, maximum: f32) -> f32 {
+    if height <= start {
+        return height;
+    }
+    let source_range = end - start;
+    let target_range = tail - start;
+    if source_range <= 0. || target_range <= 0. {
+        return height.min(maximum);
+    }
+    let slope = target_range / source_range;
+    if height <= end {
+        return start + (height - start) * slope;
+    }
+    let room = maximum - tail;
+    let excess = height - end;
+    let softness = room / slope;
+    tail + room * excess / (softness + excess)
+}
+
 fn terrain(cells: &[Cell], size: usize, px: f32, pz: f32) -> [f32; 3] {
     let x = px - px as i32 as f32;
     let z = pz - pz as i32 as f32;
@@ -401,7 +446,7 @@ fn required(cells: &mut [Cell], o: &Options) {
             }
         }
     }
-    if !o.optional {
+    if !o.optional || !o.noise_correction {
         return;
     }
     for x in (0..o.size).step_by(4) {

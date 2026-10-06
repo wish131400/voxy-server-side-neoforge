@@ -1,4 +1,4 @@
-//! FreeTerraForged 0.0.6005 noise modules. Float arithmetic and seed wrapping
+//! FreeTerraForged 0.0.6005/1.0 noise modules. Float arithmetic and seed wrapping
 //! follow the released source, including its non-mathematical negative floor.
 use crate::density::{integer, number, string, Result};
 use serde_json::Value;
@@ -11,6 +11,15 @@ pub struct Noise {
     max: f32,
 }
 type N = Arc<Noise>;
+
+pub fn world_seed(seed: i64, modern: bool) -> i32 {
+    if !modern || seed == seed as i32 as i64 { return seed as i32; }
+    let mut mixed = seed as u64;
+    mixed = (mixed ^ (mixed >> 33)).wrapping_mul(-49064778989728563i64 as u64);
+    mixed = (mixed ^ (mixed >> 33)).wrapping_mul(-4265267296055464877i64 as u64);
+    mixed ^= mixed >> 33;
+    (mixed ^ (mixed >> 32)) as i32
+}
 enum Node {
     Constant(f32),
     Fractal {
@@ -37,12 +46,13 @@ enum Node {
 }
 
 impl Noise {
-    pub fn parse(value: &Value, doc: &Value) -> Result<N> {
-        Self::read(value, doc, &mut HashSet::new(), &mut 0, 0)
+    pub fn parse(value: &Value, doc: &Value, namespace: &str) -> Result<N> {
+        let registry = &doc["custom_registries"][format!("{namespace}:worldgen/noise")];
+        Self::read(value, registry, &mut HashSet::new(), &mut 0, 0)
     }
     fn read(
         value: &Value,
-        doc: &Value,
+        registry: &Value,
         active: &mut HashSet<String>,
         count: &mut usize,
         depth: usize,
@@ -55,18 +65,22 @@ impl Noise {
             if !active.insert(name.into()) {
                 return Err(format!("cyclic FTF noise reference {name}"));
             }
-            let resolved = doc["custom_registries"]["reterraforged:worldgen/noise"]
+            let resolved = registry
                 .get(name)
                 .ok_or_else(|| format!("missing FTF noise {name}"))?;
-            let result = Self::read(resolved, doc, active, count, depth + 1);
+            let result = Self::read(resolved, registry, active, count, depth + 1);
             active.remove(name);
             return result;
         }
         if let Some(n) = value.as_f64() {
             return constant(n as f32);
         }
-        let mut child = |key: &str| Self::read(&value[key], doc, active, count, depth + 1);
-        let kind = string(value, "type")?;
+        let mut child = |key: &str| Self::read(&value[key], registry, active, count, depth + 1);
+        let full_type = string(value, "type")?;
+        let kind = full_type
+            .strip_prefix("freeterraforged:")
+            .or_else(|| full_type.strip_prefix("reterraforged:"))
+            .ok_or_else(|| format!("unsupported FTF noise codec {full_type}"))?;
         let f = |key| -> Result<f32> {
             let n = number(value, key)? as f32;
             if n.is_finite() {
@@ -76,15 +90,12 @@ impl Noise {
             }
         };
         let (node, min, max) = match kind {
-            "reterraforged:constant" => return constant(f("value")?),
-            "reterraforged:perlin"
-            | "reterraforged:perlin2"
-            | "reterraforged:simplex"
-            | "reterraforged:simplex2" => {
+            "constant" => return constant(f("value")?),
+            "perlin" | "perlin2" | "simplex" | "simplex2" => {
                 let k = match kind {
-                    "reterraforged:perlin" => 0,
-                    "reterraforged:perlin2" => 1,
-                    "reterraforged:simplex" => 2,
+                    "perlin" => 0,
+                    "perlin2" => 1,
+                    "simplex" => 2,
                     _ => 3,
                 };
                 let octaves = integer(value, "octaves")?;
@@ -124,13 +135,13 @@ impl Noise {
                     1.,
                 )
             }
-            "reterraforged:white" => (Node::White(f("frequency")?), 0., 1.),
-            "reterraforged:shift" => {
+            "white" => (Node::White(f("frequency")?), 0., 1.),
+            "shift" => {
                 let n = child("input")?;
                 let bounds = (n.min, n.max);
                 (Node::Shift(n, integer(value, "shift")?), bounds.0, bounds.1)
             }
-            "reterraforged:frequency" => {
+            "frequency" => {
                 let n = child("input")?;
                 let bounds = (n.min, n.max);
                 (
@@ -139,35 +150,32 @@ impl Noise {
                     bounds.1,
                 )
             }
-            "reterraforged:add"
-            | "reterraforged:multiply"
-            | "reterraforged:min"
-            | "reterraforged:max" => {
+            "add" | "multiply" | "min" | "max" => {
                 let a = child("input1")?;
                 let b = child("input2")?;
                 let op = match kind {
-                    "reterraforged:add" => 0,
-                    "reterraforged:multiply" => 1,
-                    "reterraforged:min" => 2,
+                    "add" => 0,
+                    "multiply" => 1,
+                    "min" => 2,
                     _ => 3,
                 };
                 let min = binary(op, a.min, b.min);
                 let max = binary(op, a.max, b.max);
                 (Node::Binary(op, a, b), min, max)
             }
-            "reterraforged:abs" | "reterraforged:invert" | "reterraforged:power" => {
+            "abs" | "invert" | "power" => {
                 let n = child("input")?;
                 let (min, max) = (n.min, n.max);
-                if kind.ends_with(":abs") {
+                if kind == "abs" {
                     (Node::Abs(n), min.abs(), max.abs())
-                } else if kind.ends_with(":invert") {
+                } else if kind == "invert" {
                     (Node::Invert(n), min, max)
                 } else {
                     (Node::Power(n, f("power")?), min, max)
                 }
             }
-            "reterraforged:clamp" | "reterraforged:map" => {
-                let mapping = kind.ends_with(":map");
+            "clamp" | "map" => {
+                let mapping = kind == "map";
                 let n = child(if mapping { "alpha" } else { "input" })?;
                 let a = child(if mapping { "from" } else { "min" })?;
                 let b = child(if mapping { "to" } else { "max" })?;
@@ -182,12 +190,12 @@ impl Noise {
                     max,
                 )
             }
-            "reterraforged:alpha" => {
+            "alpha" => {
                 let n = child("input")?;
                 let bounds = (n.min, n.max);
                 (Node::Alpha(n, child("alpha")?), bounds.0, bounds.1)
             }
-            "reterraforged:threshold" => {
+            "threshold" => {
                 let n = child("input")?;
                 let bounds = (n.min, n.max);
                 (
