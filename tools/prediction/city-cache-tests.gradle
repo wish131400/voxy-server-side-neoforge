@@ -1,0 +1,24 @@
+allprojects {
+    afterEvaluate {
+        def regression = sourceSets.create('cityCacheRegression') {
+            java.srcDir 'src/test/java'
+            java.include 'dev/xantha/vss/mixin/lostcities/LostCityTimedCacheConcurrencyTest.java'
+            java.include 'dev/xantha/vss/networking/server/compat/LostCity*Test.java'
+            java.include 'dev/xantha/vss/client/prediction/ForgeTestBootstrap.java'
+            compileClasspath = sourceSets.test.runtimeClasspath
+            runtimeClasspath = output + sourceSets.test.runtimeClasspath
+        }
+        configurations.cityCacheRegressionImplementation.extendsFrom configurations.testImplementation
+        configurations.cityCacheRegressionRuntimeOnly.extendsFrom configurations.testRuntimeOnly
+        tasks.register('cityCacheTest', Test) {
+            testClassesDirs = regression.output.classesDirs
+            classpath = regression.runtimeClasspath
+            useJUnitPlatform()
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '1500m'
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/city-cache')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/city-cache')
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

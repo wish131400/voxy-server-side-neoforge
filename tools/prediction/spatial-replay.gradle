@@ -1,0 +1,9 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        maxHeapSize = '2G'
+        if (providers.gradleProperty('vssSpatialReplay').isPresent()) {
+            systemProperty 'vss.spatialReplay', providers.gradleProperty('vssSpatialReplay').get()
+        }
+        testLogging.showStandardStreams = true
+    }
+}

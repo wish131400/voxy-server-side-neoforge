@@ -1,0 +1,13 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('cityCompatTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '1500m'
+            ['LostCityPlannerAccessTest','LostCityPlanningReaderTest','LostCityStreetPlanTest','LostCityInfrastructurePlanTest','LostCityLegacyPalettesTest','LostCityReleaseMatrixTest','LostCityHintsTest','LostCityExteriorTest','LostCityHintsPayloadTest','VSSConstantsTest','PredictionCityGeometryTest','PredictionCitySurfaceTest','PredictionMeshBuilderTest','PredictionSurfaceRegressionTest','PredictionSurfaceStructuresTest','PredictionFluidStructureTest','PredictionSnowSurfacesTest','PredictionDecorationInvalidationTest'].each { include "**/${it}.class" }
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

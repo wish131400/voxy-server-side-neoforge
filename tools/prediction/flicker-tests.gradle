@@ -1,0 +1,15 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('flickerGpuTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '1500m'
+            forkEvery = 1
+            systemProperty 'vss.gpuTests', 'true'
+            ['PredictionProductionBatchGpuTest','PredictionCompactGpuTest','PredictionRenderTargetGpuTest','PredictionSegmentedMeshGpuTest'].each { include "**/${it}.class" }
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

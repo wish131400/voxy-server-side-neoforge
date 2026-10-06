@@ -1,0 +1,10 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        include '**/PredictionVegetationReuseBenchmark.class'
+        maxParallelForks = 1
+        maxHeapSize = '2G'
+        environment 'VSS_VEGETATION_REUSE_BENCH', '1'
+        outputs.upToDateWhen { false }
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

@@ -1,0 +1,41 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('vramCpuTest', Test) {
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '2G'
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/vram-cpu')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/vram-cpu')
+            filter {
+                includeTestsMatching '*PredictionPassStorageTest'
+                includeTestsMatching '*PredictionGpuResidencyTest'
+                includeTestsMatching '*PredictionGpuEncodingTest'
+                includeTestsMatching '*PredictionMeshCompressionTest'
+                includeTestsMatching '*PredictionDisplayGeometryTest'
+                includeTestsMatching '*PredictionMeshCodecTest'
+                includeTestsMatching '*PredictionScopedResidencyTest'
+                includeTestsMatching '*PredictionSubmissionCoverageTest'
+            }
+        }
+        tasks.register('vramGpuTest', Test) {
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            forkEvery = 1
+            maxHeapSize = '2G'
+            systemProperty 'vss.gpuTests', 'true'
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/vram-gpu')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/vram-gpu')
+            filter {
+                includeTestsMatching '*PredictionProductionBatchGpuTest'
+                includeTestsMatching '*PredictionCompactGpuTest'
+                includeTestsMatching '*PredictionCompressedUploadGpuTest'
+                includeTestsMatching '*PredictionSegmentedMeshGpuTest'
+                includeTestsMatching '*PredictionDisplayLodGpuTest'
+            }
+        }
+    }
+}

@@ -1,0 +1,41 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('gpuOptimizationTest', Test) {
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            forkEvery = 1
+            maxHeapSize = '2G'
+            systemProperty 'vss.gpuTests', 'true'
+            testLogging {
+                events 'passed', 'skipped', 'failed'
+                showStandardStreams = true
+            }
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/gpu-optimization')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/gpu-optimization')
+            filter {
+                includeTestsMatching '*PredictionOcclusionGpuTest'
+                includeTestsMatching '*PredictionProductionBatchGpuTest'
+                includeTestsMatching '*PredictionDisplayLodGpuTest'
+            }
+        }
+        tasks.register('gpuOptimizationCpuTest', Test) {
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '2G'
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/gpu-optimization-cpu')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/gpu-optimization-cpu')
+            filter {
+                includeTestsMatching '*PredictionDisplayGeometryTest'
+                includeTestsMatching '*PredictionOcclusionPolicyTest'
+                includeTestsMatching '*PredictionSpatialOrderTest'
+                includeTestsMatching '*PredictionAquaticSubmissionTest'
+                includeTestsMatching '*PredictionMeshCodecTest'
+                includeTestsMatching '*PredictionMeshMemoryTest'
+                includeTestsMatching '*PredictionSubmissionCoverageTest'
+            }
+        }
+    }
+}

@@ -1,0 +1,6 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        // Full registry/palette fixtures exceed Gradle's default 512 MiB test heap.
+        maxHeapSize = '2G'
+    }
+}

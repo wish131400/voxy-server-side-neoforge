@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-06",
+  "scope": "prediction geometry VRAM",
+  "artifacts": {
+    "neoforge": {
+      "path": "C:\\Users\\Administrator\\Desktop\\voxyserverside-neoforge-1.21.1\\lib\\vss-0.3.5-neoforge-1.21.1.jar",
+      "bytes": 5668136,
+      "sha256": "34A58E669C468DE7185648D809B9E0D90BA97C207A14076BFE054251389B8077",
+      "classes": 776,
+      "class_version": 65,
+      "native_libraries": 5,
+      "tests": {
+        "vram-cpu": {
+          "tests": 44,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1,
+          "passed": 43
+        },
+        "vram-gpu": {
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "passed": 5
+        }
+      }
+    },
+    "forge": {
+      "path": "C:\\Users\\Administrator\\Desktop\\voxyserverside\\lib\\vss-0.3.5-forge-1.20.1.jar",
+      "bytes": 6341676,
+      "sha256": "81F3A025F0A4FE5B6F3BF3E0B8E4EADBAC533C5ECA2007C5B5D1856866C161F7",
+      "classes": 787,
+      "class_version": 61,
+      "native_libraries": 5,
+      "tests": {
+        "vram-cpu": {
+          "tests": 44,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1,
+          "passed": 43
+        },
+        "vram-gpu": {
+          "tests": 5,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "passed": 5
+        }
+      }
+    }
+  },
+  "shared_sources": {
+    "PredictionGpuTile": "5116D06E5D2EDABEBDAFDAE7D15F96CF2039E04ACAE1DEDB8F2B0D3A274AF428",
+    "PredictionGpuEncoding": "ED8BD9F4B02E30C774D7F68591666FA37B4FFCB66C1BA83DED8684D377B0C233",
+    "PredictionGpuResidency": "8F0798A8990CD61C5B730EA05515AF30099551B50A6C3E95108C61C82AD2633A",
+    "PredictionMeshRestore": "B9FD86395FE7451A09228D275C657568FFFEA6D952BB3F2E0BFC2609BCE3BDB3",
+    "PredictionGeometryStats": "1D4CD5C32C4A6556EFB970ADA73BCD08703546C35D832CED8FCAA275DDB1E5F6",
+    "PredictionTerrainArena": "F4BB3D7B24A3D3AFF3FDEC7C8D1C12C684626A9D93C88E149215F1C8C2812B8E",
+    "PredictionOwnershipRuns": "0CD4BEFAFD5CF3E276DFB38F965F3350FD2EA18AF1509C4B1E8FBAE3FF7D116D",
+    "PredictionSubmissionCoverage": "BC00BDBB6C2DC1106991D5B4A8E95A61BE4679254CC5DBB6C74098257C3F4C6B"
+  }
+}

@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-06T10:02:22.1150189+08:00",
+  "artifacts": [
+    {
+      "loader": "Forge",
+      "minecraft": "1.20.1",
+      "version": "0.3.5-forge-1.20.1",
+      "path": "C:/Users/Administrator/Desktop/voxyserverside/lib/vss-0.3.5-forge-1.20.1.jar",
+      "bytes": 6244097,
+      "sha256": "546B1FFAD21F3EE1EBECE9931AD938920C8949B8BA03F2488A982EFC4D729C35",
+      "metadata_entry": "META-INF/mods.toml",
+      "metadata": "modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\nlicense=\"MIT\"\n\n[[mods]]\nmodId=\"vss\"\nversion=\"0.3.5-forge-1.20.1\"\ndisplayName=\"Voxy Server Side\"\nauthors=\"Xantha\"\nlogoFile=\"icon.png\"\ndescription='''Forge port of Voxy Server Side for synchronizing server chunk columns into Voxy clients.'''\n\n[[dependencies.vss]]\n    modId=\"forge\"\n    mandatory=true\n    versionRange=\"[47,)\"\n    ordering=\"NONE\"\n    side=\"BOTH\"\n\n[[dependencies.vss]]\n    modId=\"minecraft\"\n    mandatory=true\n    versionRange=\"[1.20.1,1.21)\"\n    ordering=\"NONE\"\n    side=\"BOTH\"\n",
+      "manifest": "Manifest-Version: 1.0\r\nSpecification-Title: vss\r\nSpecification-Vendor: Xantha\r\nSpecification-Version: 1\r\nImplementation-Title: voxyserverside\r\nImplementation-Version: 0.3.5-forge-1.20.1\r\nImplementation-Vendor: Xantha\r\nImplementation-Timestamp: 2026-10-06T10:01:16+0800\r\nMixinConfigs: vss.compat.mixins.json,vss.strict.mixins.json\r\n\r\n",
+      "production_classes": [
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionCpuBudget.class",
+          "major": 61,
+          "sha256": "AA25D016DBDF1D380E9A9E014CAD8ECC7606577CB9A12C07B2A32BCB517D28C9"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionLoadingProgress.class",
+          "major": 61,
+          "sha256": "A50F8D4F0A70E2DD6D8B8A5A8DEAE78369128B335DB37ED0748D68047AFDA305"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionJavaExterior.class",
+          "major": 61,
+          "sha256": "759F6700B8376AD022B23634A83D59B4760B72D189A9093C3FF3F28F7AC02C6C"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionColumnVolume.class",
+          "major": 61,
+          "sha256": "20D6F425186245B7CEB5B8B60BFAC2219F345479A5EFD8AD489E0265184A944E"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionTileManager.class",
+          "major": 61,
+          "sha256": "CF9A3F906EBDA5696E35A877FC3FB322DE46814416870277E545672E32E1F4BD"
+        },
+        {
+          "entry": "dev/xantha/vss/networking/client/PredictionGenerationPriority.class",
+          "major": 61,
+          "sha256": "6378AF51A386B927D1C0DB826EF7BF425480B6C25CC72C7FC35B94BD6FD9F593"
+        },
+        {
+          "entry": "dev/xantha/vss/networking/client/LodRequestManager.class",
+          "major": 61,
+          "sha256": "7F0DFB2AF4D0BB9A922A4F11C4FFCC7CD06A55F78089FF5BC1A5F81DD84CFF88"
+        }
+      ],
+      "excluded_test_and_tool_classes": true,
+      "windows_native": {
+        "entry": "META-INF/vss-natives/windows-x86_64/vss_native_core.dll",
+        "bytes": 1544704,
+        "sha256": "03447C3F2AD8EF552A1449BB81C1D69C1E04DE8E682FE9D91360AFAA607B97D5",
+        "abi": 6
+      },
+      "build": {
+        "success": true,
+        "forge_reobfuscated": true,
+        "log": "C:/Users/Administrator/.codex/tmp/vss-loading-fixes-20261006/forge-build-035.log"
+      },
+      "loading_regression": {
+        "total": 188,
+        "passed": 187,
+        "skipped": 1,
+        "failures": 0,
+        "errors": 0,
+        "suites": 28
+      },
+      "skipped_tests": [
+        "dev.xantha.vss.client.prediction.PredictionSurfaceRetryTest.pairedRetryBenchmarkIncludesAllProductionPreparation()"
+      ],
+      "protocol_version": 48,
+      "java_version": 17,
+      "loader_requirement": "[47,)",
+      "minecraft_requirement": "[1.20.1,1.21)",
+      "metadata_version_verified": true,
+      "manifest_version_verified": true
+    },
+    {
+      "loader": "NeoForge",
+      "minecraft": "1.21.1",
+      "version": "0.3.5-neoforge-1.21.1",
+      "path": "C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1/lib/vss-0.3.5-neoforge-1.21.1.jar",
+      "bytes": 5570103,
+      "sha256": "4CF1F639F67B31DCB9B5F5FEB969B3971D7C0143705E545644000E2D2D2D3D96",
+      "metadata_entry": "META-INF/neoforge.mods.toml",
+      "metadata": "modLoader=\"javafml\"\nloaderVersion=\"[4,)\"\nlicense=\"MIT\"\n\n[[mods]]\nmodId=\"vss\"\nversion=\"0.3.5-neoforge-1.21.1\"\ndisplayName=\"Voxy Server Side\"\nauthors=\"Xantha\"\ncredits=\"版本移植：wish\"\nlogoFile=\"icon.png\"\ndescription='''NeoForge port of Voxy Server Side for synchronizing server chunk columns into Voxy clients.'''\n\n[[dependencies.vss]]\n    modId=\"neoforge\"\n    mandatory=true\n    versionRange=\"[21.1,)\"\n    ordering=\"NONE\"\n    side=\"BOTH\"\n\n[[dependencies.vss]]\n    modId=\"minecraft\"\n    mandatory=true\n    versionRange=\"[1.21.1]\"\n    ordering=\"NONE\"\n    side=\"BOTH\"\n",
+      "manifest": "Manifest-Version: 1.0\r\nSpecification-Title: vss\r\nSpecification-Vendor: Xantha\r\nSpecification-Version: 1\r\nImplementation-Title: voxyserverside-neoforge-1.21.1\r\nImplementation-Version: 0.3.5-neoforge-1.21.1\r\nImplementation-Vendor: Xantha\r\nImplementation-Timestamp: 2026-10-06T10:01:13+0800\r\nMixinConfigs: vss.compat.mixins.json,vss.strict.mixins.json\r\n\r\n",
+      "production_classes": [
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionCpuBudget.class",
+          "major": 65,
+          "sha256": "22811FD38EBEAC6BBFF6AE348346D2280468053B56D78CEBFB295ABD7E826FC0"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionLoadingProgress.class",
+          "major": 65,
+          "sha256": "5EB41D6FC05ACC55CB6255DF55CF83CA2E9E331F4D8C2CB137DDC251C8F52FC3"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionJavaExterior.class",
+          "major": 65,
+          "sha256": "8DFB4566C85C74425875D85290308B7C64B29052C58458ACDE9042F7D1E2BC84"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionColumnVolume.class",
+          "major": 65,
+          "sha256": "1CC0A7F3344F10FD1033EB20CB0EC754F00706EEA3490BDA18AD4D7ACDBB57F7"
+        },
+        {
+          "entry": "dev/xantha/vss/client/prediction/PredictionTileManager.class",
+          "major": 65,
+          "sha256": "094EE1EC0748CF003E57C2CECFB7849CCECE8FA5C373C902080337046ECFB347"
+        },
+        {
+          "entry": "dev/xantha/vss/networking/client/PredictionGenerationPriority.class",
+          "major": 65,
+          "sha256": "4405FC019045E03DB8ECBBDBFFE1B6AFE560033454A1EDFEC6CE9DCFDF13E3C6"
+        },
+        {
+          "entry": "dev/xantha/vss/networking/client/LodRequestManager.class",
+          "major": 65,
+          "sha256": "BA28D2D4C24FE0260769E2CE59CC33BC62C708AACC4067A8397AD80C7255C2BD"
+        }
+      ],
+      "excluded_test_and_tool_classes": true,
+      "windows_native": {
+        "entry": "META-INF/vss-natives/windows-x86_64/vss_native_core.dll",
+        "bytes": 1544704,
+        "sha256": "03447C3F2AD8EF552A1449BB81C1D69C1E04DE8E682FE9D91360AFAA607B97D5",
+        "abi": 6
+      },
+      "build": {
+        "success": true,
+        "forge_reobfuscated": false,
+        "log": "C:/Users/Administrator/.codex/tmp/vss-loading-fixes-20261006/neoforge-build-035.log"
+      },
+      "loading_regression": {
+        "total": 188,
+        "passed": 187,
+        "skipped": 1,
+        "failures": 0,
+        "errors": 0,
+        "suites": 28
+      },
+      "skipped_tests": [
+        "dev.xantha.vss.client.prediction.PredictionSurfaceRetryTest.pairedRetryBenchmarkIncludesAllProductionPreparation()"
+      ],
+      "protocol_version": 49,
+      "java_version": 21,
+      "loader_requirement": "[21.1,)",
+      "minecraft_requirement": "[1.21.1]",
+      "metadata_version_verified": true,
+      "manifest_version_verified": true
+    }
+  ],
+  "native_release_regression": {
+    "total": 17,
+    "passed": 17,
+    "failures": 0,
+    "suites": {
+      "biome_colors": 5,
+      "surface": 2,
+      "worldgen": 10
+    }
+  },
+  "java_exterior_benchmark": [
+    {
+      "loader": "Forge",
+      "java": 17,
+      "footprints": 20,
+      "original_ms": 392.866,
+      "reuse_ms": 216.626,
+      "original_allocated_bytes": 323389120,
+      "reuse_allocated_bytes": 33097232,
+      "result_parity": true
+    },
+    {
+      "loader": "NeoForge",
+      "java": 21,
+      "footprints": 20,
+      "original_ms": 378.541,
+      "reuse_ms": 213.617,
+      "original_allocated_bytes": 313873136,
+      "reuse_allocated_bytes": 33372240,
+      "result_parity": true
+    }
+  ],
+  "validation_scope": {
+    "deployed_to_game_instance": false,
+    "gameplay_resampled_after_build": false,
+    "benchmark_scope": "One ordered vanilla Overworld exterior stage; not whole-world loading time or gameplay FPS. Small synthetic graphs may not benefit.",
+    "native_color_comparison": "Old DLL rejects grass_color; new DLL imports 137 captured biomes combined with explicitly identified vanilla fixtures. Surface/tint/state/feature parity verified against RGB normalization.",
+    "complete_deceasedcraft_runtime_snapshot_import": false,
+    "client_rust_true_observed_after_fix": false,
+    "missing_runtime_snapshot_inputs": [
+      "complete block_definitions",
+      "canonical input_states",
+      "production vss_terrablender routing"
+    ],
+    "rebuilt_native_platforms": [
+      "windows-x86_64"
+    ],
+    "other_native_platforms_rebuilt": false,
+    "skipped_java_test_reason": "Optional long paired surface retry benchmark requires VSS_SURFACE_RETRY_BENCH_OUTPUT; functional retry tests passed."
+  },
+  "evidence_root": "C:/Users/Administrator/.codex/tmp/vss-loading-fixes-20261006",
+  "implementation_record": "docs/prediction-loading-optimization-20261006.md",
+  "native_color_record": "docs/prediction-native-color-compatibility-20261006.md",
+  "repackaging": {
+    "requested_version": "0.3.5",
+    "completed_loading_optimizations_preserved": true,
+    "all_production_classes_and_windows_dll_identical_to_previous_build": true,
+    "binary_comparison": [
+      {
+        "loader": "forge-1.20.1",
+        "previous_036_jar": "C:/Users/Administrator/Desktop/voxyserverside/lib/vss-0.3.6-forge-1.20.1.jar",
+        "repackaged_035_jar": "C:/Users/Administrator/Desktop/voxyserverside/lib/vss-0.3.5-forge-1.20.1.jar",
+        "production_class_count": 748,
+        "all_production_classes_identical": true,
+        "windows_dll_identical": true,
+        "windows_dll_sha256": "03447C3F2AD8EF552A1449BB81C1D69C1E04DE8E682FE9D91360AFAA607B97D5"
+      },
+      {
+        "loader": "neoforge-1.21.1",
+        "previous_036_jar": "C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1/lib/vss-0.3.6-neoforge-1.21.1.jar",
+        "repackaged_035_jar": "C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1/lib/vss-0.3.5-neoforge-1.21.1.jar",
+        "production_class_count": 737,
+        "all_production_classes_identical": true,
+        "windows_dll_identical": true,
+        "windows_dll_sha256": "03447C3F2AD8EF552A1449BB81C1D69C1E04DE8E682FE9D91360AFAA607B97D5"
+      }
+    ],
+    "previous_loading_regression_results_reused": true,
+    "regression_note": "Only package version and release documentation changed; all production class bytes and the Windows DLL match the tested optimized build.",
+    "previous_035_jars_backed_up_to": "C:/Users/Administrator/.codex/tmp/vss-loading-fixes-20261006/repack-035/"
+  }
+}

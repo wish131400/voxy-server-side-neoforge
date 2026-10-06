@@ -1,0 +1,7 @@
+tasks.withType(Test).configureEach {
+    include '**/PredictionDecorationLocalityBenchmark.class'
+    maxParallelForks = 1
+    maxHeapSize = '1G'
+    outputs.upToDateWhen { false }
+    testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+}

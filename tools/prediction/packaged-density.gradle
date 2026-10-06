@@ -1,0 +1,12 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        include '**/PackagedDensityCompilerTest.class'
+        outputs.upToDateWhen { false }
+        systemProperty 'vss.packagedJar', providers.gradleProperty('vssPackagedJar').get()
+        if (providers.gradleProperty('vssSrgMinecraft').isPresent()) {
+            systemProperty 'vss.srgMinecraft', providers.gradleProperty('vssSrgMinecraft').get()
+            systemProperty 'vss.srgMappings', providers.gradleProperty('vssSrgMappings').get()
+        }
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

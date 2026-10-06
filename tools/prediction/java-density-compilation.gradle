@@ -1,0 +1,23 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        include '**/JavaDensityCompilationBenchmark.class'
+        forkEvery = 1
+        maxParallelForks = 1
+        minHeapSize = '1G'
+        maxHeapSize = '1G'
+        outputs.upToDateWhen { false }
+        def result = System.getenv('VSS_JIT_BENCH_OUTPUT')
+        if (result != null) {
+            doFirst { project.file(result).mkdirs() }
+            if (System.getenv('VSS_JIT_LOG') == 'true') {
+                jvmArgs '-XX:+UnlockDiagnosticVMOptions', '-XX:+LogCompilation',
+                        "-XX:LogFile=${project.file(result).absolutePath}/hotspot-%p.xml"
+            }
+        }
+        if (providers.gradleProperty('vssMountainDocument').isPresent())
+            systemProperty 'vss.mountainDocument', providers.gradleProperty('vssMountainDocument').get()
+        if (System.getenv('VSS_JIT_JAVA') != null)
+            executable = "${System.getenv('VSS_JIT_JAVA')}/bin/java.exe"
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

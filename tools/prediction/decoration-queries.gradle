@@ -1,0 +1,11 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        include '**/PredictionDecorationQueryBenchmark.class'
+        maxParallelForks = 1
+        maxHeapSize = '1G'
+        if (System.getenv('VSS_DECORATION_JAVA') != null)
+            executable = "${System.getenv('VSS_DECORATION_JAVA')}/bin/java.exe"
+        outputs.upToDateWhen { false }
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

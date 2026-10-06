@@ -1,0 +1,56 @@
+[
+  {
+    "loader": "neo",
+    "file": "C:\\Users\\Administrator\\Desktop\\voxyserverside-neoforge-1.21.1\\lib\\flicker-fix-20261006\\vss-0.3.5-neoforge-1.21.1.jar",
+    "sha256": "930e286d935005eaceb306e9b9945abe0ed0c38d881faf60b68ceb6744a541a0",
+    "bytes": 5570158,
+    "gpu_tests": 4,
+    "city_tests": 37,
+    "failures": 0,
+    "skipped": 0,
+    "previous_windows_dll_preserved": true,
+    "other_production_classes_preserved": true,
+    "changed_classes": [
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$BatchSlot.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanBatch.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanCache.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanItem.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch.class",
+      "dev/xantha/vss/networking/server/compat/LostCityPlanningReader.class"
+    ],
+    "sources": {
+      "src/main/java/dev/xantha/vss/client/prediction/PredictionIndirectBatch.java": "27d935f93d99adba2cf2305cfd53795fbdd81bfc55089ae0b92cc0deb8cb75c8",
+      "src/test/java/dev/xantha/vss/client/prediction/PredictionProductionBatchGpuTest.java": "bf8902082a3f28cd96a28fa8d18c476353fd68901114e43a37e3df93674c1d92",
+      "src/main/java/dev/xantha/vss/networking/server/compat/LostCityPlanningReader.java": "8203cf02be23e41c55392c7d38a744eb9628a195670b537d1ef238e4c41c79d2",
+      "src/test/java/dev/xantha/vss/networking/server/compat/LostCityPlanningReaderTest.java": "6bd15069164efcaced1b3ec181c30fb1c4ae9176d19efb6e4cbad7807cedd77a",
+      "tools/prediction/flicker-tests.gradle": "44254b60ec55996655f178651b545d61e27c6d2adc4b28ec75338c136cb787ec"
+    }
+  },
+  {
+    "loader": "forge",
+    "file": "C:\\Users\\Administrator\\Desktop\\voxyserverside\\lib\\flicker-fix-20261006\\vss-0.3.5-forge-1.20.1.jar",
+    "sha256": "0d3e8ec6d31b37a5fc9d587d5e0afdea78e0991ec2bf4482a52cb94f324fbce1",
+    "bytes": 6244156,
+    "gpu_tests": 4,
+    "city_tests": 32,
+    "failures": 0,
+    "skipped": 0,
+    "previous_windows_dll_preserved": true,
+    "other_production_classes_preserved": true,
+    "changed_classes": [
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$BatchSlot.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanBatch.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanCache.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch$PlanItem.class",
+      "dev/xantha/vss/client/prediction/PredictionIndirectBatch.class",
+      "dev/xantha/vss/networking/server/compat/LostCityPlanningReader.class"
+    ],
+    "sources": {
+      "src/main/java/dev/xantha/vss/client/prediction/PredictionIndirectBatch.java": "27d935f93d99adba2cf2305cfd53795fbdd81bfc55089ae0b92cc0deb8cb75c8",
+      "src/test/java/dev/xantha/vss/client/prediction/PredictionProductionBatchGpuTest.java": "bf8902082a3f28cd96a28fa8d18c476353fd68901114e43a37e3df93674c1d92",
+      "src/main/java/dev/xantha/vss/networking/server/compat/LostCityPlanningReader.java": "8203cf02be23e41c55392c7d38a744eb9628a195670b537d1ef238e4c41c79d2",
+      "src/test/java/dev/xantha/vss/networking/server/compat/LostCityPlanningReaderTest.java": "49693df0536c17e3b7f2678960f531c94b8c4f8a4d97278604ed7c609f0a8b57",
+      "tools/prediction/flicker-tests.gradle": "44254b60ec55996655f178651b545d61e27c6d2adc4b28ec75338c136cb787ec"
+    }
+  }
+]

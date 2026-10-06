@@ -1,0 +1,15 @@
+// Independent reports for the Java exterior loading regression.
+allprojects {
+    afterEvaluate {
+        tasks.register('exteriorLoadingTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '2G'
+            include '**/PredictionJavaExteriorTest.class'
+            include '**/PredictionExteriorColumnsTest.class'
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

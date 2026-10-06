@@ -1,6 +1,6 @@
 # Voxy Server Side NeoForge
 
-[0.3.4 更新日志](CHANGELOG.md)
+[0.3.5 更新日志](CHANGELOG.md)
 
 Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
@@ -10,12 +10,12 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | --- | --- |
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
-| VSS | `0.3.4-neoforge-1.21.1` |
+| VSS | `0.3.5-neoforge-1.21.1` |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
 
-当前版本为 `0.3.4-neoforge-1.21.1`，输出文件为 `lib/vss-0.3.4-neoforge-1.21.1.jar`。配置结构和网络协议使用独立的内部版本标记。0.3.2 的世界生成档案改用分片传输，NeoForge 协议由 46 升至 47，服务端与所有 VSS 客户端需要一起更新。
+当前版本为 `0.3.5-neoforge-1.21.1`，输出文件为 `lib/vss-0.3.5-neoforge-1.21.1.jar`。当前 NeoForge 网络协议为 50（0.3.4 源码为 48）。客户端与服务端必须使用同一次 0.3.5 构建；旧协议不兼容。缓存升级按记录校验和迁移，无需清空世界或 Voxy 缓存。
 
 客户端和服务端必须安装协议一致的 VSS；更新时请使用同一次构建的 JAR，不要仅凭模组版本号判断两端兼容。
 
@@ -50,9 +50,11 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能默认开启，可用 `enablePrediction` 关闭。
 
-预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），普通精细地形距离由 `predictionFineDistanceBlocks` 控制（默认 512 方块）。最外层 10% 不强制锁定粗 LOD，仍按屏幕像素误差及可用预算渐进细化。近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容，植被和建筑分别由 `predictionTrees`、`predictionStructures` 开关。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系、地表规则与装饰放置，未支持的装饰保留 Java 回退；建筑结构沿用 Minecraft 的 Java 布局与模板处理器，并与两种地形后端共享虚拟区块。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
+预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），普通精细地形距离由 `predictionFineDistanceBlocks` 控制（默认 512 方块）。最外层 10% 不强制锁定粗 LOD，仍按屏幕像素误差及可用预算渐进细化。近处地形之外还会按 `predictionSurfaceDistanceBlocks`（默认 768 方块）细化地表内容。植被数量由 `predictionVegetationDensity` 的低、中、高三档控制，分别保留约 25%、50%、100%，默认中档；建筑由 `predictionStructures` 开关控制。望远镜额外加载目标区域由 `predictionSpyglassLoading` 控制，默认开启。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系、地表规则与装饰放置，未支持的装饰保留 Java 回退；建筑结构沿用 Minecraft 的 Java 布局与模板处理器，并与两种地形后端共享虚拟区块。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
 
-生物群系快照支持 TerraBlender 区域和 Blueprint 切片的嵌套组合，Java 与 Rust 都保留内部区域选择，避免石岸被预测为玄武岩悬崖。缺少必要快照时不启用该维度预测；生成快照变化后会使用独立的本地缓存。
+生物群系快照支持 TerraBlender 区域和 Blueprint 切片的嵌套组合，Java 与 Rust 都保留内部区域选择，避免石岸被预测为玄武岩悬崖。缺少必要快照时不启用该维度预测。
+
+预测缓存按存档或服务器、维度和种子固定保存，不再因世界生成档案、Java/Rust 后端或超采样设置变化另建目录。单人缓存位于 `<存档>/.vss/prediction/surface-v1/<维度命名空间>/<维度路径>/seed-<种子十六进制>/`；多人缓存位于 `<游戏目录>/.vss/servers/<服务器标识哈希>/prediction/surface-v1/` 下的相同维度目录。已有精细地形、植被和成品网格优先读取，缺失或无法解码的记录才重建；方块和生物群系按资源名称恢复，真实区块更新仍执行局部脏列刷新。首次升级会迁移能够确认匹配的旧目录，未确认来源的历史目录不自动合并；旧版缺少方块编号表的真实区块采样会重新采集。更改地形配置后，已缓存区域保留原有预测，新区域使用新配置；需要全部重新预测时，应退出世界后清理对应的预测缓存目录。
 
 预测只是对世界生成的近似：不执行完整雕刻、装饰与结构地形融合，也不包含玩家改动，需要完全准确时以服务端下发的真实列为准。更细的范围与缓存行为见下方客户端配置。
 
@@ -62,7 +64,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 该功能默认开启，可在 VSS 的 Embeddium/Sodium 设置页控制，需要临时关闭地图写入时执行 `/vssclient xaero disable`，恢复时执行 `/vssclient xaero enable`。执行 `/vssclient xaero reload` 会清除当前服务器所有维度的客户端列存在性记录并自动重新请求已有 LOD 缓存。
 
-Xaero `1.40.x`、`1.41.x`、`1.42.x`、`1.43.x`、`1.44.x` 和 `1.45.0` 已适配；低于 `1.40.0` 的版本不受支持，高于 `1.45.0` 的版本尚未验证。反射接口不兼容时，Xaero 桥接会自动停用，不影响 VSS/Voxy 的 LOD 功能。
+Xaero `1.40.x`～`1.45.0` 已适配，并核对 `1.46.0` 对应平台的发布接口与保存流程；低于 `1.40.0` 的版本不受支持，其他版本和整合包组合仍需验证。反射接口不兼容时，Xaero 桥接会自动停用，不影响 VSS/Voxy 的 LOD 功能。
 
 ## 远处玩家与兼容模组
 
@@ -106,27 +108,30 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 | `predictionDistanceBlocks` | `4096` | 独立预测远景范围，单位方块，独立于 VSS |
 | `predictionFineDistanceBlocks` | `512` | 普通精细地形距离，单位方块，独立于预测远景距离 |
 | `predictionSurfaceDistanceBlocks` | `768` | 实际近处地形外的地表细化宽度，范围 128–2048 方块 |
-| `predictionTrees` | `true` | 近处及望远镜目标的树木、草等植被 |
+| `predictionVegetationDensity` | `medium` | 预测植被数量：`low` 约 25%、`medium` 约 50%、`high` 100% |
+| `predictionSpyglassLoading` | `true` | 允许望远镜额外加载远处精细地形、植被与建筑 |
 | `predictionStructures` | `true` | 近处及望远镜目标的地表建筑 |
 | `rememberTerrain` | `true` | 本地压缩保存预测地形与地表内容，允许释放闲置细节 |
 
 进入世界后可
-执行 `/vssclient stats`，其中 `profile` 表示世界生成快照是否解码完成，
+执行 `/vssclient stats details`，其中 `profile` 表示世界生成快照是否解码完成，
 `tiles`/`pending`/`failed` 表示预测 tile 队列状态，`rendered` 表示最近的
 渲染阶段实际提交了多少预测网格单元；`render=...` 是累计的渲染诊断，
 其中 `packedQuads` 是 greedy 顶面/水面四边形数量，`triangleVertices` 是
 墙体与 feature 补充通道的顶点数量，`depthBoundCulled`/`occlusionCulled`
 表示被远景边界和四帧遮挡迟滞过滤的 tile。
 
-`surface` 诊断包含地表候选/完成网格数、基础远景与近处地形是否就绪、实际生成块数、进入网格的块数，以及跳过的 feature/结构数。自动日志受 `debugLogging` 控制；也可通过 `/vssclient stats` 主动查询。Voxy/Sodium 设置页提供植被开关、地表建筑开关与地表内容范围。
+`surface` 诊断包含地表候选/完成网格数、基础远景与近处地形是否就绪、实际生成块数、进入网格的块数，以及跳过的 feature/结构数。自动日志受 `debugLogging` 控制；也可通过 `/vssclient stats details` 主动查询。VSS 预测设置页提供植被数量三档、望远镜远处加载开关、地表建筑开关与地表内容范围。
 
-服务端的 `enablePredictionSync` 控制是否发送 `worldgen_profile`。客户端可用 `/vssclient stats` 查看 `profile`、`tiles`、`pending` 和当前 exact/预测会话状态；地形后端诊断会显示当前 Rust 算法标识或 Java。
+植被档位按世界坐标稳定选择完整植被组，只改变预测显示数量。相连树冠作为整组选择，未能确认是树木的模板木质组件保守保留，所以实际比例近似；已有的距离显示 LOD 仍会进一步简化远景。切换后在后台逐步更新网格，无需删除预测缓存。关闭望远镜远处加载后仍可缩放观看已有远景，并在阶段检查点取消尚未完成的目标细化。旧配置的 `predictionTrees=true` 自动迁移到中档，`false` 迁移到低档；已有明确三档设置会保留。
+
+服务端的 `enablePredictionSync` 控制是否发送 `worldgen_profile`。客户端可用 `/vssclient stats details` 查看 `profile`、`tiles`、`pending` 和当前 exact/预测会话状态；地形后端诊断会显示当前 Rust 算法标识或 Java。
 
 ### FreeTerraForged 预测适配
 
-已接入 [ETcodehome/FreeTerraForged](https://github.com/ETcodehome/FreeTerraForged) 发布版 `0.0.6005-neoforge-1.21.1` 的 Java 生成路径。两端需使用同次构建的 VSS，并安装对应 FreeTerraForged。服务器同步实际预设与噪声注册表，客户端按维度设置其初始化上下文。采样间距至少 32 方块的粗模使用模组自己的点估算；更细地形读取逐方块侵蚀缓存，继续沿用近处/望远镜优先调度。河流、湖泊与湿地水面使用模组的水文高度函数；预测专用地形缓存会在工作线程结束后释放。
+已接入 [ETcodehome/FreeTerraForged](https://github.com/ETcodehome/FreeTerraForged) 发布版 `1.0.0-neoforge-1.21.1`，并保留 `0.0.6005-neoforge-1.21.1` 支持。自动识别新旧命名空间，服务器同步实际预设与噪声注册表，客户端按维度设置其初始化上下文，并保留新版地下生物群系设置。两端需使用同次构建的 VSS，并安装对应 FreeTerraForged。粗模使用模组自己的点估算；更细地形读取逐方块侵蚀缓存，继续沿用近处/望远镜优先调度。河流、湖泊与湿地水面使用模组的水文高度函数；预测专用地形缓存会在工作线程结束后释放。
 
-FreeTerraForged 的侵蚀、平滑、坡度、海滩检测和海滩修正已由预测专用挂钩批量交给 Rust，普通服务器生成器不注册该挂钩。Perlin/Perlin2、Simplex/Simplex2、白噪声、基础组合噪声、密度量化和线性样条也已有原生实现。大陆、河网、气候、部分噪声及其地表/装饰扩展仍使用 Java，完整 FreeTerraForged 生成器尚未全部迁入 Rust。已用发布 JAR 验证数值，整合包中的 Mixin 转换及最终画面仍需实机验证。瀑布流动、河岸补块等区块后处理不保证逐方块复现；已有真实列仍由 Voxy 覆盖。此适配不代表原始 RTF 的所有分支、任意地形模组叠加或 TerraBlender 扩展都已兼容。迁移边界见 `tools/rust/MOD_MIGRATION_2026-09-09.md`。
+FreeTerraForged 的侵蚀、平滑、坡度和海滩检测已由预测专用挂钩批量交给 Rust；旧版保留海滩修正，新版按预设执行高山高度压缩，并使用独立的地形高度缩放与完整种子转换。普通服务器生成器不注册该挂钩。Perlin/Perlin2、Simplex/Simplex2、白噪声、基础组合噪声、密度量化和线性样条也已有原生实现。大陆、河网、气候、部分噪声及其地表/装饰扩展仍使用 Java，完整 FreeTerraForged 生成器尚未全部迁入 Rust。已用发布 JAR 验证数值，整合包中的 Mixin 转换及最终画面仍需实机验证。瀑布流动、河岸补块等区块后处理不保证逐方块复现；已有真实列仍由 Voxy 覆盖。此适配不代表原始 RTF 的所有分支、任意地形模组叠加或 TerraBlender 扩展都已兼容。验证范围见 `docs/freeterraforged-compatibility.md`。
 
 ### 地形模组版本与史诗地形
 
@@ -135,7 +140,7 @@ FreeTerraForged 的侵蚀、平滑、坡度、海滩检测和海滩修正已由�
 | 地形模组 | 1.21.1 验证版本 | 预测路径与边界 |
 | --- | --- | --- |
 | Tectonic | `3.0.26-neoforge-21.1`，配合 Lithostitched `1.8.0+beta6-neoforge-21.1` | 按实际运行图及自定义注册表重建；未验证所有旧版，不能声称整个 3.x 系列均支持 |
-| FreeTerraForged | `0.0.6005-neoforge-1.21.1` | Java 生成上下文加 Rust 瓦片过滤；基础噪声和密度算子部分原生化。`0.0.6001`、`0.0.6002`、`0.0.6003R2`、`0.0.6004R1` 缺少当前适配必需的 `RTFWorldGenContext` 接口，不在当前支持范围 |
+| FreeTerraForged | `1.0.0-neoforge-1.21.1`、`0.0.6005-neoforge-1.21.1` | Java 生成上下文加 Rust 瓦片过滤；适配新版命名空间、64 位种子及高山高度压缩。其他发布版尚未逐一验证 |
 | [ETN 史诗地形](https://www.mcmod.cn/class/15808.html) / Epic Terrain | 发布名 `v0.1.4b-Beta-1.20.5~1.21.1`，文件 `epicterrain-0.1.4.jar` | Rust 重建密度缓存访问顺序、基础柱与扩展高度；已与发布数据包的 Minecraft NoiseChunk 结果对照 |
 | Epic Terrain Compatible | `1.0.3+mod`，文件 `epic-terrain_compatible-1.0.3.jar` | 三维 `cache_2d`、插值切片和单元格批量填充已在 Rust 实现，并验证基础柱液体结果。此处不包含仅标注 Forge 的 `1.0.3b-1.21.1` |
 
@@ -145,11 +150,13 @@ Rust 样条现在保留数据包内重复/未排序控制点，并按 Minecraft 
 
 ## 常用命令
 
-所有命令需要管理员权限，可使用游戏内自动补全查看完整参数。
+服务端 `/vss` 命令需要 OP 2，可使用游戏内自动补全查看参数。直接输入 `/vss` 或 `/vssclient` 显示帮助；中文别名和英文命令使用同一逻辑。
 
 ```text
 /vss help
 /vss 帮助
+/vss help generation
+/vss help chunky
 /vss stats
 /vss bandwidth get
 /vss bandwidth set_mbps <mbps>
@@ -165,11 +172,40 @@ Rust 样条现在保留数据包内重复/未排序控制点，并按 Minecraft 
 /vss farplayers get
 ```
 
-`/vss help` 和 `/vss 帮助` 会显示每个根指令及其重要子指令的用途。
+普通生成并发命令立即保存配置并刷新玩家会话限制。它们控制普通玩家请求；显式 chunky 任务使用独立的速度优先路径。
 
-Xaero 地图命令是客户端命令，不需要管理员权限：`/vssclient xaero disable`、`/vssclient xaero enable`、`/vssclient xaero reload`。使用 `/vssclient stats` 查看会话、预测布局、tile、样本、feature/structure 和渲染统计。`/vssclient prediction capture` 用于显式导出参考数据；重复的 `/vssclient prediction` 状态入口已移除。
+### 指定区域生成 Voxy 列
 
-并发命令修改会立即保存配置并刷新玩家会话限制，其余生成后台参数会自动重新计算。
+```text
+/vss chunky <x> <z> <radius>
+/vss chunky start <x> <z> <radius>
+/vss chunky here <radius>
+/vss chunky rect <x1> <z1> <x2> <z2>
+/vss chunky status
+/vss chunky pause
+/vss chunky resume
+/vss chunky cancel
+```
+
+例如 `/vss chunky 0 0 1024` 生成以方块坐标 `(0, 0)` 为中心、半径 1024 方块的正方形区域，并保存可同步给 Voxy 的真实列；已有有效列直接复用。中文入口为 `/vss 预生成`，支持 `开始`、`当前位置`、`矩形`、`状态`、`暂停`、`继续`、`取消`。
+
+进度每 60 秒报告，任务不随玩家移动或退出而结束。chunky 不应用 VSS 普通生成、打包与磁盘队列的性能限制，也没有 `concurrency` 子命令；区块快照仍在服务器线程安全取得。坐标和半径单位均为方块，半径 0～8192、矩形最多 4,194,304 列，同时运行一个任务。详细行为见 [指令与 chunky 说明](docs/vss-commands-and-chunky-20261006.md)。
+
+### 客户端帮助与诊断
+
+客户端命令不需要管理员权限：
+
+```text
+/vssclient help
+/vssclient stats
+/vssclient stats details
+/vssclient xaero disable
+/vssclient xaero enable
+/vssclient xaero reload
+/vssclient prediction capture
+```
+
+`stats` 显示简明状态，`stats details` 显示会话、预测布局、瓦片、样本、feature／structure 与渲染统计。`prediction capture` 显式导出参考数据；`prediction` 根节点显示对应帮助。
 
 ## 缓存与排错
 
@@ -192,4 +228,3 @@ Xaero 地图命令是客户端命令，不需要管理员权限：`/vssclient xa
 ## License
 
 MIT
-

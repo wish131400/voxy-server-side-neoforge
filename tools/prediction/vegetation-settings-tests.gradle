@@ -1,0 +1,23 @@
+allprojects {
+    afterEvaluate {
+        def regression = sourceSets.create('vegetationSettingsRegression') {
+            java.srcDir 'src/test/java'
+            java.include 'dev/xantha/vss/client/prediction/PredictionVegetationSettingsTest.java'
+            java.include 'dev/xantha/vss/client/prediction/ForgeTestBootstrap.java'
+            compileClasspath = sourceSets.test.runtimeClasspath
+            runtimeClasspath = output + sourceSets.test.runtimeClasspath
+        }
+        configurations.vegetationSettingsRegressionImplementation.extendsFrom configurations.testImplementation
+        configurations.vegetationSettingsRegressionRuntimeOnly.extendsFrom configurations.testRuntimeOnly
+        tasks.register('vegetationSettingsTest', Test) {
+            testClassesDirs = regression.output.classesDirs
+            classpath = regression.runtimeClasspath
+            useJUnitPlatform()
+            javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+            maxHeapSize = '1500m'
+            reports.junitXml.outputLocation = layout.buildDirectory.dir('test-results/vegetation-settings')
+            reports.html.outputLocation = layout.buildDirectory.dir('reports/tests/vegetation-settings')
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

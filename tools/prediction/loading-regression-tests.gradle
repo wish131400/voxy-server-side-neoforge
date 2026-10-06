@@ -1,0 +1,30 @@
+// Run loading/admission regressions against this checkout's compiled classes.
+// Keep reports independent from mountain and exterior profiling tasks.
+allprojects {
+    afterEvaluate {
+        tasks.register('loadingRegressionTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = files(sourceSets.main.output, sourceSets.test.runtimeClasspath)
+            useJUnitPlatform()
+            maxHeapSize = '2G'
+            [
+                'PredictionCpuBudgetTest', 'PredictionCpuAdmissionIntegrationTest', 'PredictionCpuLeaseLifecycleTest',
+                'PredictionLoadingProgressTest', 'PredictionLoadingProgressIntegrationTest',
+                'PredictionGenerationPriorityTest', 'PredictionJavaExteriorTest',
+                'PredictionExteriorColumnsTest', 'PredictionBackgroundSchedulingTest',
+                'PredictionFramePaceTest', 'PredictionFirstCoverageTest',
+                'PredictionInitializationTest', 'PredictionMediumCoverageTest',
+                'PredictionCoverageBudgetTest', 'PredictionCoverageWorkTest',
+                'PredictionCoverageWorkloadTest', 'PredictionProgressiveLoadingTest',
+                'PredictionRefinementBudgetTest', 'PredictionRefinementConvergenceTest',
+                'PredictionSamplingWorkTest', 'PredictionSurfaceRetryTest',
+                'PredictionScopedResidencyTest', 'PredictionIdleRefinementTest',
+                'PredictionTileManagerTest', 'JavaPreviewSamplingTest',
+                'JavaDensityOptimizationTest', 'DensityMemoCompatTest',
+                'PredictionMemoryLifecycleTest'
+            ].each { include "**/${it}.class" }
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

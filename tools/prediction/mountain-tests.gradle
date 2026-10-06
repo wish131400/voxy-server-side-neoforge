@@ -1,0 +1,25 @@
+// Keep this investigation's reports separate from concurrent test runs.
+allprojects {
+    afterEvaluate {
+        tasks.register('mountainTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            maxHeapSize = '2G'
+            forkEvery = project.hasProperty('mountainGpu') ? 1 : 0
+            if (project.hasProperty('mountainGpu')) {
+                systemProperty 'vss.gpuTests', 'true'
+                // Filter class files too: forkEvery must not spawn empty workers for unrelated classes.
+                def classes = project.hasProperty('mountainClasses')
+                        ? project.property('mountainClasses').split(',')
+                        : ['PredictionProductionBatchGpuTest', 'PredictionCompactGpuTest',
+                           'PredictionOcclusionGpuTest', 'PredictionRawStateHandoffGpuTest',
+                           'PredictionSegmentedMeshGpuTest', 'PredictionVoxyBoundaryGpuTest']
+                classes.each { include "**/${it}.class" }
+            }
+            if (project.hasProperty('vssSpatialReplay')) systemProperty 'vss.spatialReplay', project.property('vssSpatialReplay')
+            testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = true }
+        }
+    }
+}

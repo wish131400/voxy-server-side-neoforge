@@ -1,0 +1,12 @@
+allprojects {
+    tasks.withType(Test).configureEach {
+        include '**/PredictionBiomeOptimizationBenchmark.class'
+        maxParallelForks = 1
+        minHeapSize = '1G'
+        maxHeapSize = '1G'
+        outputs.upToDateWhen { false }
+        if (System.getenv('VSS_BIOME_JAVA') != null)
+            executable = "${System.getenv('VSS_BIOME_JAVA')}/bin/java.exe"
+        testLogging { showStandardStreams = true; exceptionFormat = 'full' }
+    }
+}

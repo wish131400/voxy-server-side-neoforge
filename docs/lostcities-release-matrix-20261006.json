@@ -1,0 +1,37 @@
+[
+  {
+    "file": "lostcities-1.20-7.3.6.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/hyayVBkk/lostcities-1.20-7.3.6.jar",
+    "sha512": "1d2562f900073b6dcde42b6cd42a73513c75cb7c650743025e1f4a88f006fc4dfb5677cc09e36c235ef4491b67b171f8dddaed7597901756e3eaa83401898ecf"
+  },
+  {
+    "file": "lostcities-1.20-7.4.11.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/D43m5aav/lostcities-1.20-7.4.11.jar",
+    "sha512": "e84ff9a0e0346afef170722f81e505c0a17a8745877620c7bcf0499c1d9603ff6edd79160f5616d9e280c39affefb9696dca2cded8ea0b6e6f5224fc614d2205"
+  },
+  {
+    "file": "lostcities-1.20-7.4.13.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/sT3Y8s4v/lostcities-1.20-7.4.13.jar",
+    "sha512": "75aa3044cc408832a4177fba6396a9e1a623e726fc518107a2fc5510e4d67fe2ae9b7079d325450c97cbbf2acd9ff373058b70fec79975777ad68d8243f16a91"
+  },
+  {
+    "file": "lostcities-1.20-7.5.7.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/zDRDuewL/lostcities-1.20-7.5.7.jar",
+    "sha512": "3f36e97d97a2909261a3784aeca1a10ce7d1644a4b1e46234362509a5c1bff70a08338907054f7a20a24ae311fef50ff53ced5981d2227a7e61e72af7f5ba371"
+  },
+  {
+    "file": "lostcities-1.21-8.2.6.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/kIdMKy1X/lostcities-1.21-8.2.6.jar",
+    "sha512": "0d5a06ed42159843ebc1cbdd24f735c0927dcd0fcc8b78c549919a0e15ad9b535722107fc90dc8a0ec188cf6246ed6c925b408fa50e7213f8ed118206b2db2ed"
+  },
+  {
+    "file": "lostcities-1.21-8.3.8.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/cRpeD1yr/lostcities-1.21-8.3.8.jar",
+    "sha512": "b524fd3c6cc5802c84774b46b5e2bed6c351232dd124b5867b1d1f5f695cb1bf41e40c99bb97ee135706ca1756c4b4777408f183146041ae3cf50e974b69c1e8"
+  },
+  {
+    "file": "lostcities-1.21-8.4.6.jar",
+    "url": "https://cdn.modrinth.com/data/8VDCUS3b/versions/jqhDeD82/lostcities-1.21-8.4.6.jar",
+    "sha512": "3bb4085104a816190ae0f1139a32be4c49049b3f927b16c705c6cebb1e63a590d97813dd753588a02cf97af402ce2aa40443413bfadb2bbaba18bc0cea2d4b9f"
+  }
+]
