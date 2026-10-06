@@ -5,7 +5,9 @@ import dev.xantha.vss.networking.server.VSSServerNetworking;
 import dev.xantha.vss.networking.server.broadcast.FarPlayerBroadcaster;
 import dev.xantha.vss.networking.server.dirty.DirtyColumnBroadcaster;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import dev.xantha.vss.networking.command.VSSCommandHelp;
 import dev.xantha.vss.config.VSSServerConfig;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
@@ -23,17 +25,17 @@ public final class VSSServerCommands {
         register(event.getDispatcher());
     }
 
-    private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
-        dispatcher.register(Commands.literal("vss")
+    static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
+        var root = dispatcher.register(Commands.literal("vss")
                 .requires(source -> source.hasPermission(2))
+                .executes(context -> showHelp(context.getSource()))
+                .then(VSSChunkyCommands.build())
                 .then(Commands.literal("stats")
                         .executes(context -> showStats(context.getSource())))
                 .then(Commands.literal("状态")
                         .executes(context -> showStats(context.getSource())))
-                .then(Commands.literal("help")
-                        .executes(context -> showHelp(context.getSource())))
-                .then(Commands.literal("帮助")
-                        .executes(context -> showHelp(context.getSource())))
+                .then(helpCommand("help"))
+                .then(helpCommand("帮助"))
                 .then(Commands.literal("bandwidth")
                         .executes(context -> showBandwidth(context.getSource()))
                         .then(Commands.literal("get")
@@ -291,7 +293,21 @@ public final class VSSServerCommands {
                                         VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL))
                                          .executes(context -> setGenerationGlobalConcurrency(
                                                  context.getSource(),
-                                                 IntegerArgumentType.getInteger(context, "数量")))))));
+                                                 IntegerArgumentType.getInteger(context, "数量"))))))
+                .then(Commands.argument("unknown_command", StringArgumentType.word())
+                        .executes(context -> VSSCommandHelp.server(context.getSource(),
+                                StringArgumentType.getString(context, "unknown_command")))));
+        VSSCommandHelp.serverAliases(root);
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> helpCommand(String name) {
+        return Commands.literal(name)
+                .executes(context -> showHelp(context.getSource()))
+                .then(Commands.argument("command", StringArgumentType.greedyString())
+                        .suggests((context, builder) -> net.minecraft.commands.SharedSuggestionProvider.suggest(
+                                VSSCommandHelp.SERVER_HELP_TOPICS, builder))
+                        .executes(context -> VSSCommandHelp.server(context.getSource(),
+                                StringArgumentType.getString(context, "command"))));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> requestLimitsCommand(
@@ -330,19 +346,7 @@ public final class VSSServerCommands {
     }
 
     private static int showHelp(CommandSourceStack source) {
-        source.sendSuccess(() -> Component.translatable("vss.command.help.title")
-                .withStyle(ChatFormatting.GOLD), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.stats"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.bandwidth"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.queue"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.request_limits"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.distance"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.far_players"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.dirty"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.storage"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.generation"), false);
-        source.sendSuccess(() -> Component.translatable("vss.command.help.help"), false);
-        return 1;
+        return VSSCommandHelp.server(source, "");
     }
 
     private static int showBandwidth(CommandSourceStack source) {
