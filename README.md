@@ -1,6 +1,6 @@
 # Voxy Server Side NeoForge
 
-[0.3.5 更新日志](CHANGELOG.md)
+[0.3.5 更新日志](CHANGELOG.md) · [玩家版说明](docs/release-0.3.5-player-guide.md) · [模组适配核对](docs/release-0.3.5-mod-compatibility-20261006.md)
 
 Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Voxy 远景 LOD。客户端只请求缺失或过期的列数据，再交给 Voxy 渲染，适合多人服务器、大型整合包和高速移动场景。
 
@@ -11,6 +11,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 | Minecraft | `1.21.1` |
 | Loader | NeoForge `21.1.x` |
 | VSS | `0.3.5-neoforge-1.21.1` |
+| 本轮核对的 Voxy | `0.2.15-beta`，NeoForge 1.21.1 |
 
 - Forge 1.20.1 版本：[voxy-server-side-forge](https://github.com/wish131400/voxy-server-side-forge)
 - 下载：[CurseForge](https://www.curseforge.com/minecraft/mc-mods/voxy-server-side-forge-neoforge)
@@ -64,7 +65,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 该功能默认开启，可在 VSS 的 Embeddium/Sodium 设置页控制，需要临时关闭地图写入时执行 `/vssclient xaero disable`，恢复时执行 `/vssclient xaero enable`。执行 `/vssclient xaero reload` 会清除当前服务器所有维度的客户端列存在性记录并自动重新请求已有 LOD 缓存。
 
-Xaero `1.40.x`～`1.45.0` 已适配，并核对 `1.46.0` 对应平台的发布接口与保存流程；低于 `1.40.0` 的版本不受支持，其他版本和整合包组合仍需验证。反射接口不兼容时，Xaero 桥接会自动停用，不影响 VSS/Voxy 的 LOD 功能。
+Xaero 支持下限为 `1.40.0`。已有 `1.40.16`、`1.45.0` 及对应平台 `1.46.0` 的发布接口与保存流程核对；本轮对本地 NeoForge `1.45.0` 的实际 JAR 再次检查通过。其他版本和整合包组合仍需验证。反射接口不兼容时，Xaero 桥接会自动停用，不影响 VSS/Voxy 的 LOD 功能。具体记录见 [模组适配核对](docs/release-0.3.5-mod-compatibility-20261006.md)。
 
 ## 远处玩家与兼容模组
 
@@ -129,7 +130,7 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 
 ### FreeTerraForged 预测适配
 
-已接入 [ETcodehome/FreeTerraForged](https://github.com/ETcodehome/FreeTerraForged) 发布版 `1.0.0-neoforge-1.21.1`，并保留 `0.0.6005-neoforge-1.21.1` 支持。自动识别新旧命名空间，服务器同步实际预设与噪声注册表，客户端按维度设置其初始化上下文，并保留新版地下生物群系设置。两端需使用同次构建的 VSS，并安装对应 FreeTerraForged。粗模使用模组自己的点估算；更细地形读取逐方块侵蚀缓存，继续沿用近处/望远镜优先调度。河流、湖泊与湿地水面使用模组的水文高度函数；预测专用地形缓存会在工作线程结束后释放。
+已接入 [ETcodehome/FreeTerraForged](https://github.com/ETcodehome/FreeTerraForged) 发布版 `1.0.0-neoforge-1.21.1`，并保留 ReTerraForged `0.0.6005-neoforge-1.21.1` 支持。上述两个 NeoForge 发行包已有实际接口与数值验证；Forge 1.20.1 的共享代码同步不计作这些发行包的跨平台实测。自动识别新旧命名空间，服务器同步实际预设与噪声注册表，客户端按维度设置其初始化上下文，并保留新版地下生物群系设置。两端需使用同次构建的 VSS，并安装对应生成模组。粗模使用模组自己的点估算；更细地形读取逐方块侵蚀缓存，继续沿用近处/望远镜优先调度。河流、湖泊与湿地水面使用模组的水文高度函数；预测专用地形缓存会在工作线程结束后释放。
 
 FreeTerraForged 的侵蚀、平滑、坡度和海滩检测已由预测专用挂钩批量交给 Rust；旧版保留海滩修正，新版按预设执行高山高度压缩，并使用独立的地形高度缩放与完整种子转换。普通服务器生成器不注册该挂钩。Perlin/Perlin2、Simplex/Simplex2、白噪声、基础组合噪声、密度量化和线性样条也已有原生实现。大陆、河网、气候、部分噪声及其地表/装饰扩展仍使用 Java，完整 FreeTerraForged 生成器尚未全部迁入 Rust。已用发布 JAR 验证数值，整合包中的 Mixin 转换及最终画面仍需实机验证。瀑布流动、河岸补块等区块后处理不保证逐方块复现；已有真实列仍由 Voxy 覆盖。此适配不代表原始 RTF 的所有分支、任意地形模组叠加或 TerraBlender 扩展都已兼容。验证范围见 `docs/freeterraforged-compatibility.md`。
 
@@ -140,7 +141,7 @@ FreeTerraForged 的侵蚀、平滑、坡度和海滩检测已由预测专用挂�
 | 地形模组 | 1.21.1 验证版本 | 预测路径与边界 |
 | --- | --- | --- |
 | Tectonic | `3.0.26-neoforge-21.1`，配合 Lithostitched `1.8.0+beta6-neoforge-21.1` | 按实际运行图及自定义注册表重建；未验证所有旧版，不能声称整个 3.x 系列均支持 |
-| FreeTerraForged | `1.0.0-neoforge-1.21.1`、`0.0.6005-neoforge-1.21.1` | Java 生成上下文加 Rust 瓦片过滤；适配新版命名空间、64 位种子及高山高度压缩。其他发布版尚未逐一验证 |
+| FreeTerraForged / ReTerraForged | `1.0.0-neoforge-1.21.1` / `0.0.6005-neoforge-1.21.1` | Java 生成上下文加 Rust 瓦片过滤；适配新版命名空间、64 位种子及高山高度压缩。其他发布版尚未逐一验证 |
 | [ETN 史诗地形](https://www.mcmod.cn/class/15808.html) / Epic Terrain | 发布名 `v0.1.4b-Beta-1.20.5~1.21.1`，文件 `epicterrain-0.1.4.jar` | Rust 重建密度缓存访问顺序、基础柱与扩展高度；已与发布数据包的 Minecraft NoiseChunk 结果对照 |
 | Epic Terrain Compatible | `1.0.3+mod`，文件 `epic-terrain_compatible-1.0.3.jar` | 三维 `cache_2d`、插值切片和单元格批量填充已在 Rust 实现，并验证基础柱液体结果。此处不包含仅标注 Forge 的 `1.0.3b-1.21.1` |
 
