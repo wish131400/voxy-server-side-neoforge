@@ -186,7 +186,7 @@ final class ClientColumnProcessor {
         }
     }
 
-    private static VoxelColumnData decodeColumn(
+    static VoxelColumnData decodeColumn(
             AssembledColumn column,
             Registry<Biome> biomeRegistry) {
         ArrayList<VoxelColumnData.SectionData> decodedSections = new ArrayList<>();

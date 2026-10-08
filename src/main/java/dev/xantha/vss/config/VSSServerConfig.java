@@ -128,8 +128,10 @@ public class VSSServerConfig extends JsonConfig {
     /** Send the VSS worldgen profile used by the client-side prediction sampler. */
     @SerializedName("enablePredictionSync")
     public boolean enablePredictionSync = true;
-    public int persistentColumnCacheMaxMiB = 1024;
-    public int persistentColumnCacheMaxEntries = 250000;
+    public int persistentColumnCacheMaxMiB = 10240;
+    public int persistentColumnCacheRetentionDays = 7;
+    private boolean pregenCacheDefaultsApplied;
+    public int persistentColumnCacheMaxEntries = 2500000;
     public int persistentColumnCacheWriteQueueLimit = 128;
     public int persistentColumnInvalidationBatchSize = 2048;
     public boolean ftbChunksSafeForceLoad = true;
@@ -189,8 +191,9 @@ public class VSSServerConfig extends JsonConfig {
         help.put("enablePersistentColumnCompression", "是否压缩持久化 .vcl 数据；默认 true。");
         help.put("enableNetworkColumnCompression", "是否压缩网络 LOD 数据；默认 true。");
         help.put("enablePredictionSync", "是否同步种子和维度生成元数据，让客户端生成远处预测地形；默认 true。");
-        help.put("persistentColumnCacheMaxMiB", "持久化列缓存大小，单位 MiB；默认 1024；范围 64-65536。");
-        help.put("persistentColumnCacheMaxEntries", "持久化列缓存最大条目数；默认 250000；范围 1024-10000000。");
+        help.put("persistentColumnCacheMaxMiB", "持久化列缓存大小，单位 MiB；默认 10240（10 GiB）；范围 64-65536。");
+        help.put("persistentColumnCacheRetentionDays", "持久化列缓存自写入起最长保留天数，读取不续期；默认 7；范围 1-7。到期不再读取，后台定期删除。");
+        help.put("persistentColumnCacheMaxEntries", "持久化列缓存最大条目数；默认 2500000；范围 1024-10000000。");
         help.put("persistentColumnCacheWriteQueueLimit", "持久化缓存写入队列上限；默认 128；范围 1-10000。");
         help.put("persistentColumnInvalidationBatchSize", "持久化缓存失效处理批量大小；默认 2048；范围 1-" + VSSConstants.MAX_DIRTY_COLUMN_POSITIONS + "。");
         help.put("ftbChunksSafeForceLoad", "是否启用 FTB Chunks 安全强制加载兼容；默认 true。");
@@ -263,6 +266,7 @@ public class VSSServerConfig extends JsonConfig {
         columnCacheMaxEntries = clamp(columnCacheMaxEntries, 1, 100000);
         columnCacheMaxBytes = clamp(columnCacheMaxBytes, 1 * BYTES_PER_MIB, 512 * BYTES_PER_MIB);
         preloadCacheMaxPercent = clamp(preloadCacheMaxPercent, 0, 50);
+        persistentColumnCacheRetentionDays = clamp(persistentColumnCacheRetentionDays, 1, 7);
         persistentColumnCacheMaxMiB = clamp(persistentColumnCacheMaxMiB, 64, 65536);
         persistentColumnCacheMaxEntries = clamp(persistentColumnCacheMaxEntries, 1024, 10000000);
         persistentColumnCacheWriteQueueLimit = clamp(persistentColumnCacheWriteQueueLimit, 1, 10000);
@@ -297,6 +301,12 @@ public class VSSServerConfig extends JsonConfig {
             applyStorageThroughputDefaults();
             applyBandwidthDecoupledDefaults();
             configVersion = CURRENT_CONFIG_VERSION;
+        }
+        // A separate marker avoids replaying unrelated legacy tuning migrations.
+        if (!pregenCacheDefaultsApplied) {
+            if (persistentColumnCacheMaxMiB == 1024) persistentColumnCacheMaxMiB = 10240;
+            if (persistentColumnCacheMaxEntries == 250000) persistentColumnCacheMaxEntries = 2500000;
+            pregenCacheDefaultsApplied = true;
         }
         clearLegacyMigrationState();
     }
@@ -444,6 +454,14 @@ public class VSSServerConfig extends JsonConfig {
 
     public void normalizeAndSave() {
         validate();
+        save();
+    }
+
+    public void setPersistentCacheGiB(int gib) {
+        if (gib < 1 || gib > 64) throw new IllegalArgumentException("Disk cache must be 1-64 GiB");
+        persistentColumnCacheMaxMiB = gib * 1024;
+        persistentColumnCacheMaxEntries = Math.min(10000000, Math.max(persistentColumnCacheMaxEntries, gib * 250000));
+        pregenCacheDefaultsApplied = true;
         save();
     }
 

@@ -57,20 +57,65 @@ public final class ChunkyGenerationService {
         if (hasActiveJob()) return error(source, "vss.command.chunky.busy");
         if (!VSSServerConfig.CONFIG.enabled || !VSSServerConfig.CONFIG.enableChunkGeneration)
             return error(source, "vss.command.chunky.generation_disabled");
-        if (!store.enabled()) return error(source, "vss.command.chunky.storage_disabled");
+        if (!store.enabled() && !IntegratedPregenBridge.supports(source.getServer()))
+            return error(source, "vss.command.chunky.storage_disabled");
         ServerLevel level = source.getLevel();
         if (!insideBorder(level, area.minChunkX(), area.minChunkZ())
                 || !insideBorder(level, area.maxChunkX(), area.maxChunkZ()))
             return error(source, "vss.command.chunky.outside_border");
         job = new Job(source, level, area);
-        generation.registerBackgroundOwner(job.id);
+        Job proposed = job;
+        if (IntegratedPregenBridge.supports(level.getServer())) {
+            activate(proposed);
+            return 1;
+        }
+        source.sendSuccess(() -> Component.translatable("vss.command.chunky.checking_capacity"), false);
+        long epoch = VSSServerNetworking.lifecycleEpoch();
+        boolean queued = disk.submitReadUnrestricted(() -> {
+            dev.xantha.vss.networking.server.storage.PregenCacheCapacity estimate = null;
+            try {
+                estimate = dev.xantha.vss.networking.server.storage.PregenCacheCapacity.inspect(
+                        level.getServer().getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT)
+                                .resolve("data").resolve("vss-column-cache"),
+                        VSSServerConfig.CONFIG.persistentColumnCacheRetentionDays);
+            } catch (Exception e) { VSSLogger.warn("Pregen capacity scan failed: " + e.getMessage()); }
+            var result = estimate;
+            level.getServer().execute(() -> {
+                if (job != proposed || proposed.stopped || VSSServerNetworking.isLifecycleStale(epoch)) return;
+                var config = VSSServerConfig.CONFIG;
+                if (result == null) {
+                    stop(proposed);
+                    source.sendFailure(Component.translatable("vss.command.chunky.capacity_scan_failed"));
+                } else if (!result.fits(area.columnCount(), config.persistentColumnCacheMaxMiB, config.persistentColumnCacheMaxEntries)) {
+                    stop(proposed);
+                    source.sendFailure(Component.translatable("vss.command.chunky.capacity_rejected",
+                            String.format(Locale.ROOT, "%.2f", config.persistentColumnCacheMaxMiB / 1024.0),
+                            result.capacity(config.persistentColumnCacheMaxMiB, config.persistentColumnCacheMaxEntries),
+                            area.columnCount(), result.estimatedColumnBytes()));
+                } else {
+                    activate(proposed);
+                }
+            });
+        }, error -> { });
+        if (!queued) {
+            stop(proposed);
+            return error(source, "vss.command.chunky.capacity_scan_failed");
+        }
+        return 1;
+    }
+
+    private void activate(Job current) {
+        current.capacityPending = false;
+        generation.registerBackgroundOwner(current.id);
         disk.setUnrestrictedMode(true);
+        CommandSourceStack source = current.source;
+        ServerLevel level = current.level;
+        ChunkyArea area = current.area;
         source.sendSuccess(() -> Component.translatable("vss.command.chunky.started",
                 level.dimension().location().toString(), area.columnCount(),
                 area.minChunkX() * 16, area.minChunkZ() * 16,
                 area.maxChunkX() * 16 + 15, area.maxChunkZ() * 16 + 15)
                 .withStyle(ChatFormatting.GREEN), true);
-        return 1;
     }
 
     public boolean hasActiveJob() { return job != null && !job.stopped; }
@@ -94,7 +139,8 @@ public final class ChunkyGenerationService {
         if (!hasActiveJob()) return error(source, "vss.command.chunky.no_active_job");
         if (!VSSServerConfig.CONFIG.enabled || !VSSServerConfig.CONFIG.enableChunkGeneration)
             return error(source, "vss.command.chunky.generation_disabled");
-        if (!store.enabled()) return error(source, "vss.command.chunky.storage_disabled");
+        if (!store.enabled() && !IntegratedPregenBridge.supports(source.getServer()))
+            return error(source, "vss.command.chunky.storage_disabled");
         job.paused = false;
         source.sendSuccess(() -> Component.translatable("vss.command.chunky.resumed"), true);
         return 1;
@@ -130,6 +176,7 @@ public final class ChunkyGenerationService {
     public void tick(MinecraftServer server) {
         if (!hasActiveJob()) { completions.clear(); return; }
         Job current = job;
+        if (current.capacityPending) return;
         Completion completion;
         while ((completion = completions.poll()) != null) acceptCompletion(current, completion);
         // Deliver confirmed columns while the rest of the area is still running.
@@ -140,7 +187,8 @@ public final class ChunkyGenerationService {
             return;
         }
         boolean running = !current.paused && VSSServerConfig.CONFIG.enabled
-                && VSSServerConfig.CONFIG.enableChunkGeneration && store.enabled();
+                && VSSServerConfig.CONFIG.enableChunkGeneration
+                && (store.enabled() || IntegratedPregenBridge.supports(current.level.getServer()));
         current.scanning = running;
         if (running && !current.queue.allReserved()) startCacheScanners(current);
 
@@ -240,6 +288,7 @@ public final class ChunkyGenerationService {
             retryGeneration(current, work);
             return true;
         }
+        if (tryLocalImport(current, work)) return true;
         work.stage = ChunkyWorkQueue.Stage.WRITING;
         boolean accepted = writer.writeConfirmed(current.level.getServer(), current.level.dimension(), work.columnData,
                 saved -> completions.add(new Completion(current.id, work.requestId, null, saved)));
@@ -257,6 +306,8 @@ public final class ChunkyGenerationService {
             if (data != null && data.completeColumn() && data.hasBody() && data.columnStamp() >= dirty(current, work)) {
                 work.reused = true;
                 if (completion.saved) {
+                    work.columnData = data;
+                    if (tryLocalImport(current, work)) return;
                     current.availability.available(work.chunkX, work.chunkZ, data.columnStamp());
                     current.queue.finish(work, true);
                 }
@@ -267,6 +318,15 @@ public final class ChunkyGenerationService {
                 }
             } else {
                 work.stage = ChunkyWorkQueue.Stage.GENERATION;
+                current.ready.addLast(work);
+            }
+        } else if (work.stage == ChunkyWorkQueue.Stage.IMPORTING) {
+            if (completion.saved && work.columnData.columnStamp() >= dirty(current, work)) {
+                current.queue.finish(work, true);
+            } else if (work.columnData.columnStamp() < dirty(current, work)) {
+                retryGeneration(current, work);
+            } else {
+                work.stage = ChunkyWorkQueue.Stage.PERSIST;
                 current.ready.addLast(work);
             }
         } else if (work.stage == ChunkyWorkQueue.Stage.WRITING) {
@@ -280,6 +340,28 @@ public final class ChunkyGenerationService {
                 current.ready.addLast(work);
             } else current.queue.finish(work, false);
         }
+    }
+
+    private boolean tryLocalImport(Job current, ChunkyWorkQueue.Work work) {
+        if (work.localAttempted) return false;
+        work.localAttempted = true;
+        work.stage = ChunkyWorkQueue.Stage.IMPORTING;
+        long epoch = VSSServerNetworking.lifecycleEpoch();
+        boolean accepted = IntegratedPregenBridge.offer(current.level.getServer(), current.level.dimension(), work.columnData,
+                () -> !current.stopped && !VSSServerNetworking.isLifecycleStale(epoch),
+                imported -> completions.add(new Completion(current.id, work.requestId, null, imported)));
+        if (!accepted) {
+            work.stage = ChunkyWorkQueue.Stage.PERSIST;
+            // A full local import queue is transient. Keep this work ready for
+            // another tick rather than spilling distant columns to an unseen cache.
+            if (IntegratedPregenBridge.supports(current.level.getServer())
+                    && current.level.players().stream().anyMatch(player -> !player.isRemoved())) {
+                work.localAttempted = false;
+                current.ready.addLast(work);
+                return true;
+            }
+        }
+        return accepted;
     }
 
     private static void notifyAvailableColumns(Job current, DirtyColumnsS2CPayload batch) {
@@ -297,6 +379,7 @@ public final class ChunkyGenerationService {
         work.columnData = null;
         work.reused = false;
         work.writeAttempts = 0;
+        work.localAttempted = false;
         if (work.generationAttempts >= 3) current.queue.finish(work, false);
         else {
             work.stage = ChunkyWorkQueue.Stage.GENERATION;
@@ -321,9 +404,9 @@ public final class ChunkyGenerationService {
     }
 
     private static Component status(Job current) {
-        String state = current.finished ? "finished" : current.stopped ? "cancelled" : current.paused
+        String state = current.capacityPending && !current.stopped ? "checking_capacity" : current.finished ? "finished" : current.stopped ? "cancelled" : current.paused
                 || !VSSServerConfig.CONFIG.enabled || !VSSServerConfig.CONFIG.enableChunkGeneration
-                || !VSSServerConfig.CONFIG.enablePersistentColumnCache
+                || !VSSServerConfig.CONFIG.enablePersistentColumnCache && !IntegratedPregenBridge.supports(current.level.getServer())
                 ? "paused" : "running";
         return Component.translatable("vss.command.chunky.status", current.level.dimension().location().toString(),
                 Component.translatable("vss.command.chunky.state." + state),
@@ -366,6 +449,7 @@ public final class ChunkyGenerationService {
         long lastReportNanos = startedNanos;
         long stoppedNanos;
         boolean paused;
+        boolean capacityPending = true;
         volatile boolean stopped;
         boolean finished;
 

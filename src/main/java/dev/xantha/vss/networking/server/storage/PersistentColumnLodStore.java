@@ -63,7 +63,11 @@ public final class PersistentColumnLodStore {
     private long indexScans;
     private long indexMissSkips;
     private long indexEvictions;
-    private long nextCleanupMillis;
+    private volatile long nextCleanupMillis;
+    private final java.util.concurrent.atomic.AtomicBoolean cleanupRunning = new java.util.concurrent.atomic.AtomicBoolean();
+    private volatile long nextExpiryMillis;
+    private long cacheMutation;
+    private int observedRetentionDays;
     private long knownCacheBytes = -1L;
     private int knownCacheEntries = -1;
     private volatile boolean indexedZstdAvailable = LodByteCompression.isZstdAvailable();
@@ -86,6 +90,7 @@ public final class PersistentColumnLodStore {
             dirtyIndexes.clear();
         }
         nextCleanupMillis = 0L;
+        nextExpiryMillis = 0L;
         knownCacheBytes = -1L;
         knownCacheEntries = -1;
         indexedZstdAvailable = LodByteCompression.isZstdAvailable();
@@ -123,6 +128,11 @@ public final class PersistentColumnLodStore {
             return null;
         }
 
+        if (expiredFile(path, System.currentTimeMillis())) {
+            deleteColumn(server, dimension, cx, cz);
+            misses++;
+            return null;
+        }
         try (InputStream fileIn = Files.newInputStream(path);
              DataInputStream in = new DataInputStream(fileIn)) {
             IndexSlot header = readColumnHeader(in, cx, cz);
@@ -269,7 +279,7 @@ public final class PersistentColumnLodStore {
                 recordColumnWrite(previousSize, sizeIfRegular(path));
                 markIndexed(server, dimension, columnData.chunkX(), columnData.chunkZ(), IndexSlot.from(columnData));
                 writes++;
-                cleanupIfNeeded(server);
+                nextExpiryMillis = Math.min(nextExpiryMillis, System.currentTimeMillis() + retentionMillis());
                 return true;
             } catch (Exception e) {
                 writeFailures++;
@@ -440,71 +450,95 @@ public final class PersistentColumnLodStore {
                 && isReadableCompression(slot.method());
     }
 
-    private void cleanupIfNeeded(MinecraftServer server) {
-        long now = System.currentTimeMillis();
-        if (now < nextCleanupMillis) {
-            return;
-        }
-        nextCleanupMillis = now + 60_000L;
-        if (isKnownCacheWithinLimits()) {
-            return;
-        }
-        cleanup(server);
+    private long retentionMillis() {
+        return java.util.concurrent.TimeUnit.DAYS.toMillis(Math.max(1, Math.min(7, config.persistentColumnCacheRetentionDays)));
     }
 
-    private void cleanup(MinecraftServer server) {
-        Path root = root(server);
-        if (!Files.isDirectory(root)) {
-            return;
-        }
+    private boolean expiredFile(Path path, long now) {
+        try { return now - Files.getLastModifiedTime(path).toMillis() >= retentionMillis(); }
+        catch (IOException e) { return true; }
+    }
 
+    /** Called by the disk maintenance task, including when no columns are being written. */
+    public void maintain(MinecraftServer server) {
+        long now = System.currentTimeMillis();
+        if (!enabled() || now < nextCleanupMillis || !cleanupRunning.compareAndSet(false, true)) return;
+        try {
+            nextCleanupMillis = now + 60_000L;
+            if (observedRetentionDays != config.persistentColumnCacheRetentionDays) {
+                observedRetentionDays = config.persistentColumnCacheRetentionDays;
+                nextExpiryMillis = 0L;
+            }
+            if (isKnownCacheWithinLimits() && now < nextExpiryMillis) return;
+            cleanupRoot(root(server), now, path -> removeIndexedPath(server, path));
+        } finally { cleanupRunning.set(false); }
+    }
+
+    // Kept independent of a live MinecraftServer so actual file eviction can be tested.
+    void cleanupRoot(Path root, long now, java.util.function.Consumer<Path> removed) {
+        if (!Files.isDirectory(root)) return;
         long maxBytes = (long) config.persistentColumnCacheMaxMiB * VSSServerConfig.BYTES_PER_MIB;
         int maxEntries = config.persistentColumnCacheMaxEntries;
         ArrayList<FileEntry> entries = new ArrayList<>();
+        long scanMutation;
+        synchronized (this) { scanMutation = cacheMutation; }
         long totalBytes = 0L;
+        long earliestExpiry = Long.MAX_VALUE;
         try (Stream<Path> stream = Files.walk(root)) {
-            var iterator = stream.filter(Files::isRegularFile).iterator();
+            var iterator = stream.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    && path.getFileName().toString().endsWith(COLUMN_EXTENSION)).iterator();
             while (iterator.hasNext()) {
                 Path path = iterator.next();
-                String fileName = path.getFileName().toString();
-                if (!fileName.endsWith(COLUMN_EXTENSION)) {
-                    if (!fileName.equals(INDEX_FILE_NAME) && !fileName.endsWith(".tmp")) {
-                        deleteQuietly(path);
-                    }
-                    continue;
-                }
-                long size = Files.size(path);
-                long lastAccess = lastAccessMillis(path);
-                entries.add(new FileEntry(path, size, lastAccess));
-                totalBytes += size;
+                try {
+                    long size = Files.size(path), modified = Files.getLastModifiedTime(path).toMillis();
+                    entries.add(new FileEntry(path, size, modified));
+                    totalBytes += size;
+                    earliestExpiry = Math.min(earliestExpiry, modified + retentionMillis());
+                } catch (java.nio.file.NoSuchFileException ignored) { }
             }
-        } catch (IOException e) {
+        } catch (IOException | java.io.UncheckedIOException e) {
             invalidateCacheLedger();
             VSSLogger.debug("Failed to scan persistent LOD cache: " + e.getMessage());
             return;
         }
-        setCacheLedger(totalBytes, entries.size());
-
-        if (totalBytes <= maxBytes && entries.size() <= maxEntries) {
-            return;
-        }
-
-        cleanupRuns++;
         entries.sort(Comparator.comparingLong(FileEntry::lastAccessMillis));
         long bytes = totalBytes;
         int count = entries.size();
+        cleanupRuns++;
         for (FileEntry entry : entries) {
-            if (bytes <= maxBytes && count <= maxEntries) {
-                break;
-            }
-            if (deleteQuietly(entry.path())) {
-                bytes -= entry.sizeBytes();
-                count--;
-                cleanupDeleted++;
-                removeIndexedPath(server, entry.path());
+            if (bytes <= maxBytes && count <= maxEntries && now - entry.lastAccessMillis() < retentionMillis()) break;
+            // Match the writer's stripe, then revalidate: a rewrite during the scan
+            // must not let maintenance delete freshly generated data.
+            synchronized (columnLockForPath(root, entry.path())) {
+                try {
+                    if (!Files.isRegularFile(entry.path())
+                            || Files.getLastModifiedTime(entry.path()).toMillis() != entry.lastAccessMillis()
+                            || Files.size(entry.path()) != entry.sizeBytes()) continue;
+                    if (Files.deleteIfExists(entry.path())) {
+                        bytes -= entry.sizeBytes(); count--; cleanupDeleted++;
+                        removed.accept(entry.path());
+                    }
+                } catch (IOException e) { VSSLogger.debug("Persistent LOD cleanup failed: " + e.getMessage()); }
             }
         }
-        setCacheLedger(bytes, count);
+        synchronized (this) {
+            // Keep an accurate fast path while idle; concurrent writes force a later rescan.
+            if (cacheMutation == scanMutation) setCacheLedger(bytes, count);
+            else invalidateCacheLedger();
+            nextExpiryMillis = earliestExpiry;
+        }
+    }
+
+    private Object columnLockForPath(Path root, Path path) {
+        Path relative = root.relativize(path);
+        String name = path.getFileName().toString();
+        int split = name.lastIndexOf('_');
+        try {
+            int cx = Integer.parseInt(name.substring(0, split));
+            int cz = Integer.parseInt(name.substring(split + 1, name.length() - COLUMN_EXTENSION.length()));
+            int hash = 31 * (31 * relative.getName(0).toString().hashCode() + cx) + cz;
+            return columnLocks[Math.floorMod(hash, columnLocks.length)];
+        } catch (RuntimeException e) { return columnLocks[0]; }
     }
 
     private synchronized boolean isKnownCacheWithinLimits() {
@@ -521,6 +555,7 @@ public final class PersistentColumnLodStore {
     }
 
     private synchronized void recordColumnWrite(long previousSize, long newSize) {
+        cacheMutation++;
         if (previousSize < 0L || newSize < 0L || knownCacheBytes < 0L || knownCacheEntries < 0) {
             invalidateCacheLedger();
             return;
@@ -532,6 +567,7 @@ public final class PersistentColumnLodStore {
     }
 
     private synchronized void recordColumnDelete(long previousSize) {
+        cacheMutation++;
         if (previousSize < 0L || knownCacheBytes < 0L || knownCacheEntries < 0) {
             invalidateCacheLedger();
             return;
@@ -543,6 +579,7 @@ public final class PersistentColumnLodStore {
     }
 
     private synchronized void invalidateCacheLedger() {
+        cacheMutation++;
         knownCacheBytes = -1L;
         knownCacheEntries = -1;
     }
@@ -623,7 +660,7 @@ public final class PersistentColumnLodStore {
     }
 
     private Object columnLock(ResourceKey<Level> dimension, int cx, int cz) {
-        int hash = dimension.location().hashCode();
+        int hash = safeDimension(dimension.location()).hashCode();
         hash = 31 * hash + cx;
         hash = 31 * hash + cz;
         return columnLocks[Math.floorMod(hash, columnLocks.length)];

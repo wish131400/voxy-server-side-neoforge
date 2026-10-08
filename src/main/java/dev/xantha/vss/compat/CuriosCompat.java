@@ -20,6 +20,9 @@ public final class CuriosCompat {
     private static final String SYNC_IDENTIFIER_KEY = "Identifier";
     private static final String SYNC_DATA_KEY = "SyncTag";
     private static final int SYNC_VERSION = 1;
+    /** Curios normally exposes a small fixed slot map. Keep malformed/modded
+     * inventories from expanding a far-player packet without bound. */
+    private static final int MAX_SYNC_ENTRIES = 64;
     private static final Method GET_INVENTORY = findGetInventory();
     private static boolean reflectionFailed;
 
@@ -63,13 +66,15 @@ public final class CuriosCompat {
             return captureSyncData(handler);
         } catch (NoSuchMethodException ignored) {
             Object tag = findMethod(handler, "writeTag").invoke(handler);
-            return tag instanceof CompoundTag compound ? compound.copy() : null;
+            // Curios writes a fresh tag for writeTag(). A second recursive copy
+            // is both unnecessary and unsafe with NBT allocation mixins.
+            return tag instanceof CompoundTag compound ? compound : null;
         }
     }
 
     static boolean applyHandler(Object handler, CompoundTag tag) throws ReflectiveOperationException {
         if (!tag.contains(SYNC_VERSION_KEY, Tag.TAG_INT) || tag.getInt(SYNC_VERSION_KEY) != SYNC_VERSION) {
-            findMethod(handler, "readTag", Tag.class).invoke(handler, tag.copy());
+            findMethod(handler, "readTag", Tag.class).invoke(handler, tag);
             return true;
         }
 
@@ -92,7 +97,9 @@ public final class CuriosCompat {
             if (stacksHandler == null) {
                 stacksHandler = createStacksHandler(handler, identifier);
             }
-            findMethod(stacksHandler, "applySyncTag", CompoundTag.class).invoke(stacksHandler, syncTag.copy());
+            // The decoded packet owns this tag and Curios consumes it
+            // synchronously; avoid another deep copy on the client thread.
+            findMethod(stacksHandler, "applySyncTag", CompoundTag.class).invoke(stacksHandler, syncTag);
             syncedHandlers.put(identifier, stacksHandler);
         }
         findMethod(handler, "setCurios", Map.class).invoke(handler, syncedHandlers);
@@ -107,6 +114,9 @@ public final class CuriosCompat {
 
         ListTag entries = new ListTag();
         for (Map.Entry<?, ?> entry : curios.entrySet()) {
+            if (entries.size() >= MAX_SYNC_ENTRIES) {
+                break;
+            }
             if (!(entry.getKey() instanceof String identifier) || entry.getValue() == null) {
                 continue;
             }
@@ -116,7 +126,10 @@ public final class CuriosCompat {
             }
             CompoundTag encoded = new CompoundTag();
             encoded.putString(SYNC_IDENTIFIER_KEY, identifier);
-            encoded.put(SYNC_DATA_KEY, syncTag.copy());
+            // ICurioStacksHandler#getSyncTag creates a new CompoundTag and
+            // serializes its stacks into it. Transfer that owned snapshot
+            // directly instead of recursively copying every ItemStack NBT.
+            encoded.put(SYNC_DATA_KEY, syncTag);
             entries.add(encoded);
         }
 

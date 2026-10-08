@@ -84,8 +84,6 @@ public final class LodRequestManager {
     private static final int BOOSTED_SCAN_CANDIDATES_PER_TICK = 32768;
     private static final int MAX_REQUESTS_PER_TICK = 256;
     private static final int INTEGRATED_MAX_REQUESTS_PER_TICK = 96;
-    /** Keep VSS/Voxy moving while Xaero drains its own map-update backlog. */
-    private static final int XAERO_BACKPRESSURE_MAX_REQUESTS_PER_TICK = 8;
     private static final long MAX_SCAN_NANOS_PER_TICK = 1_500_000L;
     private static final long INTEGRATED_MAX_SCAN_NANOS_PER_TICK = 750_000L;
     private static final int SCAN_DEADLINE_CHECK_INTERVAL = 64;
@@ -428,6 +426,21 @@ public final class LodRequestManager {
         boolean dirtyRefreshRequest = dirtyColumns.contains(packed);
         boolean replacingKnownColumn = columnTimestamps.get(packed) > 0L || dirtyRefreshRequest;
         return new ColumnReceiveResult(true, dirtyRefreshRequest, replacingKnownColumn, packed);
+    }
+
+    /** Local explicit pregen may persist outside the display radius. It still
+     * obeys the active dimension, dirty watermark and monotonic column version. */
+    synchronized boolean processLocalPregenColumn(ResourceKey<Level> dimension, int cx, int cz,
+            long version, int[] sections, BooleanSupplier processor) {
+        if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) return false;
+        long packed = PositionUtil.packPosition(cx, cz);
+        if (version <= 0 || version < dirtyColumnTimestamps.get(packed)) return false;
+        if (columnTimestamps.get(packed) >= version) return true;
+        if (!processor.getAsBoolean()) return false;
+        requestTracker.cancel(packed);
+        suppressedResponses.remove(packed);
+        acceptColumn(dimension, packed, version, sections);
+        return true;
     }
 
     public synchronized ColumnProcessingResult processColumnIfCurrent(
@@ -919,12 +932,10 @@ public final class LodRequestManager {
         int maxCount = Math.min(
                 Math.min(VSSConstants.MAX_BATCH_CHUNK_REQUESTS, requestWindow.remaining()),
                 maxRequestsPerTick());
-        diagnosticXaeroBackpressure = ModCompat.shouldBackpressureXaeroMapInput();
-        maxCount = limitForXaeroBackpressure(maxCount, diagnosticXaeroBackpressure);
+        // Xaero is an optional, lossy side-channel. Its queue pressure must
+        // never throttle VSS/Voxy column delivery or explicit generation.
+        diagnosticXaeroBackpressure = false;
         diagnosticBatchLimit = maxCount;
-        if (diagnosticXaeroBackpressure) {
-            generationDiagnostics.record("xaeroThrottledTicks");
-        }
         int[] requestIds = requestBuffers.requestIds;
         long[] positions = requestBuffers.positions;
         long[] timestamps = requestBuffers.timestamps;
@@ -1706,7 +1717,8 @@ public final class LodRequestManager {
     }
 
     private boolean generationAllowed() {
-        return !cacheOnlyReload.isActive() && sessionConfig != null && sessionConfig.generationEnabled();
+        // Xaero map replay is independent of terrain generation.
+        return sessionConfig != null && sessionConfig.generationEnabled();
     }
 
     long requestTimestampFor(long packed) {
@@ -1723,9 +1735,8 @@ public final class LodRequestManager {
     }
 
     static int limitForXaeroBackpressure(int maxCount, boolean backpressure) {
-        if (maxCount <= 0) return 0;
-        return backpressure ? Math.min(maxCount, XAERO_BACKPRESSURE_MAX_REQUESTS_PER_TICK)
-                : maxCount;
+        // Retained as a compatibility seam; map backlog never limits VSS.
+        return Math.max(0, maxCount);
     }
 
     private int getEffectiveLodDistance() {

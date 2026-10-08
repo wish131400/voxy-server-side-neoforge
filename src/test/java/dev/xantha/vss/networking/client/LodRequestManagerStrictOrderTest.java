@@ -355,6 +355,34 @@ class LodRequestManagerStrictOrderTest {
         manager.onColumnTransferPart(old, Level.OVERWORLD, 1, 0, 10);
         assertTrue(tracker.matches(newer, position));
     }
+    @Test void localPregenPersistsOutsideWindowWithoutNetworkRequestAndDeduplicates() throws Exception {
+        int[] calls = {0};
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 4096, 4096, 100,
+                new int[0], () -> { calls[0]++; return true; }));
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 4096, 4096, 100,
+                new int[0], () -> { calls[0]++; return true; }));
+        assertEquals(1, calls[0]);
+        assertFalse(tracker.contains(PositionUtil.packPosition(4096,4096)));
+    }
+    @Test void localPregenRejectsWrongDimensionAndStaleVersionWithoutDispatch() {
+        long position = PositionUtil.packPosition(5,5);
+        manager.onDirtyColumns(new long[]{position},new long[]{100});
+        assertFalse(manager.processLocalPregenColumn(Level.OVERWORLD,5,5,99,new int[0],
+                () -> { fail("stale data cannot reach Voxy"); return true; }));
+        assertFalse(manager.processLocalPregenColumn(Level.NETHER,5,5,101,new int[0],
+                () -> { fail("wrong dimension cannot reach Voxy"); return true; }));
+    }
+    @Test void localPregenFailureKeepsInflightRequestAndSuccessSupersedesIt() {
+        long position = PositionUtil.packPosition(5,5);
+        int request = tracker.track(position,false,false,false,60_000_000_000L,0L);
+        assertFalse(manager.processLocalPregenColumn(Level.OVERWORLD,5,5,100,new int[0], () -> false));
+        assertTrue(tracker.matches(request,position));
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD,5,5,100,new int[0], () -> true));
+        assertFalse(tracker.contains(position));
+        assertEquals(LodRequestManager.ColumnProcessingResult.STALE,
+                manager.processColumnIfCurrent(request,Level.OVERWORLD,5,5,99,new int[0],
+                    () -> { fail("old network reply must not overwrite local import"); return true; }));
+    }
     private void frontier(int ring) throws Exception {
         field(StrictLodVisibility.class,"snapshot").set(null,new StrictLodVisibility.Snapshot(Level.OVERWORLD,0,0,ring,ring+1,1));
     }

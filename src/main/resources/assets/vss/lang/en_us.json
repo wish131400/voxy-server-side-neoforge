@@ -242,5 +242,14 @@
   "vss.command.reference_capture.started": "VSS: collecting Rust reference data in the background...",
   "vss.command.reference_capture.done": "VSS reference data saved: %s",
   "vss.command.reference_capture.failed": "VSS reference capture failed: %s",
-  "vss.command.client_stats.summary": "VSS local status: server LOD sync %s, range %s chunks; received %s columns / %s MiB, dropped %s; terrain prediction %s. Detailed diagnostics: /vssclient stats details."
+  "vss.command.client_stats.summary": "VSS local status: server LOD sync %s, range %s chunks; received %s columns / %s MiB, dropped %s; terrain prediction %s. Detailed diagnostics: /vssclient stats details.",
+  "vss.command.chunky.checking_capacity": "Checking server disk cache capacity before starting pre-generation...",
+  "vss.command.chunky.capacity_scan_failed": "Could not check disk cache capacity; pre-generation was not started. Check the server log and retry.",
+  "vss.command.chunky.capacity_rejected": "Pre-generation rejected: disk cache %s GiB, estimated capacity %s columns, requested %s columns. Estimated %s bytes/column including headroom; entry limits also apply. Use /vss disk_cache <GiB> or select a smaller area.",
+  "vss.command.chunky.state.checking_capacity": "checking capacity",
+  "vss.command.disk_cache.show": "Disk cache: %s GiB, up to %s columns, retained for at most %s days after writing. Set with /vss disk_cache <1-64 GiB>. Actual capacity depends on compressed column size.",
+  "vss.command.disk_cache.saved": "Disk cache saved at %s GiB; the entry limit was expanded accordingly.",
+  "vss.command.help.disk_cache": "Disk cache: inspect or change the server LOD disk quota.",
+  "vss.command.help.disk_cache.usage": "/vss disk_cache [GiB] | /vss 磁盘缓存 [GiB], range 1-64; retained for at most 7 days.",
+  "vss.command.help.disk_cache.example": "Example: /vss disk_cache 10"
 }

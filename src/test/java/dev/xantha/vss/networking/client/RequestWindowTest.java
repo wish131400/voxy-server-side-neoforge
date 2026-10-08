@@ -24,8 +24,8 @@ class RequestWindowTest {
     }
 
     @Test
-    void xaeroBackpressureKeepsASmallVssBudgetAlive() {
-        assertEquals(8, LodRequestManager.limitForXaeroBackpressure(256, true));
+    void xaeroBackpressureDoesNotLimitVssBudget() {
+        assertEquals(256, LodRequestManager.limitForXaeroBackpressure(256, true));
         assertEquals(3, LodRequestManager.limitForXaeroBackpressure(3, true));
         assertEquals(256, LodRequestManager.limitForXaeroBackpressure(256, false));
         assertEquals(0, LodRequestManager.limitForXaeroBackpressure(0, true));

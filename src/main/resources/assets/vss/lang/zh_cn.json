@@ -242,5 +242,14 @@
   "vss.command.reference_capture.started": "VSS：正在后台采集 Rust 参考数据……",
   "vss.command.reference_capture.done": "VSS 参考数据已保存：%s",
   "vss.command.reference_capture.failed": "VSS 参考采集失败：%s",
-  "vss.command.client_stats.summary": "VSS 本机状态：服务端远景同步%s，同步范围 %s 区块；累计收到 %s 列 / %s MiB，丢弃 %s 列；地形预测%s。详细诊断：/vssclient stats details。"
+  "vss.command.client_stats.summary": "VSS 本机状态：服务端远景同步%s，同步范围 %s 区块；累计收到 %s 列 / %s MiB，丢弃 %s 列；地形预测%s。详细诊断：/vssclient stats details。",
+  "vss.command.chunky.checking_capacity": "正在检查服务器磁盘缓存容量，检查通过后开始预生成……",
+  "vss.command.chunky.capacity_scan_failed": "无法检查磁盘缓存容量，预生成未启动；请检查服务器日志后重试。",
+  "vss.command.chunky.capacity_rejected": "服务器拒绝预生成：磁盘缓存 %s GiB，预计可保存 %s 列，当前请求预生成 %s 列，超出缓存容量。估算每列 %s 字节（含余量，并受列数上限约束）。可通过 /vss 磁盘缓存 <GiB> 调整，或缩小生成区域。",
+  "vss.command.chunky.state.checking_capacity": "容量检查中",
+  "vss.command.disk_cache.show": "磁盘缓存：%s GiB，列数上限 %s，写入后最长保留 %s 天。调整命令：/vss 磁盘缓存 <1-64 GiB>。实际可容纳列数取决于压缩大小。",
+  "vss.command.disk_cache.saved": "服务器磁盘缓存已设置为 %s GiB，并已保存配置；列数上限同步扩容。",
+  "vss.command.help.disk_cache": "磁盘缓存：查看或调整服务器 LOD 磁盘配额。",
+  "vss.command.help.disk_cache.usage": "/vss 磁盘缓存 [GiB] | /vss disk_cache [GiB]，范围 1-64，最长保留 7 天。",
+  "vss.command.help.disk_cache.example": "示例：/vss 磁盘缓存 10"
 }

@@ -21,6 +21,8 @@ import net.minecraft.world.level.Level;
 public final class PersistentColumnWriter {
     private final PersistentColumnLodStore persistentStore;
     private final DiskTaskRuntime diskRuntime;
+    private long nextMaintenanceNanos;
+    private final java.util.concurrent.atomic.AtomicBoolean maintenancePending = new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<ResourceKey<Level>, Long2LongLinkedOpenHashMap> pendingInvalidations = new HashMap<>();
     private final Map<ResourceKey<Level>, Long2LongLinkedOpenHashMap> invalidationWatermarks = new HashMap<>();
     private final LinkedHashMap<WriteKey, PendingWrite> pendingWrites = new LinkedHashMap<>();
@@ -197,6 +199,19 @@ public final class PersistentColumnWriter {
         if (!submitted) {
             indexFlushPending.set(false);
         }
+    }
+
+    public void scheduleMaintenance(MinecraftServer server) {
+        if (!persistentStore.enabled() || VSSServerNetworking.isServerStopping()) return;
+        long now = System.nanoTime();
+        if (now < nextMaintenanceNanos || !maintenancePending.compareAndSet(false, true)) return;
+        long epoch = VSSServerNetworking.lifecycleEpoch();
+        boolean accepted = diskRuntime.submitWrite(VSSServerConfig.CONFIG.persistentColumnCacheWriteQueueLimit, () -> {
+            try { if (!VSSServerNetworking.isLifecycleStale(epoch)) persistentStore.maintain(server); }
+            finally { maintenancePending.set(false); }
+        }, error -> maintenancePending.set(false));
+        if (accepted) nextMaintenanceNanos = now + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        else maintenancePending.set(false);
     }
 
     public void flushInvalidationsBlocking(MinecraftServer server) {

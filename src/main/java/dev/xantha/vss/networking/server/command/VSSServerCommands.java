@@ -17,6 +17,27 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 public final class VSSServerCommands {
+    private static LiteralArgumentBuilder<CommandSourceStack> diskCacheCommand(String name) {
+        return Commands.literal(name)
+                .executes(context -> showDiskCache(context.getSource()))
+                .then(Commands.argument("GiB", IntegerArgumentType.integer(1, 64))
+                        .executes(context -> setDiskCache(context.getSource(), IntegerArgumentType.getInteger(context, "GiB"))));
+    }
+
+    private static int showDiskCache(CommandSourceStack source) {
+        var config = VSSServerConfig.CONFIG;
+        source.sendSuccess(() -> Component.translatable("vss.command.disk_cache.show",
+                String.format(java.util.Locale.ROOT, "%.2f", config.persistentColumnCacheMaxMiB / 1024.0),
+                config.persistentColumnCacheMaxEntries, config.persistentColumnCacheRetentionDays), false);
+        return 1;
+    }
+
+    private static int setDiskCache(CommandSourceStack source, int gib) {
+        VSSServerConfig.CONFIG.setPersistentCacheGiB(gib);
+        source.sendSuccess(() -> Component.translatable("vss.command.disk_cache.saved", gib), true);
+        return showDiskCache(source);
+    }
+
     private VSSServerCommands() {
     }
 
@@ -30,6 +51,8 @@ public final class VSSServerCommands {
                 .requires(source -> source.hasPermission(2))
                 .executes(context -> showHelp(context.getSource()))
                 .then(VSSChunkyCommands.build())
+                .then(diskCacheCommand("磁盘缓存"))
+                .then(diskCacheCommand("disk_cache"))
                 .then(Commands.literal("stats")
                         .executes(context -> showStats(context.getSource())))
                 .then(Commands.literal("状态")

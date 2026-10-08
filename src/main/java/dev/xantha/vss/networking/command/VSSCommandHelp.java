@@ -13,13 +13,13 @@ import net.minecraft.network.chat.HoverEvent;
 /** Shared, localized references for the server and local client command trees. */
 public final class VSSCommandHelp {
     public static final List<String> SERVER_TOPICS = List.of("stats", "bandwidth", "queue", "request_limits",
-            "distance", "farplayers", "dirty", "storage", "generation", "chunky", "help");
+            "distance", "farplayers", "dirty", "storage", "generation", "chunky", "disk_cache", "help");
     public static final List<String> CLIENT_TOPICS = List.of("stats", "xaero", "prediction", "help");
     private static final Map<String, String> SERVER_ALIASES = Map.ofEntries(
             Map.entry("状态", "stats"), Map.entry("带宽", "bandwidth"), Map.entry("队列", "queue"),
             Map.entry("请求限速", "request_limits"), Map.entry("距离", "distance"), Map.entry("远处玩家", "farplayers"),
             Map.entry("刷新", "dirty"), Map.entry("存储", "storage"), Map.entry("生成", "generation"),
-            Map.entry("预生成", "chunky"), Map.entry("帮助", "help"));
+            Map.entry("磁盘缓存", "disk_cache"), Map.entry("预生成", "chunky"), Map.entry("帮助", "help"));
     private static final Map<String, String> CLIENT_ALIASES = Map.of(
             "状态", "stats", "地图", "xaero", "预测", "prediction", "帮助", "help");
     public static final List<String> SERVER_HELP_TOPICS = java.util.stream.Stream.concat(

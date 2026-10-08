@@ -6,7 +6,7 @@ import java.util.Map;
 
 /** A lazy area cursor with no admission quota; background readers claim positions as they run. */
 final class ChunkyWorkQueue {
-    enum Stage { READING, GENERATION, GENERATING, PERSIST, WRITING }
+    enum Stage { READING, GENERATION, GENERATING, PERSIST, IMPORTING, WRITING }
 
     static final class Work {
         final int requestId;
@@ -16,6 +16,7 @@ final class ChunkyWorkQueue {
         int generationAttempts;
         int writeAttempts;
         boolean reused;
+        boolean localAttempted;
         EncodedColumnData columnData;
 
         Work(int requestId, int chunkX, int chunkZ) {

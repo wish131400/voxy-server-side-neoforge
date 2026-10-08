@@ -101,15 +101,15 @@ class LodRequestManagerDeferredProgressTest {
     }
 
     @Test
-    void cacheOnlyPassNeverGrantsGenerationPermission() throws Exception {
+    void xaeroReplayNeverDisablesGenerationPermission() throws Exception {
         Fixture f = new Fixture();
         f.defer(40, true);
         ((CacheOnlyReloadTracker) field("cacheOnlyReload").get(f.manager))
                 .begin(List.of("minecraft:overworld"), "minecraft:overworld");
         assertEquals(1, f.drain(window(2, 1), 96));
-        assertFalse(f.allowGeneration[0]);
-        assertTrue(f.probes[0]);
-        assertEquals(0, f.tracker.generationSize());
+        assertTrue(f.allowGeneration[0]);
+        assertFalse(f.probes[0]);
+        assertEquals(1, f.tracker.generationSize());
     }
 
     @Test

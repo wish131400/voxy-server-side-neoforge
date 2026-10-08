@@ -2,6 +2,7 @@ package dev.xantha.vss.compat;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
@@ -24,6 +25,30 @@ class CuriosCompatTest {
         FakeStacksHandler applied = (FakeStacksHandler) target.getCurios().get("back");
         assertEquals("youkai_bow", applied.item);
         assertFalse(applied.render);
+    }
+
+    @Test
+    void captureTransfersSyncTagWithoutASecondDeepCopy() throws ReflectiveOperationException {
+        FakeInventory source = new FakeInventory();
+        FakeStacksHandler stacks = new FakeStacksHandler("amulet", true);
+        source.getCurios().put("back", stacks);
+
+        CompoundTag payload = CuriosCompat.captureHandler(source);
+        CompoundTag encoded = payload.getList("Entries", Tag.TAG_COMPOUND).getCompound(0);
+
+        assertSame(stacks.lastSyncTag, encoded.get("SyncTag"));
+    }
+
+    @Test
+    void captureBoundsMalformedOrExpandedSlotMaps() throws ReflectiveOperationException {
+        FakeInventory source = new FakeInventory();
+        for (int i = 0; i < 80; i++) {
+            source.getCurios().put("slot_" + i, new FakeStacksHandler("item_" + i, true));
+        }
+
+        CompoundTag payload = CuriosCompat.captureHandler(source);
+
+        assertEquals(64, payload.getList("Entries", Tag.TAG_COMPOUND).size());
     }
 
     @Test
@@ -51,6 +76,7 @@ class CuriosCompatTest {
     public static final class FakeStacksHandler {
         private String item;
         private boolean render;
+        private CompoundTag lastSyncTag;
 
         private FakeStacksHandler(String item, boolean render) {
             this.item = item;
@@ -61,6 +87,7 @@ class CuriosCompatTest {
             CompoundTag tag = new CompoundTag();
             tag.putString("Item", item);
             tag.putBoolean("Render", render);
+            lastSyncTag = tag;
             return tag;
         }
 

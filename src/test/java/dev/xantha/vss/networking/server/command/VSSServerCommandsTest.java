@@ -73,4 +73,16 @@ class VSSServerCommandsTest {
         assertEquals(0, dispatcher.execute("vss help unknown", source(2)));
         assertEquals(0, dispatcher.execute("vss unknown", source(2)));
     }
+    @Test void diskCacheAliasesParseAndRejectOutOfRangeOrUnprivilegedChanges() throws Exception {
+        CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();
+        VSSServerCommands.register(dispatcher);
+        for (String input : new String[]{"vss 磁盘缓存", "vss 磁盘缓存 10", "vss disk_cache 64"}) {
+            var parsed = dispatcher.parse(input,source(2));
+            assertFalse(parsed.getReader().canRead()); assertNotNull(parsed.getContext().getCommand());
+            assertTrue(dispatcher.parse(input,source(1)).getReader().canRead());
+        }
+        for (String input : new String[]{"vss 磁盘缓存 0","vss disk_cache 65"})
+            assertThrows(com.mojang.brigadier.exceptions.CommandSyntaxException.class,
+                () -> dispatcher.execute(input,source(2)));
+    }
 }

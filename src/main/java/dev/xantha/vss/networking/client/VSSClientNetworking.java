@@ -256,6 +256,19 @@ public final class VSSClientNetworking {
         }
     }
 
+    static LodRequestManager currentPregenManager() { return requestManager; }
+
+    public static boolean isLocalPregenServer(net.minecraft.server.MinecraftServer server) {
+        return IntegratedPregenImporter.supports(server);
+    }
+
+    public static boolean tryImportLocalPregen(net.minecraft.server.MinecraftServer server,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+            dev.xantha.vss.common.processing.EncodedColumnData data,
+            java.util.function.BooleanSupplier valid, java.util.function.Consumer<Boolean> completed) {
+        return IntegratedPregenImporter.offer(server, dimension, data, requestManager, valid, completed);
+    }
+
     public static void handleDirtyColumns(DirtyColumnsS2CPayload payload) {
         if (!serverEnabled || !isClientWorldReady()) {
             return;
@@ -424,7 +437,8 @@ public final class VSSClientNetworking {
         }
         ClientLodPresenceCache.ScopeClearResult cleared = ClientLodPresenceCache.clearScopeWithDimensions(
                 ClientLodPresenceCache.currentScope());
-        manager.forceResyncWithoutGeneration(cleared.dimensions(), level.dimension());
+        // Xaero replay is a side-channel and must not disable VSS generation.
+        manager.forceResync();
         COLUMN_PROCESSOR.beginSession();
         ClientLodPresenceCache.flush();
         VSSLogger.info("Xaero map reload requested for current server: cleared " + cleared.columns()
