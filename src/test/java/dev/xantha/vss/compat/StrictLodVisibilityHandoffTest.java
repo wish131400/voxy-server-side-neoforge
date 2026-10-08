@@ -105,6 +105,57 @@ class StrictLodVisibilityHandoffTest {
         assertFalse(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
     }
 
+    @Test void auxiliaryViewportsKeepMainCoverageAndItsCachedAnswers() throws Exception {
+        var cache = (StrictVoxyCoverageCache) field(StrictLodVisibility.class, "COLUMN_COVERAGE").get(null);
+        assertTrue(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
+        long revision = StrictLodVisibility.coverageRevision();
+        long reset = StrictLodVisibility.coverageResetRevision();
+        long misses = cache.misses();
+        Object[] auxiliaryViews = {null, new Viewport(0, 1080), new Viewport(1920, 0),
+                new Viewport(-1, 1080), new Viewport(1920, -1)};
+        for (int frame = 0; frame < 64; frame++) {
+            for (Object viewport : auxiliaryViews) StrictLodVisibility.beginFrame(null, viewport);
+            StrictLodVisibility.updateRenderWindow(Level.OVERWORLD, 0, 0, 64);
+            assertEquals(revision, StrictLodVisibility.coverageRevision());
+            assertEquals(reset, StrictLodVisibility.coverageResetRevision());
+            assertTrue(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
+        }
+        assertEquals(misses, cache.misses(), "shadow calls must retain the main view's warm coverage");
+        nodes.update(1, -1, -1);
+        assertFalse(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0),
+                "a real node removal still retracts coverage immediately");
+    }
+
+    @Test void auxiliaryViewportsCannotConsumePendingOrderingRestart() throws Exception {
+        StrictLodVisibility.restartOrdering(Level.OVERWORLD, 0, 0);
+        var pending = (java.util.concurrent.atomic.AtomicBoolean)
+                field(StrictLodVisibility.class, "invalidated").get(null);
+        assertTrue(pending.get());
+        StrictLodVisibility.beginFrame(null, new Viewport(0, 0));
+        assertTrue(pending.get(), "the next main view must process the requested restart");
+    }
+
+    @Test void worldResetRetractsCachedCoverageAndFreshUploadsCanRestoreIt() throws Exception {
+        assertTrue(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
+        long reset = StrictLodVisibility.coverageResetRevision();
+        StrictLodVisibility.reset();
+        assertTrue(StrictLodVisibility.coverageResetRevision() > reset);
+        assertFalse(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
+        field(StrictLodVisibility.class, "dimension").set(null, Level.OVERWORLD);
+        field(StrictLodVisibility.class, "uploadedNodes").setBoolean(null, true);
+        field(StrictLodVisibility.class, "meshPipeline").set(null, pipeline);
+        StrictLodVisibility.updateRenderWindow(Level.OVERWORLD, 0, 0, 64);
+        assertFalse(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0),
+                "old positive cache entries cannot survive a new world");
+        nodes.update(1, StrictVoxyNodeIndex.key(0, 10, 2, 0), 123);
+        assertTrue(StrictLodVisibility.predictionCoverage(Level.OVERWORLD, 20, 64, 95, 0));
+    }
+
+    private static final class Viewport {
+        final int width, height;
+        Viewport(int width, int height) { this.width = width; this.height = height; }
+    }
+
     @Test void predictionToggleRetainsResidentVoxyNodes() {
         VSSClientConfig.CONFIG.enablePrediction = false;
         assertFalse(StrictLodVisibility.active());

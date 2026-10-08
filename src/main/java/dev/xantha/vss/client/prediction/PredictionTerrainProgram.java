@@ -20,6 +20,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
     private final GlProgram program;
     private final int modelView;
     private final int projection;
+    private final int waterInverseMvp;
     private final int viewOrigin;
     private final int realCoverageBounds;
     private final int exactCoverage, exactCoverageGrid;
@@ -92,6 +93,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
         this.batchTimeSeconds = program.uniform("BatchTimeSeconds");
         this.modelView = program.uniform("ModelViewMat");
         this.projection = program.uniform("ProjMat");
+        this.waterInverseMvp = program.uniform("WaterInverseMvp");
         this.viewOrigin = program.uniform("ViewOrigin");
         this.realCoverageBounds = program.uniform("RealCoverageBounds");
         this.exactCoverage = program.uniform("ExactCoverage");
@@ -219,6 +221,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
     void setCamera(Matrix4f modelView, Matrix4f projection) {
         GL20.glUniformMatrix4fv(this.modelView, false, modelView.get(matrixValues));
         GL20.glUniformMatrix4fv(this.projection, false, projection.get(matrixValues));
+        if (waterInverseMvp >= 0) GL20.glUniformMatrix4fv(waterInverseMvp, false,
+                new org.joml.Matrix4d(projection).mul(new org.joml.Matrix4d(modelView)).invert().get(matrixValues));
         var origin = new Matrix4f(modelView).invert().transformPosition(new org.joml.Vector3f());
         GL20.glUniform3f(viewOrigin, origin.x, origin.y, origin.z);
     }
@@ -420,6 +424,7 @@ final class PredictionTerrainProgram implements AutoCloseable {
             flat out float vCellLocal;
             flat out uint vCoverageAxis;
             flat out vec3 vFaceNormal;
+            flat out vec4 vFluidPlane;
             flat out float vSurfaceVisible;
             flat out uint vRealBoundary;
             flat out uint vTerrainWall;
@@ -598,8 +603,10 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // Other faces retain their real positions and flat discard.
                 uint planeA = axis == 0u ? texelB.x : axis == 1u ? texelA.x : texelA.z;
                 uint planeB = axis == 0u ? texelB.y : axis == 1u ? texelA.y : texelA.w;
-                bool constantFacePlane = (axis != 0u || TerrainMorph.y <= 0.0)
+                bool constantFacePlane = (axis != 0u || fluid != 0u || TerrainMorph.y <= 0.0)
                         && planeA == planeB && (planeA & 65535u) == (planeA >> 16u);
+                vFluidPlane = fluid != 0u && constantFacePlane
+                        ? vec4(faceNormal, -dot(faceNormal, relative)) : vec4(0.0);
                 if (!surfaceVisible && constantFacePlane) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             }
             """;
@@ -660,6 +667,8 @@ final class PredictionTerrainProgram implements AutoCloseable {
              flat in float vCellLocal;
             flat in uint vCoverageAxis;
             flat in vec3 vFaceNormal;
+            flat in vec4 vFluidPlane;
+            uniform mat4 WaterInverseMvp;
             flat in float vSurfaceVisible;
             flat in uint vRealBoundary;
             flat in uint vTerrainWall;
@@ -758,6 +767,20 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // view bob. Reconstruct real geometry before any discard so
                 // screen derivatives remain defined across the fragment quad.
                 float predictedDistance = 1.0 / max(gl_FragCoord.w, 1e-30);
+                #ifndef VSS_IRIS
+                // Large near-clipped water triangles can accumulate reciprocal-W
+                // interpolation error. Intersect this pixel's ray with the exact
+                // flat face instead; homogeneous coordinates retain view bob.
+                if (vWater > 0.5 && dot(vFluidPlane.xyz, vFluidPlane.xyz) > 0.5) {
+                    vec2 ndc = gl_FragCoord.xy / vec2(textureSize(MainDepth, 0)) * 2.0 - 1.0;
+                    vec4 a = WaterInverseMvp * vec4(ndc, 1.0, 1.0);
+                    vec4 b = WaterInverseMvp * vec4(ndc, -1.0, 1.0);
+                    float da = dot(vFluidPlane, a), db = dot(vFluidPlane, b);
+                    float denominator = a.w * db - b.w * da;
+                    float planeDistance = (db - da) / denominator;
+                    if (planeDistance > 0.0 && planeDistance < 1e30) predictedDistance = planeDistance;
+                }
+                #endif
                  #ifdef VSS_IRIS
                 float clipDepth = VssZeroToOne ? mainDepth : mainDepth * 2.0 - 1.0;
                 vec4 mainView = VssInverseProjection * vec4(gl_FragCoord.xy / VssViewport * 2.0 - 1.0, clipDepth, 1.0);
@@ -781,16 +804,27 @@ final class PredictionTerrainProgram implements AutoCloseable {
                 // Voxy's final blit saturates all geometry beyond vanilla's
                 // far plane to the last depth bin. That bin cannot establish
                 // which of two distant surfaces is closer.
-                if (realDepthRelevant && VoxyDepthAvailable
-                        && mainDepth >= 1.0 - 2.0 / 16777215.0 && mainDepth < 1.0) {
+                // Water needs the original depth inside the vanilla far plane too:
+                // main D24 bins are already too wide to resolve a coplanar tie
+                // when flying or when sprint FOV changes the pixel's clip distance.
+                if (realDepthRelevant && VoxyDepthAvailable && mainDepth < 1.0
+                        && (vWater > 0.5 || mainDepth >= 1.0 - 2.0 / 16777215.0)) {
                     float raw = texelFetch(VoxyDepth, ivec2(gl_FragCoord.xy), 0).r;
                     if (raw > 0.0 && raw < 1.0) {
                         vec2 uv = gl_FragCoord.xy / vec2(textureSize(VoxyDepth, 0));
                         vec4 clip = vec4(uv * 2.0 - 1.0, raw * VoxyDepthTransform.x + VoxyDepthTransform.y, 1.0);
                         float denominator = dot(VoxyDistanceDenominator, clip);
                         if (abs(denominator) > 1e-10) {
-                            realDistance = dot(VoxyDistanceNumerator, clip) / denominator;
-                            originalVoxyDepth = realDistance > 0.0;
+                            float voxyDistance = dot(VoxyDistanceNumerator, clip) / denominator;
+                            float voxyMainDepth = clamp((-MainDepthPlanes.x
+                                    + MainDepthPlanes.y / voxyDistance) * 0.5 + 0.5,
+                                    0.0, 1.0 - 1.0 / 16777215.0);
+                            // A later vanilla surface can be closer than Voxy.
+                            // Only refine depth consistent with Voxy's final blit;
+                            // an independently closer main surface keeps ownership.
+                            originalVoxyDepth = voxyDistance > 0.0 && (mainDepth >= 1.0 - 2.0 / 16777215.0
+                                    || abs(voxyMainDepth - mainDepth) <= 2.0 / 16777215.0);
+                            if (originalVoxyDepth) realDistance = voxyDistance;
                             // One far-depth quantization bin spans centimetres
                             // or more in world space. A fixed 0.02-block bias
                             // cannot consistently break coplanar water ties.

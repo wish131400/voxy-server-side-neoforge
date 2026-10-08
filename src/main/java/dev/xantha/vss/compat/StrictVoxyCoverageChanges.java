@@ -2,7 +2,6 @@ package dev.xantha.vss.compat;
 
 import it.unimi.dsi.fastutil.HashCommon;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 
@@ -87,8 +86,8 @@ public final class StrictVoxyCoverageChanges {
         long next = revision + 1;
         areas.clear();
         windows.clear();
-        for (var versions : columnVersions) Arrays.fill(versions, 0);
-        for (var versions : regionVersions) Arrays.fill(versions, 0);
+        // Both stamp queries start at resetRevision. Every older bucket value is
+        // below this new baseline, so logical invalidation needs no array writes.
         discardedThrough = next;
         discardedWindowThrough = next;
         resetRevision = next;

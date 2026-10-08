@@ -77,6 +77,34 @@ class StrictVoxyCoverageChangesTest {
         assertEquals(1, changes.since(reset).areas().size());
     }
 
+    @Test void resetBaselineDominatesOldStampsAndRetainsNewLocalInvalidations() {
+        var changes = new StrictVoxyCoverageChanges(2);
+        for (int edit = 0; edit < 1000; edit++) changes.columnChanged(3, 4);
+        changes.nodeChanged(StrictVoxyNodeIndex.key(4, -1, 0, 2));
+        long oldColumn = changes.columnRevision(3, 4);
+        long oldRegion = changes.regionRevision(-32, 64, -1, 95);
+        changes.windowMoved(0, 0, 1, 0, 64);
+        changes.invalidateAll();
+        long reset = changes.resetRevision();
+        assertTrue(reset > Math.max(oldColumn, oldRegion));
+        assertEquals(reset, changes.columnRevision(3, 4));
+        assertEquals(reset, changes.regionRevision(-32, 64, -1, 95));
+        var delta = changes.since(reset);
+        assertFalse(delta.reset());
+        assertTrue(delta.areas().isEmpty());
+        assertTrue(delta.windows().isEmpty());
+        changes.columnChanged(-3, 70);
+        assertTrue(changes.columnRevision(-3, 70) > reset);
+        assertTrue(changes.regionRevision(-32, 64, -1, 95) > reset);
+        assertEquals(reset, changes.columnRevision(3, 4),
+                "new local edits must not revive unrelated stamps from before the reset");
+        changes.invalidateAll();
+        long nextReset = changes.resetRevision();
+        assertTrue(nextReset > reset);
+        assertEquals(nextReset, changes.columnRevision(-3, 70));
+        assertEquals(nextReset, changes.regionRevision(-32, 64, -1, 95));
+    }
+
     @Test void evictingAreaHistoryPreservesLocalStampsWithoutGloballyInvalidatingColumns() {
         var changes = new StrictVoxyCoverageChanges(2);
         changes.columnChanged(0, 0);

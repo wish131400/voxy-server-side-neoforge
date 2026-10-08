@@ -935,14 +935,19 @@ class PredictionRenderTargetGpuTest {
         int originalDepth = texture(5, GL_R32F, 64, 64, GL_RED, new float[4096]);
         try {
             for (boolean zeroToOne : new boolean[]{false, true}) for (boolean reverseZ : new boolean[]{false, true})
-            for (float fov : new float[]{70, 7, 1}) for (float height : new float[]{65.6F, 68.1F, 128, 181.07F, 4700, 4701.37F, 8191.3F})
+            for (float farPlane : new float[]{320, 2048})
+            for (float fov : new float[]{70, 90, 7, 1}) for (float height : new float[]{65.6F, 68.1F, 128, 179, 181.07F, 4700, 4701.37F, 8191.3F})
                     for (double pitch : height < 200 ? new double[]{Math.PI / 2 - .013, fov < 10 ? .1 : .7}
-                            : new double[]{Math.PI / 2 - .013}) {
-                var vanilla = new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, 320);
+                            : new double[]{Math.PI / 2 - .013})
+            for (int motion : fov == 90 && height == 179 ? new int[]{0, 1, 2} : new int[]{0}) {
+                var vanilla = new Matrix4f().perspective((float) Math.toRadians(fov), 1, .05F, farPlane);
+                var effects = new Matrix4f().translate(.04F * motion, -.08F * motion, 0)
+                        .rotateZ(.015F * motion).rotateX(.02F * motion);
+                vanilla.mul(effects);
                 var projection = VssLodProjection.of(vanilla);
                 var view = new Matrix4f().lookAlong(0, (float) -Math.sin(pitch), (float) -Math.cos(pitch), 0, 1, 0);
                 var voxyMvp = new Matrix4f().perspective((float) Math.toRadians(fov), 1,
-                        reverseZ ? 131072 : 16, reverseZ ? 16 : 131072, zeroToOne).mul(view);
+                        reverseZ ? 131072 : 16, reverseZ ? 16 : 131072, zeroToOne).mul(effects).mul(view);
                 var mainMvp = new org.joml.Matrix4d(vanilla).mul(new org.joml.Matrix4d(view));
                 var inverse = new org.joml.Matrix4d(voxyMvp).invert();
                 terrain.setCamera(view, projection.matrix()); terrain.setTile(-8192, -height, -8192, 16384, 1, false);
@@ -951,8 +956,11 @@ class PredictionRenderTargetGpuTest {
                     float[] depths = new float[4096];
                     float[] mainDepths = new float[4096];
                     for (int py = 0; py < 64; py++) for (int px = 0; px < 64; px++) {
+                        // View bob translates the ray origin too; intersect two
+                        // unprojected points rather than assuming an eye at zero.
                         var ray = inverse.transformProject(new org.joml.Vector3d((px + .5) / 32 - 1, (py + .5) / 32 - 1, 0));
-                        ray.mul((64 - height - below) / ray.y);
+                        var direction = inverse.transformProject(new org.joml.Vector3d((px + .5) / 32 - 1, (py + .5) / 32 - 1, .5)).sub(ray);
+                        ray.fma((64 - height - below - ray.y) / direction.y, direction);
                         var clip = new org.joml.Matrix4d(voxyMvp).transformProject(new org.joml.Vector3d(ray));
                         depths[py * 64 + px] = (float) (Math.rint((zeroToOne ? clip.z : clip.z * .5 + .5) * 16777215) / 16777215);
                         var mainClip = mainMvp.transformProject(new org.joml.Vector3d(ray));
@@ -976,9 +984,23 @@ class PredictionRenderTargetGpuTest {
                     for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++)
                         if ((pixels.get((py * 64 + px) * 4) & 255) > 50) visible++;
                     System.out.println("PLANAR_HANDOFF fluid=" + fluid + " zeroToOne=" + zeroToOne + " reverseZ=" + reverseZ
-                            + " fov=" + fov + " height=" + height + " pitch=" + pitch + " realBelow=" + below + " visible=" + visible + "/2304");
+                            + " fov=" + fov + " far=" + farPlane + " motion=" + motion + " height=" + height + " pitch=" + pitch + " realBelow=" + below + " visible=" + visible + "/2304");
                     if (below == 0) assertEquals(0, visible, "coincident Voxy surface must win every pixel; fluid=" + fluid);
                     else assertEquals(2304, visible, "a distinct background surface must not erase foreground prediction; fluid=" + fluid);
+                    if (fluid && below == 4 && height == 179 && fov == 90 && !zeroToOne && !reverseZ) {
+                        // A later vanilla foreground is independent of the borrowed Voxy pixel.
+                        main.bindWrite(true); glClearDepth(VssLodProjection.distanceToVanillaDepth(2, projection));
+                        glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+                        ByteBuffer foreground = terrainPixels();
+                        for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++)
+                            assertEquals(0, foreground.get((py * 64 + px) * 4) & 255,
+                                    "closer vanilla geometry must still hide water with a farther Voxy pixel");
+                        main.bindWrite(true); glClearDepth(1); glClear(GL_DEPTH_BUFFER_BIT); target.bindWrite(true);
+                        ByteBuffer clear = terrainPixels();
+                        for (int py = 8; py < 56; py++) for (int px = 8; px < 56; px++)
+                            assertTrue((clear.get((py * 64 + px) * 4) & 255) > 50,
+                                    "uncomposited Voxy depth must not erase fallback water in a clear main pixel");
+                    }
                 }
             }
         } finally {

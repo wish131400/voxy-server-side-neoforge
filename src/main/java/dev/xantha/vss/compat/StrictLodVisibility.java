@@ -171,7 +171,8 @@ public final class StrictLodVisibility {
         return "{active=" + active() + ",voxyVisibility=unrestricted,readyRing=" + s.visibleRing() + ",requestRing=" + s.requestRing()
                 + ",waiting=" + waiting + ",checks=" + frameChecks + ",unchangedFrames=" + unchangedFrames
                 + ",coverageRetractions=" + coverageRetractions + ",meshPending=" + (meshPipeline == null ? -1 : meshPipeline.size())
-                + ",handoffRevision=" + COVERAGE.revision() + ",coverageQueries={" + COLUMN_COVERAGE.diagnostics() + "}"
+                + ",handoffRevision=" + COVERAGE.revision() + ",handoffResetRevision=" + COVERAGE.resetRevision()
+                + ",coverageQueries={" + COLUMN_COVERAGE.diagnostics() + "}"
                 + ",coverageRegions={" + REGION_COVERAGE.diagnostics() + "},nodeBoxLookups=" + NODES.boxLookups()
                 + ",handoffRadius=" + renderWindow.radius() + ",bridgeFailed=" + failed
                 + ",predictionHandoff=region-index+frame-depth}";
@@ -198,21 +199,20 @@ public final class StrictLodVisibility {
 
     /** Called on the render thread before any Voxy terrain draws, even after a teleport. */
     public static void beginFrame(Object renderSystem, Object viewport) {
-        renderHookSeen = true;
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.level == null || mc.player == null) { resetGeometry(); return; }
-        FRONTIER.center(mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
-                VSSClientNetworking.getEffectiveLodDistanceChunks());
-        if (invalidated.getAndSet(false)) {
-            FRONTIER.reset();
+        try {
+            // Iris shadow calls enter renderOpaque without a drawable Voxy viewport.
+            // They must not clear the main view or consume its pending restart.
+            if (viewport == null || ((Number) field(viewport, "width")).intValue() <= 0
+                    || ((Number) field(viewport, "height")).intValue() <= 0) return;
+            renderHookSeen = true;
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null || mc.level == null || mc.player == null) { resetGeometry(); return; }
             FRONTIER.center(mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
                     VSSClientNetworking.getEffectiveLodDistanceChunks());
-        }
-        try {
-            if (viewport == null || ((Number) field(viewport, "width")).intValue() <= 0
-                    || ((Number) field(viewport, "height")).intValue() <= 0) {
-                updateRenderWindow(null, 0, 0, 0);
-                return;
+            if (invalidated.getAndSet(false)) {
+                FRONTIER.reset();
+                FRONTIER.center(mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
+                        VSSClientNetworking.getEffectiveLodDistanceChunks());
             }
             Object owner = field(renderSystem, "nodeManager");
             // A Voxy cache can publish its first GPU batch before the first
