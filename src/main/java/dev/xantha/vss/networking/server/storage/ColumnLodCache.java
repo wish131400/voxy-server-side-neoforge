@@ -6,13 +6,28 @@ import dev.xantha.vss.common.processing.ColumnCoverage;
 import dev.xantha.vss.common.processing.EncodedColumnData;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ChunkPos;
 
-public final class ColumnLodCache {
+/**
+ * Bounded LRU of committed source results. The immutable coverage view is
+ * published by the same mutations, but queried without taking the LRU lock.
+ * It records intended VSS source ownership, never a client ingest/GPU receipt.
+ */
+public final class ColumnLodCache implements dev.xantha.vss.api.column.ColumnCoverage {
+    private static final AtomicLong COVERAGE_REVISIONS = new AtomicLong();
     private final VSSServerConfig config;
     private final LinkedHashMap<Key, Entry> entries = new LinkedHashMap<>(1024, 0.75F, true);
+    private final ConcurrentHashMap<Key, Snapshot> coverage = new ConcurrentHashMap<>();
+    private volatile CoverageView coverageView;
+    // Configuration is published by the runtime, not read unsafely by workers.
+    private volatile boolean coverageReadable;
     private long cachedBytes;
     private long hits;
     private long misses;
@@ -27,6 +42,54 @@ public final class ColumnLodCache {
 
     public ColumnLodCache(VSSServerConfig config) {
         this.config = config;
+        refreshCoverageConfig();
+    }
+
+    /** Runtime lifecycle only; retained old references become UNKNOWN on stop. */
+    public synchronized void openCoverage() {
+        refreshCoverageConfig();
+        coverage.clear();
+        coverageView = new CoverageView();
+        dev.xantha.vss.api.column.ColumnCoverageApi.bind(coverageView);
+    }
+
+    public synchronized void closeCoverage() {
+        CoverageView previous = coverageView;
+        coverageView = null;
+        coverage.clear();
+        if (previous != null) dev.xantha.vss.api.column.ColumnCoverageApi.unbind(previous);
+    }
+
+    /** Called alongside other runtime config updates on the server thread. */
+    public synchronized void refreshCoverageConfig() {
+        boolean readable = config.enabled && config.enableColumnCache;
+        if (readable != coverageReadable) coverage.clear();
+        coverageReadable = readable;
+    }
+
+    @Override public Snapshot snapshot(ResourceKey<Level> dimension, ChunkPos chunkPos) {
+        if (dimension == null || chunkPos == null || coverageView == null) return Snapshot.UNKNOWN;
+        // Disabling the server cannot recall columns already queued at clients.
+        // It therefore does not prove another producer may safely write now.
+        if (!coverageReadable) return Snapshot.UNKNOWN;
+        return coverage.getOrDefault(new Key(dimension.location(), chunkPos.x, chunkPos.z), Snapshot.UNKNOWN);
+    }
+
+    private final class CoverageView implements dev.xantha.vss.api.column.ColumnCoverage {
+        @Override public Snapshot snapshot(ResourceKey<Level> dimension, ChunkPos pos) {
+            if (coverageView != this) return Snapshot.UNKNOWN;
+            Snapshot result = ColumnLodCache.this.snapshot(dimension, pos);
+            return coverageView == this ? result : Snapshot.UNKNOWN;
+        }
+    }
+
+    private void publishCoverage(Key key, EncodedColumnData data) {
+        if (coverageView == null) return;
+        boolean full = data.completeColumn() && !data.coverage().isFiltered();
+        Set<Integer> owned = new HashSet<>();
+        if (!full) for (int y : data.sectionYs()) owned.add(y);
+        coverage.put(key, new Snapshot(COVERAGE_REVISIONS.incrementAndGet(), full,
+                full ? State.VSS_OWNED : State.VSS_UNTOUCHED, owned));
     }
 
     public synchronized Entry get(ResourceKey<Level> dimension, int cx, int cz) {
@@ -106,6 +169,7 @@ public final class ColumnLodCache {
                 columnData.sectionLengths(),
                 columnData.encodedCrc32c(),
                 effectivePreloaded, columnData.coverage()));
+        publishCoverage(key, columnData);
         this.cachedBytes += sizeBytes;
         if (effectivePreloaded) {
             preloadEntries++;
@@ -118,7 +182,9 @@ public final class ColumnLodCache {
     }
 
     public synchronized void invalidate(ResourceKey<Level> dimension, int cx, int cz) {
-        Entry removed = entries.remove(new Key(dimension.location(), cx, cz));
+        Key key = new Key(dimension.location(), cx, cz);
+        coverage.remove(key);
+        Entry removed = entries.remove(key);
         if (removed != null) {
             cachedBytes -= removed.sizeBytes();
             removePreloadAccounting(removed);
@@ -133,12 +199,14 @@ public final class ColumnLodCache {
             return;
         }
         entries.remove(key);
+        coverage.remove(key);
         cachedBytes -= entry.sizeBytes();
         removePreloadAccounting(entry);
         invalidations++;
     }
 
     public synchronized void clear() {
+        coverage.clear();
         entries.clear();
         cachedBytes = 0L;
         preloadBytes = 0L;
@@ -181,6 +249,7 @@ public final class ColumnLodCache {
             Map.Entry<Key, Entry> eldest = entries.entrySet().iterator().next();
             cachedBytes -= eldest.getValue().sizeBytes();
             entries.remove(eldest.getKey());
+            coverage.remove(eldest.getKey());
             evictions++;
         }
     }
@@ -188,11 +257,13 @@ public final class ColumnLodCache {
     private boolean evictOldestPreloaded() {
         var iterator = entries.entrySet().iterator();
         while (iterator.hasNext()) {
-            Entry entry = iterator.next().getValue();
+            var candidate = iterator.next();
+            Entry entry = candidate.getValue();
             if (!entry.preloaded()) {
                 continue;
             }
             iterator.remove();
+            coverage.remove(candidate.getKey());
             cachedBytes -= entry.sizeBytes();
             removePreloadAccounting(entry);
             preloadUnusedEvictions++;

@@ -82,6 +82,7 @@ tasks.register('columnFilterTest', Test) {
     classpath = sourceSets.test.runtimeClasspath
     useJUnitPlatform()
     include '**/ColumnFiltersTest.class', '**/ColumnFilter*Test.class'
+    include '**/ColumnCoverage*Test.class'
     include '**/VoxelColumnS2CPayloadTest.class', '**/ServerIdentityS2CPayloadTest.class'
     include '**/ClientColumnTransferAssemblerTest.class', '**/ColumnPayloadSplitterTest.class'
     include '**/NbtSectionSerializerTest.class', '**/SectionSerializerLightCompletenessTest.class'

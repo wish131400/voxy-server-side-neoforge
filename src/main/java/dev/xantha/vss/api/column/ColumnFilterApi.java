@@ -13,9 +13,10 @@ public final class ColumnFilterApi {
     public static final String SECTION_LIGHT_MODES = "section-light-modes";
     public static final String SECTION_MAX_BLOCK_Y = "section-max-block-y";
     public static final String COLUMN_TOP_SOLID_Y = "column-top-solid-y";
+    public static final String COLUMN_COVERAGE_QUERY = "column-coverage-query";
 
     private static final Set<String> CAPABILITIES = Set.of(
-            SECTION_DECISIONS, SECTION_LIGHT_MODES, SECTION_MAX_BLOCK_Y, COLUMN_TOP_SOLID_Y);
+            SECTION_DECISIONS, SECTION_LIGHT_MODES, SECTION_MAX_BLOCK_Y, COLUMN_TOP_SOLID_Y, COLUMN_COVERAGE_QUERY);
 
     private ColumnFilterApi() { }
 

@@ -14,6 +14,7 @@ class ColumnFilterCapabilitiesTest {
         assertTrue(ColumnFilterApi.supports(ColumnFilterApi.SECTION_MAX_BLOCK_Y));
         assertTrue(ColumnFilterApi.supports(ColumnFilterApi.SECTION_DECISIONS));
         assertTrue(ColumnFilterApi.supports(ColumnFilterApi.SECTION_LIGHT_MODES));
+        assertTrue(ColumnFilterApi.supports(ColumnFilterApi.COLUMN_COVERAGE_QUERY));
         assertFalse(ColumnFilterApi.supports("source-priority"));
         assertFalse(ColumnFilterApi.supports("future-feature"));
         assertFalse(ColumnFilterApi.supports(null));
