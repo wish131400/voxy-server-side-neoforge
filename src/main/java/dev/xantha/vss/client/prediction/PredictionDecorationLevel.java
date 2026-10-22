@@ -104,9 +104,12 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         int slot = localZ * 5 + localX;
         net.minecraft.world.level.chunk.ChunkAccess cached = virtualChunks[slot];
         if (cached != null) return cached;
+        // Only the section geometry is needed here. Passing this level would expose it as a LevelAccessor to
+        // ChunkAccess constructor hooks (ScalableLux asks it for getChunkSource(), which this level refuses).
         cached = new net.minecraft.world.level.chunk.ProtoChunk(
                 new net.minecraft.world.level.ChunkPos(x, z), net.minecraft.world.level.chunk.UpgradeData.EMPTY,
-                this, registryAccess().registryOrThrow(net.minecraft.core.registries.Registries.BIOME), null) {
+                net.minecraft.world.level.LevelHeightAccessor.create(getMinBuildHeight(), getHeight()),
+                registryAccess().registryOrThrow(net.minecraft.core.registries.Registries.BIOME), null) {
             @Override public BlockState getBlockState(BlockPos pos) { return PredictionDecorationLevel.this.getBlockState(pos); }
             @Override public net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
                 return getBlockState(pos).getFluidState();

@@ -65,6 +65,26 @@ class PredictionDecorationQueryTest {
                 () -> level.getChunk(-4, -4, net.minecraft.world.level.chunk.status.ChunkStatus.EMPTY, true));
     }
 
+    @Test void virtualChunksUseAPlainHeightAccessorWithTheLevelGeometry() throws Exception {
+        var terrain = terrain();
+        var level = new PredictionDecorationLevel(terrain, terrain, access, 0, 0);
+        var chunk = level.getChunk(0, 0, net.minecraft.world.level.chunk.status.ChunkStatus.EMPTY, true);
+        net.minecraft.world.level.LevelHeightAccessor heights = null;
+        for (var field : net.minecraft.world.level.chunk.ChunkAccess.class.getDeclaredFields()) {
+            if (field.getType() != net.minecraft.world.level.LevelHeightAccessor.class) continue;
+            field.setAccessible(true);
+            heights = (net.minecraft.world.level.LevelHeightAccessor) field.get(chunk);
+        }
+        assertNotNull(heights);
+        // ChunkAccess constructor hooks (ScalableLux) query a LevelAccessor height source for its chunk source.
+        assertFalse(heights instanceof net.minecraft.world.level.LevelAccessor);
+        assertFalse(heights instanceof net.minecraft.world.level.BlockAndTintGetter);
+        assertEquals(level.getMinBuildHeight(), heights.getMinBuildHeight());
+        assertEquals(level.getHeight(), heights.getHeight());
+        assertEquals(level.getSectionsCount(), chunk.getSectionsCount());
+        assertEquals(level.getMinBuildHeight(), chunk.getMinBuildHeight());
+    }
+
     @Test void optionalPredicateReadsUseGroundFluidsOffsetsAndTransactionalEdits() {
         var terrain = terrain();
         var level = new PredictionDecorationLevel(terrain, terrain, access, -1, -1);
