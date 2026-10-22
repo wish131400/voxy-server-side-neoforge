@@ -1,12 +1,14 @@
-# 服务端整列过滤接口 v1（协议 53）
+# 服务端整列过滤接口（API 2，协议 53）
 
 本接口供 PYF 等模组决定 VSS 应交付哪些真实 section。VSS 实现整列回调、字节重建、缓存隔离、网络传输和客户端摄入保护；外部模组只返回决策，不负责压缩、CRC 或 section 清单。没有注册过滤器时保留原来的完整列路径。
 
 入口为 `dev.xantha.vss.api.column.ColumnFilters.register(String id, int version, ColumnFilter filter)`。此包可以在专服加载，不引用客户端、Voxy 或网络实现。`VSSApi` 仍是客户端接口，服务端不要用它注册过滤器。
 
+API 2 新增每个 X/Z 位置的最高非空气高度、公开版本／能力查询和不冻结注册的状态查询。API 版本、网络协议和 provider 注册版本各自独立；API 2 不改变既有过滤缓存身份。PYF 接入、可编译示例与来源协调限制见 [每列高度与后续兼容接口](column-surface-api-20261022.md)。
+
 ## 注册与示例
 
-在模组初始化阶段注册，早于首次列处理或登录握手。首次 `ColumnFilters.snapshot()` 冻结注册；之后注册会抛异常。注册 ID 使用 `modid:name`，版本必须为正整数。重复 ID 被拒绝。
+在模组初始化阶段注册，早于首次列处理或登录握手。正常的 `FMLCommonSetupEvent` 可用于注册，但任何调用者都不得提前调用 `snapshot()` 探测能力。首次 `ColumnFilters.snapshot()` 冻结注册；之后注册会抛异常。`isRegistrationFrozen()` 只读取状态，不冻结；观察结果不是预约，真正注册仍在锁内检查。冻结在进程生命周期内不重置，reload／重进世界不能重新注册。注册 ID 使用 `modid:name`，版本必须为正整数。重复 ID 被拒绝。
 
 ```java
 import dev.xantha.vss.api.column.ColumnDecision;
@@ -42,6 +44,8 @@ ColumnFilters.register("pyf:vss_column_band", 1, column -> {
 
 输入不暴露 `ServerLevel`、玩家、活区块或可修改的方块容器。光照数组存在只说明有数据，不额外证明 Minecraft 光照引擎已经完成。
 
+API 2 另外提供 `hasTopSolidY()`、`topSolidY()` 和 `topSolidY(localX, localZ)`。数组为 256 个绝对方块 Y，索引 `(z << 4) | x`；名称为兼容 PYF 请求保留，实际计算最高非空气，包含树叶、植物和流体。空水平列为 `Integer.MIN_VALUE`。VSS 的完整源输入始终具备这张表，未知的旧构造输入通过 `hasTopSolidY()==false` 区分；数组访问仍返回 256 个哨兵值。数组在传入与读出时复制，单点访问不分配数组，X/Z 必须位于 `[0, 15]`。
+
 | 决策 | 交付内容 | 对 Voxy 旧数据的影响 |
 | --- | --- | --- |
 | `UPDATE` | 完整真实源 section；真实源为空气时也显式发送空气 | 替换该 section，不做逐 voxel 合并 |
@@ -54,7 +58,7 @@ ColumnFilters.register("pyf:vss_column_band", 1, column -> {
 
 `ColumnInput.Section` 的五参数构造器为 `(int sectionY, boolean onlyAir, int maxBlockY, byte[] blockLight, byte[] skyLight)`。保留旧四参数构造器 `(int, boolean, byte[], byte[])` 和所有旧访问方法；旧构造器的高度默认为 `Integer.MIN_VALUE`，光照仍防御性复制。旧调用方的构造和访问可继续链接，但 record 分量数、反射结构及自动生成的比较／字符串输出发生变化，不保证依赖这些细节的代码无须调整。调用 `maxBlockY()` 的新扩展须使用包含该字段的 VSS 构建。
 
-高度在 `ColumnFilterPipeline` 已反序列化的脱离世界的 section 内计算，从 local Y=15 向下寻找非空气方块；不访问活世界或 NBT Heightmaps。实时快照与磁盘 NBT 使用同一入口；未注册过滤器时直接绕过，缓存命中复用已过滤字节，不重复解析或扫描。非空 section 最坏需要 4096 次方块查询，启用过滤器后的实际额外耗时尚须按场景测量。
+高度在 `ColumnFilterPipeline` 已反序列化的脱离世界的 section 内计算；API 2 在各 X/Z 从 local Y=15 向下寻找最高非空气块，一次遍历同时计算 section 最大值和每列高度，不访问活世界或 NBT Heightmaps。实时快照与磁盘 NBT 使用同一入口；未注册过滤器时直接绕过，缓存命中复用已过滤字节，不重复解析或扫描。空 section 跳过，非空 section 最坏需要 4096 次方块查询，实际额外耗时尚须按场景测量；这不是与旧版单个 section 最高点查询等成本的承诺。
 
 以下仅示范“整列最高非空气点以下 32 方块”的近似高度带，**不是保证保留地表的地下剥离算法**。高建筑、树冠和起伏地形可能使较低地面落在带外；需要精确保留地表时，接入方须另行设计规则。
 
@@ -113,7 +117,7 @@ VSS 不生成原本缺失的光照。`CLEAR` 常量默认 `NONE`，可显式构�
 
 ## 缓存身份与适用范围
 
-ID、整数版本和 API 代号按固定顺序生成 SHA256，作为 `coverage.filterKey()`。改变过滤规则、静态配置或影响结果的外部数据，必须升级注册版本并重启服务端；ID/版本不变的情况下，缓存命中不会自动发现回调行为变化。
+ID、整数版本和缓存身份代号 `vss-column-filter-api-1` 按固定顺序生成 SHA256，作为 `coverage.filterKey()`。该代号描述既有策略缓存算法，并非公开能力版本；API 2 扩展不改变它。改变过滤规则、静态配置或影响结果的外部数据，必须升级注册版本并重启服务端；ID/版本不变的情况下，缓存命中不会自动发现回调行为变化。
 
 - 未过滤缓存仍在存档的 `data/vss-column-cache/`。
 - 过滤缓存位于 `data/vss-column-cache-filtered/<filterKey>/`，不会把带外省略写成普通完整列缓存。
@@ -151,6 +155,8 @@ Voxy 的 `rawIngest` 对同一 section 使用替换语义。VSS 先写入后，�
 本版网络协议为 **53**。登录身份与列 payload 新增策略 key，与 release 50、旧开发版 52 不兼容。服务端、客户端须同时升级；VSS 主版本字符串相同不能代替协议检查。
 
 构建命令可指定 `-PvssBuildId=column-filter-api1-20261020-p53`。JAR 清单写入 `VSS-Protocol`、`VSS-Build-Id`，并保留 `Implementation-Timestamp`。只做普通本地构建不指定 ID 时标记 `dev`，不会冒充这份交付包。
+
+API 2 构建还写入 `VSS-Column-Filter-API: 2`。通过 `ColumnFilterApi.version()` 和 `supports(String)` 查询运行时能力，不要只依赖会被编译器内联的 `VERSION` 常量。API 2 保留原六参数 `ColumnInput` 构造器、原四／五参数 `Section` 构造器和旧访问器；新增数组会改变 `ColumnInput` 的 record 分量、反射结构、equals/hashCode/toString，禁止把这些细节当作稳定序列化格式或策略缓存 key。新构造器形态为 `(dimension, chunkX, chunkZ, minSectionY, maxSectionY, int[] topSolidY, List<Section> sections)`。
 
 `columnFilterTest` 验证整列回调次数、三态／光照、不可变快照、异常拒绝、编码与清单、分片与混策略拒绝、空操作、缓存隔离／CRC／跨策略失效、握手及局部覆盖契约；按类隔离 JVM。已纳入 `verifyModules`，两平台都可执行：
 

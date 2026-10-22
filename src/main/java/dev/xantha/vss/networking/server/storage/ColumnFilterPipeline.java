@@ -8,6 +8,7 @@ import dev.xantha.vss.common.processing.ColumnCoverage;
 import dev.xantha.vss.common.processing.LoadedColumnData;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import net.minecraft.core.Registry;
@@ -41,7 +42,9 @@ public final class ColumnFilterPipeline {
         ColumnFilters.Snapshot filters = ColumnFilters.snapshot();
         if (source == null || !source.completeColumn() || filters.isEmpty()) return source;
         if (context == null) throw new IllegalArgumentException("Missing column filter source context");
-        Map<Integer, ParsedSection> parsed = parse(context, source.sectionBytes());
+        int[] topSolidY = new int[256];
+        Arrays.fill(topSolidY, Integer.MIN_VALUE);
+        Map<Integer, ParsedSection> parsed = parse(context, source.sectionBytes(), topSolidY);
         ArrayList<ColumnInput.Section> sections = new ArrayList<>();
         for (int y = context.minSectionY(); y < context.maxSectionY(); y++) {
             ParsedSection section = parsed.get(y);
@@ -50,7 +53,7 @@ public final class ColumnFilterPipeline {
                     section == null ? null : section.blockLight(), section == null ? null : section.skyLight()));
         }
         ColumnDecision decision = filters.decide(new ColumnInput(context.dimension(), source.chunkX(), source.chunkZ(),
-                context.minSectionY(), context.maxSectionY(), sections));
+                context.minSectionY(), context.maxSectionY(), topSolidY, sections));
         FriendlyByteBuf body = new FriendlyByteBuf(Unpooled.buffer());
         FriendlyByteBuf output = new FriendlyByteBuf(Unpooled.buffer());
         try {
@@ -91,7 +94,7 @@ public final class ColumnFilterPipeline {
         }
     }
 
-    private static Map<Integer, ParsedSection> parse(Context context, byte[] bytes) {
+    private static Map<Integer, ParsedSection> parse(Context context, byte[] bytes, int[] topSolidY) {
         FriendlyByteBuf input = new FriendlyByteBuf(Unpooled.wrappedBuffer(bytes));
         try {
             int count = input.readVarInt();
@@ -109,7 +112,7 @@ public final class ColumnFilterPipeline {
                 LevelChunkSection section = new LevelChunkSection(context.biomes());
                 section.read(input);
                 int length = input.readerIndex() - start;
-                sections.put(y, new ParsedSection(start, length, section.hasOnlyAir(), highestNonAirBlockY(section, y),
+                sections.put(y, new ParsedSection(start, length, section.hasOnlyAir(), collectHeights(section, y, topSolidY),
                         readLight(input), readLight(input)));
             }
             if (input.isReadable()) throw new IllegalArgumentException("Trailing source column bytes");
@@ -119,18 +122,27 @@ public final class ColumnFilterPipeline {
         }
     }
 
-    private static int highestNonAirBlockY(LevelChunkSection section, int sectionY) {
+    private static int collectHeights(LevelChunkSection section, int sectionY, int[] topSolidY) {
         if (section.hasOnlyAir()) return Integer.MIN_VALUE;
-        // Read only the detached section already decoded for the filter. Heightmaps
-        // may be stale and do not describe each section's highest non-air block.
-        for (int y = 15; y >= 0; y--) {
+        // Compute both metadata forms in one pass over the already detached
+        // section. Each horizontal column stops at its first non-air block;
+        // no voxel is queried twice and stale source Heightmaps are irrelevant.
+        int maxBlockY = Integer.MIN_VALUE;
+        for (int z = 0; z < 16; z++) {
             for (int x = 0; x < 16; x++) {
-                for (int z = 0; z < 16; z++) {
-                    if (!section.getBlockState(x, y, z).isAir()) return (sectionY << 4) + y;
+                for (int y = 15; y >= 0; y--) {
+                    if (!section.getBlockState(x, y, z).isAir()) {
+                        int blockY = (sectionY << 4) + y;
+                        maxBlockY = Math.max(maxBlockY, blockY);
+                        int index = (z << 4) | x;
+                        // Source sections need not arrive in height order.
+                        topSolidY[index] = Math.max(topSolidY[index], blockY);
+                        break;
+                    }
                 }
             }
         }
-        return Integer.MIN_VALUE;
+        return maxBlockY;
     }
 
     private static byte[] readLight(FriendlyByteBuf input) {

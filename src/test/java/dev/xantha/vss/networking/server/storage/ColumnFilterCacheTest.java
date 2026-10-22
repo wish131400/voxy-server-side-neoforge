@@ -27,6 +27,9 @@ class ColumnFilterCacheTest {
         ColumnFilters.register("test:cache", 1, c -> {
             calls.incrementAndGet();
             assertEquals(-16, c.section(-1).maxBlockY());
+            assertTrue(c.hasTopSolidY());
+            assertEquals(16, c.topSolidY(0, 0));
+            assertEquals(Integer.MIN_VALUE, c.topSolidY(15, 15));
             return ColumnDecision.updateAll();
         });
     }

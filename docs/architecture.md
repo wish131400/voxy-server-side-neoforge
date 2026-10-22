@@ -35,7 +35,7 @@ flowchart TD
 | --- | --- |
 | [`api`](../src/main/java/dev/xantha/vss/api/package-info.java) | 客户端列消费扩展、列数据契约与客户端 LOD 会话查询接口。 |
 | [`api.worldgen`](../src/main/java/dev/xantha/vss/api/worldgen/package-info.java) | 服务端地形快照扩展点、密度特征声明与可用快照选择。 |
-| [`api.column`](../src/main/java/dev/xantha/vss/api/column/package-info.java) | 专服安全的整列三态与光照策略注册；只传脱离世界的快照。 |
+| [`api.column`](../src/main/java/dev/xantha/vss/api/column/package-info.java) | 专服安全的整列三态、光照策略、段内／每列高度和 API 能力查询；只传脱离世界的快照。 |
 | [`client`](../src/main/java/dev/xantha/vss/client/package-info.java) | 客户端启动、设置界面、Voxy/Sodium/Embeddium 选项接入。 |
 | [`client.prediction.feature`](../src/main/java/dev/xantha/vss/client/prediction/feature/package-info.java) | 在隔离的特征放置环境中记录预测装饰，不直接修改真实客户端世界。 |
 | [`client.prediction`](../src/main/java/dev/xantha/vss/client/prediction/package-info.java) | 预测需求、地形采样、网格与缓存、覆盖交接和独立 GPU 场景。内部 package-private 类型属于同一实现模块。 |

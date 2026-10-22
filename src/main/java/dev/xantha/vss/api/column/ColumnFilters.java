@@ -23,6 +23,9 @@ public final class ColumnFilters {
 
     private ColumnFilters() { }
 
+    /** Observes registration state without freezing it; register still checks atomically. */
+    public static boolean isRegistrationFrozen() { return frozen != null; }
+
     public static synchronized void register(String id, int version, ColumnFilter filter) {
         if (frozen != null) throw new IllegalStateException("Column filters are frozen; register during mod setup");
         if (id == null || !id.matches("[a-z0-9_.-]+:[a-z0-9/._-]+") || version < 1) {
