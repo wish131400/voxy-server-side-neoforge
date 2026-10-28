@@ -36,6 +36,11 @@ def verify(jar, platform, build_id, source):
                 require(symbol.encode() in data, "Missing reference: " + name + ": " + symbol)
             return data
 
+        check_class("client/prediction/PredictionClimateSampler", "FabricBiomeCompat", "copyClimateContext")
+        check_class("client/prediction/FabricBiomeCompat", "net.fabricmc.fabric.impl.biome.MultiNoiseSamplerHooks", "fabric_getSeed", "fabric_setSeed")
+        check_class("client/prediction/PredictionBiomeCache", "LookupFailure", "sample")
+        check_class("client/prediction/PredictionVegetation", "END_CLIMATE_SETTINGS_VERSION", "LookupFailure")
+        check_class("client/prediction/PredictionSurfaceStructures", "LookupFailure")
         inset = check_class("compat/VoxySurfaceHeights", "patchShader", "// VSS world-space model inset")
         for retired in (b"vssSurfaceDrop", b"HEIGHT_BITS", b"org/lwjgl/system/MemoryUtil"):
             require(retired not in inset, "Retired post-cull geometry path: " + retired.decode())
@@ -56,6 +61,48 @@ def verify(jar, platform, build_id, source):
         check_class("compat/VoxyIngestTracker", "realColumnSettled")
         check_class("compat/VoxyPredictionBridge$Context", "hasSkyLight")
         check_class("client/prediction/PredictionVoxySource", "lightingBuilds")
+        check_class("client/prediction/PredictionTileManager", "invalidatedSurfaces")
+        check_class("client/prediction/PredictionCaptureHandoff", "await", "committed", "blocked", "reindex", "retired")
+        check_class("client/prediction/PredictionTileManager", "awaitExactColumns", "requiresExactCapture", "retryCapture", "captureHandoff", "retireExactColumns")
+        check_class("networking/client/VSSClientNetworking", "dirtyColumnTimestamp", "expectsAuthoritativeColumns")
+        check_class("networking/client/LodRequestManager", "onDirtyColumnsRetired")
+        check_class("client/prediction/PredictionVoxelData", "terrainRevision")
+        check_class("client/prediction/PredictionVoxelData", "cacheContentIdentity")
+        check_class("client/prediction/PredictionVoxySource$Tile", "reuseContent")
+        check_class("client/prediction/PredictionVoxySource", "vegetationVisible")
+        check_class("client/prediction/PredictionTileManager", "surfaceFallbackReady")
+        check_class("client/prediction/PredictionVoxyBoxes", "changedBounds")
+        check_class("client/prediction/PredictionDiskCache", "voxelWrites", "unchangedVoxelWrites", "contentIdentity")
+        check_class("client/prediction/PredictionVoxelCache", "FEATURE_PAGE_SIZE", "contentIdentity", "voxel feature page invalid")
+        check_class("compat/VoxySectionSignature", "SHA-256", "faces")
+        check_class("compat/VoxyPredictionBridge$Delivered", "changes")
+        check_class("compat/VoxyPredictionBridge$Context", "notificationContent", "delivered", "unchangedNotifications")
+        check_class("client/prediction/PredictionParentLod$Proof", "terrainRevision")
+        check_class("client/prediction/PredictionParentLod$Input", "uses")
+        check_class("client/prediction/PredictionTileManager", "terrainCellAxis")
+        check_class("client/prediction/PredictionTileManager", "PredictionTileStates", "tileStates")
+        check_class("client/prediction/PredictionWorkOrder", "coveragePriority")
+        check_class("client/prediction/PredictionSchedulePreparation$Facts", "coveragePriority")
+        check_class("client/prediction/PredictionPlanPreparation", "nativeCoverage")
+        check_class("client/prediction/PredictionVoxyWorkPreparation", "coveragePriority")
+        check_class("client/prediction/PredictionDiskCache", "resetTerrainProbes", "maximumWaitNanos")
+        check_class("client/prediction/PredictionTileManager", "coveragePriority", "resetTerrainProbes")
+        check_class("client/prediction/PredictionTileStates", "AtomicLongArray", "membership", "generation")
+        check_class("client/prediction/PredictionInputSnapshots", "SetSource", "MapSource")
+        check_class("client/prediction/PredictionSchedulePreparation$Facts", "projected", "distance", "priority")
+        check_class("client/prediction/PredictionLoadingPreparation$Calculation", "Facts", "reads")
+        check_class("client/prediction/PredictionVegetationBlocks", "positions", "palette", "table")
+        check_class("client/prediction/PredictionVegetation$Tile", "forEachVoxel", "order", "cells")
+        check_class("client/prediction/PredictionVegetationDisplayCache", "PredictionVegetationBlocks$Builder", "bytes")
+        check_class("client/prediction/PredictionVoxySource", "forEachVoxel")
+        check_class("client/prediction/PredictionVoxySource$VolumeScratch", "mappedRuns", "mappedRunCount", "materials", "clear")
+        check_class("client/prediction/PredictionVoxyMaterials", "reset", "clear", "table", "lastValue")
+        require("dev/xantha/vss/client/prediction/PredictionVoxyMaterials$Key.class" not in names,
+                "Stale object material pair key packaged")
+        check_class("compat/VoxySectionData", "BOUNDARIES", "MAX_BOUNDARIES")
+        check_class("compat/VoxyNotificationScratch", "ThreadLocal", "borrow", "close")
+        check_class("compat/VoxyPredictionBridge$Context", "VoxyNotificationScratch")
+        check_class("client/prediction/PredictionVoxyBoxes", "retainVegetation", "geometryHash", "sameGeometry")
         check_class("client/prediction/PredictionVoxyLighting", "propagate")
         check_class("client/prediction/PredictionVoxelCache", ":floating-columns-r1")
         check_class("client/prediction/PredictionExteriorColumns", "enrichFloating")
@@ -65,7 +112,26 @@ def verify(jar, platform, build_id, source):
         shards = check_class("client/prediction/PredictionInputSnapshots", "shard")
         require(bytes.fromhex("0385ebca6b") in shards and bytes.fromhex("03c2b2ae35") in shards,
                 "Missing independent shard hash mixing constants")
-        check_class("client/prediction/PredictionVoxyFeatures", "intersect", "visit", "quickSort")
+        check_class("client/prediction/PredictionVoxyFeatures", "intersect", "visit", "quickSort", "bounds")
+        check_class("client/prediction/PredictionVoxyBoxes", "coordinate", "WeakReference", "pageStorage")
+        check_class("client/prediction/PredictionVoxyBoxes", "CONTENTS", "shareContents", "index")
+        check_class("client/prediction/PredictionVoxyFeatures", "partition", "compare")
+        check_class("client/prediction/PredictionDiskCache$Shared", "surfaceInvalidations")
+        check_class("client/prediction/PredictionDiskCache", "invalidated", "deleteSurfaces")
+        check_class("client/prediction/PredictionRegionStorage", "deleteColdRegion", "deleteSurfaces")
+        check_class("client/prediction/PredictionVoxySource", "columnClock", "FACE_BUFFERS", "compactFaceCopy")
+        check_class("client/prediction/PredictionVoxyBoxes$Data", "index", "limits")
+        check_class("client/prediction/PredictionVoxyBoxes", "append", "indexBytes")
+        check_class("client/prediction/PredictionDetailTrace", "dirtyAgeSeconds", "demandAgeSeconds", "lastEvent")
+        check_class("client/prediction/PredictionVoxySource", "copyFace", "COLUMN_SCRATCH", "VOLUME_SCRATCH", "COLUMN_PROBE")
+        check_class("compat/VoxyPredictionBridge", "NEIGHBOR_BUFFER", "copyFace")
+        check_class("client/prediction/PredictionCapturedTerrain", "decoding", "coalescedReads", "generation")
+        check_class("client/prediction/PredictionCapturedTerrain$Summary", "columns")
+        check_class("client/prediction/PredictionDecorationLevel", "LocalPlacementFailure")
+        check_class("client/prediction/PredictionVegetation", "localFailures", "LocalPlacementFailure")
+        check_class("client/prediction/PredictionTileManager", "detailPipelineSnapshot", "oldestIncomplete", "visibleRemaining")
+        require("dev/xantha/vss/client/prediction/PredictionVoxyFeatures$Node.class" not in names, "Object feature tree packaged")
+        check_class("client/prediction/PredictionVoxyDetailQueue", "maintainResidency", "dormant")
         check_class("client/prediction/PredictionVoxySource", "selectOwners", "featureIndex")
         check_class("client/prediction/PredictionVoxySource$ColumnKey", "PredictionKeyHash")
         check_class("client/prediction/PredictionMemoryBudget", "unobservedReleaseBytes", "refreshCollections")
@@ -80,7 +146,45 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionVoxySource", "reducedColumn", "copySection", "mappedFaces",
                     "unchangedPublications", "retainedColumnPublications", "changedTerrain")
         check_class("client/prediction/PredictionVoxyColumnRuns$Builder", "arraycopy", "binarySearch")
+        check_class("client/prediction/PredictionVoxyColumnRuns$Coverage", "covers", "put")
+        check_class("client/prediction/PredictionVoxySource$CachedColumn", "referenced")
+        check_class("client/prediction/PredictionVoxySource", "columnSecondChances")
+        check_class("client/prediction/PredictionVoxySource", "columnPageBuilds", "featureContributors", "publicationChange")
+        check_class("client/prediction/PredictionVoxySource$VolumeScratch", "columnPages", "featureContributors")
+        check_class("client/prediction/PredictionVoxyColumnRuns$Page", "offsets", "write")
+        check_class("client/prediction/PredictionVoxyColumnRuns$PageBuilder", "append")
+        check_class("client/prediction/PredictionVoxyChange", "precedes", "bitCount")
+        check_class("client/prediction/PredictionVoxyChange", "computeIfAbsent", "horizontal", "peerVisits")
+        check_class("client/prediction/PredictionSectionIndex", "references", "levels", "intersect", "collect")
+        check_class("client/prediction/PredictionVoxySource", "cachedPositions", "changeInput", "changeCurrent", "prepareInvalidation", "refreshDetails")
+        check_class("client/prediction/PredictionTileManager", "voxyDemand", "voxyDemandRefill", "PredictionVoxySource$DetailInput")
+        check_class("client/prediction/PredictionVoxyViewDemand", "collect", "projectedSize", "hasProjection")
+        check_class("client/prediction/PredictionVoxyHorizon", "changes", "intersects", "affected", "clips")
+        check_class("client/prediction/PredictionVoxySource", "PredictionVoxyViewDemand", "observedView", "viewDemandBuilds",
+                    "PredictionVoxyHorizon", "windowUpdates", "updateWindow")
+        check_class("client/prediction/PredictionVoxyDetailQueue", "observe")
+        check_class("client/prediction/PredictionWorkView", "hasProjection", "atan")
+        check_class("client/prediction/PredictionRenderer", "projection", "scoping", "ageSeconds")
+        check_class("compat/VoxySectionSignature", "asLongBuffer", "java/nio/LongBuffer", "SHA-256")
+        check_class("client/prediction/PredictionInputSnapshots$Union", "buckets", "snapshot")
+        check_class("client/prediction/PredictionTileManager", "PredictionInputSnapshots$Union", "keys")
+        check_class("client/prediction/RustWorldgenDocument", "vss_dimension_bounds")
+        for native in [n for n in names if n.startswith("META-INF/vss-natives/") and n.endswith((".dll", ".so", ".dylib"))]:
+            require(b"vss_dimension_bounds" in archive.read(native), "Native missing dimension bounds: " + native)
+
         check_class("mixin/voxy/PredictionVoxyNeighborSourceMixin", "copyNeighborFaces", "VoxyFluidSurface", "vss$packFluidHeight", "vss$liquidTransitions")
+
+        check_class("compat/VoxyPredictionBridge", "updatePredictionState")
+        check_class("compat/VoxyPredictionBridge$Context", "withdrawals", "withdraw")
+        require(any(n.startswith("dev/xantha/vss/compat/VoxyRenderAccess$") and n.endswith(".class")
+                    and b"submitGeometryResult" in archive.read(n) and b"empty" in archive.read(n) for n in names),
+                "Missing native empty geometry adapter")
+        check_class("client/prediction/ClientPredictionState", "updatePredictionState")
+        check_class("client/prediction/PredictionCpuBudget", "generationWaiting", "generationWaitAt")
+        priority = check_class("networking/client/PredictionGenerationPriority", "shared-", "detail-ready")
+        require(b"exclusive" not in priority and b"STALL" not in priority, "Exclusive prediction generation gate packaged")
+        requests = check_class("networking/client/LodRequestManager", "reserveLocalGeneration")
+        require(b"localGenerationLimit" not in requests, "Non-atomic generation admission still packaged")
 
         check_class("compat/VoxyFluidSurface", "top", "pack", "transitions", "meshTransitions", "LiquidBlock")
         check_class("compat/VoxySurfaceHeights", "// VSS liquid surface remainder", "vssLiquidDrop")
@@ -88,6 +192,8 @@ def verify(jar, platform, build_id, source):
         check_class("mixin/voxy/StrictVoxyVisibilityMixin", "observeUnifiedView")
         check_class("client/prediction/PredictionRenderer", "observeUnifiedView", "width", "height")
         check_class("client/prediction/PredictionViewObservation", "height", "selectionScale")
+        check_class("client/prediction/PredictionVoxyDetailQueue", "deferredEntries", "deferredOrder", "rebalance", "membershipRevision")
+        check_class("client/prediction/PredictionVoxySource", "detailSnapshotRevision", "detailWaiting", "revision")
         state = check_class("client/prediction/ClientPredictionState", "setNativeDetailLoading")
         require(b"updateViewFocus" not in state, "Independent scope raycast still scheduled")
         check_class("client/prediction/PredictionPlanPreparation$Input", "nativeDemand")
@@ -123,13 +229,26 @@ def verify(jar, platform, build_id, source):
     return {"jar": jar.name, "platform": platform, "buildId": build_id,
             "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
             "bytes": jar.stat().st_size, "nativeSha256": natives,
-            "integratedFixes": ["auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
+            "integratedFixes": ["two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
+                                "layout-plan-domain-reset", "partial-vegetation-retention", "terrain-only-parent-proof",
+                                "retained-deferred-detail-demand", "view-priority-readmission", "completion-driven-detail-refill", "dimension-write-bounds", "reverse-coarse-column-coverage", "second-chance-column-cache", "incremental-candidate-union", "exact-display-biome-reuse", "prediction-display-withdrawal", "warm-toggle-reactivation", "concurrent-real-generation", "atomic-generation-admission", "auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
                                 "end-floating-columns", "empty-node-sample-readmission",
                                 "dimension-transition", "real-air-authority",
                                 "incremental-snapshots", "scheduled-range-pruning",
                                 "frontier-blocker-probe", "empty-child-wakeup", "native-neighbor-faces",
                                 "reusable-coarse-column-runs", "direct-section-destination", "bounded-face-cache",
-                                "content-aware-publication", "local-terrain-invalidation", "independent-snapshot-shards", "feature-bounds-index", "projected-tile-ownership", "mixed-column-footprints", "batched-gc-observation", "incremental-plan-candidates"]}
+                                "content-aware-publication", "local-terrain-invalidation", "independent-snapshot-shards", "feature-bounds-index", "projected-tile-ownership", "mixed-column-footprints", "batched-gc-observation", "incremental-plan-candidates",
+                                "coordinate-surface-invalidation", "slot-local-cold-deletion", "allocation-free-column-clock",
+                                "compact-neighbor-planes", "lazy-shared-page-index", "per-revision-detail-trace", "display-parent-reduction", "stable-terrain-publication",
+                                "precise-final-voxel-notification", "paged-complete-vegetation-cache",
+                                "deduplicated-fast-voxel-save", "reclaim-preserves-parent-inputs",
+                                "shared-tile-state-pages", "reused-scheduling-facts", "packed-vegetation-display",
+                                "reusable-material-workspace", "bounded-section-boundaries", "reused-notification-faces",
+                                "partial-vegetation-lod-union", "complete-surface-eviction-fallback",
+                                "active-projected-sample-demand", "zoom-sensitive-view-refresh", "prediction-horizon-mask",
+                                "indexed-horizon-invalidation",
+                                "off-lock-publication-evidence", "shared-horizontal-change-evidence", "spatial-cache-invalidation",
+                                "asynchronous-native-demand-handoff", "bulk-exact-section-signatures", "bounded-middle-cover", "first-terrain-priority", "bounded-cache-probe-wait", "offscreen-retirement-without-generation"]}
 
 
 if __name__ == "__main__":

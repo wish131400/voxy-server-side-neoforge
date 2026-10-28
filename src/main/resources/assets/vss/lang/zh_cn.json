@@ -55,7 +55,7 @@
   "vss.voxy_options.off_thread_processing": "后台处理远景数据",
   "vss.voxy_options.off_thread_processing.tooltip": "在后台线程处理收到的远景区块，减少主线程卡顿。",
   "vss.voxy_options.prediction": "VSS 远处预测（Beta）",
-  "vss.voxy_options.prediction.tooltip": "预测远景总开关，控制预测 LOD 的显示与生成。此功能处于 Beta 阶段，默认关闭；开启后才会生成和显示预测 LOD。只想暂停加载并保留已有远景，请关闭下方的“预测加载”。",
+  "vss.voxy_options.prediction.tooltip": "预测远景总开关，控制预测 LOD 的显示与生成。此功能处于 Beta 阶段，默认开启；关闭后停止生成并撤回预测 LOD。只想暂停加载并保留已有远景，请关闭下方的“预测加载”。",
   "vss.voxy_options.prediction_loading": "预测加载",
   "vss.voxy_options.prediction_loading.tooltip": "继续生成新区域、细化地形和读取成品缓存。默认开启；关闭后已加载的预测 LOD 继续显示，重新开启即可继续。暂停期间移动到未加载区域不会补充预测远景；不限制 Voxy 真实区块接收或 /vss chunky。",
   "vss.voxy_options.prediction_distance_blocks": "预测远景范围",

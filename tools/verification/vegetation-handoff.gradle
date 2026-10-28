@@ -1,0 +1,14 @@
+allprojects { afterEvaluate {
+    tasks.register('vegetationHandoffTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionVegetationHandoffTest.class'
+        include '**/PredictionVoxySourceTest.class','**/PredictionStutterRepairTest.class'
+        include '**/PredictionVegetation*Test.class','**/PredictionVoxelCacheTest.class'
+        include '**/VoxyPredictionNotificationTest.class','**/XaeroPrediction*Test.class'
+        include '**/PredictionCpuCachePolicyTest.class','**/PredictionXaeroSourceTest.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

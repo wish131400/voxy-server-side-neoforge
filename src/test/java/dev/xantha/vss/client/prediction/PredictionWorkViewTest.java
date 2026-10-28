@@ -5,6 +5,7 @@ import net.minecraft.world.level.Level;
 import org.junit.jupiter.api.Test;
 
 class PredictionWorkViewTest {
+    @org.junit.jupiter.api.BeforeAll static void bootstrap() {ClientTerrainSamplerTest.bootstrapMinecraft();}
     @Test void actualAspectRejectsTheDiagonalConeAndKeepsDistantLod() {
         var layout = VssLodLayout.of(32768, 2, true, true);
         var camera = new net.minecraft.world.phys.Vec3(0, 80, 0);

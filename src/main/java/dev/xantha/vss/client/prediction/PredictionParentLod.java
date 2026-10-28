@@ -18,18 +18,23 @@ final class PredictionParentLod {
             for (int i = 0; i < 4; i++) {
                 Source source = child(i);
                 PredictionTile tile = tiles.get(source.key());
-                if (tile == null || tile.revision() != source.revision() || dirty.contains(source.key())
+                if (tile == null || tile.terrainRevision() != source.revision() || dirty.contains(source.key())
                         || captures.getOrDefault(source.key(), 0L) != source.captureEpoch()) return false;
             }
             return true;
         }
         boolean describes(PredictionTile[] children) {
             for (int i = 0; i < 4; i++) if (children[i] == null
-                    || !child(i).key().equals(children[i].key()) || child(i).revision() != children[i].revision()) return false;
+                    || !child(i).key().equals(children[i].key()) || child(i).revision() != children[i].terrainRevision()) return false;
             return true;
         }
     }
-    record Input(PredictionTileKey parent, int axis, PredictionTile[] children, Source[] sources) { }
+    record Input(PredictionTileKey parent, int axis, PredictionTile[] children, Source[] sources) {
+        boolean uses(PredictionTileKey key) {
+            for (var source : sources) if (source.key().equals(key)) return true;
+            return false;
+        }
+    }
     record Result(ClientColumnSample[] samples, Proof proof) { }
 
     /** Caller captures references under the manager lock, then reduces outside it. */
@@ -49,7 +54,7 @@ final class PredictionParentLod {
                     || child.spacingBlocks() > step || step % child.spacingBlocks() != 0
                     || child.samples().length != (child.cellAxis() + 1) * (child.cellAxis() + 1)) return null;
             children[i] = child;
-            sources[i] = new Source(key, child.revision(), captures.getOrDefault(key, 0L));
+            sources[i] = new Source(key, child.terrainRevision(), captures.getOrDefault(key, 0L));
         }
         return new Input(parent, axis, children, sources);
     }
@@ -57,8 +62,12 @@ final class PredictionParentLod {
     static Result reduce(Input input) {
         // Validate columns on the worker too. The manager's capture lock only
         // protects references/versions, never a full-grid walk.
-        for (var child : input.children()) for (var sample : child.samples()) if (sample == null
-                || !sample.reusableFor(false) && (sample.flags() & ClientColumnSample.FLAG_PARENT_LOD) == 0) return null;
+        // This is a DISPLAY reduction, not admission to the exact sample cache.
+        // Preview/display/capture mips are already drawable children. Rejecting
+        // them here after capture admitted them repeatedly resamples the parent.
+        // aggregate preserves provenance and always adds FLAG_PARENT_LOD, so
+        // these columns remain unusable for exact terrain and decoration.
+        for (var child : input.children()) for (var sample : child.samples()) if (sample == null) return null;
         int axis = input.axis(), grid = axis + 2;
         int span = input.children()[0].spanBlocks() * 2, step = span / axis;
         ClientColumnSample[] result = new ClientColumnSample[grid * grid];

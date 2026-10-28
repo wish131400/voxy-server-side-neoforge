@@ -51,7 +51,7 @@ Voxy Server Side（VSS）让服务端负责读取、生成、缓存并发送 Vox
 
 0.3.6 将预测体素交给 Voxy 统一构网、细化和渲染，继续使用 Rust / Java 地形与植被计算。真实列优先，预测不写入 Voxy 的真实持久缓存；Voxy 适配未就绪时等待恢复。放大与望远镜使用实际主画面投影，初始覆盖和细化请求可独立推进。用法与升级边界见 [0.3.6 说明](docs/release-0.3.6-player-guide.md)。
 
-客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能标记为 Beta，默认关闭，可用 `enablePrediction` 开启。
+客户端收到服务端同步的世界生成信息后，用世界种子在本地预测并渲染远景地形，不必等服务端把远处的 Voxy 列全部传输完成，地平线附近即可显示地形、植被和地表建筑。该功能标记为 Beta，默认开启，可用 `enablePrediction` 关闭；已有配置继续使用保存值。
 
 预测范围由 `predictionDistanceBlocks` 控制（默认 4096 方块），配置范围内完整覆盖，不额外留空最外圈。地形按屏幕像素误差渐进细化；植被和地表建筑随可见细节需求补全，发布完整生成的方块体素，不再生成简化方块树冠或代表性草木。完整树形缓存继续复用。望远镜额外加载目标区域由 `predictionSpyglassLoading` 控制，默认开启。地形采样按「原生 Rust → Java」的顺序选择后端：可用时使用随包的原生 Rust 世界生成核心，否则退回解码后的 Java 上下文；Rust 会处理受支持的生物群系、地表规则与装饰放置，未支持的装饰保留 Java 回退；建筑结构沿用 Minecraft 的 Java 布局与模板处理器，并与两种地形后端共享虚拟区块。预测结果默认缓存在本地（`rememberTerrain=true`），重进世界可恢复已有精度。
 
@@ -109,7 +109,7 @@ VSS 可在原版实体跟踪范围外显示简化的玩家和载具，并同步�
 | `desiredBandwidthKbps` | `0` | 不设个人下载上限，仍受全服总带宽限制 |
 | `offThreadSectionProcessing` | `true` | 在线程外解码和处理收到的列 |
 | `enableXaeroMapBridge` | `true` | 将服务端真实远景写入 Xaero 世界地图；预测转地图暂时停用 |
-| `enablePrediction` | `false` | 开启种子驱动的预测采样，由 Voxy 统一渲染 |
+| `enablePrediction` | `true` | 开启种子驱动的预测采样，由 Voxy 统一渲染 |
 | `predictionDistanceBlocks` | `4096` | 独立预测远景范围，单位方块，独立于 VSS |
 | `predictionSpyglassLoading` | `true` | 允许望远镜额外加载远处精细地形、植被与建筑 |
 | `rememberTerrain` | `true` | 本地压缩保存预测地形与地表内容，允许释放闲置细节 |

@@ -98,17 +98,18 @@ impl World {
         let ox = (cx - 2) * 16;
         let oz = (cz - 2) * 16;
         let mut v = Volume::interior_proxy(
-            [ox, t.min_y, oz],
+            [ox, self.decoration_min_y, oz],
             80,
             80,
-            t.height as usize,
+            self.decoration_height as usize,
             self.palette.clone(),
             Box::new(move |x, z| owner.interior_column(ox + x as i32, oz + z as i32)),
         )?;
         v.write_bounds = Some((
-            [cx * 16 - 16, t.min_y, cz * 16 - 16],
-            [cx * 16 + 32, t.min_y + t.height, cz * 16 + 32],
+            [cx * 16 - 16, self.decoration_min_y, cz * 16 - 16],
+            [cx * 16 + 32, self.decoration_min_y + self.decoration_height, cz * 16 + 32],
         ));
+        v.proxy_base_bounds(t.min_y, t.height);
         v.write_budget = 65536;
         Ok(v)
     }

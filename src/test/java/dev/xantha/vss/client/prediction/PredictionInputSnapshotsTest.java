@@ -91,4 +91,38 @@ class PredictionInputSnapshotsTest {
         Collections.sort(before);Collections.sort(after);
         System.out.printf(Locale.ROOT,"CHANGED_INPUT entries=32768 publications=100 fullCopyMedianMs=%.3f incrementalMedianMs=%.3f (synthetic; not FPS)%n",before.get(3)/1e6,after.get(3)/1e6);
     }
+
+    @org.junit.jupiter.api.Test void candidateUnionReusesUnchangedShardsAndIgnoresTimestampRefreshes() {
+        var snapshots=new PredictionInputSnapshots();
+        Set<Integer> a=PredictionInputSnapshots.concurrentSet(),b=PredictionInputSnapshots.concurrentSet();
+        Map<Integer,Long> grace=PredictionInputSnapshots.concurrentMap();
+        var union=new PredictionInputSnapshots.Union<Integer>();
+        for(int i=0;i<10000;i++){a.add(i);b.add(i+5000);grace.put(i+10000,1L);}
+        var first=union.snapshot(snapshots.set(a),snapshots.set(b),snapshots.keys(grace));
+        assertEquals(20000,first.size());
+        for(int i=0;i<10000;i++)grace.put(i+10000,2L);
+        assertSame(first,union.snapshot(snapshots.set(a),snapshots.set(b),snapshots.keys(grace)));
+        a.remove(0);b.add(20000);grace.keySet().remove(19999);
+        var second=union.snapshot(snapshots.set(a),snapshots.set(b),snapshots.keys(grace));
+        var expected=new java.util.HashSet<Integer>(a);expected.addAll(b);expected.addAll(grace.keySet());
+        assertEquals(expected,second);assertTrue(first.contains(0));assertTrue(first.contains(19999));
+        assertThrows(UnsupportedOperationException.class,()->second.iterator().remove());
+        a.clear();b.clear();grace.clear();assertTrue(union.snapshot(snapshots.set(a),snapshots.set(b),snapshots.keys(grace)).isEmpty());
+        union.clear();grace.put(1,3L);assertEquals(Set.of(1),union.snapshot(snapshots.set(a),snapshots.set(b),snapshots.keys(grace)));
+    }
+
+
+    @Test void membershipOnlyMapsDoNotAccumulateValueDeltaHistoryAndCanStartValueSnapshotsLater() throws Exception {
+        var snapshots=new PredictionInputSnapshots();Map<Integer,Long> map=PredictionInputSnapshots.concurrentMap();
+        for(int i=0;i<10000;i++){map.put(i,1L);map.remove(i);}
+        map.put(1,2L);var first=snapshots.keys(map);
+        map.replace(1,3L);map.compute(2,(k,v)->4L);map.putIfAbsent(3,5L);
+        map.values().removeIf(v->v==5L);
+        var field=map.getClass().getDeclaredField("changed");field.setAccessible(true);
+        assertTrue(((Set<?>)field.get(map)).isEmpty());
+        assertEquals(Set.of(1),first);assertEquals(Set.of(1,2),snapshots.keys(map));
+        assertEquals(Map.of(1,3L,2,4L),snapshots.map(map));
+        map.entrySet().iterator().next().setValue(7L);assertEquals(map,snapshots.map(map));
+        map.clear();assertTrue(snapshots.map(map).isEmpty());assertTrue(snapshots.keys(map).isEmpty());
+    }
 }

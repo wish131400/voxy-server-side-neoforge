@@ -116,3 +116,21 @@ fn interior_proxy_reads_only_touched_columns_and_rolls_back_cave_edits() {
     assert!(failed.finish(true).is_err());
     assert!(failed.published.is_empty());
 }
+
+#[test]
+fn dimension_write_height_is_independent_of_noise_height() {
+    let mut doc=document();doc["vss_dimension_bounds"]=json!({"min_y":-16,"height":288});
+    let world=Arc::new(World::new(42,0,doc).unwrap());
+    let rock=world.palette.clone().named("minecraft:netherrack").unwrap();let air=world.palette.air;
+    let base=world.interior_column(1,1).unwrap();assert_eq!(base.len(),128);
+    let mut volume=world.interior_proxy(0,0).unwrap();
+    for y in 0..128 {assert_eq!(base[y as usize],volume.get([1,y,1]));}
+    assert_eq!(air,volume.get([1,-1,1]));assert_eq!(air,volume.get([1,160,1]));
+    volume.begin().unwrap();volume.set([1,160,1],rock);volume.finish(true).unwrap();
+    assert_eq!(rock,volume.get([1,160,1]));assert!(!volume.incomplete);
+    volume.begin().unwrap();volume.set([1,161,1],rock);volume.finish(false).unwrap();
+    assert_eq!(air,volume.get([1,161,1]));
+    let mut surface=world.decoration_proxy(0,0,true).unwrap();
+    assert_eq!(air,surface.get([1,-1,1]));assert_eq!(air,surface.get([1,160,1]));
+    surface.set([1,160,1],rock);assert_eq!(rock,surface.get([1,160,1]));
+}

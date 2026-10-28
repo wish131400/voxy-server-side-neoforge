@@ -49,6 +49,10 @@ class PredictionCpuCachePolicyTest {
             assertEquals(false,eligible.invoke(manager,child,System.nanoTime()),"ground fallback cannot remove the only feature source");
             maintain(manager); assertSame(child,ready.get(child.key()));
             parent=tile(16,0,1,layout,true); ready.put(parent.key(),parent);
+            assertEquals(false,eligible.invoke(manager,child,System.nanoTime()),"Some cached parent plants do not prove complete feature fallback");
+            var source=parent.data().voxyTile;
+            parent.data().voxyTile=new PredictionVoxySource.Tile(source.key(),source.baseX(),source.baseZ(),source.span(),
+                    source.axis(),source.step(),source.columns(),source.features(),source.terrainBytes(),true,source.cityFeatures());
             assertEquals(true,eligible.invoke(manager,child,System.nanoTime()));
             long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
             do { maintain(manager); } while(ready.containsKey(child.key()) && System.nanoTime()<deadline);

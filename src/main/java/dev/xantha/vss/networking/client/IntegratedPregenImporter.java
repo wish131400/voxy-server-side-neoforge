@@ -49,7 +49,7 @@ final class IntegratedPregenImporter {
                         if (accepted) {
                             manager.recordStrictSections(data.chunkX(), data.chunkZ(), decoded);
                             if (decoded.authoritative()) {
-                                ClientPredictionState.onExactColumn(dimension, data.chunkX(), data.chunkZ(), decoded);
+                                accepted = ClientPredictionState.onExactColumn(dimension, data.chunkX(), data.chunkZ(), decoded);
                             }
                         }
                         return accepted;

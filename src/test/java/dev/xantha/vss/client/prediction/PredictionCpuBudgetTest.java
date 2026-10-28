@@ -8,6 +8,26 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class PredictionCpuBudgetTest {
+    @Test void waitingRealGenerationGetsHeadroomWhenContinuousPredictionFinishes() {
+        var e=new Environment();var leases=new ArrayList<PredictionCpuBudget.Lease>();
+        try {
+            for(int i=0;i<7;i++)leases.add(assertLease(e.budget.tryAcquire(false)));
+            assertEquals(0,e.budget.reserveLocalGeneration(4,true,0));
+            e.budget.observeLocalGeneration(true,0);
+            leases.remove(0).close();
+            assertNull(e.budget.tryAcquire(true),"finishing prediction must leave room for waiting real terrain");
+            assertEquals(1,e.budget.localGenerationLimit(8,true));
+            assertEquals(1,e.budget.reserveLocalGeneration(1,true,0));
+            e.budget.observeLocalGeneration(true,1);
+            assertNull(e.budget.tryAcquire(false));
+        } finally {leases.forEach(PredictionCpuBudget.Lease::close);}
+    }
+    @Test void oneWorkerCanGenerateRealTerrainWithPredictionEnabled() {
+        var budget=PredictionCpuBudget.fixed(1);
+        assertEquals(1,budget.localGenerationLimit(8,true));
+        assertEquals(1,budget.reserveLocalGeneration(1,true,0));
+    }
+
     private static final long SECOND = 1_000_000_000L;
     private static final class Environment {
         long now;

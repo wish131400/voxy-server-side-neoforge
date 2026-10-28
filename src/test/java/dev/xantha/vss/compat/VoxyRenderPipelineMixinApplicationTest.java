@@ -20,6 +20,7 @@ class VoxyRenderPipelineMixinApplicationTest {
              "injectors":{"defaultRequire":1}}
             """;
         var harness=new VoxyMixinHarness(System.getProperty("vss.voxyJar"),config);
+        assertNativeWithdrawalContract(harness);
         var render=new ClassNode();
         new ClassReader(harness.apply("me.cortex.voxy.client.core.VoxyRenderSystem")).accept(render,0);
         var opaque=render.methods.stream().filter(m->m.name.equals("renderOpaque")).findFirst().orElseThrow();
@@ -44,6 +45,16 @@ class VoxyRenderPipelineMixinApplicationTest {
             }
             for(var method:node.methods) new Analyzer<>(new BasicVerifier()).analyze(node.name,method);
         }
+    }
+    private static void assertNativeWithdrawalContract(VoxyMixinHarness harness) throws Exception {
+        String built="me/cortex/voxy/client/core/rendering/building/BuiltSection";
+        var nodes=harness.getClassNode("me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager");
+        var submit=nodes.methods.stream().filter(m->m.name.equals("submitGeometryResult")).toList();
+        assertEquals(1,submit.size());assertEquals("(L"+built+";)V",submit.get(0).desc);
+        assertEquals(0,submit.get(0).access&Opcodes.ACC_STATIC);
+        var mesh=harness.getClassNode(built.replace('/','.'));
+        assertTrue(mesh.methods.stream().anyMatch(m->m.name.equals("empty") && m.desc.equals("(J)L"+built+";")
+                && (m.access&(Opcodes.ACC_PUBLIC|Opcodes.ACC_STATIC))==(Opcodes.ACC_PUBLIC|Opcodes.ACC_STATIC)));
     }
     /** Execute the transformed hook; merely finding its call sites missed Iris's null shadow pass. */
     private void assertAuxiliaryViewportsIgnored(MethodNode common) throws Exception {

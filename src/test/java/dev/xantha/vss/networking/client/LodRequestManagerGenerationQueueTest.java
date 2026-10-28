@@ -14,11 +14,15 @@ class LodRequestManagerGenerationQueueTest {
         long now = System.nanoTime();
         int requestId = tracker.track(42L, false, false, 30_000_000_000L, now);
         manager.onColumnQueued(requestId);
-        assertTrue(tracker.drainTimedOut(now + 31_000_000_000L).isEmpty());
+        // First-use class initialization may be slow. Measure the refreshed
+        // deadline from the acknowledgement, not from before that initialization.
+        long queuedAt=System.nanoTime();
+        assertTrue(tracker.drainTimedOut(queuedAt + 31_000_000_000L).isEmpty());
         assertFalse(tracker.isGenerationRequest(requestId));
         assertEquals(0, tracker.generationSize());
         manager.onColumnQueued(requestId + 1);
-        assertEquals(1, tracker.drainTimedOut(now + 121_000_000_000L).size());
+        assertEquals(1, tracker.drainTimedOut(queuedAt
+                + dev.xantha.vss.common.VSSConstants.COLUMN_QUEUE_IDLE_TIMEOUT_NANOS + 1).size());
     }
 
 

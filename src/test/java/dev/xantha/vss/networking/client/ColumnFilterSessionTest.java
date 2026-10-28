@@ -24,6 +24,7 @@ class ColumnFilterSessionTest {
     @Test void filteredSessionCannotRestoreOrAdvertiseFullCoverage() {
         var manager = new LodRequestManager("scoped-test", new ClientRequestTracker(), () -> { }, true);
         long packed = PositionUtil.packPosition(1, 2);
+        assertFalse(manager.expectsAuthoritativeColumns());
         manager.restoreKnownColumn(packed, 100L);
         assertEquals(0L, manager.requestTimestampFor(packed));
         var data = new VoxelColumnData(new VoxelColumnData.SectionData[] {

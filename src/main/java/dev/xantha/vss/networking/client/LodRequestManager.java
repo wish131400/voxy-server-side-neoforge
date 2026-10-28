@@ -565,6 +565,12 @@ public final class LodRequestManager {
         // Vanilla chunk lifetime is independent from Voxy's persisted LOD lifetime.
     }
 
+    public boolean expectsAuthoritativeColumns() { return !filteredSession; }
+
+    public synchronized long dirtyColumnTimestamp(long packed) {
+        return dirtyColumnTimestamps.get(packed);
+    }
+
     public synchronized long[] onDirtyColumns(long[] dirtyPositions, long[] dirtyTimestamps) {
         var changed = new it.unimi.dsi.fastutil.longs.LongArrayList();
         for (int i = 0; i < dirtyPositions.length; i++) {
@@ -603,7 +609,7 @@ public final class LodRequestManager {
         long packed = requestTracker.remove(requestId);
         if (packed != Long.MIN_VALUE) {
             requestScanPending = true;
-            if (dirtyRefreshRequest && hasKnownColumn(packed)) {
+            if (dirtyRefreshRequest && (hasDirtyTimestamp(packed) || hasKnownColumn(packed))) {
                 if (hasDirtyTimestamp(packed)) {
                     markBackoff(packed, false);
                     deferredColumns.remove(packed);
@@ -1039,11 +1045,8 @@ public final class LodRequestManager {
                 : 0;
 
         boolean predictionActive = VSSClientNetworking.isPredictionActive();
-        int availableBudget = isIntegratedServer()
-                ? PredictionCpuBudget.SHARED.localGenerationLimit(generationConcurrencyLimit, predictionActive)
-                : generationConcurrencyLimit;
         generationConcurrencyLimit = predictionPriority.limit(generationConcurrencyLimit,
-                predictionActive, ClientPredictionState.loadingProgress(lastDimension), availableBudget, System.nanoTime());
+                predictionActive, ClientPredictionState.loadingProgress(lastDimension), System.nanoTime());
         if (isIntegratedServer()) {
             generationConcurrencyLimit = PredictionCpuBudget.SHARED.reserveLocalGeneration(
                     generationConcurrencyLimit, predictionActive, generationInFlightCount);
@@ -1254,7 +1257,9 @@ public final class LodRequestManager {
                     int cz = PositionUtil.unpackZ(packed);
                     int ring = PositionUtil.chebyshevDistance(cx, cz, playerCx, playerCz);
 
-                    if (ring > lodDistance) {
+                    // Dirty notifications include the existing retention buffer. Fetch their
+                    // replacement there too; otherwise prediction waits on an unsendable request.
+                    if (ring > lodDistance + (dirtyRefresh ? VSSConstants.LOD_DISTANCE_BUFFER : 0)) {
                         generationDiagnostics.record("deferredOutsideDistance");
                         if (!dirtyRefresh) {
                             clearMissState(packed);
@@ -1984,6 +1989,10 @@ public final class LodRequestManager {
                 staleColumns.add(packed);
             }
         }
+        // Availability notices may have a dirty watermark without any accepted local version.
+        for (long packed : dirtyColumnTimestamps.keySet()) {
+            if (PositionUtil.isOutOfRange(packed, playerCx, playerCz, pruneDistance)) staleColumns.add(packed);
+        }
         // Unavailable columns need pruning even when no timestamp was stored.
         for (long packed : strictUnavailableColumns) {
             if (PositionUtil.isOutOfRange(packed, playerCx, playerCz, pruneDistance)) {
@@ -2011,6 +2020,9 @@ public final class LodRequestManager {
             requestTracker.cancel(packed);
             deferredColumns.remove(packed);
             clearMissState(packed);
+        }
+        if (lastDimension != null && !staleColumns.isEmpty()) {
+            ClientPredictionState.onDirtyColumnsRetired(lastDimension, staleColumns.toLongArray());
         }
     }
 
@@ -2053,6 +2065,9 @@ public final class LodRequestManager {
         diagnosticGenerationSlots = 0;
         diagnosticXaeroBackpressure = false;
         requestTracker.cancelAll();
+        if (lastDimension != null && !dirtyColumnTimestamps.isEmpty()) {
+            ClientPredictionState.onDirtyColumnsRetired(lastDimension, dirtyColumnTimestamps.keySet().toLongArray());
+        }
         columnTimestamps.clear();
         dirtyColumns.clear();
         dirtyColumnTimestamps.clear();

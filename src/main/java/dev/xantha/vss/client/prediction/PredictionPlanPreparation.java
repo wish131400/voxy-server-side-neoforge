@@ -150,7 +150,7 @@ final class PredictionPlanPreparation {
         java.util.function.Predicate<PredictionTileKey> needsSurface = key -> authoritative.computeIfAbsent(key,
                 candidate -> !queries.authority(candidate, false));
         var tiles = i.residents().tiles();
-        var leaves = i.nativeDemand() ? bootstrap(i.dimension(), i.x(), i.z(), i.layout(), i.mediumBias())
+        var leaves = i.nativeDemand() ? nativeCoverage(i.dimension(), i.x(), i.z(), i.layout(), i.mediumBias())
                 : PredictionLodPlanner.plan(i.dimension(), i.x(), i.y(), i.z(), i.layout(), i.focus(),
                 Math.max(.01, i.pixels()), i.minY(), i.maxY() + (i.view() == null ? 0 : 64), i.vegetation() ? surfaceRadius : 0, needsSurface,
                 key -> { var error = i.relief().get(key); return error != null && error.needsRefinement(); }, i.view(),
@@ -200,6 +200,25 @@ final class PredictionPlanPreparation {
             if (dx*dx+dz*dz<=radius*radius) leaves.add(new PredictionTileKey(dimension,tx,tz,level));
         }
         return List.copyOf(leaves);
+    }
+
+    /** A small local cover is independent of GPU demand. After relocation native
+     * empty nodes may not request detail until the horizon publication arrives.
+     * Supply this bounded middle band directly, with its ancestor paths, so the
+     * coarse horizon is never the sole source of those initial requests. */
+    static List<PredictionTileKey> nativeCoverage(ResourceKey<Level> dimension, double x, double z,
+                                                  VssLodLayout layout, int bias) {
+        var keys = new LinkedHashSet<>(bootstrap(dimension, x, z, layout, bias));
+        int level = Math.min(4, PredictionMediumCoverage.level(layout, bias));
+        int span = layout.tileBlocks(level);
+        double radius = Math.min(2048, layout.maxDistanceBlocks());
+        for (int tz = (int)Math.floor((z-radius)/span); tz <= (int)Math.floor((z+radius)/span); tz++)
+            for (int tx = (int)Math.floor((x-radius)/span); tx <= (int)Math.floor((x+radius)/span); tx++) {
+                double dx = Math.max(0, Math.max(tx*(double)span-x, x-(tx+1D)*span));
+                double dz = Math.max(0, Math.max(tz*(double)span-z, z-(tz+1D)*span));
+                if (dx*dx+dz*dz <= radius*radius) keys.add(new PredictionTileKey(dimension,tx,tz,level));
+            }
+        return List.copyOf(keys);
     }
 
     private static int initialAxis(Input i, PredictionTileKey key) {

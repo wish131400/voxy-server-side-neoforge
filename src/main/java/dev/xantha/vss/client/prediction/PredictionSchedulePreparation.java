@@ -19,92 +19,110 @@ final class PredictionSchedulePreparation {
                  Set<PredictionTileKey> dependencies, Set<PredictionTileKey> hidden,
                  List<Integer> initialAxes, PredictionDiskCache disk, Map<PredictionTileKey, Long> cacheMiss,
                  Map<PredictionTileKey, Long> failed, Map<PredictionTileKey, Long> deferred, long now, boolean reclaimNeeded) {
-        int axis(PredictionTileKey key) {
-            var tile = residents.tiles().get(key); return tile == null ? 0 : tile.cellAxis();
-        }
-        boolean surfaceTerrainReady(PredictionTileKey key) {
-            var tile = residents.tiles().get(key);
-            return tile != null && (tile.data() != null && tile.data().voxyTile != null
-                    || tile.cellAxis() == layout.cellAxis(key.lod()));
-        }
-        boolean scoped(PredictionTileKey key) { return PredictionWorkOrder.scoped(key, layout, focus); }
-        int band(PredictionTileKey key) {
-            if (scoped(key)) return PredictionWorkView.VISIBLE;
-            Integer known = bands.get(key);
-            return known == null ? view == null ? PredictionWorkView.VISIBLE : view.band(key, layout, focus, minY, maxY) : known;
-        }
+        Facts facts(PredictionTileKey key){return new Facts(this,key);}
+        int axis(PredictionTileKey key){var tile=residents.tiles().get(key);return tile==null?0:tile.cellAxis();}
+        boolean scoped(PredictionTileKey key){return PredictionWorkOrder.scoped(key,layout,focus);}
+        int band(PredictionTileKey key){return facts(key).band();}
         int mediumAxis(PredictionTileKey key) {
-            int axis = medium.frontier().contains(key) ? PredictionWorkOrder.PREVIEW_CELL_AXIS : initialAxes.get(key.lod());
-            return view != null && terrain.containsKey(key) ? Math.min(axis, ordinary.getOrDefault(key, axis)) : axis;
+            int axis=medium.frontier().contains(key)?PredictionWorkOrder.PREVIEW_CELL_AXIS:initialAxes.get(key.lod());
+            return view!=null&&terrain.containsKey(key)?Math.min(axis,ordinary.getOrDefault(key,axis)):axis;
         }
-        boolean mediumWork(PredictionTileKey key) {
-            return mediumPending && medium.paths().contains(key) && axis(key) < mediumAxis(key);
-        }
-        boolean required(PredictionTileKey key, boolean surface) {
-            if (dirty.contains(key) || fallback.contains(key) || scoped(key)) return true;
-            if (surface) return false;
-            var tile = residents.tiles().get(key);
-            return tile == null || (medium.paths().contains(key) || dependencies.contains(key)) && tile.scopeOnly()
-                    || dependencies.contains(key) && transitions.containsKey(key) && axis(key) < transitions.get(key);
-        }
-        boolean relevant(PredictionTileKey key) { return band(key) <= PredictionWorkView.BUFFER || dependencies.contains(key); }
-        boolean idleWork(PredictionTileKey key) {
-            return idle.containsKey(key) && !dirty.contains(key) && !scoped(key)
-                    && (!ordinary.containsKey(key) || axis(key) >= ordinary.get(key));
-        }
-        int offset(PredictionTileKey key, boolean surface) {
-            if (hidden.contains(key) && !required(key, surface)) return band(key) == PredictionWorkView.VISIBLE ? 350_000 : 650_000;
-            if (band(key) == PredictionWorkView.VISIBLE || !surface && dependencies.contains(key)) return 0;
-            return band(key) == PredictionWorkView.BUFFER ? 300_000
-                    : band(key) == PredictionWorkView.RECENT ? 600_000 : PredictionWorkOrder.BACKGROUND_PRIORITY;
-        }
-        int priority(PredictionTileKey key, boolean surface) {
-            if (dirty.contains(key)) return Integer.MIN_VALUE + 1 + key.lod();
-            if (!surface && idleWork(key)) return view == null ? 2_000_000 : 400_000 + offset(key, surface);
-            double distance = PredictionWorkOrder.orderingDistance(key, layout, x, z, focus);
-            if (scoped(key)) return PredictionWorkOrder.priority(key, layout, distance, axis(key), surface, focus);
-            int screen = 0;
-            if (view != null && band(key) <= PredictionWorkView.BUFFER && !mediumWork(key)) {
-                double projected = PredictionScreenDetail.projected(view, key, layout, x, y, z, pixels, minY, maxY);
-                double perCell = layout.pixelThreshold() / VssLodLayout.TILE_QUADS;
-                double error = surface ? projected * 8 / layout.tileBlocks(key.lod()) / Math.max(1.5, Math.min(3, perCell))
-                        : projected / Math.max(1, axis(key) == 0 ? 8 : axis(key)) / perCell;
-                screen = (int) (6000 / (1 + Math.max(0, error)));
-            }
-            return offset(key, surface) + PredictionWorkOrder.nearPriority(distance, axis(key), surface, screen);
-        }
-        int target(PredictionTileKey key) {
-            int target = terrain.getOrDefault(key, initialAxes.get(key.lod()));
-            if (medium.frontier().contains(key)) target = Math.max(mediumAxis(key), target);
-            if (mediumPending && !scoped(key) && medium.paths().contains(key)
-                    && (!medium.frontier().contains(key) || mediumWork(key))) return mediumAxis(key);
-            return Math.max(target, transitions.getOrDefault(key, target));
-        }
+        boolean mediumWork(PredictionTileKey key){return facts(key).mediumWork();}
+        boolean required(PredictionTileKey key,boolean surface){return facts(key).required(surface);}
+        boolean relevant(PredictionTileKey key){return facts(key).relevant();}
+        boolean idleWork(PredictionTileKey key){return facts(key).idleWork();}
+        int offset(PredictionTileKey key,boolean surface){return facts(key).offset(surface);}
+        int priority(PredictionTileKey key,boolean surface){return facts(key).priority(surface);}
+        int target(PredictionTileKey key){return facts(key).target();}
+        boolean surfaceTerrainReady(PredictionTileKey key){return facts(key).surfaceTerrainReady();}
         boolean retry(PredictionTileKey key) {
-            return now - deferred.getOrDefault(key, Long.MIN_VALUE / 2) >= 0
-                    && now - failed.getOrDefault(key, Long.MIN_VALUE / 2) > 30_000_000_000L;
+            return now-deferred.getOrDefault(key,Long.MIN_VALUE/2)>=0 && now-failed.getOrDefault(key,Long.MIN_VALUE/2)>30_000_000_000L;
         }
-        boolean defer(PredictionTileKey key, boolean surface) {
-            return view != null && band(key) >= PredictionWorkView.RECENT && (surface || axis(key) > 0)
-                    && !required(key, surface) && !(!surface && dependencies.contains(key));
-        }
+        boolean defer(PredictionTileKey key,boolean surface){return facts(key).defer(surface);}
     }
+
     record Result(Input input, List<Request> work, List<PredictionTileKey> cached, List<PredictionTileKey> reclaim,
                   Map<PredictionTileKey, Hint> hints) { }
+    /** One evaluation per immutable input/key. No live admission decision is cached here. */
+    static final class Facts {
+        final Input input;
+        final PredictionTileKey key;
+        final PredictionTileManager.PredictionTile tile;
+        final int axis;
+        final boolean scoped,dirty,dependency,mediumPath,frontier;
+        private int band=-1;
+        private double distance=Double.NaN,projected=Double.NaN;
+        Facts(Input input,PredictionTileKey key) {
+            this.input=input;this.key=key;tile=input.residents().tiles().get(key);axis=tile==null?0:tile.cellAxis();
+            scoped=input.scoped(key);dirty=input.dirty().contains(key);dependency=input.dependencies().contains(key);
+            mediumPath=input.medium().paths().contains(key);frontier=input.medium().frontier().contains(key);
+        }
+        int band() {
+            if(band<0) {Integer known=input.bands().get(key);band=scoped?PredictionWorkView.VISIBLE:known!=null?known
+                    :input.view()==null?PredictionWorkView.VISIBLE:input.view().band(key,input.layout(),input.focus(),input.minY(),input.maxY());}
+            return band;
+        }
+        double distance() {
+            if(Double.isNaN(distance))distance=PredictionWorkOrder.orderingDistance(key,input.layout(),input.x(),input.z(),input.focus());
+            return distance;
+        }
+        int mediumAxis() {return input.mediumAxis(key);}
+        boolean mediumWork(){return input.mediumPending()&&mediumPath&&axis<mediumAxis();}
+        boolean required(boolean surface) {
+            if(dirty||input.fallback().contains(key)||scoped)return true;
+            return !surface&&(tile==null||(mediumPath||dependency)&&tile.scopeOnly()
+                    ||dependency&&input.transitions().containsKey(key)&&axis<input.transitions().get(key));
+        }
+        boolean relevant(){return band()<=PredictionWorkView.BUFFER||dependency;}
+        boolean idleWork(){return input.idle().containsKey(key)&&!dirty&&!scoped
+                &&(!input.ordinary().containsKey(key)||axis>=input.ordinary().get(key));}
+        int offset(boolean surface) {
+            if(input.hidden().contains(key)&&!required(surface))return band()==PredictionWorkView.VISIBLE?350_000:650_000;
+            if(band()==PredictionWorkView.VISIBLE||!surface&&dependency)return 0;
+            return band()==PredictionWorkView.BUFFER?300_000:band()==PredictionWorkView.RECENT?600_000:PredictionWorkOrder.BACKGROUND_PRIORITY;
+        }
+        int priority(boolean surface) {
+            if(dirty)return Integer.MIN_VALUE+1+key.lod();
+            if(!surface&&idleWork())return input.view()==null?2_000_000:400_000+offset(false);
+            if(scoped)return PredictionWorkOrder.priority(key,input.layout(),distance(),axis,surface,input.focus());
+            int screen=0;
+            if(input.view()!=null&&band()<=PredictionWorkView.BUFFER&&!mediumWork()) {
+                if(Double.isNaN(projected))projected=PredictionScreenDetail.projected(input.view(),key,input.layout(),input.x(),input.y(),input.z(),input.pixels(),input.minY(),input.maxY());
+                double perCell=input.layout().pixelThreshold()/VssLodLayout.TILE_QUADS;
+                double error=surface?projected*8/input.layout().tileBlocks(key.lod())/Math.max(1.5,Math.min(3,perCell))
+                        :projected/Math.max(1,axis==0?8:axis)/perCell;
+                screen=(int)(6000/(1+Math.max(0,error)));
+            }
+            return offset(surface)+PredictionWorkOrder.coveragePriority(distance(),axis,surface,screen);
+        }
+        int target() {
+            int target=input.terrain().getOrDefault(key,input.initialAxes().get(key.lod()));
+            if(frontier)target=Math.max(mediumAxis(),target);
+            if(input.mediumPending()&&!scoped&&mediumPath&&(!frontier||mediumWork()))return mediumAxis();
+            return Math.max(target,input.transitions().getOrDefault(key,target));
+        }
+        boolean retry(){return input.retry(key);}
+        boolean defer(boolean surface){return input.view()!=null&&band()>=PredictionWorkView.RECENT&&(surface||axis>0)
+                &&!required(surface)&&!(!surface&&dependency);}
+        boolean surfaceTerrainReady(){return tile!=null&&(tile.data()!=null&&tile.data().voxyTile!=null||axis==input.layout().cellAxis(key.lod()));}
+    }
+    private record Reclaim(PredictionTileKey key,int priority,double distance) { }
     static Result build(Input i) {
         var work = new ArrayList<Request>();
         var keys = new LinkedHashSet<>(i.dirty()); keys.addAll(i.plan()); keys.addAll(i.surfaceDesired());
-        var cached = new ArrayList<PredictionTileKey>();
+        var cached = new ArrayList<Facts>();
+        var facts = new HashMap<PredictionTileKey,Facts>();
         var hints = new HashMap<PredictionTileKey, Hint>();
         for (var key : keys) {
             if (!i.desired().contains(key) || key.lod() < 0 || key.lod() >= i.layout().levelCount()) continue;
-            double distance = PredictionWorkOrder.orderingDistance(key, i.layout(), i.x(), i.z(), i.focus());
-            var hint = new Hint(i.priority(key, false), i.priority(key, true), distance); hints.put(key, hint);
+            var f=facts.computeIfAbsent(key,k->new Facts(i,k));double distance=f.distance();
+            var hint = new Hint(f.priority(false), f.priority(true), distance); hints.put(key, hint);
             if (i.pending().contains(key)) continue;
-            if (i.retry(key) && !i.defer(key, false) && (i.dirty().contains(key) || i.axis(key) < i.target(key)))
+            boolean retry=f.retry();
+            if (retry && !f.defer(false) && (f.dirty || f.axis < f.target()))
                 work.add(new Request(key, false, hint.terrain(), distance));
-            if (i.retry(key) && !i.defer(key, true) && i.surfaceDesired().contains(key)
-                    && i.surfaceTerrainReady(key) && !i.dirty().contains(key) && !i.surfaceReady().contains(key))
+            if (retry && !f.defer(true) && i.surfaceDesired().contains(key)
+                    && f.surfaceTerrainReady() && !f.dirty && !i.surfaceReady().contains(key))
                 work.add(new Request(key, true, hint.surface(), distance));
         }
         // Native node demand can be outside the ordinary plan. Restore every desired
@@ -113,24 +131,26 @@ final class PredictionSchedulePreparation {
             if (key.lod() < 0 || key.lod() >= i.layout().levelCount() || i.pending().contains(key)) continue;
             if (i.now() - i.cacheMiss().getOrDefault(key, Long.MIN_VALUE / 2) >= 0
                     && i.disk().cachedTerrainAxis(PredictionDiskCache.Key.terrain(key.tileX(), key.tileZ(), key.lod())) > i.axis(key))
-                cached.add(key);
+                cached.add(facts.computeIfAbsent(key,k->new Facts(i,k)));
         }
         work.sort(Comparator.comparingInt(Request::priority).thenComparingDouble(Request::distance)
                 .thenComparingInt(request -> -request.key().lod()));
-        cached.sort(Comparator.<PredictionTileKey>comparingInt(i::band)
-                .thenComparingDouble(key -> PredictionWorkOrder.orderingDistance(key, i.layout(), i.x(), i.z(), i.focus()))
-                .thenComparingInt(key -> i.axis(key) > 0 ? 1 : 0).thenComparingInt(key -> -key.lod()));
+        cached.forEach(f->{f.band();f.distance();});
+        cached.sort(Comparator.comparingInt(Facts::band).thenComparingDouble(Facts::distance)
+                .thenComparingInt(f -> f.axis > 0 ? 1 : 0).thenComparingInt(f -> -f.key.lod()));
         var reclaim = new ArrayList<PredictionTileKey>();
         if (i.reclaimNeeded()) {
         reclaim.addAll(i.residents().tiles().keySet());
         reclaim.removeIf(key -> key.lod() < 0 || key.lod() >= i.layout().levelCount() || i.scoped(key)
                 || i.medium().paths().contains(key) || i.pending().contains(key)
                 || !PredictionTileResidencyPolicy.coveredByAncestor(i.residents().tiles().keySet(), i.layout(), key));
-        reclaim.sort(Comparator.<PredictionTileKey>comparingInt(key -> PredictionWorkOrder.priority(key, i.layout(),
-                        PredictionWorkOrder.distanceSquared(key, i.layout(), i.x(), i.z()), 0, false, i.focus()))
-                .thenComparingDouble(key -> PredictionWorkOrder.orderingDistance(key, i.layout(), i.x(), i.z(), i.focus()))
-                .reversed());
+        var ranked=new ArrayList<Reclaim>(reclaim.size());
+        for(var key:reclaim)ranked.add(new Reclaim(key,PredictionWorkOrder.priority(key,i.layout(),
+                PredictionWorkOrder.distanceSquared(key,i.layout(),i.x(),i.z()),0,false,i.focus()),
+                facts.computeIfAbsent(key,k->new Facts(i,k)).distance()));
+        ranked.sort(Comparator.comparingInt(Reclaim::priority).thenComparingDouble(Reclaim::distance).reversed());
+        reclaim.clear();ranked.forEach(r->reclaim.add(r.key()));
         }
-        return new Result(i, List.copyOf(work), List.copyOf(cached), List.copyOf(reclaim), Map.copyOf(hints));
+        return new Result(i, List.copyOf(work), cached.stream().map(f->f.key).toList(), List.copyOf(reclaim), Map.copyOf(hints));
     }
 }

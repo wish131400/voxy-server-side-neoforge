@@ -30,6 +30,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Module boundaries and CPU regressions
         run: .\gradlew.bat -I tools/verification/performance-regression.gradle verifyModules planningConsumerTest performanceRegressionTest --no-daemon
+      - name: Terrain handoff and End generation regressions
+        run: .\gradlew.bat -I tools/verification/dirty-handoff.gradle -I tools/verification/end-decoration.gradle dirtyHandoffTest endDecorationTest --no-daemon
       - name: Package mod (Forge also reobfuscates)
         run: .\gradlew.bat jar "-PvssBuildId=ci-${{ github.sha }}" --no-daemon
       - name: Save reports

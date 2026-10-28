@@ -184,6 +184,10 @@ final class RustWorldgenDocument {
         context.generatorContext().getBiomeSource().possibleBiomes().forEach(b -> possible.add(
                 b.unwrapKey().orElseThrow(() -> new IllegalArgumentException("Inline biome needs a native identity")).location().toString()));
         result.add("possible_biomes", possible);
+        JsonObject bounds = new JsonObject();
+        bounds.addProperty("min_y", context.profile().minY());
+        bounds.addProperty("height", context.profile().height());
+        result.add("vss_dimension_bounds", bounds);
         if (compact) {
             result.addProperty("vss_shared_palette", shared.palette());
             return result;

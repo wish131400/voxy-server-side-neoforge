@@ -304,6 +304,7 @@ pub struct ProxyBase {
     page_axis: usize,
     loader: Option<ColumnLoader>,
     interior_loader: Option<InteriorLoader>,
+    base_bounds: Option<(i32, i32)>,
     interior_columns: Vec<OnceLock<Result<Arc<Vec<StateId>>>>>,
     air: StateId,
     water: StateId,
@@ -330,17 +331,19 @@ impl ProxyBase {
         })
     }
     fn value(&self, i: usize, origin_y: i32, height: usize) -> Result<StateId> {
+        let y = origin_y + (i % height) as i32;
+        let (base_y, base_height) = self.base_bounds.unwrap_or((origin_y, height as i32));
+        if y < base_y || y >= base_y + base_height { return Ok(self.air); }
         if let Some(loader) = &self.interior_loader {
             let c = i / height;
             let values = self.interior_columns[c].get_or_init(|| {
                 let values = loader(c / self.depth, c % self.depth)?;
-                if values.len() != height { return Err("interior proxy column height".into()); }
+                if values.len() != base_height as usize { return Err("interior proxy column height".into()); }
                 Ok(values)
             });
-            return Ok(values.as_ref().map_err(Clone::clone)?[i % height]);
+            return Ok(values.as_ref().map_err(Clone::clone)?[(y - base_y) as usize]);
         }
         let c = self.column(i / height)?;
-        let y = origin_y + (i % height) as i32;
         let end = c[0].max(c[1]);
         Ok(if y >= end {
             // The original loop only wrote `min_y..end`; everything above kept
@@ -485,6 +488,7 @@ impl Volume {
             page_axis: 16,
             loader: None,
             interior_loader: None,
+            base_bounds: None,
             interior_columns: Vec::new(),
             air,
             water,
@@ -492,6 +496,10 @@ impl Volume {
             ice,
         });
         Ok(volume)
+    }
+    /// Keep sparse edit space at dimension height; the immutable base remains noise-height.
+    pub fn proxy_base_bounds(&mut self, min_y: i32, height: i32) {
+        if let Some(proxy) = &mut self.proxy { proxy.base_bounds = Some((min_y, height)); }
     }
     /// Same bounded proxy, but sample each 16x16 chunk only on first read.
     pub fn lazy_proxy(origin: Pos, width: usize, depth: usize, height: usize,

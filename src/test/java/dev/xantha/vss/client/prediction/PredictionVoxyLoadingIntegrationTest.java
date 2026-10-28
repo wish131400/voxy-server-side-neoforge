@@ -77,8 +77,14 @@ class PredictionVoxyLoadingIntegrationTest {
                     // Neither the immediate parent nor medium coverage exists locally.
                     field("mediumCoveragePending").setBoolean(manager,true);
                     field("mediumCoverage").set(manager,PredictionMediumCoverage.EMPTY);
-                    invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},true);
+                    refreshDetails(manager);
                     assertTrue(((Set<PredictionTileKey>)field("desiredKeys").get(manager)).contains(key));
+                    var initial=manager.demandSnapshot();
+                    var pipeline=(Map<String,Object>)initial.get("detailPipeline");
+                    var levels=(Map<Integer,Map<String,Object>>)pipeline.get("byLod");
+                    assertEquals(1,levels.get(1).get("missing"));
+                    assertEquals(1,pipeline.get("remaining"));
+                    assertEquals(10,((Map<?,?>)initial.get("admission")).size());
                     // A plan publication must not cancel a live node demand between its clear/add phases.
                     ((Set<PredictionTileKey>)field("desiredKeys").get(manager)).remove(key);
                     var desired=PredictionTileManager.class.getDeclaredMethod("effectivelyDesired",PredictionTileKey.class);
@@ -96,6 +102,9 @@ class PredictionVoxyLoadingIntegrationTest {
                     assertNotNull(tile,manager.surfaceDiagnostics());
                     assertEquals(64,tile.cellAxis(),"Voxy demand must not stop at another 8/16/32-cell preview");
                     assertEquals(2,tile.spacingBlocks());assertNotNull(tile.data().voxyTile);
+                    var finished=(Map<String,Object>)manager.demandSnapshot().get("detailPipeline");
+                    assertEquals(0,finished.get("remaining"));
+                    assertTrue(((List<?>)finished.get("oldestIncomplete")).isEmpty());
                     assertTrue(source.requestDetail(position,(x,z)->false));
                     assertSame(originalParent,manager.renderSnapshot().tiles().get(parent),"Parent coverage remains usable");
                     cache.flush();
@@ -290,7 +299,7 @@ class PredictionVoxyLoadingIntegrationTest {
                     source.put(PredictionVoxySource.build(key,newPreview(),10,16,manager.sampler(),
                             PredictionVegetation.Tile.EMPTY,null));
                     assertFalse(source.requestDetail(VoxyPredictionBridge.position(2,-1,0,-1),(x,z)->false));
-                    invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},true);
+                    refreshDetails(manager);
                     assertTrue(((List<?>)field("scheduledPlan").get(manager)).isEmpty(),"Demand is exclusively from Voxy");
                     long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
                     while(cache.terrainProbePending(diskKey) && System.nanoTime()<deadline)Thread.sleep(2);
@@ -445,7 +454,10 @@ class PredictionVoxyLoadingIntegrationTest {
                     enqueue(manager,key,entry>0);
                     var surfaces=(Set<PredictionTileKey>)field("surfaceReady").get(manager);
                     long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
-                    while(!surfaces.contains(key) && System.nanoTime()<deadline) Thread.sleep(5);
+                    while(!surfaces.contains(key) && System.nanoTime()<deadline) {
+                        invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());
+                        Thread.sleep(5);
+                    }
                     assertTrue(surfaces.contains(key),manager.surfaceDiagnostics()); await(manager);
                     var tile=manager.readyTiles().iterator().next();
                     assertTrue(tile.data().voxyTile.surfaceComplete());
@@ -499,6 +511,7 @@ class PredictionVoxyLoadingIntegrationTest {
             assertTrue(surfaces.contains(key),manager.surfaceDiagnostics());
             var surface=manager.readyTiles().iterator().next();
             assertSame(before.samples(),surface.samples()); assertSame(before.data().voxyTile.columns(),surface.data().voxyTile.columns());
+            assertEquals(before.terrainRevision(),surface.terrainRevision());
             assertEquals(terrainCalls,sampled.get(),"A decoration job must not resample the Rust/Java terrain grid");
             assertTrue(calls.get()>0); assertTrue(surface.data().voxyTile.surfaceComplete());
             var features=surface.data().voxyTile.features();
@@ -510,11 +523,22 @@ class PredictionVoxyLoadingIntegrationTest {
             var refined=manager.readyTiles().iterator().next();
             assertEquals(64,refined.cellAxis()); assertTrue(refined.data().voxyTile.surfaceComplete());
             assertEquals(features,refined.data().voxyTile.features()); assertTrue(surfaces.contains(key));
-            // Local data invalidation must be allowed to remove the old surface.
             ((Set<PredictionTileKey>)field("surfaceDesired").get(manager)).remove(key);
-            ((Set<PredictionTileKey>)field("dirtyTiles").get(manager)).add(key);
+            // A new real-terrain capture refreshes ground, not the placement inputs.
+            var vegetation=(PredictionVegetation)field("vegetation").get(manager);
+            var chunks=PredictionVegetation.class.getDeclaredField("chunks"); chunks.setAccessible(true);
+            ((Map<?,?>)chunks.get(vegetation)).clear(); // placement LRU eviction is not evidence of empty plants
+            manager.capturedTerrainChanged(-1,-1);
+            enqueue(manager,key,false); await(manager);
+            var refreshed=manager.readyTiles().iterator().next();
+            assertTrue(refreshed.data().voxyTile.surfaceComplete(),"Ground refresh must preserve completed plants");
+            assertEquals(features,refreshed.data().voxyTile.features());
+            assertTrue(refreshed.depthBound().maxY()>=surface.depthBound().maxY());
+            // Actual content invalidation must still remove the old surface.
+            manager.invalidate(-1,-1);
             enqueue(manager,key,false); await(manager);
             assertFalse(manager.readyTiles().iterator().next().data().voxyTile.surfaceComplete());
+            assertTrue(manager.readyTiles().iterator().next().data().voxyTile.features().isEmpty());
         } finally {}
     }
 
@@ -703,6 +727,46 @@ class PredictionVoxyLoadingIntegrationTest {
         }
     }
 
+    @Test void zoomReadmitsAFullQueueTargetAndPublishesPreciseSamplesWithoutAnotherGpuRequest() throws Exception {
+        try(var manager=manager(sampler(new AtomicInteger()),null)) {
+            field("unifiedVoxy").setBoolean(manager,true);
+            var source=(PredictionVoxySource)field("voxySource").get(manager);
+            var detailsField=PredictionVoxySource.class.getDeclaredField("details");detailsField.setAccessible(true);
+            var queue=new PredictionVoxyDetailQueue(1);detailsField.set(source,queue);
+            var parent=new PredictionTileKey(PROFILE.levelKey(),0,-1,5);
+            source.put(PredictionVoxySource.build(parent,newPreview(),10,256,manager.sampler(),
+                    PredictionVegetation.Tile.EMPTY,null));
+            long near=VoxyPredictionBridge.position(2,3,0,-1);
+            long target=VoxyPredictionBridge.position(2,0,0,-8);
+            var key=new PredictionTileKey(PROFILE.levelKey(),0,-8,1);
+            assertFalse(source.requestDetail(near,(x,z)->false));
+            assertFalse(source.requestDetail(target,(x,z)->false));
+            assertFalse(source.detailRequests().contains(new PredictionVoxySource.Detail(0,-8,1)));
+            assertEquals(1,queue.waiting());
+            var projection=new org.joml.Matrix4f().perspective((float)Math.toRadians(5),2,.1f,1000);
+            var view=PredictionWorkView.rendered(projection,new org.joml.Matrix4f(),
+                    new net.minecraft.world.phys.Vec3(32,80,0),new net.minecraft.world.phys.Vec3(0,0,-1),8000);
+            assertEquals(PredictionWorkView.VISIBLE,view.band(key,manager.layout(),null,-64,320));
+            assertEquals(PredictionWorkView.BACKGROUND,view.band(
+                    new PredictionTileKey(PROFILE.levelKey(),3,-1,1),manager.layout(),null,-64,320));
+            manager.setRenderWorkView(view);
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(15);
+            while(System.nanoTime()<deadline) {
+                invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},true);
+                invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());
+                var tile=manager.renderSnapshot().tiles().get(key);
+                if(tile!=null && tile.cellAxis()==64)break;
+                Thread.sleep(2);
+            }
+            await(manager);
+            var tile=manager.renderSnapshot().tiles().get(key);
+            assertNotNull(tile,manager.surfaceDiagnostics());assertEquals(64,tile.cellAxis());
+            assertTrue(source.detailRequests().contains(new PredictionVoxySource.Detail(0,-8,1)),
+                    "The cached desired snapshot includes targets admitted by asynchronous reprioritization");
+            assertTrue(source.requestDetail(target,(x,z)->false),"The next GPU retry observes already-published samples");
+        }
+    }
+
     @Test void scopeLoadingSwitchDefersNewSamplesButAllowsReadyDataAndResumesWithoutAnotherGpuRequest() throws Exception {
         var calls=new AtomicInteger();
         try(var manager=manager(sampler(calls),null)) {
@@ -725,11 +789,44 @@ class PredictionVoxyLoadingIntegrationTest {
         }
     }
 
+    @Test void observedSpyglassCreatesAndPublishesMissingTerrainWithoutAnyGpuCallback() throws Exception {
+        int distance=VSSClientConfig.CONFIG.predictionDistanceBlocks;
+        VSSClientConfig.CONFIG.predictionDistanceBlocks=1024;
+        var calls=new AtomicInteger();
+        try(var manager=manager(sampler(calls),null)) {
+            field("unifiedVoxy").setBoolean(manager,true);
+            field("cameraBlockX").setDouble(manager,32);field("cameraBlockY").setDouble(manager,1000);
+            var projection=new org.joml.Matrix4f().perspective((float)Math.toRadians(5),1.7f,.1f,1024);
+            var model=new org.joml.Matrix4f().lookAt(0,0,0,0,-936,-768,0,1,0);
+            var observation=new PredictionViewObservation().observe(projection,model,
+                    new net.minecraft.world.phys.Vec3(32,1000,0),1080,true,true,System.nanoTime());
+            manager.setRenderWorkView(observation.view());
+            var key=new PredictionTileKey(PROFILE.levelKey(),0,-12,0);
+            var source=(PredictionVoxySource)field("voxySource").get(manager);
+            assertTrue(source.detailRequests().isEmpty());assertTrue(manager.readyTiles().isEmpty());
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
+            while(System.nanoTime()<deadline) {
+                invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},true);
+                invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());
+                var tile=manager.renderSnapshot().tiles().get(key);
+                if(tile!=null && tile.cellAxis()==64)break;
+                Thread.sleep(2);
+            }
+            var tile=manager.renderSnapshot().tiles().get(key);
+            assertNotNull(tile,manager.surfaceDiagnostics());assertEquals(64,tile.cellAxis());
+            assertEquals(1,tile.spacingBlocks());assertTrue(calls.get()>0);
+            assertTrue(source.detailRequests().contains(new PredictionVoxySource.Detail(0,-12,0)));
+            assertNotNull(source.section(VoxyPredictionBridge.position(0,0,1,-24),(s,b)->1L<<27));
+        } finally {VSSClientConfig.CONFIG.predictionDistanceBlocks=distance;}
+    }
+
     private static void checkTile(PredictionTileManager manager,PredictionTileKey key) throws Exception {
         var tile=manager.readyTiles().iterator().next();
         assertEquals(key,tile.key()); assertNotNull(tile.data().voxyTile);
         assertTrue(tile.cellAxis()>0);
         var source=(PredictionVoxySource)field("voxySource").get(manager);
+        var tiles=PredictionVoxySource.class.getDeclaredField("tiles");tiles.setAccessible(true);
+        assertSame(tile.data().voxyTile,((Map<?,?>)tiles.get(source)).get(key));
         int x=Math.floorDiv(tile.baseBlockX(),512),z=Math.floorDiv(tile.baseBlockZ(),512);
         long[] data=source.section(VoxyPredictionBridge.position(4,x,0,z),(s,b)->1L<<27);
         assertNotNull(data); assertTrue(Arrays.stream(data).anyMatch(v->(v&(0xfffffL<<27))!=0));
@@ -768,6 +865,10 @@ class PredictionVoxyLoadingIntegrationTest {
     /** This fixture inspects a single prepared turn, so explicitly await its asynchronous hint handoff. */
     private static void refreshDetails(PredictionTileManager manager) throws Exception {
         invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},true);
+        // Demand now crosses the source monitor on the worker too. This fixture
+        // awaits that handoff; production ticks only poll and never wait here.
+        PredictionClientPreparation.WORKER.submit(()->{}).get(10,TimeUnit.SECONDS);
+        invoke(manager,"refreshVoxyDetails",new Class[]{boolean.class},false);
         var pipeline=(PredictionPlanningPipeline)field("planning").get(manager);
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
         while(pipeline.details.pending() && System.nanoTime()<deadline) {

@@ -34,6 +34,15 @@ final class PredictionWorkOrder {
         return 10_000 + band * 16 + stage * 4 + Math.min(3, Math.max(0, screenPriority / 1500));
     }
 
+    /** Fill the useful local region before spending its turns on detail or trees.
+     * Distant horizon work keeps distance ordering instead of imposing a global
+     * coverage barrier. View bands, focus and fair turns remain caller-owned. */
+    static int coveragePriority(double distanceSquared, int residentAxis, boolean surface, int screenPriority) {
+        int priority = nearPriority(distanceSquared, residentAxis, surface, screenPriority);
+        return residentAxis == 0 && !surface && distanceSquared <= 2048.0 * 2048
+                ? priority - 5_000 : priority;
+    }
+
     static int initialCellAxis(int lod) {
         // Large ancestors only establish coverage. Keep the denser first
         // preview for local tiles without charging it to the entire horizon.
@@ -89,8 +98,9 @@ final class PredictionWorkOrder {
 
     static boolean scoped(PredictionTileKey key, VssLodLayout layout, VssLodFocus focus) {
         VssLodFocus patch = terrainFocus(focus);
+        if (patch == null) return false;
         int span = layout.tileBlocks(key.lod());
-        return patch != null && patch.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
+        return patch.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
                 (key.tileX() + 1D) * span, (key.tileZ() + 1D) * span);
     }
 

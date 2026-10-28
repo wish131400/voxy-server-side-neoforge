@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('publicationRepairTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionParentLodTest.class','**/PredictionParentLodIntegrationTest.class'
+        include '**/PredictionPublicationIdentityTest.class','**/PredictionVoxelCacheTest.class'
+        include '**/VoxyPredictionNotificationTest.class','**/PredictionPublicationPerformanceTest.class'
+        include '**/PredictionNewWorldLoadingTest.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

@@ -327,6 +327,7 @@ impl Terrain {
 
     /// Work remains local to one bounded batch; no proof survives the caller.
     pub fn exterior_footprints(&self, requests: &[(i32, i32, i32, i32, i32)]) -> Result<Option<Vec<Option<Vec<u8>>>>> {
+        let _scope = crate::prof::Scope::new(&crate::prof::FOOTPRINT);
         if requests.len() > 8 { return Err("exterior batch size".into()); }
         if self.graph.requires_complete_column_order() {
             return Ok(None);

@@ -151,6 +151,7 @@ impl World {
     }
 
     fn display_points_impl(&self, points: &[(i32, i32)], reuse_exact: bool) -> Result<Vec<SurfaceColumn>> {
+        let _total_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[0]);
         self.check_active()?;
         self.display_queries[0].fetch_add(points.len() as u64, Ordering::Relaxed);
         if points.len() > 64
@@ -166,6 +167,7 @@ impl World {
         // Warm display grids return immediately, without probing the same
         // perimeter a second time or constructing chunk query groups.
         {
+            let _cache_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[1]);
             let cache = self
                 .display_columns
                 .lock()
@@ -179,12 +181,16 @@ impl World {
                 return Ok(rows);
             }
         }
-        if let Some(grid) = self.adaptive_display_grid(points)? {
+        let adaptive_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[2]);
+        let adaptive = self.adaptive_display_grid(points)?;
+        adaptive_scope.finish();
+        if let Some(grid) = adaptive {
             self.display_queries[2].fetch_add(1, Ordering::Relaxed);
             return Ok(grid);
         }
         let generation = self.color_generation.load(Ordering::Acquire);
         let mut result = vec![SurfaceColumn { values: [0; 10] }; points.len()];
+        let group_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[3]);
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
         {
             let cache = self
@@ -200,6 +206,7 @@ impl World {
                 }
             }
         }
+        group_scope.finish();
         // This workspace is used only by biome routing/record colors in Raw mode.
         // Density traversal keeps its separate Job workspace. Reuse one lazy
         // Raw workspace across chunk groups instead of allocating a full graph per group.
@@ -211,6 +218,7 @@ impl World {
         let mut sparse_work: Option<Job<'_>> = None;
         for ((cx, cz), indices) in groups {
             self.check_active()?;
+            let hint_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[4]);
             let eligible = !self.terrain.graph.requires_complete_column_order()
                 && !self.adjustments.contains_key(&(cx, cz));
             if biome_scratch.is_none() { biome_scratch = Some(self.terrain.graph.raw_scratch()?); }
@@ -222,7 +230,9 @@ impl World {
             let mut q = zoom_quart(self.zoom_seed, [cx * 16 + 8, t.sea_level + 1, cz * 16 + 8]);
             q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
             let hint = self.source.sample(&t.graph, q, scratch, &mut None);
+            hint_scope.finish();
             if !eligible || !self.display_hint_eligible(hint) {
+                let _fallback_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[7]);
                 self.display_queries[3].fetch_add(indices.len() as u64, Ordering::Relaxed);
                 let missing: Vec<_> = indices.iter().map(|&i| points[i]).collect();
                 for (i, row) in indices.into_iter().zip(self.surface_points(&missing)?) {
@@ -230,6 +240,7 @@ impl World {
                 }
                 continue;
             }
+            let job_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[5]);
             let mut job = if sparse_batch {
                 match sparse_work.take() {
                     Some(mut job) => { job.reset_display_chunk(cx * 16, cz * 16)?; job }
@@ -259,6 +270,7 @@ impl World {
             job.beard = self.adjustments.get(&(cx, cz));
             self.attach_tops(&mut job);
 
+            job_scope.finish();
             for i in indices {
                 self.check_active()?;
                 let (x, z) = points[i];
@@ -278,6 +290,7 @@ impl World {
                             self.display_queries[3].fetch_add(1, Ordering::Relaxed);
                             // Share the existing job instead of allocating a
                             // second context and redoing the same column walk.
+                            let _fallback_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[7]);
                             let display = job.display;
                             job.display = false;
                             self.prepare_exterior_columns(&mut job, &[(x, z)]);
@@ -302,6 +315,7 @@ impl World {
                 }
             }
         }
+        let _store_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[8]);
         let mut cache = self
             .display_columns
             .lock()
@@ -406,8 +420,12 @@ impl World {
         &self, x: i32, z: i32, job: &mut Job<'_>,
         scratch: &mut crate::density::Scratch,
     ) -> Result<Option<SurfaceColumn>> {
+        let _record_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[6]);
         let t = &self.terrain;
+        let boundary_scope=crate::prof::Scope::new(&crate::prof::DISPLAY[9]);
         let floor = job.density_surface(x, z).map_or(t.min_y, |y| y + 1);
+        boundary_scope.finish();
+        let biome_scope=crate::prof::Scope::new(&crate::prof::DISPLAY[10]);
         let (fluid_y, fluid) = t.preview_fluid(floor);
         if floor != t.min_y && !self.display_liquids_supported()
             && !job.display_fluid_band_matches(x, z, floor, fluid_y, fluid) {
@@ -417,16 +435,19 @@ impl World {
         q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
         let name = self.source.sample(&t.graph, q, scratch, &mut None);
         if !self.display_biome_at(name, x, z) { return Ok(None); }
-        // Check the visible liquid biome too: an underwater plains floor must
-        // not bypass the iceberg/special-surface fallback above it.
-        if fluid != 0 {
+        // Reuse the exact biome query already required by surface admission.
+        // Floor and liquid colors may use different quart Y: retain both identities.
+        let record_name = if fluid != 0 {
             let mut water_q = zoom_quart(self.zoom_seed, [x, fluid_y - 1, z]);
             water_q[1] = water_q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
-            if water_q != q && !self.display_biome_at(
-                self.source.sample(&t.graph, water_q, scratch, &mut None), x, z) {
-                return Ok(None);
-            }
-        }
+            if water_q != q {
+                let water_name=self.source.sample(&t.graph, water_q, scratch, &mut None);
+                if !self.display_biome_at(water_name,x,z) { return Ok(None); }
+                water_name
+            } else {name}
+        } else {name};
+        biome_scope.finish();
+        let material_scope=crate::prof::Scope::new(&crate::prof::DISPLAY[11]);
         let biome = self.biomes.get(name).ok_or("missing display biome")?;
         let materials = if floor == t.min_y {
             [self.palette.air; 3]
@@ -438,7 +459,9 @@ impl World {
         if floor != t.min_y && materials.iter().any(|&id| self.palette.is_air(id) || self.palette.fluid(id)) {
             return Ok(None);
         }
-        let row = self.record_surface(x, z, floor, fluid_y, fluid, materials, scratch, &mut None)?;
+        material_scope.finish();
+        let _color_scope=crate::prof::Scope::new(&crate::prof::DISPLAY[12]);
+        let row = self.record_surface_biome(x, z, floor, fluid_y, fluid, materials, record_name)?;
         self.display_queries[4].fetch_add(1, Ordering::Relaxed);
         Ok(Some(row))
     }
@@ -671,6 +694,26 @@ mod tests {
                 assert_eq!(actual.map(|v|v.values),expected.map(|v|v.values));
             }
         }
+    }
+
+    #[test]
+    fn resolved_color_biome_matches_an_independent_lookup_for_dry_and_liquid_columns() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
+        let read=|name:&str|serde_json::from_str::<Value>(&std::fs::read_to_string(root.join(name)).unwrap()).unwrap();
+        let mut doc=read("overworld.json");
+        for(k,f)in[("block_definitions","blocks.json"),("biomes","biomes.json"),("grass_colormap","grass.json"),("foliage_colormap","foliage.json")]{doc[k]=read(f);}
+        let world=World::new(0,0,doc).unwrap();let mut dry=0;let mut liquid=0;
+        let mut scratch=world.terrain.graph.raw_scratch().unwrap();
+        for i in 0..256 {
+            let(x,z)=(100000+i%16*64,100000+i/16*64);
+            let mut job=world.terrain.job(x,z,false).unwrap();job.display=true;
+            if let Some(row)=world.display_record(x,z,&mut job,&mut scratch).unwrap() {
+                let v=row.values;let expected=world.record_surface(x,z,v[0],v[1],v[2],[v[4]as u32,v[5]as u32,v[6]as u32],&mut scratch,&mut None).unwrap();
+                assert_eq!(row.values,expected.values,"point={x},{z}");
+                if v[2]==0 {dry+=1;}else{liquid+=1;}
+            }
+        }
+        assert!(dry>0 && liquid>0,"dry={dry},liquid={liquid}");
     }
 
     #[test]

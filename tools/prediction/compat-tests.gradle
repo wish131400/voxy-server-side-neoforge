@@ -1,5 +1,8 @@
 allprojects {
     tasks.withType(Test).configureEach {
+        if (providers.gradleProperty('vssFabricBiomeJar').isPresent()) {
+            systemProperty 'vss.fabricBiomeJar', providers.gradleProperty('vssFabricBiomeJar').get()
+        }
         if (providers.gradleProperty('vssMostructuresJar').isPresent()) {
             systemProperty 'vss.mostructuresJar', providers.gradleProperty('vssMostructuresJar').get()
         }

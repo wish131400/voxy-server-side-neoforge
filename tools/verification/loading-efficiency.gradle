@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('loadingEfficiencyTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionLoadingEfficiencyTest.class','**/PredictionEditedTerrainTest.class','**/PredictionSampleStoreTest.class'
+        include '**/PredictionFeatureMemoryTest.class','**/PredictionVoxyPreparationTest.class','**/PredictionVegetationTest.class'
+        include '**/PredictionMemoryLifecycleTest.class','**/PredictionScopedResidencyTest.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

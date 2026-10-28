@@ -29,8 +29,7 @@ final class PredictionVegetationDisplayCache {
             this.captures = captures;
             this.tile = tile;
             this.generation = generation;
-            // Includes cells, voxels, map entries and cached signature bytes.
-            bytes = 512L + tile.blocks().size() * 192L + tile.cells().size() * 96L
+            bytes = 512L + tile.bytes()
                     + sources.length * 48L + captures.length * 8L;
         }
 
@@ -105,7 +104,8 @@ final class PredictionVegetationDisplayCache {
     /** The per-column capture API shares the complete block publication used by rendering. */
     static PredictionVegetation.Tile merge(int x, int z, int span, int spacing, boolean trees,
             List<Source> sources, Predicate<BlockPos> captured) {
-        Map<BlockPos, BlockState> blocks = new HashMap<>();
+        long expected=0;for(var source:sources)expected+=source.blocks().size();
+        var blocks = new PredictionVegetationBlocks.Builder((int)Math.min(65536,expected));
         for (var source : sources) for (var entry : source.blocks().entrySet()) {
             var pos = entry.getKey(); var state = entry.getValue();
             if (pos.getX() < x - 1 || pos.getX() >= x + span + 1
@@ -115,7 +115,7 @@ final class PredictionVegetationDisplayCache {
             blocks.put(pos, state);
         }
         // Publish complete blocks; Voxy owns geometry reduction.
-        return PredictionVegetation.Tile.of(blocks, x, z, span, spacing, 1);
+        return PredictionVegetation.Tile.of(blocks.build(), x, z, span, spacing, 1);
     }
 
     void invalidate(int chunkX, int chunkZ) {

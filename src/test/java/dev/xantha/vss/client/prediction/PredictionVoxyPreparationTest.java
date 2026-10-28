@@ -9,13 +9,34 @@ import net.minecraft.world.level.block.Blocks;
 import org.junit.jupiter.api.*;
 
 class PredictionVoxyPreparationTest {
+    @Test void fullSectionsCannotEvictReservedFaceAndColumnWorkingSets() {
+        try(var source=new PredictionVoxySource(32768,256L*1024)) {
+            var tile=fixture(0,0,64,41);source.put(tile);
+            long face=VoxyPredictionBridge.position(3,0,0,0);
+            var expected=source.face(face,MAPPER,2);
+            long columns=(long)source.diagnostics().get("columnCacheBytes");
+            long faces=(long)source.diagnostics().get("faceCacheBytes");
+            assertTrue(columns>0);assertTrue(faces>0 && faces<=8448L);
+            for(int x=4;x<=24;x++) {
+                source.put(fixture(x*64,0,64,41+x));
+                source.section(VoxyPredictionBridge.position(0,x*2,1,0),MAPPER);
+            }
+            var diagnostics=source.diagnostics();
+            assertTrue((long)diagnostics.get("cacheEvictions")>0,"Exercise full-section byte pressure");
+            assertEquals(columns,diagnostics.get("columnCacheBytes"));
+            assertEquals(faces,diagnostics.get("faceCacheBytes"));
+            assertTrue((long)diagnostics.get("mappedBytes")<=(long)diagnostics.get("sectionCacheLimit"));
+            assertTrue((long)diagnostics.get("mappedBytes")+columns+(long)diagnostics.get("faceCacheBytes")<=256L*1024);
+            assertArrayEquals(expected,source.face(face,MAPPER,2));assertEquals(1L,source.diagnostics().get("faceCacheHits"));
+        }
+    }
     @Test void reducedFootprintHashesDoNotCollapseAdjacentGridCoordinates() throws Exception {
         Class<?> key=Arrays.stream(PredictionVoxySource.class.getDeclaredClasses())
                 .filter(c->c.getSimpleName().equals("ColumnKey")).findFirst().orElseThrow();
         var constructor=key.getDeclaredConstructors()[0];constructor.setAccessible(true);
         var columns=new PredictionVoxySource.Column[1];var hashes=new HashSet<Integer>();
         for(int z=0;z<64;z++)for(int x=0;x<64;x++)
-            hashes.add(constructor.newInstance(columns,256,MAPPER,4,x*4,z*4,x*4+3,z*4+3).hashCode());
+            hashes.add(constructor.newInstance(columns,256,MAPPER,4,x*4,z*4,x*4+3,z*4+3,true).hashCode());
         assertTrue(hashes.size()>4000,"Rectangular footprint keys must mix both axes: "+hashes.size());
     }
     @Test void indexedFeaturesMatchLinearSelectionAndPreserveOverlappingWriteOrder() {
@@ -37,9 +58,9 @@ class PredictionVoxyPreparationTest {
         System.out.printf(Locale.ROOT,"FEATURE_INDEX boxes=%d queries=100 selected=%d linearCandidates=%d%n",boxes.size(),candidates,boxes.size()*100);
     }
     @BeforeAll static void bootstrap() {ClientTerrainSamplerTest.bootstrapMinecraft();}
-    private static final VoxyPredictionBridge.Mapper MAPPER=(s,b)-> s.isAir()?15L<<56:
+    static final VoxyPredictionBridge.Mapper MAPPER=(s,b)-> s.isAir()?15L<<56:
             15L<<56 | (long)(s.is(Blocks.WATER)?2:s.is(Blocks.DIRT)?3:1)<<27 | (b.endsWith("desert")?1L<<47:0);
-    private static PredictionVoxySource.Tile fixture(int bx,int bz,int axis,int seed) {
+    static PredictionVoxySource.Tile fixture(int bx,int bz,int axis,int seed) {
         var random=new Random(seed);var columns=new PredictionVoxySource.Column[axis*axis];
         for(int i=0;i<columns.length;i++) {
             int top=1+random.nextInt(110),cave=1+random.nextInt(16);
@@ -55,7 +76,7 @@ class PredictionVoxyPreparationTest {
                 new PredictionVoxySource.Box(axis-3,70,axis-3,axis,130,axis,Blocks.DIRT.defaultBlockState())),4096,true,1);
     }
     /** Original rasterization, deliberately independent of the reduced-run implementation. */
-    private static long[] reference(PredictionVoxySource.Tile tile,long pos) {
+    static long[] reference(PredictionVoxySource.Tile tile,long pos) {
         long[] result=new long[32768];Arrays.fill(result,15L<<56);
         int step=1<<VoxyPredictionBridge.level(pos),span=32*step,
                 bx=VoxyPredictionBridge.x(pos)*span,by=VoxyPredictionBridge.y(pos)*span,bz=VoxyPredictionBridge.z(pos)*span;
@@ -133,6 +154,29 @@ class PredictionVoxyPreparationTest {
             assertEquals(1L,source.diagnostics().get("directSectionWrites"));assertArrayEquals(reference(tile,pos),target);
             Arrays.fill(target,-1);assertArrayEquals(reference(tile,pos),source.section(pos,MAPPER));
         }
+    }
+    @Test void faceDestinationsNeverExposeCachedStorageAndParallelSourcesKeepTheirOwnScratch() throws Exception {
+        var pool=java.util.concurrent.Executors.newFixedThreadPool(4);
+        try(var first=new PredictionVoxySource();var second=new PredictionVoxySource()) {
+            var a=fixture(-64,-64,64,41);var b=fixture(-64,-64,64,78);first.put(a);second.put(b);
+            var work=new ArrayList<java.util.concurrent.Callable<Void>>();
+            for(int n=0;n<4;n++) {
+                boolean one=(n&1)==0;var source=one?first:second;var tile=one?a:b;
+                work.add(()->{
+                    for(int lod=0;lod<=3;lod++) {
+                        long pos=VoxyPredictionBridge.position(lod,-1,0,-1);long[] expected=reference(tile,pos);
+                        var destination=new long[1024];
+                        for(int face=0;face<6;face++)for(int round=0;round<3;round++) {
+                            assertTrue(source.copyFace(pos,MAPPER,face,destination));
+                            for(int i=0;i<1024;i++)assertEquals(expected[VoxyFaceData.index(face,i)],destination[i]);
+                            Arrays.fill(destination,-1L);
+                        }
+                    }
+                    return null;
+                });
+            }
+            for(var result:pool.invokeAll(work))result.get(30,java.util.concurrent.TimeUnit.SECONDS);
+        } finally {pool.shutdownNow();}
     }
     @Test void reducedRunsAreSharedAcrossHeightsAndRetiredWithTheirMapperTileAndBudget() {
         var budget=new PredictionMemoryBudget(8*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime);
@@ -224,7 +268,7 @@ class PredictionVoxyPreparationTest {
         var columns=Arrays.stream(tile.columns()).map(c->new PredictionVoxySource.Column(List.copyOf(c.runs()),c.biome()))
                 .toArray(PredictionVoxySource.Column[]::new);
         return new PredictionVoxySource.Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),tile.axis(),tile.step(),
-                columns,features,tile.bytes(),complete,tile.cityFeatures());
+                columns,features,tile.terrainBytes(),complete,tile.cityFeatures());
     }
     @Test void identicalPublicationsKeepMappedSectionsAndReducedColumnsWhileDecorationRetainsTerrain() {
         try(var source=new PredictionVoxySource()) {
@@ -295,4 +339,49 @@ class PredictionVoxyPreparationTest {
             System.out.printf(java.util.Locale.ROOT,"COARSE_FACE_REPLAY baselineMs=%.3f optimizedMs=%.3f checksum=%d diagnostics=%s%n",baseline/1e6,optimized/1e6,checksum,source.diagnostics());
         }
     }
+
+    @Test void reverseIntervalsPreserveExplicitAirAndArbitraryOverlaps() {
+        var random=new Random(9123);long air=15L<<56;
+        for(int trial=0;trial<200;trial++) {
+            int count=100;int[] lo=new int[count],hi=new int[count];long[] values=new long[count];
+            var forward=new PredictionVoxyColumnRuns.Builder(air);
+            for(int i=0;i<count;i++) {lo[i]=random.nextInt(200)-100;hi[i]=lo[i]+random.nextInt(40);values[i]=i%3==0?air:1+i%7;forward.put(lo[i],hi[i],values[i]);}
+            var reverse=new PredictionVoxyColumnRuns.Builder(air);var coverage=new PredictionVoxyColumnRuns.Coverage();
+            for(int i=count-1;i>=0;i--)coverage.put(reverse,lo[i],hi[i],values[i]);
+            var expected=forward.build();var actual=reverse.build();
+            for(int y=-110;y<150;y++)assertEquals(expected.value(y,air),actual.value(y,air),"trial="+trial+" y="+y);
+        }
+    }
+    @Test void recentColumnHitsReceiveASecondChanceWithoutExtendingTheBudget() throws Exception {
+        try(var source=new PredictionVoxySource()) {
+            source.put(fixture(0,0,64,71));
+            source.section(VoxyPredictionBridge.position(1,0,0,0),MAPPER);
+            // A new Y section reads the same horizontal reductions.
+            source.section(VoxyPredictionBridge.position(1,0,1,0),MAPPER);
+            var field=PredictionVoxySource.class.getDeclaredField("reducedColumns");field.setAccessible(true);
+            int before=((Map<?,?>)field.get(source)).size();assertTrue(before>1);
+            var evict=PredictionVoxySource.class.getDeclaredMethod("evictColumn");evict.setAccessible(true);evict.invoke(source);
+            assertEquals(before-1,((Map<?,?>)field.get(source)).size());
+            assertTrue(((Number)source.diagnostics().get("columnSecondChances")).longValue()>0);
+        }
+    }
+
+    @Test void compactFacesReuseMorePlanesWithinTheSameByteBudget() {
+        try(var source=new PredictionVoxySource(32768,256L*1024)) {
+            var column=new PredictionVoxySource.Column(List.of(new PredictionVoxySource.Run(-64,256,
+                    Blocks.STONE.defaultBlockState())),"minecraft:plains");
+            var columns=new PredictionVoxySource.Column[1024];Arrays.fill(columns,column);
+            for(int n=0;n<24;n++) {
+                var key=new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,n*2,0,0);
+                source.put(new PredictionVoxySource.Tile(key,n*64,0,32,32,1,columns,List.of(),4096,true,0));
+                assertNotNull(source.face(VoxyPredictionBridge.position(0,n*2,0,0),MAPPER,2));
+            }
+            var before=source.diagnostics();assertEquals(24,before.get("cachedFaces"));
+            assertTrue((long)before.get("faceCacheBytes")<=(long)before.get("faceCacheLimit"));
+            for(int n=0;n<24;n++)assertNotNull(source.face(VoxyPredictionBridge.position(0,n*2,0,0),MAPPER,2));
+            assertEquals(before.get("faceBuilds"),source.diagnostics().get("faceBuilds"));
+            assertEquals(24L,source.diagnostics().get("faceCacheHits"));
+        }
+    }
+
 }

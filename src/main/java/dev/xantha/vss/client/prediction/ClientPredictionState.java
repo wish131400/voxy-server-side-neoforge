@@ -315,6 +315,7 @@ public final class ClientPredictionState {
     }
 
     public static void tick() {
+        VoxyPredictionBridge.updatePredictionState();
         Minecraft current = Minecraft.getInstance();
         if (!VoxyPredictionBridge.isLevelActive(current.level)) return;
         requestCurrentDimension(current, System.nanoTime());
@@ -462,11 +463,13 @@ public final class ClientPredictionState {
         }
     }
 
-    public static void onExactColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ,
-                                     VoxelColumnData data) {
-        onExactColumn(dimension, chunkX, chunkZ);
+    public static boolean onExactColumn(ResourceKey<Level> dimension, int chunkX, int chunkZ,
+                                        VoxelColumnData data) {
         PredictionTileManager manager = MANAGERS.get(dimension);
-        if (manager != null) manager.captureExactColumn(chunkX, chunkZ, data);
+        if (manager != null && !manager.captureExactColumn(chunkX, chunkZ, data)
+                && manager.requiresExactCapture(chunkX, chunkZ)) return false;
+        onExactColumn(dimension, chunkX, chunkZ);
+        return true;
     }
 
     public static boolean hasReadyTiles(ResourceKey<Level> dimension) {
@@ -651,12 +654,24 @@ public final class ClientPredictionState {
         return manager == null ? Set.of() : manager.drainCoverageHot();
     }
 
+    public static void onDirtyColumnsRetired(ResourceKey<Level> dimension, long[] positions) {
+        PredictionTileManager manager = MANAGERS.get(dimension);
+        if (manager != null) manager.retireExactColumns(positions);
+    }
+
     public static void onDirtyColumns(ResourceKey<Level> dimension, long[] packedPositions) {
+        onDirtyColumns(dimension, packedPositions, null);
+    }
+
+    public static void onDirtyColumns(ResourceKey<Level> dimension, long[] packedPositions, long[] timestamps) {
         if (packedPositions == null || packedPositions.length == 0) {
             return;
         }
         PredictionTileManager manager = MANAGERS.get(dimension);
-        if (manager != null) manager.invalidate(packedPositions);
+        if (manager != null) {
+            if (timestamps == null) manager.invalidate(packedPositions);
+            else manager.awaitExactColumns(packedPositions, timestamps);
+        }
         for (long packed : packedPositions) {
             if (dimension != null) {
                 CellKey key = new CellKey(dimension, packed);

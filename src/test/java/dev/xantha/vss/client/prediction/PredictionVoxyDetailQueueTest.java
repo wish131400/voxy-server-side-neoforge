@@ -6,6 +6,36 @@ import org.junit.jupiter.api.Test;
 import dev.xantha.vss.client.prediction.PredictionVoxySource.Detail;
 
 class PredictionVoxyDetailQueueTest {
+    @Test void completedWorkAdmitsDeferredDemandWithoutAnotherNativeRequest() {
+        var q=new PredictionVoxyDetailQueue(1);var near=new Detail(0,0,0);var far=new Detail(100,0,0);
+        q.request(near,false);q.drainChanges();
+        assertFalse(q.request(far,false));assertEquals(1,q.waiting());
+        assertTrue(q.request(near,true),"Completion publishes the newly admitted target");
+        assertEquals(Set.of(near,far),q.keys());assertEquals(1,q.pending());assertEquals(0,q.waiting());
+        assertEquals(java.util.List.of(far),q.drainChanges().added());
+    }
+    @Test void zoomPromotesDeferredAndPreviouslyEvictedTargetsWithoutGpuRetries() {
+        var jobs=new java.util.ArrayDeque<Runnable>();var q=new PredictionVoxyDetailQueue(2,jobs::add);
+        var a=new Detail(0,0,0);var b=new Detail(1,0,0);var target=new Detail(-100,-100,0);
+        q.request(a,false);q.request(b,false);assertFalse(q.request(target,false));q.drainChanges();
+        q.priorityAsync(0,0,d -> d.equals(target)?0:3);jobs.removeFirst().run();q.pollPriority();
+        assertEquals(Set.of(a,target),q.keys());assertEquals(2,q.pending());assertEquals(1,q.waiting());
+        var change=q.drainChanges();assertEquals(java.util.List.of(target),change.added());assertEquals(java.util.List.of(b),change.removed());
+        q.priorityAsync(0,0,d -> d.equals(b)?0:3);jobs.removeFirst().run();q.pollPriority();
+        assertEquals(Set.of(a,b),q.keys(),"Evicted identities remain available on the next view");
+        q.request(a,true);assertEquals(Set.of(a,b,target),q.keys());assertEquals(0,q.waiting());
+    }
+    @Test void asynchronousReorderingReplaysCompletionArrivalAndHorizonRetirement() {
+        var jobs=new java.util.ArrayDeque<Runnable>();var q=new PredictionVoxyDetailQueue(1,jobs::add);
+        var a=new Detail(0,0,0);var b=new Detail(10,0,0);var c=new Detail(20,0,0);var d=new Detail(30,0,0);
+        q.request(a,false);q.request(b,false);q.request(c,false);
+        q.priorityAsync(0,0,k -> k.equals(c)?0:3);
+        q.request(a,true);q.removeIf(c::equals);q.request(d,false);
+        jobs.removeFirst().run();q.pollPriority();
+        assertEquals(Set.of(a,b),q.keys());assertEquals(1,q.waiting());
+        q.request(b,true);assertEquals(Set.of(a,b,d),q.keys());assertFalse(q.keys().contains(c));
+        q.clear();q.priority(0,0,k -> 0);assertTrue(q.keys().isEmpty());assertEquals(0,q.waiting());
+    }
     @Test void membershipDeltasCancelOppositeChangesAndIgnoreCompletionRenewal() {
         var q=new PredictionVoxyDetailQueue(2);var a=new Detail(0,0,0);var b=new Detail(1,0,0);
         q.request(a,false);q.removeIf(a::equals);assertTrue(q.drainChanges().empty());
@@ -54,6 +84,49 @@ class PredictionVoxyDetailQueueTest {
         assertTrue(q.request(far,false));assertEquals(Set.of(resident,far),q.keys());
         assertTrue(q.request(resident,false),"Evicting a pending request changes desired membership even when the new request was a resident");
         assertEquals(Set.of(resident),q.keys());assertEquals(1,q.pending());assertEquals(0,q.residents());
+    }
+
+    @Test void completedColdDemandReleasesItsPinButSurvivesForTurnAndWarmReuse() {
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var q=new PredictionVoxyDetailQueue(1,Runnable::run,clock::get);
+        var cold=new Detail(10,0,0);var pending=new Detail(20,0,0);
+        q.request(cold,false);q.request(cold,true);q.request(pending,false);q.drainChanges();
+        q.priority(0,0,k->PredictionWorkView.BACKGROUND);
+        clock.set(PredictionCpuCachePolicy.COLD_AGE_NANOS-1);q.maintainResidency(k->true);
+        assertTrue(q.keys().contains(cold));
+        clock.incrementAndGet();q.maintainResidency(k->true);
+        assertFalse(q.keys().contains(cold));assertEquals(1,q.dormant());assertEquals(1,q.pending());
+        assertEquals(java.util.List.of(cold),q.drainChanges().removed());
+        q.priority(0,0,k->k.equals(cold)?PredictionWorkView.VISIBLE:PredictionWorkView.BACKGROUND);
+        q.maintainResidency(k->true);
+        assertTrue(q.keys().contains(cold));assertEquals(1,q.residents());assertEquals(1,q.pending());
+        assertEquals(java.util.List.of(cold),q.drainChanges().added());
+        q.priority(0,0,k->PredictionWorkView.BACKGROUND);clock.addAndGet(PredictionCpuCachePolicy.COLD_AGE_NANOS);
+        q.maintainResidency(k->false);q.drainChanges();
+        q.priority(0,0,k->k.equals(cold)?PredictionWorkView.VISIBLE:PredictionWorkView.BACKGROUND);
+        q.maintainResidency(k->false);
+        assertTrue(q.keys().contains(cold));assertEquals(0,q.residents());assertEquals(1,q.waiting());
+        q.request(cold,true);assertTrue(q.keys().contains(pending));assertEquals(0,q.waiting());
+        q.removeIf(k->true);clock.addAndGet(PredictionCpuCachePolicy.COLD_AGE_NANOS);
+        q.maintainResidency(k->false);assertTrue(q.keys().isEmpty());assertEquals(0,q.dormant());
+    }
+
+    @Test void displacedCompletionAndResidentRenewalHaveOneDemandLifecycle() {
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var q=new PredictionVoxyDetailQueue(1,Runnable::run,clock::get);
+        var a=new Detail(0,0,0);var b=new Detail(10,0,0);
+        q.request(a,false);q.request(a,true);q.request(b,false);
+        q.priority(0,0,k->k.equals(b)?0:3);q.drainChanges();
+        assertTrue(q.request(a,false),"Unready resident waiting behind active work releases its old completion pin");
+        assertFalse(q.keys().contains(a));assertEquals(0,q.residents());assertEquals(1,q.waiting());
+        q.maintainResidency(k->false);assertEquals(0,q.dormant());
+        assertTrue(q.request(a,true),"A displaced task can still complete through another valid plan demand");
+        assertTrue(q.keys().contains(a));assertEquals(1,q.residents());assertEquals(0,q.waiting());
+        q.priority(0,0,k->PredictionWorkView.BACKGROUND);clock.addAndGet(PredictionCpuCachePolicy.COLD_AGE_NANOS);
+        q.maintainResidency(k->false);assertEquals(0,q.residents());assertEquals(1,q.dormant());
+        q.priority(0,0,k->k.equals(a)?0:3);q.maintainResidency(k->false);
+        assertTrue(q.keys().contains(a));assertEquals(0,q.dormant());assertEquals(1,q.waiting());
+        q.request(a,true);assertTrue(q.keys().contains(b));assertEquals(1,q.residents());
     }
 
 }

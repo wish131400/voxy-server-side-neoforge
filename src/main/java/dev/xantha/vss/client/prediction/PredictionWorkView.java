@@ -71,6 +71,8 @@ final class PredictionWorkView {
         return rendered && now - observedAt < 1_000_000_000L;
     }
 
+    boolean hasProjection() { return rendered && pixelScale>0; }
+
     /** Exact geometry identity; observation age is deliberately not part of visibility. */
     boolean sameGeometry(PredictionWorkView other) {
         return other != null && x == other.x && y == other.y && z == other.z
@@ -85,7 +87,8 @@ final class PredictionWorkView {
         if (Math.abs(pixelScale - previous.pixelScale) > Math.max(1, previous.pixelScale) * .05) return true;
         double ax = x - previous.x, ay = y - previous.y, az = z - previous.z;
         if (ax * ax + ay * ay + az * az >= 64) return true;
-        if (dx * previous.dx + dy * previous.dy + dz * previous.dz < Math.cos(Math.toRadians(3))) return true;
+        double turn=Math.min(Math.toRadians(3),Math.atan(64/Math.max(1,pixelScale)));
+        if (dx * previous.dx + dy * previous.dy + dz * previous.dz < Math.cos(turn)) return true;
         for (int i = 0; i < planes.length; i += 4) {
             double a = planes[i] - previous.planes[i], b = planes[i + 1] - previous.planes[i + 1];
             double c = planes[i + 2] - previous.planes[i + 2];

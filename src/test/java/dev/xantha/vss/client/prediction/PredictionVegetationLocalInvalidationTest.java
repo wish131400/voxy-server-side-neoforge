@@ -266,13 +266,13 @@ class PredictionVegetationLocalInvalidationTest {
         var fixture = new Fixture();
         var level = new PredictionDecorationLevel(fixture.terrain, fixture.terrain, RegistryAccess.EMPTY, 5, 6);
         var position = new BlockPos(80, 100, 96);
-        assertThrows(UnsupportedOperationException.class,
+        assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class,
                 () -> level.setBlock(position.offset(-17, 0, 0), Blocks.OAK_LOG.defaultBlockState(), 2, 0));
         level.beginFeature();
         try {
             for (int i = 0; i < 65_536; i++)
                 assertTrue(level.setBlock(position, Blocks.OAK_LOG.defaultBlockState(), 2, 0));
-            assertThrows(UnsupportedOperationException.class,
+            assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class,
                     () -> level.setBlock(position, Blocks.OAK_LOG.defaultBlockState(), 2, 0));
             assertFalse(Thread.currentThread().isInterrupted());
         } finally { level.endFeature(false); }
@@ -359,7 +359,9 @@ class PredictionVegetationLocalInvalidationTest {
                     (x, z) -> Math.floorDiv(x, 16) == -2 && Math.floorDiv(z, 16) == -2);
             var rendering = vegetation.cachedDisplayForRendering(-32, -32, 32, spacing,
                     chunk -> chunk == key(-2, -2));
-            assertEquals(legacy, rendering);
+            assertEquals(legacy.blocks(), rendering.blocks());
+            assertEquals(legacy.cells(), rendering.cells());
+            assertEquals(legacy.maxY(), rendering.maxY());
         }
         var partial = vegetation.cachedDisplay(-32, -32, 32, 1, (x, z) -> x == -8);
         assertFalse(partial.blocks().containsKey(new BlockPos(-8, 100, -8)));

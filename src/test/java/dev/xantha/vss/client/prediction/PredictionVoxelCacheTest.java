@@ -19,6 +19,97 @@ class PredictionVoxelCacheTest {
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @AfterEach void cleanup() throws Exception { PredictionCacheTestFiles.awaitBackgroundClose(); }
 
+    @Test void completeLargeForestRestoresAcrossPageBoundariesAndWorldReentry() throws Exception {
+        var original=tile(key,32,true);var base=original.data().voxyTile;
+        var boxes=new PredictionVoxyBoxes.Builder();int count=539_773;
+        for(int i=0;i<count;i++)boxes.add(i%128,64+i/16384,i/128%128,
+                i%128+1,65+i/16384,i/128%128+1,Blocks.OAK_LEAVES.defaultBlockState());
+        original.data().voxyTile=new PredictionVoxySource.Tile(key,base.baseX(),base.baseZ(),base.span(),base.axis(),base.step(),
+                base.columns(),boxes.build(),base.terrainBytes(),true,0);
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            assertTrue(disk.writeVoxelsLater(lease,original,3,identity).get(15,TimeUnit.SECONDS),"A large complete forest must not reject the entire voxel record");
+        }
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            var saved=disk.readVoxels(lease,key,3,identity);assertNotNull(saved);
+            assertEquals(count,saved.voxels().features().size());assertTrue(saved.voxels().surfaceComplete());
+            assertEquals(original.data().voxyTile.features(),saved.voxels().features());
+            byte[] encoded=PredictionCacheTestFiles.read(disk,diskKey());
+            PredictionCacheTestFiles.write(disk,diskKey(),Arrays.copyOf(encoded,encoded.length/2));
+            assertNull(disk.readVoxels(lease,key,3,identity),"Partial pages must fall back atomically, never expose a partial forest");
+        }
+    }
+
+    @Test void duplicateContentSharesPendingWriteAndCommittedResultButInvalidationAndSettingsStillRewrite() throws Exception {
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey());var gate=new Gate()) {
+            var first=disk.writeVoxelsLater(lease,tile(key,32,true),3,identity);
+            var same=disk.writeVoxelsLater(lease,tile(key,32,true),3,identity);
+            assertSame(first,same,"Identical immutable data must share pending persistence");
+            gate.release();assertTrue(first.get(5,TimeUnit.SECONDS));
+            assertSame(first,disk.writeVoxelsLater(lease,tile(key,32,true),3,identity));
+            assertTrue(disk.diagnostics().contains("unchangedVoxelWrites=2"));
+            assertTrue(disk.writeVoxelsLater(lease,tile(key,32,true),4,identity).get(5,TimeUnit.SECONDS));
+            disk.invalidate(List.of(diskKey()));disk.flush();
+            try(var fresh=disk.lease(diskKey())) {
+                assertTrue(disk.writeVoxelsLater(fresh,tile(key,32,true),4,identity).get(5,TimeUnit.SECONDS));
+                assertNotNull(disk.readVoxels(fresh,key,4,identity));
+            }
+        }
+    }
+    @Test void restoredUnchangedVoxelsDoNotEnterCompressionAgain() throws Exception {
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            assertTrue(disk.writeVoxelsLater(lease,tile(key,32,true),3,identity).get(5,TimeUnit.SECONDS));
+        }
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            var data=disk.readVoxels(lease,key,3,identity);assertNotNull(data);
+            var restored=data.restore(123,false);assertNotNull(restored.data().cacheContentIdentity);
+            assertTrue(disk.writeVoxelsLater(lease,restored,3,identity).get(5,TimeUnit.SECONDS));
+            assertTrue(disk.diagnostics().contains("deferredEncodes=0"));
+            assertTrue(disk.diagnostics().contains("unchangedVoxelWrites=1"));
+        }
+    }
+
+    @Test void emptyAndPartialFinalFeaturePagesRoundTrip() throws Exception {
+        for(int count:new int[]{0,PredictionVoxelCache.FEATURE_PAGE_SIZE,PredictionVoxelCache.FEATURE_PAGE_SIZE+1}) {
+            var original=tile(key,8,true);var base=original.data().voxyTile;var builder=new PredictionVoxyBoxes.Builder();
+            for(int i=0;i<count;i++)builder.add(i,64,0,i+1,65,1,Blocks.OAK_LOG.defaultBlockState());
+            original.data().voxyTile=new PredictionVoxySource.Tile(key,base.baseX(),base.baseZ(),base.span(),base.axis(),base.step(),base.columns(),builder.build(),base.terrainBytes(),true,0);
+            try(var disk=new PredictionDiskCache(directory.resolve("count-"+count),77);var lease=disk.lease(diskKey())) {
+                assertTrue(disk.writeVoxelsLater(lease,original,3,identity).get(5,TimeUnit.SECONDS));
+                assertEquals(count,disk.readVoxels(lease,key,3,identity).voxels().features().size());
+            }
+        }
+    }
+
+    @Test void invalidPageCountsAreRejectedAndVersionTenRecordsRemainReadable() throws Exception {
+        var original=tile(key,8,true);
+        try(var disk=new PredictionDiskCache(directory,77)) {
+            var bytes=new java.io.ByteArrayOutputStream();
+            try(var out=new java.io.DataOutputStream(bytes)) {PredictionVoxelCache.write(out,PredictionVoxelCache.Data.snapshot(original),3,identity,null,disk);}
+            byte[] raw=bytes.toByteArray();int pageAt;
+            try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(raw))) {
+                in.readInt();in.readInt();in.skipNBytes(32);assertFalse(in.readBoolean());
+                in.readInt();in.readBoolean();in.readInt();in.readInt();in.readInt();
+                int states=in.readInt();for(int i=0;i<states;i++)in.readUTF();
+                int biomes=in.readInt();for(int i=0;i<biomes;i++)in.readUTF();
+                for(int i=0;i<64;i++){in.readInt();int runs=in.readInt();in.skipNBytes(runs*12L);}
+                assertEquals(2,in.readInt());pageAt=raw.length-in.available();
+            }
+            for(int invalid:new int[]{0,-1,3,PredictionVoxelCache.FEATURE_PAGE_SIZE+1,Integer.MAX_VALUE}) {
+                var corrupt=raw.clone();java.nio.ByteBuffer.wrap(corrupt).putInt(pageAt,invalid);
+                try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(corrupt))) {
+                    assertThrows(java.io.IOException.class,()->PredictionVoxelCache.read(in,key,3,identity,null,disk,11));
+                }
+            }
+            var legacy=new byte[raw.length-4];System.arraycopy(raw,0,legacy,0,pageAt);
+            System.arraycopy(raw,pageAt+4,legacy,pageAt,raw.length-pageAt-4);
+            try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(legacy))) {
+                var restored=PredictionVoxelCache.read(in,key,3,identity,null,disk,10);
+                assertEquals(original.data().voxyTile.features(),restored.voxels().features());
+                assertEquals(-1,in.read());
+            }
+        }
+    }
+
     @Test void completeVoxelRoundTripPreservesStatesFeaturesBiomesAndRefinementInputs() throws Exception {
         var original = tile(key,32,true);
         var before = new PredictionCacheMappings(List.of("minecraft:plains","minecraft:forest"),List.of(),List.of());

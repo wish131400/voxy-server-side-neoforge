@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('newWorldLoadingTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionNewWorldLoadingTest.class','**/PredictionVoxyPreparationTest.class'
+        include '**/PredictionVoxySourceTest.class','**/VoxyPredictionNotificationTest.class'
+        include '**/PredictionPlanningPipelineTest.class','**/PredictionPlanningValidityTest.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

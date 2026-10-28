@@ -189,6 +189,9 @@ struct ColumnCache {
 }
 pub struct World {
     pub terrain: Terrain,
+    // Dimension build bounds and noise generation bounds are independent (Nether: 256/128).
+    decoration_min_y: i32,
+    decoration_height: i32,
     pub palette: Palette,
     pub document: Value,
     source: BiomeSource,
@@ -241,6 +244,14 @@ impl World {
     }
     pub fn new_with_palette(seed: i64, zoom_seed: i64, document: Value, shared: Option<Palette>) -> Result<Self> {
         let mut terrain = Terrain::from_document(seed, &document)?;
+        let (decoration_min_y, decoration_height) = if let Some(bounds) = document.get("vss_dimension_bounds") {
+            let min = crate::density::integer(bounds, "min_y")?;
+            let height = crate::density::integer(bounds, "height")?;
+            if !(1..=4096).contains(&height) || min.checked_add(height).is_none() {
+                return Err("invalid dimension build bounds".into());
+            }
+            (min, height)
+        } else { (terrain.min_y, terrain.height) };
         let mut palette = match shared { Some(p) => p, None => Palette::from_json(&document["block_definitions"])? };
         if let Some(states) = document.get("input_states") {
             for state in states.as_array().ok_or("invalid input state table")? {
@@ -315,6 +326,7 @@ impl World {
             !matches!(name.as_str(),"minecraft:eroded_badlands"|"minecraft:frozen_ocean"|"minecraft:deep_frozen_ocean")
                 && surface.display_safe_for_biome(&palette,Some(name))).cloned().collect();
         Ok(Self {
+            decoration_min_y, decoration_height,
             terrain,
             palette,
             document,
@@ -701,11 +713,18 @@ impl World {
     fn record_surface(&self,x:i32,z:i32,floor:i32,fluid_y:i32,fluid:i32,
         materials:[StateId;3],scratch:&mut crate::density::Scratch,last:&mut Option<usize>) -> Result<SurfaceColumn> {
         let t=&self.terrain;
-        let [top,under,deep]=materials;
         let p = [x, if fluid != 0 { fluid_y - 1 } else { floor }, z];
         let mut q = zoom_quart(self.zoom_seed, p);
         q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
         let name = self.source.sample(&t.graph, q, scratch, last);
+        self.record_surface_biome(x,z,floor,fluid_y,fluid,materials,name)
+    }
+    /// Reuse a biome already resolved at precisely the record's color position.
+    fn record_surface_biome(&self,x:i32,z:i32,floor:i32,fluid_y:i32,fluid:i32,
+        materials:[StateId;3],name:&str) -> Result<SurfaceColumn> {
+        let t=&self.terrain;
+        let [top,under,deep]=materials;
+        let p = [x, if fluid != 0 { fluid_y - 1 } else { floor }, z];
         let b = self.biomes.get(name).ok_or("missing surface biome")?;
         let cold = self.colors.temperature(b, p) < 0.15;
         let rain = self.document["biomes"][name]["has_precipitation"]
@@ -1262,7 +1281,7 @@ impl World {
             return Err("proxy origin outside range".into());
         }
         let t = &self.terrain;
-        let origin = [(cx - 2) * 16, t.min_y, (cz - 2) * 16];
+        let origin = [(cx - 2) * 16, self.decoration_min_y, (cz - 2) * 16];
         // Collect the column summaries first: the proxy computes every cell from
         // them on demand instead of materialising an 80 x height x 80 array
         // (about 9.4 MiB at height 384). Flatten the entire region in
@@ -1285,14 +1304,15 @@ impl World {
             origin,
             80,
             80,
-            t.height as usize,
+            self.decoration_height as usize,
             self.palette.clone(),
             summaries,
         )?;
         volume.write_bounds = Some((
-            [cx * 16 - 16, t.min_y, cz * 16 - 16],
-            [cx * 16 + 32, t.min_y + t.height, cz * 16 + 32],
+            [cx * 16 - 16, self.decoration_min_y, cz * 16 - 16],
+            [cx * 16 + 32, self.decoration_min_y + self.decoration_height, cz * 16 + 32],
         ));
+        volume.proxy_base_bounds(t.min_y, t.height);
         volume.write_budget = 65536;
         Ok(volume)
     }
@@ -1304,16 +1324,17 @@ impl World {
         let owner = Arc::clone(self);
         let t = &self.terrain;
         let mut volume = Volume::lazy_proxy(
-            [(cx - 2) * 16, t.min_y, (cz - 2) * 16], 80, 80, t.height as usize,
+            [(cx - 2) * 16, self.decoration_min_y, (cz - 2) * 16], 80, 80, self.decoration_height as usize,
             self.palette.clone(), Box::new(move |x, z| {
                 let columns = owner.surface_columns(cx - 2 + x as i32, cz - 2 + z as i32)?;
                 Ok(Arc::new(columns.iter().map(|column| column.values).collect()))
             }),
         )?;
         volume.write_bounds = Some((
-            [cx * 16 - 16, t.min_y, cz * 16 - 16],
-            [cx * 16 + 32, t.min_y + t.height, cz * 16 + 32],
+            [cx * 16 - 16, self.decoration_min_y, cz * 16 - 16],
+            [cx * 16 + 32, self.decoration_min_y + self.decoration_height, cz * 16 + 32],
         ));
+        volume.proxy_base_bounds(t.min_y, t.height);
         volume.write_budget = 65536;
         Ok(volume)
     }
@@ -1328,7 +1349,7 @@ impl World {
         let t = &self.terrain;
         let ox = (cx - 2) * 16;
         let oz = (cz - 2) * 16;
-        let mut volume = Volume::paged_proxy([ox, t.min_y, oz], 80, 80, t.height as usize,
+        let mut volume = Volume::paged_proxy([ox, self.decoration_min_y, oz], 80, 80, self.decoration_height as usize,
             self.palette.clone(), 4, Box::new(move |px, pz| {
                 owner.check_active()?;
                 let points: Vec<_> = (0..16).map(|i|
@@ -1336,8 +1357,9 @@ impl World {
                 let columns = owner.decoration_points(&points,display)?;
                 Ok(Arc::new(columns.iter().map(|column| column.values).collect()))
             }))?;
-        volume.write_bounds = Some(([cx*16-16,t.min_y,cz*16-16],
-            [cx*16+32,t.min_y+t.height,cz*16+32]));
+        volume.write_bounds = Some(([cx*16-16,self.decoration_min_y,cz*16-16],
+            [cx*16+32,self.decoration_min_y+self.decoration_height,cz*16+32]));
+        volume.proxy_base_bounds(t.min_y, t.height);
         volume.write_budget = 65536;
         Ok(volume)
     }

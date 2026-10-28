@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('materialWorkspaceTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionMaterialWorkspaceTest.class','**/PredictionMaterialReplayTest.class'
+        include '**/PredictionVoxyPreparationTest.class','**/VoxySectionDataTest.class'
+        include '**/VoxySectionReplayTest.class'
+        forkEvery=1; maxHeapSize='2G'
+        testLogging {events 'passed','failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

@@ -201,7 +201,8 @@ class RustDecorationReuseTest {
             assertEquals(Blocks.OAK_LOG.defaultBlockState(), level.getBlockState(position));
             level.endFeature(false);
             assertEquals(original, level.getBlockState(position));
-            assertThrows(UnsupportedOperationException.class, () -> level.getBlockState(new BlockPos(48, 64, 0)));
+            assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class,
+                    () -> level.getBlockState(new BlockPos(48, 64, 0)));
             sampler.close();
             assertThrows(java.util.concurrent.CancellationException.class, () -> level.getBlockState(position));
         }

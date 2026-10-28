@@ -84,8 +84,12 @@ public final class PredictionRenderer {
     static Map<String,Object> performanceSnapshot() {
         var level = Minecraft.getInstance().level;
         boolean active = level != null && VoxyPredictionBridge.active(level.dimension());
+        var observed=observations.current();
+        Map<String,Object> projection=observed==null ? Map.of() : Map.of(
+                "scale",observed.scale(),"scoping",observed.scoping(),"unified",observed.unified(),
+                "ageSeconds",Math.max(0,System.nanoTime()-observed.observedAt())/1e9);
         return Map.of("renderState", Map.of("backend", "voxy", "active", active,
-                "gpuTimingAvailable", false, "voxyOverlay", VoxyPredictionBridge.diagnostics()));
+                "projection",projection,"gpuTimingAvailable", false, "voxyOverlay", VoxyPredictionBridge.diagnostics()));
     }
 
     /** Invalidates frame demand when the world or resource identity changes. */

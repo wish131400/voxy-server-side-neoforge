@@ -39,6 +39,7 @@ final class PredictionRegionStorage implements AutoCloseable {
 
     record Record(byte[] bytes, boolean legacy) { }
     private record Entry(long offset, int length, byte[] header, boolean deleted) { }
+    private static final Entry TOMBSTONE = new Entry(0,0,new byte[36],true);
     private record RegionAddress(int kind, int detail, int x, int z) { }
     private record RegionPaths(RegionAddress address, Path region, Path legacyDirectory) {
         boolean matches(PredictionDiskCache.Key key) {
@@ -215,6 +216,32 @@ final class PredictionRegionStorage implements AutoCloseable {
         return failures;
     }
 
+    /** The serial commit worker calls this while surface-coordinate leases are blocked.
+     * Discover only real namespaces; never cache absence across batches or sessions. */
+    Map<Long, IOException> deleteSurfaces(Set<Long> columns) {
+        var failures = new HashMap<Long, IOException>();
+        if (columns.isEmpty()) return failures;
+        var keys = new ArrayList<PredictionDiskCache.Key>();
+        try {
+            for (String directory : deletionEntries(root)) {
+                if (!directory.startsWith("1-")) continue;
+                int settings;
+                try { settings = Integer.parseInt(directory.substring(2)); }
+                catch (NumberFormatException ignored) { continue; }
+                if (!directory.equals("1-" + settings)) continue;
+                for (long column : columns)
+                    keys.add(PredictionDiskCache.Key.surface((int)(column >> 32),(int)column,settings));
+            }
+            for (var entry : deleteAll(keys).entrySet()) {
+                var key = entry.getKey();
+                failures.put((long)key.x() << 32 | key.z() & 0xffffffffL,entry.getValue());
+            }
+        } catch (IOException failure) {
+            for (long column : columns) failures.put(column,failure);
+        }
+        return failures;
+    }
+
     private Set<String> deletionEntries(Path directory) throws IOException {
         deletionDirectoryScans++;
         var entries = new HashSet<String>();
@@ -232,6 +259,9 @@ final class PredictionRegionStorage implements AutoCloseable {
             if (region != null) pin(region);
         }
         if (region == null && directory.contains(paths.region().getFileName().toString())) {
+            // Deletion needs only the requested slots. Do not populate/evict the
+            // 32-handle read cache or decode 1024 entries for a few tombstones.
+            if (deleteColdRegion(paths,keys,directory)) return;
             try { region = region(paths.region(), false); }
             catch (CorruptRegionException corrupt) { region = region(paths.region(), true); }
         }
@@ -261,6 +291,44 @@ final class PredictionRegionStorage implements AutoCloseable {
             if (region != null) discard(region);
             throw failure;
         } finally { release(region); }
+    }
+
+    private boolean deleteColdRegion(RegionPaths paths, List<PredictionDiskCache.Key> keys,
+                                     Set<String> directory) throws IOException {
+        try (var file = FileChannel.open(paths.region(),StandardOpenOption.READ,StandardOpenOption.WRITE)) {
+            var header = ByteBuffer.allocate(HEADER_BYTES);
+            long size = file.size();
+            if (size < DATA_START) return false; // Use the existing corrupt-region repair path.
+            readFully(file,header,0);header.flip();
+            if (header.getInt()!=MAGIC || header.getInt()!=VERSION || header.getInt()!=SLOTS
+                    || header.getInt()!=ENTRY_BYTES) return false;
+            Set<String> legacy = directory.contains(paths.legacyDirectory().getFileName().toString())
+                    ? deletionEntries(paths.legacyDirectory()) : Set.of();
+            var oldFiles = new ArrayList<Path>();
+            byte[] bytes = new byte[ENTRY_BYTES];
+            var buffer = ByteBuffer.wrap(bytes);
+            var crc = new CRC32();
+            boolean changed = false;
+            deletionRegionGroups++;
+            for (var key : keys) {
+                int slot = slot(key);
+                buffer.clear();readFully(file,buffer,HEADER_BYTES+(long)slot*ENTRY_BYTES);
+                Entry entry = decode(slot,bytes,0,size,buffer,crc);
+                String name = key.x()+"_"+key.z()+".vpd";
+                boolean hasLegacy = legacy.contains(name);
+                if ((entry!=null && !entry.deleted) || entry==null && hasLegacy) {
+                    writeFully(file,ByteBuffer.wrap(encode(slot,TOMBSTONE)),HEADER_BYTES+(long)slot*ENTRY_BYTES);
+                    changed = true;
+                }
+                if (hasLegacy) oldFiles.add(paths.legacyDirectory().resolve(name));
+            }
+            if (changed) { file.force(false);deletionForces++; }
+            for (var old : oldFiles) Files.deleteIfExists(old);
+            if (changed && size-DATA_START>=COMPACT_MIN_WASTE) synchronized(this) {
+                if (maintenance.size()<MAX_MAINTENANCE) maintenance.add(paths.region());
+            }
+            return true;
+        }
     }
 
     boolean migrate(PredictionDiskCache.Key key) throws IOException {
@@ -321,7 +389,7 @@ final class PredictionRegionStorage implements AutoCloseable {
     private Region loadRegion(Path path, boolean create) throws IOException {
         if (!Files.exists(path)) {
             if (!create) return null;
-            Files.createDirectories(path.getParent());
+            if (!Files.isDirectory(path.getParent())) Files.createDirectories(path.getParent());
             Path temporary = Files.createTempFile(path.getParent(), "region-init-", ".tmp");
             try {
                 try (var f = new RandomAccessFile(temporary.toFile(), "rw")) { initialize(f); f.getChannel().force(true); }
@@ -422,20 +490,19 @@ final class PredictionRegionStorage implements AutoCloseable {
         return bytes;
     }
 
-    private static Entry decode(int slot, byte[] bytes, long fileSize) {
+    private static Entry decode(int slot, byte[] bytes, int start, long fileSize, ByteBuffer buffer, CRC32 crc) {
         boolean empty = true;
-        for (byte b : bytes) if (b != 0) { empty = false; break; }
+        for (int i=start;i<start+ENTRY_BYTES;i++) if (bytes[i] != 0) { empty = false; break; }
         if (empty) return null;
-        Entry invalid = new Entry(0, 0, new byte[36], true);
-        CRC32 crc = new CRC32(); crc.update(bytes, 0, ENTRY_BYTES - 4);
-        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        crc.reset();crc.update(bytes, start, ENTRY_BYTES - 4);
+        buffer.position(start);
         int id = buffer.getInt(), state = buffer.getInt();
         long offset = buffer.getLong(); int length = buffer.getInt();
-        byte[] header = new byte[36]; buffer.get(header);
-        if (id != slot + 1 || (int) crc.getValue() != buffer.getInt(ENTRY_BYTES - 4)) return invalid;
-        if (state == 2) return invalid;
+        if (id != slot + 1 || (int) crc.getValue() != buffer.getInt(start+ENTRY_BYTES - 4)) return TOMBSTONE;
+        if (state == 2) return TOMBSTONE;
         if (state != 1 || offset < DATA_START || length <= 0 || length > MAX_RECORD_BYTES
-                || offset > fileSize - length) return invalid;
+                || offset > fileSize - length) return TOMBSTONE;
+        byte[] header = Arrays.copyOfRange(bytes,start+20,start+56);
         return new Entry(offset, length, header, false);
     }
 
@@ -621,10 +688,11 @@ final class PredictionRegionStorage implements AutoCloseable {
                 if (header.getInt() != MAGIC || header.getInt() != VERSION
                         || header.getInt() != SLOTS || header.getInt() != ENTRY_BYTES) throw new CorruptRegionException();
                 byte[] index = new byte[SLOTS * ENTRY_BYTES];
-                readFully(file, ByteBuffer.wrap(index), HEADER_BYTES);
+                var buffer = ByteBuffer.wrap(index);
+                readFully(file, buffer, HEADER_BYTES);
+                var crc = new CRC32();
                 for (int slot = 0; slot < SLOTS; slot++) {
-                    Entry entry = decode(slot, Arrays.copyOfRange(index, slot * ENTRY_BYTES,
-                            (slot + 1) * ENTRY_BYTES), fileSize);
+                    Entry entry = decode(slot,index,slot*ENTRY_BYTES,fileSize,buffer,crc);
                     entries[slot] = entry;
                     if (entry != null && !entry.deleted) liveBytes += entry.length;
                 }

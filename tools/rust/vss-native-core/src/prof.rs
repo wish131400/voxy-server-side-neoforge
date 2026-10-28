@@ -162,11 +162,20 @@ impl Counters {
     }
 }
 
+/// Batch/column boundary timers only; disabled completely in shipping builds.
+pub static DISPLAY: [AtomicU64; 13] = [const {AtomicU64::new(0)}; 13];
+pub fn display_snapshot() -> Vec<(&'static str,u64)> {
+    ["display_total","cache_lookup","adaptive","grouping","route_hint","job_setup","density_record","exact_fallback","cache_store","density_boundary","biome_policy","materials","record_colors"]
+        .into_iter().zip(DISPLAY.iter().map(|c|c.load(Ordering::Relaxed))).collect()
+}
+pub static FOOTPRINT: AtomicU64 = AtomicU64::new(0);
 /// Process-wide totals. Offline benchmarks are the intended reader.
 pub static SURFACE: Counters = Counters::new();
 
 /// Clear every section total and both event counters.
 pub fn reset() {
+    for counter in &DISPLAY {counter.store(0,Ordering::Relaxed);}
+    FOOTPRINT.store(0,Ordering::Relaxed);
     for (_, slot) in SURFACE.sections() {
         slot.store(0, Ordering::Relaxed);
     }

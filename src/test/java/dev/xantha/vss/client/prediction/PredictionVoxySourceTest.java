@@ -249,6 +249,36 @@ class PredictionVoxySourceTest {
         }
     }
 
+    @Test void partialPlacementSnapshotsAccumulateWithoutLruEvictionDeletingPublishedPlants() {
+        var ground=tile(0,0,0,32,1,4);
+        var a=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.DIRT.defaultBlockState());
+        var b=new PredictionVoxySource.Box(12,4,12,13,10,13,Blocks.STONE.defaultBlockState());
+        var first=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(a),320);
+        var next=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(b),320);
+        var retained=next.retainFeatures(first);
+        assertEquals(Set.of(a,b),new HashSet<>(retained.features()));
+        assertFalse(retained.surfaceComplete());
+        for(int i=0;i<20;i++)retained=(i%2==0?first:next).retainFeatures(retained);
+        assertEquals(2,retained.features().size(),"Repeated partial publications must not duplicate retained boxes");
+        var empty=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(),256,true,0);
+        assertSame(empty,empty.retainFeatures(retained),"Completed empty still replaces all earlier partial results");
+    }
+
+    @Test void partialPlacementHandoffUsesFreshStateAndCityWithoutReorderingUnchangedPlants() {
+        var ground=tile(0,0,0,32,1,4);
+        var oldCity=new PredictionVoxySource.Box(1,4,1,4,12,4,Blocks.STONE.defaultBlockState());
+        var city=new PredictionVoxySource.Box(2,4,2,5,12,5,Blocks.STONE.defaultBlockState());
+        var a=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.DIRT.defaultBlockState());
+        var b=new PredictionVoxySource.Box(12,4,12,13,10,13,Blocks.STONE.defaultBlockState());
+        var old=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(oldCity,a,b),320,false,1);
+        var fresh=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(city,b,a),320,false,1);
+        var retained=fresh.retainFeatures(old);
+        assertEquals(List.of(city,a,b),retained.features(),"Source-map iteration order must not churn published geometry");
+        var changed=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.STONE.defaultBlockState());
+        var next=new PredictionVoxySource.Tile(ground.key(),0,0,32,32,1,ground.columns(),List.of(changed),320);
+        assertEquals(List.of(changed,b),next.retainFeatures(retained).features());
+    }
+
     @Test void completedChildReplacesPreviewAndCompletedEmptyDoesNotRegrowParentTrees() {
         try (var source = new PredictionVoxySource()) {
             var parent = tile(0,0,1,32,2,4);
@@ -299,7 +329,7 @@ class PredictionVoxySourceTest {
         fresh=new PredictionVoxySource.Tile(fresh.key(),-32,-32,32,32,1,fresh.columns(),List.of(newCity),320,false,1);
         var retained=fresh.retainFeatures(previous);
         assertEquals(List.of(newCity,tree),retained.features());
-        assertTrue(retained.surfaceComplete()); assertEquals(384+retained.featureIndex().bytes(),retained.bytes());
+        assertTrue(retained.surfaceComplete()); assertEquals(256L+retained.columns().length*4L+retained.boxes().bytes()+retained.featureIndex().bytes(),retained.bytes());
         assertTrue(PredictionVoxelData.forVoxy(retained).voxyTile.surfaceComplete());
     }
     @Test void coarsePredictionRemainsAvailableDuringPartialFineArrival() {

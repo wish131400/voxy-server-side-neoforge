@@ -384,6 +384,37 @@ class LodRequestManagerStrictOrderTest {
                 manager.processColumnIfCurrent(request,Level.OVERWORLD,5,5,99,new int[0],
                     () -> { fail("old network reply must not overwrite local import"); return true; }));
     }
+    @Test void dirtyRefreshInRetentionBufferStillGetsFetched() throws Exception {
+        long buffered=PositionUtil.packPosition(140,0);
+        manager.onDirtyColumns(new long[]{buffered},new long[]{200});
+        assertEquals(200,manager.dirtyColumnTimestamp(buffered));
+        assertTrue(manager.expectsAuthoritativeColumns());
+        assertEquals(1,collect(new RequestWindow(0,0,0,0,0,0,1)));
+        assertEquals(buffered,positions[0]);assertEquals(199,timestamps[0]);
+        assertFalse(generation[0]);assertFalse(probes[0]);
+    }
+    @Test void failedDirtyCaptureAdmissionRetainsWatermarkAndRetriesTheSameVersion() throws Exception {
+        long column=PositionUtil.packPosition(3,3);
+        manager.onDirtyColumns(new long[]{column},new long[]{200});
+        int request=tracker.track(column,false,true,60_000_000_000L,0L);
+        assertEquals(LodRequestManager.ColumnProcessingResult.FAILED,manager.processColumnIfCurrent(
+                request,Level.OVERWORLD,3,3,200,new int[0],()->false));
+        assertFalse(tracker.contains(column));assertEquals(200,manager.dirtyColumnTimestamp(column));
+        assertTrue(queue().contains(column));assertEquals(199,manager.requestTimestampFor(column));
+        int retry=tracker.track(column,false,true,60_000_000_000L,0L);
+        assertEquals(LodRequestManager.ColumnProcessingResult.APPLIED,manager.processColumnIfCurrent(
+                retry,Level.OVERWORLD,3,3,200,new int[0],()->true));
+        assertEquals(0,manager.dirtyColumnTimestamp(column));assertEquals(200,manager.requestTimestampFor(column));
+    }
+    @Test void dirtyAvailabilityMissKeepsRefreshQueuedWithoutAPreviousLocalTimestamp() throws Exception {
+        long column=PositionUtil.packPosition(4,4);
+        manager.onDirtyColumns(new long[]{column},new long[]{200});
+        int request=tracker.track(column,false,true,60_000_000_000L,0L);
+        manager.onColumnNotGenerated(request);
+        assertEquals(200,manager.dirtyColumnTimestamp(column));assertEquals(199,manager.requestTimestampFor(column));
+        assertTrue(queue().contains(column));
+        assertTrue(((LongOpenHashSet)field(LodRequestManager.class,"dirtyColumns").get(manager)).contains(column));
+    }
     private void frontier(int ring) throws Exception {
         field(StrictLodVisibility.class,"snapshot").set(null,new StrictLodVisibility.Snapshot(Level.OVERWORLD,0,0,ring,ring+1,1));
     }

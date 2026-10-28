@@ -236,22 +236,23 @@ class LodRequestManagerDeferredProgressTest {
             dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = true;
             long waiting = f.defer(3, true);
             RequestWindow held = (RequestWindow) create.invoke(f.manager);
-            assertEquals(0, held.generationRemaining());
+            assertEquals(Math.max(1,config(true).generationConcurrencyLimitPerPlayer()/2), held.generationRemaining());
             assertTrue(held.canSend(true, false, false, 3), "dirty refresh remains available");
             assertTrue(held.canSend(false, false, true, 3), "cache probes remain available");
-            assertEquals(0, f.drain(held, 96));
-            assertTrue(f.queue.contains(waiting));
+            assertEquals(1, f.drain(held, 96));
+            assertFalse(f.queue.contains(waiting));assertTrue(f.allowGeneration[0]);assertEquals(waiting,f.positions[0]);
+            long next=f.defer(4,true);
             dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = false;
             RequestWindow normal = (RequestWindow) create.invoke(f.manager);
-            assertEquals(config(true).generationConcurrencyLimitPerPlayer(), normal.generationRemaining());
+            assertEquals(config(true).generationConcurrencyLimitPerPlayer()-f.tracker.generationSize(), normal.generationRemaining());
             assertEquals(1, f.drain(normal, 96));
             assertTrue(f.allowGeneration[0]);
-            assertEquals(waiting, f.positions[0]);
+            assertEquals(next, f.positions[0]);
             // A server without prediction support must use its normal generation quota.
             capabilities.setInt(null, 0);
             dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = true;
             normal = (RequestWindow) create.invoke(f.manager);
-            assertEquals(config(true).generationConcurrencyLimitPerPlayer() - 1, normal.generationRemaining());
+            assertEquals(config(true).generationConcurrencyLimitPerPlayer()-f.tracker.generationSize(), normal.generationRemaining());
         } finally {
             capabilities.setInt(null, previousCapabilities);
             dev.xantha.vss.config.VSSClientConfig.CONFIG.enablePrediction = previousOption;
@@ -262,13 +263,13 @@ class LodRequestManagerDeferredProgressTest {
     void runtimePredictionToggleResetsPriorityAndWakesDiscovery() throws Exception {
         Fixture f = new Fixture();
         PredictionGenerationPriority priority = (PredictionGenerationPriority) field("predictionPriority").get(f.manager);
-        assertEquals(0, priority.limit(16, true, dev.xantha.vss.client.prediction.PredictionLoadingProgress.INITIALIZING, 0L));
+        assertEquals(8, priority.limit(16, true, dev.xantha.vss.client.prediction.PredictionLoadingProgress.INITIALIZING, 0L));
         field("requestScanPending").setBoolean(f.manager, false);
         field("scanTickCounter").setInt(f.manager, 0);
 
         f.manager.onPredictionOptionChanged(false);
 
-        assertTrue(priority.diagnostics().startsWith("disabled"), priority.diagnostics());
+        assertTrue(priority.diagnostics().contains("reason=disabled"), priority.diagnostics());
         assertTrue(field("requestScanPending").getBoolean(f.manager));
         assertEquals(1, field("scanTickCounter").getInt(f.manager));
     }

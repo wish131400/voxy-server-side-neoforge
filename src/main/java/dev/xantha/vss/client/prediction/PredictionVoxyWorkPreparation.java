@@ -19,7 +19,7 @@ final class PredictionVoxyWorkPreparation {
                     : view.band(key,layout,focus,minY,maxY);
         }
     }
-    private record Ranked(PredictionTileKey key, int band, double distance) { }
+    private record Ranked(PredictionTileKey key, int band, int priority, double distance) { }
     record Result(Input input, List<PredictionTileKey> terrain, List<PredictionTileKey> surfaces) { }
     static Result build(Input input) {
         var terrain = new ArrayList<Ranked>(); var surfaces = new ArrayList<Ranked>();
@@ -35,11 +35,13 @@ final class PredictionVoxyWorkPreparation {
                         input.surfaceRadius(),input.pixels(),input.minY(),input.maxY()));
             if (!needsTerrain && !needsSurface) continue;
             int band=input.band(key);
-            var ranked=new Ranked(key,band,PredictionWorkOrder.distanceSquared(key,input.layout(),input.x(),input.z()));
+            double distance=PredictionWorkOrder.distanceSquared(key,input.layout(),input.x(),input.z());
+            var ranked=new Ranked(key,band,PredictionWorkOrder.coveragePriority(distance,
+                    tile==null ? 0 : tile.cellAxis(),false,0),distance);
             if(needsTerrain)terrain.add(ranked);
             if(needsSurface && band<=PredictionWorkView.BUFFER)surfaces.add(ranked);
         }
-        var comparator=Comparator.comparingInt(Ranked::band).thenComparingDouble(Ranked::distance)
+        var comparator=Comparator.comparingInt(Ranked::band).thenComparingInt(Ranked::priority).thenComparingDouble(Ranked::distance)
                 .thenComparingInt(r->r.key().lod()).thenComparingInt(r->r.key().tileX()).thenComparingInt(r->r.key().tileZ());
         terrain.sort(comparator);surfaces.sort(comparator);
         return new Result(input,terrain.stream().map(Ranked::key).toList(),surfaces.stream().map(Ranked::key).toList());

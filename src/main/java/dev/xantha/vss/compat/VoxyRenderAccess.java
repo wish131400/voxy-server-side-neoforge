@@ -39,6 +39,25 @@ public final class VoxyRenderAccess {
         }
     }
 
+    private record Withdrawal(Method empty, Method submit) { }
+    private static final ClassValue<Withdrawal> WITHDRAWALS = new ClassValue<>() {
+        @Override protected Withdrawal computeValue(Class<?> nodes) {
+            try {
+                Method submit = java.util.Arrays.stream(nodes.getDeclaredMethods())
+                        .filter(m -> m.getName().equals("submitGeometryResult") && m.getParameterCount() == 1)
+                        .findFirst().orElseThrow(NoSuchMethodException::new);
+                submit.setAccessible(true);
+                return new Withdrawal(submit.getParameterTypes()[0].getMethod("empty", long.class), submit);
+            } catch (ReflectiveOperationException e) { throw new IllegalStateException("Unsupported Voxy geometry withdrawal", e); }
+        }
+    };
+
+    /** Only used after checking current native data has neither blocks nor occupied children. */
+    static void withdraw(Object nodes, long position) throws ReflectiveOperationException {
+        var methods = WITHDRAWALS.get(nodes.getClass());
+        methods.submit.invoke(nodes, methods.empty.invoke(null, position));
+    }
+
     /** A uniform native section can be inspected without allocating a 256 KiB array. */
     public record Voxels(long[] data, long uniform) {
         public long get(int index) { return data == null ? uniform : data[index]; }

@@ -25,8 +25,7 @@ class PredictionVoxelCacheIntegrationTest {
         var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
         var original=PredictionVoxelCacheTest.tile(key,64,true);
         var calls=new AtomicInteger();var sampler=sampler(calls);
-        var settings=PredictionTileManager.class.getDeclaredMethod("surfaceSettings");settings.setAccessible(true);
-        int value=(Integer)settings.invoke(null);
+        int value = 3 | PredictionVegetation.runtimeSettings(PROFILE.dimension());
         try(var cache=new PredictionDiskCache(directory,77);var lease=cache.lease(PredictionDiskCache.Key.voxels(-1,-1,1))) {
             assertTrue(cache.writeVoxelsLater(lease,original,value,PredictionVoxelCache.identity(sampler)).get(5,TimeUnit.SECONDS));
         }
@@ -52,8 +51,7 @@ class PredictionVoxelCacheIntegrationTest {
         var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
         var original=PredictionVoxelCacheTest.tile(key,16,false);
         var calls=new AtomicInteger();var sampler=sampler(calls);
-        var settings=PredictionTileManager.class.getDeclaredMethod("surfaceSettings");settings.setAccessible(true);
-        int value=(Integer)settings.invoke(null);
+        int value = 3 | PredictionVegetation.runtimeSettings(PROFILE.dimension());
         try(var cache=new PredictionDiskCache(directory,77);var lease=cache.lease(PredictionDiskCache.Key.voxels(-1,-1,1))) {
             assertTrue(cache.writeVoxelsLater(lease,original,value,PredictionVoxelCache.identity(sampler)).get(5,TimeUnit.SECONDS));
         }

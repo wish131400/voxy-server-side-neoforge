@@ -268,7 +268,7 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
 
     private void checkColumnBounds(int x, int z) {
         if (x < originX - 32 || x >= originX + 48 || z < originZ - 32 || z >= originZ + 48) {
-            throw new UnsupportedOperationException("decoration read outside its bounded region");
+            throw new LocalPlacementFailure("decoration read outside its bounded region");
         }
     }
 
@@ -372,16 +372,21 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
                 && pos.getZ() >= originZ - 16 && pos.getZ() < originZ + 32;
     }
 
+    /** This placement failed at this location; it says nothing about other chunks. */
+    static final class LocalPlacementFailure extends RuntimeException {
+        LocalPlacementFailure(String reason) { super(reason); }
+    }
+
     @Override
     public boolean setBlock(BlockPos pos, BlockState state, int flags, int recursion) {
         if (Thread.currentThread().isInterrupted()) {
             throw new java.util.concurrent.CancellationException("prediction decoration interrupted");
         }
         if (!ensureCanWrite(pos)) {
-            throw new UnsupportedOperationException("decoration write outside its bounded region");
+            throw new LocalPlacementFailure("decoration write outside its bounded region");
         }
         if (++writes > MAX_WRITES) {
-            throw new UnsupportedOperationException("decoration exceeded its work budget");
+            throw new LocalPlacementFailure("decoration exceeded its work budget");
         }
         noteTop(pos);
         int columnSlot = columnSlot(pos.getX(), pos.getZ());

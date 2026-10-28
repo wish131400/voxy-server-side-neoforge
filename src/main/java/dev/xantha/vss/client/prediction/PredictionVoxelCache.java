@@ -11,9 +11,10 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** Stable CPU voxel records. Renderer mappings, source proofs and GPU handles are session-local. */
 final class PredictionVoxelCache {
-    // Version 10 excludes artificial preview trees stored in older finished tiles.
-    static final int VERSION = 10;
-    private static final int MAX_FEATURES = 262_144, MAX_RUNS = 1_048_576;
+    // Version 11 pages full decoration within one atomic region record.
+    static final int VERSION = 11;
+    static final int FEATURE_PAGE_SIZE = 4096, MAX_FEATURES = 2_097_152;
+    private static final int MAX_STATES = 262_144, MAX_RUNS = 1_048_576;
     private static long tagGeneration = -1;
     private static byte[] tags;
 
@@ -51,7 +52,10 @@ final class PredictionVoxelCache {
     }
 
     record Data(PredictionVoxySource.Tile voxels, int[] heights, int[] groundHeights,
-                ClientColumnSample[] samples, PredictionDepthBound bounds) {
+                ClientColumnSample[] samples, PredictionDepthBound bounds, byte[] cacheIdentity) {
+        Data(PredictionVoxySource.Tile voxels,int[] heights,int[] groundHeights,ClientColumnSample[] samples,PredictionDepthBound bounds) {
+            this(voxels,heights,groundHeights,samples,bounds,null);
+        }
         static Data snapshot(PredictionTile tile) {
             return new Data(tile.data().voxyTile, tile.heights().clone(),
                     tile.groundHeights() == tile.heights() ? null : tile.groundHeights().clone(),
@@ -66,6 +70,7 @@ final class PredictionVoxelCache {
                     Math.min(bounds.minY(),previous.depthBound().minY()),
                     Math.max(bounds.maxY(),previous.depthBound().maxY()));
             var payload = PredictionVoxelData.forVoxy(result);
+            if(result==voxels)payload.cacheContentIdentity=cacheIdentity;
             payload.retainedSampleObjects = PredictionSampleCompaction.compact(samples);
             payload.retainedVolumeBytes = PredictionSampleCompaction.volumeBytes(samples);
             return new PredictionTile(voxels.key(), heights, groundHeights == null ? heights : groundHeights,
@@ -87,7 +92,8 @@ final class PredictionVoxelCache {
             biomes.computeIfAbsent(column.biome(), ignored -> biomes.size());
             for (var run : column.runs()) states.computeIfAbsent(run.state(), ignored -> states.size());
         }
-        for (var box : tile.features()) states.computeIfAbsent(box.state(), ignored -> states.size());
+        var boxes=tile.boxes();
+        for (int i=0;i<boxes.size();i++) states.computeIfAbsent(boxes.state(i), ignored -> states.size());
         out.writeInt(states.size()); for (var state : states.keySet()) out.writeUTF(disk.encodeState(state));
         out.writeInt(biomes.size()); for (var biome : biomes.keySet()) out.writeUTF(biome);
         for (var column : tile.columns()) {
@@ -96,10 +102,15 @@ final class PredictionVoxelCache {
                 out.writeInt(run.bottom()); out.writeInt(run.top()); out.writeInt(states.get(run.state()));
             }
         }
-        out.writeInt(tile.features().size());
-        for (var box : tile.features()) {
-            out.writeInt(box.minX()); out.writeInt(box.minY()); out.writeInt(box.minZ());
-            out.writeInt(box.maxX()); out.writeInt(box.maxY()); out.writeInt(box.maxZ()); out.writeInt(states.get(box.state()));
+        int features = count(boxes.size(), MAX_FEATURES);
+        out.writeInt(features);
+        for (int start=0;start<features;start+=FEATURE_PAGE_SIZE) {
+            int end=Math.min(features,start+FEATURE_PAGE_SIZE);
+            out.writeInt(end-start);
+            for (int i=start;i<end;i++) {
+                for(int a=0;a<6;a++)out.writeInt(boxes.coordinate(i,a));
+                out.writeInt(states.get(boxes.state(i)));
+            }
         }
         for (int y : data.heights()) out.writeInt(y);
         out.writeBoolean(data.groundHeights() != null);
@@ -111,7 +122,7 @@ final class PredictionVoxelCache {
     }
 
     static Data read(DataInputStream in, PredictionTileKey key, int settings, byte[] identity, byte[] catalog,
-                     PredictionDiskCache disk) throws IOException {
+                     PredictionDiskCache disk, int version) throws IOException {
         int axis = count(in.readInt(), 64);
         if (axis == 0 || (axis & (axis-1)) != 0 || in.readInt() != settings
                 || !Arrays.equals(identity, in.readNBytes(32))) throw new IOException("voxel content identity changed");
@@ -122,7 +133,7 @@ final class PredictionVoxelCache {
         boolean complete = in.readBoolean(); int cities = in.readInt();
         var bounds = new PredictionDepthBound(in.readInt(), in.readInt());
         if (bounds.maxY() < bounds.minY()) throw new IOException("voxel bounds invalid");
-        var states = new BlockState[count(in.readInt(), MAX_FEATURES)];
+        var states = new BlockState[count(in.readInt(), MAX_STATES)];
         for (int i=0;i<states.length;i++) states[i] = disk.decodeState(in.readUTF());
         var biomes = new String[count(in.readInt(), axis*axis)];
         for (int i=0;i<biomes.length;i++) {
@@ -145,13 +156,18 @@ final class PredictionVoxelCache {
             columns[i] = palette.column(list,biome);
 
         }
-        int features = count(in.readInt(), MAX_FEATURES);
+        int features = count(in.readInt(), version >= 11 ? MAX_FEATURES : 262_144);
         if (cities < 0 || cities > features) throw new IOException("voxel feature range invalid");
-        var boxes = new ArrayList<PredictionVoxySource.Box>(features);
-        for (int i=0;i<features;i++) {
-            int x=in.readInt(),y=in.readInt(),z=in.readInt(),ex=in.readInt(),ey=in.readInt(),ez=in.readInt();
-            if (ex<=x || ey<=y || ez<=z) throw new IOException("voxel box invalid");
-            boxes.add(new PredictionVoxySource.Box(x,y,z,ex,ey,ez,states[index(in.readInt(),states.length)]));
+        var boxes = new PredictionVoxyBoxes.Builder();
+        for (int start=0;start<features;) {
+            int page=version >= 11 ? count(in.readInt(),FEATURE_PAGE_SIZE) : features;
+            if (page == 0 || page > features-start) throw new IOException("voxel feature page invalid");
+            for (int i=0;i<page;i++) {
+                int x=in.readInt(),y=in.readInt(),z=in.readInt(),ex=in.readInt(),ey=in.readInt(),ez=in.readInt();
+                if (ex<=x || ey<=y || ez<=z) throw new IOException("voxel box invalid");
+                boxes.add(x,y,z,ex,ey,ez,states[index(in.readInt(),states.length)]);
+            }
+            start+=page;
         }
         int size = (axis+1)*(axis+1);
         int[] heights = new int[size]; for (int i=0;i<size;i++) heights[i]=in.readInt();
@@ -161,12 +177,23 @@ final class PredictionVoxelCache {
         if (sampleVersion != 2 && sampleVersion != 3 && sampleVersion != 6) throw new IOException("voxel sample version invalid");
         var samples = disk.decodeTerrain(in,sampleVersion,size).samples();
         var tile = new PredictionVoxySource.Tile(key,key.tileX()*span,key.tileZ()*span,span,axis,span/axis,
-                columns,List.copyOf(boxes),palette.bytes(columns.length)+features*64L,complete,cities);
+                columns,boxes.build(),palette.bytes(columns.length),complete,cities);
         return new Data(tile,heights,ground,samples,bounds);
     }
 
     private static int count(int value, int max) throws IOException {
         if (value<0 || value>max) throw new IOException("voxel count out of range"); return value;
+    }
+    static byte[] contentIdentity(Data data, int settings, byte[] identity, byte[] catalog,
+                                  PredictionDiskCache disk) {
+        try {
+            var digest=MessageDigest.getInstance("SHA-256");
+            try (var out=new DataOutputStream(new BufferedOutputStream(
+                    new java.security.DigestOutputStream(OutputStream.nullOutputStream(),digest),32*1024))) {
+                write(out,data,settings,identity,catalog,disk);
+            }
+            return digest.digest();
+        } catch (IOException | java.security.NoSuchAlgorithmException failure) { throw new IllegalStateException(failure); }
     }
     private static int index(int value, int size) throws IOException {
         if (value<0 || value>=size) throw new IOException("voxel palette index out of range"); return value;

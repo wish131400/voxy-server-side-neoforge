@@ -286,11 +286,17 @@ public final class VSSClientNetworking {
         }
         LodRequestManager manager = requestManager;
         if (manager != null) {
-            long[] changed = manager.onDirtyColumns(payload.dirtyPositions(), payload.dirtyTimestamps());
-            ClientLevel level = Minecraft.getInstance().level;
-            if (level != null && changed.length > 0) {
-                COLUMN_PROCESSOR.invalidatePositions(level.dimension(), changed);
-                ClientPredictionState.onDirtyColumns(level.dimension(), changed);
+            synchronized (manager) {
+                long[] changed = manager.onDirtyColumns(payload.dirtyPositions(), payload.dirtyTimestamps());
+                ClientLevel level = Minecraft.getInstance().level;
+                if (level != null && changed.length > 0) {
+                    COLUMN_PROCESSOR.invalidatePositions(level.dimension(), changed);
+                    long[] timestamps = new long[changed.length];
+                    for (int i = 0; i < changed.length; i++) timestamps[i] = manager.dirtyColumnTimestamp(changed[i]);
+                    // Filtered columns cannot enter complete-terrain capture; retain their existing refresh path.
+                    ClientPredictionState.onDirtyColumns(level.dimension(), changed,
+                            manager.expectsAuthoritativeColumns() ? timestamps : null);
+                }
             }
         }
     }
@@ -367,7 +373,7 @@ public final class VSSClientNetworking {
                     if (accepted) {
                         manager.recordStrictSections(column.chunkX(), column.chunkZ(), columnData);
                         if (columnData.authoritative()) {
-                            ClientPredictionState.onExactColumn(column.dimension(), column.chunkX(), column.chunkZ(), columnData);
+                            accepted = ClientPredictionState.onExactColumn(column.dimension(), column.chunkX(), column.chunkZ(), columnData);
                         }
                     }
                     return accepted;

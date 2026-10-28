@@ -48,7 +48,7 @@ final class PredictionBiomeCache {
             // Modded climate evaluation stays outside cache locks. Concurrent
             // misses may duplicate one lookup, but never serialize noise work.
             loads.increment();
-            biome = source.getNoiseBiome(quartX, quartY, quartZ, climate);
+            biome = sample(source, climate, quartX, quartY, quartZ);
             synchronized (lock) {
                 if (sharedBiome(bucket, quartX, quartY, quartZ) == null) {
                     int at = bucket * WAYS + next[bucket];
@@ -72,6 +72,24 @@ final class PredictionBiomeCache {
                 return shared.biomes[at];
         }
         return null;
+    }
+
+    static Holder<Biome> sample(BiomeSource source, Climate.Sampler climate, int x, int y, int z) {
+        try {
+            return source.getNoiseBiome(x, y, z, climate);
+        } catch (PredictionWorkDeferred | java.util.concurrent.CancellationException deferred) {
+            throw deferred;
+        } catch (RuntimeException failure) {
+            // A broken biome context invalidates placement as a whole. It must
+            // not be swallowed as one unsupported feature and cached as empty.
+            throw new LookupFailure(x, y, z, failure);
+        }
+    }
+
+    static final class LookupFailure extends IllegalStateException {
+        LookupFailure(int x, int y, int z, RuntimeException cause) {
+            super("Prediction biome lookup failed at quart " + x + "," + y + "," + z, cause);
+        }
     }
 
     String diagnostics() {

@@ -27,6 +27,7 @@ final class PredictionLoadingPreparation {
         Map<PredictionTileKey,DisplayGoal> displayGoals;
         boolean goalsChanged;
         final Set<PredictionTileKey> reads = new HashSet<>();
+        final Map<PredictionTileKey,PredictionSchedulePreparation.Facts> facts=new HashMap<>();
         final net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension;
         PredictionLoadingProgress loadingProgress;
         Calculation(Input request) {
@@ -45,7 +46,11 @@ final class PredictionLoadingPreparation {
             captureEpochs=request.captureEpochs();displayGoals=request.goals();
             dimension=input.residents().dimension();
         }
-        int viewBand(PredictionTileKey key){reads.add(key);return input.band(key);}
+        PredictionSchedulePreparation.Facts facts(PredictionTileKey key) {
+            reads.add(key);
+            return facts.computeIfAbsent(key,k->new PredictionSchedulePreparation.Facts(input,k));
+        }
+        int viewBand(PredictionTileKey key){return facts(key).band();}
         void removeGoal(PredictionTileKey key) {
             if (!displayGoals.containsKey(key)) return;
             mutableGoals(); displayGoals.remove(key);
@@ -54,8 +59,8 @@ final class PredictionLoadingPreparation {
             if (!goalsChanged) { displayGoals=new HashMap<>(displayGoals);goalsChanged=true; }
         }
         void putGoal(PredictionTileKey key,DisplayGoal goal) { mutableGoals();displayGoals.put(key,goal); }
-        int mediumAxis(PredictionTileKey key){return input.mediumAxis(key);}
-        boolean relevant(PredictionTileKey key){reads.add(key);return input.relevant(key);}
+        int mediumAxis(PredictionTileKey key){return facts(key).mediumAxis();}
+        boolean relevant(PredictionTileKey key){return facts(key).relevant();}
         boolean retry(PredictionTileKey key) { return input.retry(key); }
         boolean foreground() {
             for(var entry:input.ordinary().entrySet()) {
@@ -71,14 +76,14 @@ final class PredictionLoadingPreparation {
         }
         boolean preview(PredictionTileKey key) {
             var tile=ready.get(key);
-            return retry(key) && (tile==null||tile.cellAxis()<Math.min(PredictionWorkOrder.PREVIEW_CELL_AXIS,input.target(key)));
+            return retry(key) && (tile==null||tile.cellAxis()<Math.min(PredictionWorkOrder.PREVIEW_CELL_AXIS,facts(key).target()));
         }
         Result build() {
             progress(request.leaves(),input.x(),input.z());
             boolean preview=false,surfacePreview=false;
             var hidden=new HashSet<PredictionTileKey>();
             for(var key:input.plan())if(preview(key)) {
-                if(!input.defer(key,false))preview=true;
+                if(!facts(key).defer(false))preview=true;
                 if(relevant(key)&&PredictionWorkOrder.distanceSquared(key,layout,input.x(),input.z())
                         <=(double)request.surfaceRadius()*request.surfaceRadius())surfacePreview=true;
             }

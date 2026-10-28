@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('teleportSchedulingTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        ['PredictionTeleportSchedulingTest','PredictionTeleportLoadingTest','PredictionSchedulingFactsTest',
+         'PredictionNearFirstSchedulingTest','PredictionVoxyLoadingIntegrationTest','PredictionDiskCacheTest',
+         'PredictionMemoryLifecycleTest','PredictionNativeDemandTest','PredictionPinningTest',
+         'PredictionScopedResidencyTest','PredictionPlanningValidityTest'].each {include "**/${it}.class"}
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

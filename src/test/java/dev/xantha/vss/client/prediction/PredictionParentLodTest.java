@@ -45,7 +45,7 @@ class PredictionParentLodTest {
                 | PredictionWallEvidence.CAPTURED_OCCUPANCY | PredictionExteriorColumns.CHECKED));
     }
 
-    @Test void checkedApproximateColumnsCannotMasqueradeAsSameSourceParents() {
+    @Test void approximateDisplayAndCaptureMipsCanReduceForDisplayButNeverBecomeExactInputs() {
         var key = new PredictionTileKey(Level.OVERWORLD, 0, 0, 1);
         var children = children(key);
         var first = children.values().iterator().next();
@@ -53,7 +53,18 @@ class PredictionParentLodTest {
                 | ClientColumnSample.FLAG_SURFACE_ONLY | PredictionWallEvidence.CHECKED);
         var input = PredictionParentLod.capture(key, 8, LAYOUT, children, Set.of(), Map.of());
         assertNotNull(input);
-        assertNull(PredictionParentLod.reduce(input), "wall inspection is not proof of exact source terrain");
+        for(int flags:new int[]{ClientColumnSample.FLAG_APPROXIMATE,ClientColumnSample.FLAG_DISPLAY,
+                ClientColumnSample.FLAG_CAPTURE_MIP,ClientColumnSample.FLAG_PARENT_LOD}) {
+            for(var child:children.values())Arrays.fill(child.samples(),withFlags(sample(-44),flags
+                    | ClientColumnSample.FLAG_SURFACE_ONLY | PredictionWallEvidence.CHECKED));
+            var result=PredictionParentLod.reduce(input);
+            assertNotNull(result,"Drawable child provenance must not fail after structural admission");
+            assertTrue(result.proof().current(children,Set.of(),Map.of()));
+            for(var sample:result.samples()) {
+                assertFalse(sample.reusableFor(false),"Display reduction must never contaminate exact sampling");
+                assertTrue((sample.flags()&ClientColumnSample.FLAG_PARENT_LOD)!=0);
+            }
+        }
     }
 
     private static ClientColumnSample withFlags(ClientColumnSample s, int flags) {
@@ -91,6 +102,25 @@ class PredictionParentLodTest {
         assertEquals(120, result.samples()[22].surfaceY());
         assertTrue(result.proof().error() >= 56);
         assertEquals(120, fine.samples()[30].surfaceY(), "source arrays must remain immutable during reduction");
+    }
+
+    @Test void decorationPublicationKeepsTerrainProofWhileNewTerrainAndEditsStillInvalidateIt() {
+        var key=new PredictionTileKey(Level.OVERWORLD,0,0,1);
+        var children=children(key);
+        var input=PredictionParentLod.capture(key,8,LAYOUT,children,Set.of(),Map.of());
+        var proof=PredictionParentLod.reduce(input).proof();
+        var old=input.children()[0];
+        var mesh=PredictionVoxelData.forVoxy(old.data().voxyTile);
+        mesh.terrainRevision=old.terrainRevision();
+        var decorated=new PredictionTile(old.key(),old.heights(),old.groundHeights(),old.samples(),mesh,
+                old.depthBound(),2,999,old.cellAxis(),old.spacingBlocks());
+        children.put(old.key(),decorated);
+        assertTrue(proof.current(children,Set.of(),Map.of()),"Plants do not change the parent terrain mip");
+        var updated=input.children().clone();updated[0]=decorated;
+        assertTrue(proof.describes(updated));
+        assertFalse(proof.current(children,Set.of(),Map.of(old.key(),1L)));
+        children.put(old.key(),tile(old.key(),1000,70));
+        assertFalse(proof.current(children,Set.of(),Map.of()));
     }
 
     @Test void missingDirtyLowResolutionAndChangedSourcesCannotPublishACoherentParent() {

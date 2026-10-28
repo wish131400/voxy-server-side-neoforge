@@ -941,7 +941,8 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
                     .write_bounds
                     .is_some_and(|(min, max)| (0..3).any(|i| n[i] < min[i] || n[i] >= max[i]))
             {
-                return Err("edit outside volume/state table".into());
+                return Err(format!("edit outside volume/state table: xyz={:?}, state={}, states={}, origin={:?}, size={:?}, write_bounds={:?}",
+                    &n[..3], n[3], v.volume.palette.states.len(), v.volume.origin, v.volume.size, v.volume.write_bounds));
             }
             edits.push(n);
         }

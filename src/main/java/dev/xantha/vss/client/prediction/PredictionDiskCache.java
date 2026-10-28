@@ -41,6 +41,9 @@ final class PredictionDiskCache implements AutoCloseable {
         boolean maintenanceQueued;
         final Map<Key, Entry> active = new HashMap<>();
         final Map<Key, Long> invalidations = new HashMap<>();
+        // Surface settings are namespaces, not dependencies. One source coordinate
+        // invalidates every persisted settings identity without expanding 256 keys.
+        final Map<Long, Long> surfaceInvalidations = new HashMap<>();
         long revision;
         boolean deleting;
     }
@@ -102,6 +105,9 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<Key, Integer> terrainWriteColumns = new LinkedHashMap<>(256, .75F, true);
     private record VoxelIdentity(int settings, String content) { }
     private final Map<Key, VoxelIdentity> voxelWriteIdentities = new LinkedHashMap<>(256, .75F, true);
+    private record VoxelWrite(VoxelIdentity identity, byte[] content, CompletableFuture<Boolean> result) { }
+    private final Map<Key,VoxelWrite> voxelWrites = new LinkedHashMap<>(256,.75F,true);
+    private final LongAdder unchangedVoxelWrites = new LongAdder();
 
     private void rememberVoxelIdentity(Key key, int settings, byte[] identity) {
         var next = new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
@@ -123,7 +129,7 @@ final class PredictionDiskCache implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicBoolean loggedError = new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Key, Integer> terrainHints = new LinkedHashMap<>(256, .75F, true);
     private final ArrayDeque<Key> probeQueue = new ArrayDeque<>();
-    private final Set<Key> pendingProbes = new HashSet<>();
+    private final Map<Key, Long> pendingProbes = new HashMap<>();
     private boolean probing;
 
     /** Header-only batch lookup; hints never replace the validated read or its lease. */
@@ -133,7 +139,7 @@ final class PredictionDiskCache implements AutoCloseable {
             int count = 0;
             for (Key key : candidates) {
                 if (key.kind == 0 && !terrainHints.containsKey(key) && pendingProbes.size() < 32768
-                        && pendingProbes.add(key)) probeQueue.add(key);
+                        && pendingProbes.putIfAbsent(key, System.nanoTime()) == null) probeQueue.add(key);
                 if (++count >= 32768) break;
             }
             probeNextBatch();
@@ -192,7 +198,24 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     boolean terrainProbePending(Key key) {
-        synchronized (shared) { return !closed && shared.owner == this && pendingProbes.contains(key); }
+        synchronized (shared) { return !closed && shared.owner == this && pendingProbes.containsKey(key); }
+    }
+
+    /** An optional cache lookup cannot indefinitely hold back the first terrain. */
+    boolean terrainProbePending(Key key, long maximumWaitNanos) {
+        synchronized (shared) {
+            Long started = pendingProbes.get(key);
+            return !closed && shared.owner == this && started != null
+                    && System.nanoTime() - started < maximumWaitNanos;
+        }
+    }
+
+    /** Discard only probes that have not started. In-flight leases and reusable hints stay valid. */
+    void resetTerrainProbes() {
+        synchronized (shared) {
+            for (Key key : probeQueue) pendingProbes.remove(key);
+            probeQueue.clear();
+        }
     }
 
     private int voxelHeaderAxis(Key terrain) {
@@ -201,7 +224,8 @@ final class PredictionDiskCache implements AutoCloseable {
         try {
             byte[] header = shared.regions.header(key);
             if (header != null) try (var input = new DataInputStream(new ByteArrayInputStream(header))) {
-                if (input.readInt() == MAGIC && input.readInt() == PredictionVoxelCache.VERSION
+                int magic=input.readInt(), version=input.readInt();
+                if (magic == MAGIC && (version == PredictionVoxelCache.VERSION || version == 10)
                         && input.readLong() == fingerprint && input.readInt() == 4
                         && input.readInt() == key.x && input.readInt() == key.z && input.readInt() == key.detail) {
                     int axis = input.readInt();
@@ -214,11 +238,23 @@ final class PredictionDiskCache implements AutoCloseable {
 
     PredictionVoxelCache.Data readVoxels(Lease lease, PredictionTileManager.PredictionTileKey key,
                                         int settings, byte[] identity) {
-        var data = read(lease, (input, version) -> PredictionVoxelCache.read(input,key,settings,identity,templateIdentity,this));
+        VoxelWrite observed;
+        synchronized(shared){observed=voxelWrites.get(lease.key);}
+        var data = read(lease, (input, version) -> PredictionVoxelCache.read(input,key,settings,identity,templateIdentity,this,version));
+        if(data!=null) {
+            var digest=PredictionVoxelCache.contentIdentity(data,0,new byte[32],null,this);
+            data=new PredictionVoxelCache.Data(data.voxels(),data.heights(),data.groundHeights(),data.samples(),data.bounds(),digest);
+        }
         synchronized (shared) {
-            if (data != null && lease.valid()) {
+            if(!lease.valid())return null;
+            if (data != null) {
                 rememberVoxelIdentity(lease.key,settings,identity);
                 rememberWriteColumns(lease.key,data.voxels().axis()*2 + (data.voxels().surfaceComplete() ? 1 : 0));
+                var namespace=new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
+                voxelWrites.putIfAbsent(lease.key,new VoxelWrite(namespace,data.cacheIdentity(),CompletableFuture.completedFuture(true)));
+                while(voxelWrites.size()>32768)voxelWrites.remove(voxelWrites.keySet().iterator().next());
+            } else if(observed!=null && observed.result.isDone()) {
+                voxelWrites.remove(lease.key,observed);
             }
         }
         return data;
@@ -226,16 +262,40 @@ final class PredictionDiskCache implements AutoCloseable {
 
     CompletableFuture<Boolean> writeVoxelsLater(Lease lease, PredictionTileManager.PredictionTile tile,
                                                 int settings, byte[] identity) {
+        return writeVoxelsLater(lease,tile,settings,identity,()->true);
+    }
+    CompletableFuture<Boolean> writeVoxelsLater(Lease lease, PredictionTileManager.PredictionTile tile,
+                                                int settings, byte[] identity, java.util.function.BooleanSupplier current) {
         var voxels = tile.data().voxyTile;
-        if (voxels.features().size() > 262_144) return CompletableFuture.completedFuture(false);
+        if (voxels.features().size() > PredictionVoxelCache.MAX_FEATURES) return CompletableFuture.completedFuture(false);
         long bytes = tile.retainedHeapBytes();
+        var snapshot = PredictionVoxelCache.Data.snapshot(tile);
+        byte[] content=tile.data().cacheContentIdentity;
+        if(content==null)tile.data().cacheContentIdentity=content=PredictionVoxelCache.contentIdentity(snapshot,0,new byte[32],null,this);
+        var namespace=new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
+        final byte[] digest=content;
         synchronized (pendingLock) {
-            synchronized (shared) { rememberVoxelIdentity(lease.key,settings,identity); }
-            return defer(lease,bytes,voxels.axis()*2+(voxels.surfaceComplete() ? 1 : 0), () -> {
-                var snapshot = PredictionVoxelCache.Data.snapshot(tile);
+            synchronized (shared) {
+                if(!lease.valid() || finishing || !current.getAsBoolean()) return CompletableFuture.completedFuture(false);
+                var previous=voxelWrites.get(lease.key);
+                if(previous!=null && previous.identity.equals(namespace) && Arrays.equals(previous.content,digest)) {
+                    unchangedVoxelWrites.increment(); return previous.result;
+                }
+                rememberVoxelIdentity(lease.key,settings,identity);
+            }
+            var result=defer(lease,bytes,voxels.axis()*2+(voxels.surfaceComplete() ? 1 : 0), () -> {
                 return new PendingWrite(retain(lease),PredictionVoxelCache.VERSION,
                         output -> PredictionVoxelCache.write(output,snapshot,settings,identity,templateIdentity,this),bytes);
             });
+            var stamp=new VoxelWrite(namespace,digest,result);
+            synchronized(shared) {
+                if(lease.valid()) {
+                    voxelWrites.put(lease.key,stamp);
+                    while(voxelWrites.size()>32768)voxelWrites.remove(voxelWrites.keySet().iterator().next());
+                }
+            }
+            result.thenAccept(written->{if(!written)synchronized(shared){voxelWrites.remove(lease.key,stamp);}});
+            return result;
         }
     }
 
@@ -296,8 +356,15 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (shared) {
             Entry entry = shared.active.computeIfAbsent(key, ignored -> new Entry());
             entry.users++;
-            return new Lease(key, entry, !shared.invalidations.containsKey(key));
+            return new Lease(key, entry, !invalidated(key));
         }
+    }
+
+    private static long surfaceColumn(Key key) { return (long) key.x << 32 | key.z & 0xffffffffL; }
+    /** Called under the shared monitor, including commit/read admission. */
+    private boolean invalidated(Key key) {
+        return shared.invalidations.containsKey(key)
+                || key.kind == 1 && shared.surfaceInvalidations.containsKey(surfaceColumn(key));
     }
 
     boolean hasCapturedTerrain() { return Files.isDirectory(root.resolve("3-0")); }
@@ -618,7 +685,7 @@ final class PredictionDiskCache implements AutoCloseable {
             synchronized (shared) {
                 // A new capture may replace an invalid queued write before its tombstone is drained.
                 // Keep the latest snapshot and put it behind the already queued deletion.
-                if (write.lease.valid() && shared.deleting && shared.invalidations.containsKey(key)) {
+                if (write.lease.valid() && shared.deleting && invalidated(key)) {
                     COMMITS.execute(() -> drainWrite(key));
                     return;
                 }
@@ -693,7 +760,7 @@ final class PredictionDiskCache implements AutoCloseable {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
             boolean templateRecord = (lease.key.kind == 1 || lease.key.kind == 2) && templateIdentity != null;
-            boolean validVersion = lease.key.kind == 4 ? version == PredictionVoxelCache.VERSION
+            boolean validVersion = lease.key.kind == 4 ? version == PredictionVoxelCache.VERSION || version == 10
                     : templateRecord ? version == 7 || version == 8
                     : version == schema(lease.key) || lease.key.kind == 3 && version == 6 || version == 5 || version == 4 || version == 3
                     || lease.key.kind == 0 && (version == 1 || version == 2);
@@ -758,11 +825,12 @@ final class PredictionDiskCache implements AutoCloseable {
         Path temporary = null;
         try {
             Path target = file(lease.key);
-            Files.createDirectories(target.getParent());
+            if (!Files.isDirectory(target.getParent())) Files.createDirectories(target.getParent());
             temporary = Files.createTempFile(target.getParent(), "pending-", ".tmp");
             // Batch primitive writes before crossing into zlib, without changing
             // the on-disk schema or retaining a whole decoded tile in the IO queue.
-            var compressor = new java.util.zip.Deflater(lease.key.kind == 2 ? 1 : java.util.zip.Deflater.DEFAULT_COMPRESSION);
+            // Finished voxel/decoration records favor reload throughput; other schemas retain their compression policy.
+            var compressor = new java.util.zip.Deflater(lease.key.kind == 2 || lease.key.kind == 4 ? 1 : java.util.zip.Deflater.DEFAULT_COMPRESSION);
             try (var output = new DataOutputStream(new BufferedOutputStream(
                     new DeflaterOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)), compressor), 32 * 1024))) {
                 output.writeInt(MAGIC); output.writeInt(version); output.writeLong(fingerprint);
@@ -782,7 +850,7 @@ final class PredictionDiskCache implements AutoCloseable {
 
     private boolean commit(Lease token, Path completed, java.util.function.BooleanSupplier current) throws IOException {
         synchronized (shared) {
-            if (!token.valid() || shared.invalidations.containsKey(token.key) || !current.getAsBoolean()) return false;
+            if (!token.valid() || invalidated(token.key) || !current.getAsBoolean()) return false;
         }
         shared.regions.write(token.key, completed);
         if (!token.valid() || !current.getAsBoolean()) {
@@ -803,6 +871,10 @@ final class PredictionDiskCache implements AutoCloseable {
 
     /** Marks leases immediately; deletions coalesce on the IO thread. */
     void invalidate(Collection<Key> keys) {
+        invalidate(keys, Set.of());
+    }
+
+    private void invalidate(Collection<Key> keys, Set<Long> surfaces) {
         synchronized (shared) {
             if (closed || shared.owner != this) return;
             var expanded = new HashSet<>(keys);
@@ -811,11 +883,18 @@ final class PredictionDiskCache implements AutoCloseable {
                 terrainHints.remove(key);
                 terrainWriteColumns.remove(key);
                 voxelWriteIdentities.remove(key);
+                voxelWrites.remove(key);
                 Entry entry = shared.active.remove(key);
                 if (entry != null) entry.valid = false;
                 shared.invalidations.put(key, ++shared.revision);
             }
-            if (!shared.deleting && !shared.invalidations.isEmpty()) {
+            for (long column : surfaces) shared.surfaceInvalidations.put(column, ++shared.revision);
+            if (!surfaces.isEmpty()) shared.active.entrySet().removeIf(item -> {
+                if (item.getKey().kind != 1 || !surfaces.contains(surfaceColumn(item.getKey()))) return false;
+                item.getValue().valid = false;
+                return true;
+            });
+            if (!shared.deleting && (!shared.invalidations.isEmpty() || !shared.surfaceInvalidations.isEmpty())) {
                 shared.deleting = true;
                 COMMITS.execute(this::drainInvalidations);
             }
@@ -824,8 +903,13 @@ final class PredictionDiskCache implements AutoCloseable {
 
     private void drainInvalidations() {
         Map<Key, Long> pending;
-        synchronized (shared) { pending = new HashMap<>(shared.invalidations); }
+        Map<Long, Long> surfaces;
+        synchronized (shared) {
+            pending = new HashMap<>(shared.invalidations);
+            surfaces = new HashMap<>(shared.surfaceInvalidations);
+        }
         var failures = shared.regions.deleteAll(pending.keySet());
+        var surfaceFailures = shared.regions.deleteSurfaces(surfaces.keySet());
         for (var entry : pending.entrySet()) {
             IOException failure = failures.get(entry.getKey());
             if (failure == null) {
@@ -836,9 +920,16 @@ final class PredictionDiskCache implements AutoCloseable {
                 error(failure);
             }
         }
+        for (var entry : surfaces.entrySet()) {
+            IOException failure = surfaceFailures.get(entry.getKey());
+            if (failure == null) {
+                synchronized (shared) { shared.surfaceInvalidations.remove(entry.getKey(), entry.getValue()); }
+            } else error(failure); // Keep the coordinate tombstone on failed deletion, without a hot retry.
+        }
         synchronized (shared) {
             shared.deleting = false;
-            boolean newWork = shared.invalidations.entrySet().stream().anyMatch(entry -> !Objects.equals(pending.get(entry.getKey()), entry.getValue()));
+            boolean newWork = shared.invalidations.entrySet().stream().anyMatch(entry -> !Objects.equals(pending.get(entry.getKey()), entry.getValue()))
+                    || shared.surfaceInvalidations.entrySet().stream().anyMatch(entry -> !Objects.equals(surfaces.get(entry.getKey()), entry.getValue()));
             if (newWork) { shared.deleting = true; COMMITS.execute(this::drainInvalidations); }
         }
         scheduleMaintenance();
@@ -854,7 +945,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 try {
                     synchronized (shared) {
                         if (closed || shared.owner != this || !token.valid || shared.revision != revision
-                                || shared.invalidations.containsKey(key)) return;
+                                || invalidated(key)) return;
                     }
                     shared.regions.migrate(key);
                 } catch (IOException failure) { error(failure); }
@@ -931,14 +1022,31 @@ final class PredictionDiskCache implements AutoCloseable {
                 keys.add(Key.surface(x, z, runtime | 96));
                 keys.add(Key.surface(x, z, runtime | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
                 keys.add(Key.surface(x, z, runtime | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                int end = runtime | PredictionVegetation.END_CLIMATE_SETTINGS_VERSION;
+                keys.add(Key.surface(x, z, end));
+                keys.add(Key.surface(x, z, end | 96));
+                keys.add(Key.surface(x, z, end | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                keys.add(Key.surface(x, z, end | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
             }
         }
         return keys;
     }
 
-    void invalidateChunk(int x, int z) { invalidate(affected(x, z)); }
+    void invalidateChunk(int x, int z) {
+        invalidateChunks(it.unimi.dsi.fastutil.longs.LongSets.singleton((long)x << 32 | z & 0xffffffffL));
+    }
 
-    void invalidateChunks(it.unimi.dsi.fastutil.longs.LongSet columns) { invalidate(affected(columns)); }
+    void invalidateChunks(it.unimi.dsi.fastutil.longs.LongSet columns) {
+        var terrain = new HashSet<Key>();
+        var surfaces = new HashSet<Long>();
+        for (long column : columns) {
+            int x = (int)(column >> 32), z = (int)column;
+            addAffectedTerrain(terrain,x,z,false);
+            for (int dz=-2;dz<=2;dz++) for (int dx=-2;dx<=2;dx++)
+                surfaces.add((long)(x+dx) << 32 | (z+dz) & 0xffffffffL);
+        }
+        invalidate(terrain,surfaces);
+    }
 
     void invalidateCapture(int x, int z) {
         invalidateCaptures(it.unimi.dsi.fastutil.longs.LongSets.singleton((long) x << 32 | z & 0xFFFFFFFFL));
@@ -965,6 +1073,7 @@ final class PredictionDiskCache implements AutoCloseable {
             + ",terrainWriteDeferrals=" + terrainWriteDeferrals.sum()
             + ",terrainRepairs=" + terrainRepairs.sum()
             + ",coalescedWrites=" + coalescedWrites.sum() + ",deferredEncodes=" + deferredEncodes.sum()
+            + ",unchangedVoxelWrites=" + unchangedVoxelWrites.sum()
             + ",deferredEncodeMs=" + deferredEncodeNanos.sum() / 1_000_000
             + ",stateDecodes=" + stateDecodes.sum() + ",errors=" + errors.sum() + "}"
             // Why the misses happened. `absent` is the healthy case (nothing
@@ -1024,6 +1133,7 @@ final class PredictionDiskCache implements AutoCloseable {
             terrainHints.clear(); pendingProbes.clear(); probeQueue.clear();
             terrainWriteColumns.clear();
             voxelWriteIdentities.clear();
+            voxelWrites.clear();
             probeQueue.clear();
             if (shared.owner == this) {
                 shared.active.values().forEach(entry -> entry.valid = false);

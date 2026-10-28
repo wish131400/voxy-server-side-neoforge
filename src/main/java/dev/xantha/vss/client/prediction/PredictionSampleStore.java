@@ -143,22 +143,30 @@ public final class PredictionSampleStore implements AutoCloseable {
     }
 
     static ClientColumnSample readSample(DataInputStream input, boolean volumes) throws IOException {
-        var sample = new ClientColumnSample(
-                input.readInt(), input.readInt(), input.readInt(), input.readInt(),
-                input.readInt(), input.readInt(), input.readInt(), input.readInt(),
-                input.readInt(), input.readInt(), input.readInt(), input.readInt(),
-                input.readInt(), input.readInt(), input.readInt(), input.readInt(),
-                input.readInt());
-        if (!volumes) return sample;
-        int count = input.readInt();
-        if (count < -1 || count > PredictionColumnVolume.MAX_RUNS) throw new IOException("Invalid column volume");
-        if (count < 0) return sample;
-        int[] words = new int[count * 4];
-        for (int i = 0; i < words.length; i++) words[i] = input.readInt();
-        return new ClientColumnSample(sample.surfaceY(),sample.fluidY(),sample.biomeIndex(),sample.topBlockIndex(),
-                sample.structureIndex(),sample.treeKind(),sample.treeDensity(),sample.treeHeight(),sample.fluid(),sample.flags(),
-                sample.groundFeatureKind(),sample.underBlockIndex(),sample.deepBlockIndex(),sample.surfaceBottom(),
-                sample.lowerTop(),sample.lowerBottom(),sample.spanFloor(),new PredictionColumnVolume(words));
+        return readSample(input,volumes,id->id,id->id);
+    }
+
+    /** Decode and remap once, including volume materials, without intermediate sample objects. */
+    static ClientColumnSample readSample(DataInputStream input, boolean volumes, IdMapper biome, IdMapper block) throws IOException {
+        int surface=input.readInt(),fluidY=input.readInt(),biomeId=biome.map(input.readInt()),top=block.map(input.readInt());
+        int structure=input.readInt(),treeKind=input.readInt(),density=input.readInt(),height=input.readInt();
+        int fluid=input.readInt(),flags=input.readInt(),ground=input.readInt(),under=block.map(input.readInt()),deep=block.map(input.readInt());
+        int bottom=input.readInt(),lowerTop=input.readInt(),lowerBottom=input.readInt(),floor=input.readInt();
+        PredictionColumnVolume volume=null;
+        if(volumes) {
+            int count=input.readInt();
+            if(count < -1 || count>PredictionColumnVolume.MAX_RUNS)throw new IOException("Invalid column volume");
+            if(count>=0) {
+                int[] words=new int[count*4];
+                for(int i=0;i<words.length;i+=4) {
+                    words[i]=input.readInt();words[i+1]=input.readInt();
+                    words[i+2]=block.map(input.readInt());words[i+3]=input.readInt();
+                }
+                volume=new PredictionColumnVolume(words);
+            }
+        }
+        return new ClientColumnSample(surface,fluidY,biomeId,top,structure,treeKind,density,height,fluid,flags,
+                ground,under,deep,bottom,lowerTop,lowerBottom,floor,volume);
     }
 
     static void writeSample(DataOutputStream output, ClientColumnSample sample)

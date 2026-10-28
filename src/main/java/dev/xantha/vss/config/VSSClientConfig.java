@@ -29,7 +29,7 @@ public class VSSClientConfig extends JsonConfig {
     public String performanceTier = "medium";
     /** Generate deterministic far terrain predictions from the server worldgen profile. */
     @SerializedName("enablePrediction")
-    public boolean enablePrediction = false;
+    public boolean enablePrediction = true;
     /** Pause generation/refinement/cache loading while keeping resident prediction LOD visible. */
     public volatile boolean enablePredictionLoading = true;
     /** Prediction horizon, in blocks. */
@@ -72,7 +72,7 @@ public class VSSClientConfig extends JsonConfig {
         help.put("offThreadSectionProcessing", "是否在后台线程处理收到的 LOD 区块以减少主线程卡顿；默认 true。");
         help.put("enableXaeroMapBridge", "是否将服务端真实远景写入 Xaero 世界地图；默认 true。预测转地图暂时停用。可用 /vssclient xaero disable 临时关闭真实数据写入。");
         help.put("performanceTier", "预测性能档位 low/medium/high；默认 medium。low 使用四分之一逻辑线程（最多 4），medium 使用一半逻辑线程（最多 8），high 使用逻辑线程数减 2。所有档位仅按 CPU 负载自动减载，并与单人本地预生成共用余量；距离、细节等画质参数与档位无关。");
-        help.put("enablePrediction", "预测远景总开关，控制预测 LOD 的显示与生成；Beta 功能，默认 false（关闭）。只想暂停加载并保留已有远景，请关闭 enablePredictionLoading。");
+        help.put("enablePrediction", "预测远景总开关，控制预测 LOD 的显示与生成；Beta 功能，默认 true（开启）。只想暂停加载并保留已有远景，请关闭 enablePredictionLoading。");
         help.put("enablePredictionLoading", "是否继续加载预测远景；默认 true。关闭后暂停新区域生成、细化和成品缓存读取，已加载的预测 LOD 继续显示；重新开启后继续加载。仅影响客户端预测，不限制 Voxy 真实区块接收或 /vss chunky。");
         help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 4096；范围 "
                 + MIN_PREDICTION_DISTANCE_BLOCKS + "-" + MAX_PREDICTION_DISTANCE_BLOCKS

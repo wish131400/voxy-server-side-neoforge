@@ -31,6 +31,42 @@ class PredictionEndColumnsTest {
                 biomes.register(h.key(), h.value(), RegistrationInfo.BUILT_IN));
         access = new RegistryAccess.ImmutableRegistryAccess(List.of(biomes.freeze()));
     }
+    @Test void endClimateRepairInvalidatesOnlyDerivedEndRecords(@TempDir Path directory) throws Exception {
+        int oldSettings = 3 | PredictionVegetation.runtimeSettings();
+        int repairedSettings = 3 | PredictionVegetation.runtimeSettings(Level.END.location());
+        assertNotEquals(oldSettings, repairedSettings);
+        assertEquals(oldSettings, 3 | PredictionVegetation.runtimeSettings(Level.OVERWORLD.location()));
+        assertEquals(oldSettings, 3 | PredictionVegetation.runtimeSettings(Level.NETHER.location()));
+        var key = new PredictionTileManager.PredictionTileKey(Level.END, 0, 0, 0);
+        var voxelKey = PredictionDiskCache.Key.voxels(0, 0, 0);
+        var terrainKey = PredictionDiskCache.Key.terrain(0, 0, 0);
+        var identity = new byte[32];
+        try (var disk = new PredictionDiskCache(directory, 42)) {
+            try (var lease = disk.lease(PredictionDiskCache.Key.surface(0, 0, oldSettings | 28))) {
+                assertTrue(disk.writeSurface(lease, Map.of(), true));
+            }
+            try (var lease = disk.lease(voxelKey)) {
+                assertTrue(disk.writeVoxelsLater(lease, PredictionVoxelCacheTest.tile(key, 8, true),
+                        oldSettings, identity).get(10, java.util.concurrent.TimeUnit.SECONDS));
+                assertNull(disk.readVoxels(lease, key, repairedSettings, identity));
+            }
+            try (var lease = disk.lease(terrainKey)) { assertTrue(disk.writeTerrain(lease, grid(heightfield(64)))); }
+            var end = terrain(true);
+            var vegetation = new PredictionVegetation(end, disk);
+            vegetation.chunk(0, 0);
+            assertEquals(0L, vegetation.performanceSnapshot().get("diskHits"), "Do not reuse old failed End surfaces");
+            assertEquals(1L, vegetation.performanceSnapshot().get("generatedChunks"));
+            try (var lease = disk.lease(terrainKey)) { assertNotNull(disk.readTerrain(lease, 9), "Raw terrain is retained"); }
+            try (var manager = new PredictionTileManager(Level.END, end,
+                    new PredictionMemoryBudget(256L * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime, 1), null)) {
+                var field = PredictionTileManager.class.getDeclaredField("surfaceSettings"); field.setAccessible(true);
+                assertEquals(repairedSettings, field.getInt(manager), "Final voxel reads must use the new End identity too");
+            }
+            var affected = PredictionDiskCache.affected(it.unimi.dsi.fastutil.longs.LongSets.singleton(0));
+            assertTrue(affected.contains(PredictionDiskCache.Key.surface(0, 0, repairedSettings | 28)));
+        }
+    }
+
     private static ClientTerrainSampler terrain(boolean end) {
         var settings = lookup.lookupOrThrow(Registries.NOISE_SETTINGS)
                 .getOrThrow(end ? NoiseGeneratorSettings.END : NoiseGeneratorSettings.OVERWORLD).value();

@@ -35,9 +35,11 @@ class VoxyPredictionNotificationTest {
         set("requested",new VoxySectionVersions());
         set("pruner",new VoxySectionPruner());
         set("cachedSections",new LinkedHashMap<>());
+        set("delivered",new ConcurrentHashMap<>());
         set("predictionOnly",ConcurrentHashMap.<Long>newKeySet());
         set("subdivisionWaiters",new VoxySubdivisionWaiters());
         set("dirty",ConcurrentHashMap.<Long>newKeySet()); set("scheduled",new AtomicBoolean());
+        set("predictionEnabled",true); set("withdrawals",new ConcurrentLinkedQueue<Long>());
         set("source",(VoxyPredictionBridge.Source)(position,mapper)->{reads.incrementAndGet();return new long[32768];});
         set("acquireReal",Engine.class.getMethod("acquireIfExists",long.class));
         set("voxels",new VoxyRenderAccess.Sections(Section.class));
@@ -380,6 +382,43 @@ class VoxyPredictionNotificationTest {
         while(scheduled.get()&&System.nanoTime()<deadline)Thread.sleep(1);
         assertFalse(scheduled.get());
     }
+    @Test void finalComposedContentSkipsUnchangedUpdatesButKeepsFacesOccupancyDeletionAndRealTakeover() throws Exception {
+        var data=new long[32768];data[0]=1L<<27;
+        var faceValue=new AtomicLong();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){return data.clone();}
+            public boolean compareNotificationFaces(){return true;}
+            public boolean copyFace(long p,VoxyPredictionBridge.Mapper m,int face,long[] target) {
+                Arrays.fill(target,faceValue.get());return true;
+            }
+        });
+        versions().put(pos,new AtomicLong(1));
+        publishNotification();assertEquals(1,engine.events.get());assertEquals(3,engine.flags);
+        for(int i=0;i<5;i++)publishNotification();
+        assertEquals(1,engine.events.get(),"Duplicate composed blocks, occupancy and neighbor faces must settle");
+        assertEquals(0,((Map<?,?>)get("cachedSections")).size(),"One-shot notifications must not evict the mesh snapshot working set");
+        data[0]=2L<<27;publishNotification();assertEquals(2,engine.events.get());assertEquals(1,engine.flags);
+        faceValue.set(3L<<27);publishNotification();assertEquals(3,engine.events.get());assertEquals(1,engine.flags,"A neighbor-only border change must remesh the center");
+        data[16]=1L<<27;publishNotification();assertEquals(4,engine.events.get());assertEquals(3,engine.flags,"A new octant must deliver child occupancy too");
+        Arrays.fill(data,0);publishNotification();assertEquals(5,engine.events.get());assertEquals(3,engine.flags,"Removing all blocks must withdraw child occupancy");
+        var real=new Section(pos);real.data[0]=7L<<27;engine.real=real;
+        publishNotification();assertEquals(6,engine.events.get());assertEquals(7L<<27,engine.lastEvent.data[0]);
+        publishNotification();assertEquals(6,engine.events.get());
+        VoxyPredictionBridge.forwardEvent(engine,new Router(3),real,3);
+        publishNotification();assertEquals(7,engine.events.get(),"An external real event revokes comparison evidence");
+    }
+    private void publishNotification() throws Exception {
+        VoxyPredictionBridge.changed((VoxyPredictionBridge.Source)get("source"),-16,-16,48,48);
+        flush();drainUpdates();
+    }
+    @Test void maskedPublicationsKeepCoveredVersionsAndStillInvalidateContributingSections() throws Exception {
+        long adjacent=VoxyPredictionBridge.position(0,1,0,0);
+        versions().put(pos,new AtomicLong(1));versions().put(adjacent,new AtomicLong(1));
+        VoxyPredictionBridge.changed((VoxyPredictionBridge.Source)get("source"),-16,-16,-16,80,80,80,p->p==adjacent);
+        assertEquals(1,versions().get(pos).get());assertTrue(versions().get(adjacent).get()>1);
+        @SuppressWarnings("unchecked") var dirty=(Set<Long>)get("dirty");
+        assertFalse(dirty.contains(pos));assertTrue(dirty.contains(adjacent));assertEquals(0,reads.get());
+    }
     @Test void publicationsBeforeAFrameInvalidateImmediatelyAndDeliverOnlyTheLatestNotification() throws Exception {
         versions().put(pos,new AtomicLong(1));
         for(int update=0;update<40;update++)
@@ -545,7 +584,7 @@ class VoxyPredictionNotificationTest {
             VoxyPredictionBridge.detach(source);
             assertEquals(0,engine.worldReleases);
         } finally {resume.countDown();drainUpdates();}
-        assertEquals(0,engine.events.get());assertEquals(0,real.references);
+        assertEquals(0,engine.events.get());assertEquals(1,real.references,"engine retains its own reference");
         assertEquals(1,engine.worldReleases);assertFalse(((VoxyPredictionBridge.Mapper)context).isOpen());
     }
 
@@ -565,7 +604,7 @@ class VoxyPredictionNotificationTest {
         versions().put(pos,new AtomicLong(1));var real=new Section(pos);real.data[0]=17L<<27;engine.real=real;
         VoxyPredictionBridge.detach((VoxyPredictionBridge.Source)get("source"));flush();drainUpdates();
         assertSame(real,engine.lastEvent);assertEquals(17L<<27,engine.lastEvent.data[0]);
-        assertEquals(0,reads.get());assertEquals(0,real.references);
+        assertEquals(0,reads.get());assertEquals(1,real.references,"engine retains its own reference");
     }
 
     @Test void activePredictionPublicationsAlsoUseBoundedBatchesAndEventuallyDeliverEverySection() throws Exception {
@@ -586,6 +625,116 @@ class VoxyPredictionNotificationTest {
             flush();drainUpdates();
         }
         assertEquals(150,engine.delivered.size(),"New publications cannot repeatedly crowd out the tail of the queue");
+    }
+
+
+    @Test void disablingPredictionWithdrawsNativeEmptyMeshesWithoutBakingAndReenableReusesSource() throws Exception {
+        var releases=new AtomicInteger();nonemptySource(releases);
+        var original=(VoxyPredictionBridge.Source)get("source");
+        var snapshot=(Section)VoxyPredictionBridge.compose(engine,pos,null);snapshot.release();
+        long before=versions().get(pos).get();
+        VSSClientConfig.CONFIG.enablePrediction=false;
+        VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertEquals(List.of(pos),engine.withdrawn);
+        assertSame(original,get("source"),"resident samples and reduced columns survive display off");
+        assertTrue(versions().get(pos).get()>before);
+        assertEquals(1,reads.get(),"withdrawal must not ask prediction to remesh");
+        assertTrue(((VoxyPredictionBridge.Mapper)context).isOpen());assertEquals(0,releases.get());
+        assertTrue((boolean)get("supported"));assertTrue(((Set<?>)get("dirty")).isEmpty());
+        VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertEquals(1,engine.withdrawn.size(),"steady disabled ticks must not clear the scene repeatedly");
+        VSSClientConfig.CONFIG.enablePrediction=true;
+        VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertSame(original,get("source"));assertTrue(reads.get()>1);
+        assertEquals(1,engine.withdrawn.size());
+    }
+
+    @Test void newlyIngestedNativeBlocksCannotBeWithdrawnUsingAnOldPredictionOnlyFlag() throws Exception {
+        nonemptySource(new AtomicInteger());
+        ((Section)VoxyPredictionBridge.compose(engine,pos,null)).release();
+        var real=new Section(pos);real.data[0]=3L<<27;engine.real=real;
+        VSSClientConfig.CONFIG.enablePrediction=false;
+        VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertTrue(engine.withdrawn.isEmpty());
+        assertSame(real,engine.lastEvent,"native data continues through the ordinary update path");
+        assertEquals(1,real.references);assertTrue((boolean)get("supported"));
+    }
+
+    @Test void aMeshBuiltBeforeDisableCannotReachTheNativeUploadConsumer() throws Exception {
+        var type=Class.forName(VoxyPredictionBridge.class.getName()+"$BuildStamp");
+        var constructor=type.getDeclaredConstructors()[0];constructor.setAccessible(true);
+        versions().put(pos,new AtomicLong(7));
+        var stamp=constructor.newInstance(context,pos,7L);
+        var field=VoxyPredictionBridge.class.getDeclaredField("BUILDS");field.setAccessible(true);
+        var mesh=new Mesh();((Map<Object,Object>)field.get(null)).put(mesh,stamp);
+        VSSClientConfig.CONFIG.enablePrediction=false;
+        var service=new Service();var delivered=new AtomicInteger();
+        VoxyPredictionBridge.meshConsumer(service,m->delivered.incrementAndGet()).accept(mesh);
+        assertEquals(0,delivered.get());assertEquals(1,mesh.frees);assertEquals(1,service.requests);
+    }
+    public static final class Mesh { int frees; public void free(){frees++;} }
+    public static final class Service { int requests; public void enqueueTask(long position){requests++;} }
+    public static final class EmptyMesh {
+        final long position; EmptyMesh(long p){position=p;}
+        public static EmptyMesh empty(long position){return new EmptyMesh(position);}
+    }
+
+    private void nonemptySource(AtomicInteger releases) throws Exception {
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper mapper) {
+                reads.incrementAndGet();var data=new long[32768];Arrays.fill(data,1L<<27);return data;
+            }
+            public void releaseMapper(VoxyPredictionBridge.Mapper mapper){releases.incrementAndGet();}
+        });
+    }
+
+    @Test void nativeChildrenWithoutBlocksAlsoPreventPredictionWithdrawal() throws Exception {
+        nonemptySource(new AtomicInteger());
+        ((Section)VoxyPredictionBridge.compose(engine,pos,null)).release();
+        var real=new Section(pos);real.children=1;engine.real=real;
+        VSSClientConfig.CONFIG.enablePrediction=false;VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertTrue(engine.withdrawn.isEmpty());assertSame(real,engine.lastEvent);
+        assertEquals(1,real.references);assertTrue((boolean)get("supported"));
+    }
+
+    @Test void displayWithdrawalDoesNotWaitBehindTheSixtyFourRemeshBudget() throws Exception {
+        nonemptySource(new AtomicInteger());
+        for(int x=0;x<150;x++)((Section)VoxyPredictionBridge.compose(engine,VoxyPredictionBridge.position(2,x,0,0),null)).release();
+        VSSClientConfig.CONFIG.enablePrediction=false;VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertEquals(150,engine.withdrawn.size());assertEquals(150,engine.events.get());
+        assertEquals(150,reads.get(),"removal never recomputes prediction samples");
+        assertTrue(((Set<?>)get("dirty")).isEmpty());assertTrue((boolean)get("supported"));
+    }
+
+    @Test void anOlderResidentMeshIsWithdrawnEvenAfterItsLastCompositionBecameEmpty() throws Exception {
+        nonemptySource(new AtomicInteger());
+        ((Section)VoxyPredictionBridge.compose(engine,pos,null)).release();
+        set("source",(VoxyPredictionBridge.Source)(p,m)->null);
+        assertNull(VoxyPredictionBridge.compose(engine,pos,null));
+        assertTrue(((Set<?>)get("predictionOnly")).isEmpty());
+        VSSClientConfig.CONFIG.enablePrediction=false;VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertEquals(List.of(pos),engine.withdrawn);assertTrue((boolean)get("supported"));
+    }
+
+    @Test void detachedSourceCannotLeaveAnUndrainableWithdrawalQueueOnReenable() throws Exception {
+        var queue=(Queue<Long>)get("withdrawals");queue.add(pos);
+        set("predictionEnabled",false);set("source",null);
+        VoxyPredictionBridge.updatePredictionState();
+        assertTrue(queue.isEmpty());assertFalse(((AtomicBoolean)get("scheduled")).get());
+    }
+
+    @Test void quickReenableCancelsQueuedWithdrawalAndPublishesWarmSamples() throws Exception {
+        nonemptySource(new AtomicInteger());
+        ((Section)VoxyPredictionBridge.compose(engine,pos,null)).release();
+        var entered=new CountDownLatch(1);var resume=new CountDownLatch(1);
+        updates().execute(()->{entered.countDown();awaitLatch(resume);});
+        try {
+            assertTrue(entered.await(5,TimeUnit.SECONDS));
+            VSSClientConfig.CONFIG.enablePrediction=false;VoxyPredictionBridge.updatePredictionState();
+            VSSClientConfig.CONFIG.enablePrediction=true;VoxyPredictionBridge.updatePredictionState();
+        } finally {resume.countDown();drainUpdates();}
+        assertTrue(engine.withdrawn.isEmpty());assertEquals(2,reads.get());
+        assertTrue((boolean)get("supported"));
     }
 
     private void holdWorldReference() throws Exception {
@@ -643,12 +792,15 @@ class VoxyPredictionNotificationTest {
         assertFalse(VoxyPredictionBridge.copyNeighborFaces(factory,new Section(pos),1));
     }
     public static final class Engine {
-        int acquires; volatile int neighborMask=-1; volatile int worldReleases;
+        final List<Long> withdrawn=new CopyOnWriteArrayList<>();
+        private void submitGeometryResult(EmptyMesh mesh) { withdrawn.add(mesh.position); }
+        int acquires; volatile int neighborMask=-1,flags; volatile int worldReleases;
         final AtomicInteger events=new AtomicInteger(); final Set<Long> delivered=ConcurrentHashMap.newKeySet(); volatile Section real,lastEvent;
         public void releaseRef() { worldReleases++; }
         final CountDownLatch event=new CountDownLatch(1);
-        public Section acquireIfExists(long position) { acquires++; return real; }
+        public Section acquireIfExists(long position) { acquires++;var section=real;if(section!=null)section.acquire();return section; }
         public void worldEvent(Section section,int flags,int neighbors) {
+            this.flags=flags;
             events.incrementAndGet();delivered.add(section.key);lastEvent=section;neighborMask=neighbors;
             try { VoxyPredictionBridge.forwardEvent(this,new Router(3),section,flags); }
             finally { event.countDown(); }
@@ -665,8 +817,9 @@ class VoxyPredictionNotificationTest {
         Section(long key) { this.key=key; }
         public static Section create(int lod,int x,int y,int z) { var section=new Section(VoxyPredictionBridge.position(lod,x,y,z));section.references=0;return section; }
         public long[] _unsafeGetRawDataArray() { return data; }
-        public byte getNonEmptyChildren() { return 0; }
-        public void _unsafeSetNonEmptyChildren(byte children) { }
+        byte children;
+        public byte getNonEmptyChildren() { return children; }
+        public void _unsafeSetNonEmptyChildren(byte children) { this.children=children; }
         public synchronized void acquire() { references++; }
         public synchronized void release() { releases++;assertTrue(--references>=0,"Section reference released twice"); }
     }

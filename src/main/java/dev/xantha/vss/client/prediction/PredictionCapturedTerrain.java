@@ -16,9 +16,10 @@ final class PredictionCapturedTerrain {
     private final long limit;
     private final Map<PredictionDiskCache.Key, Node> cache = new LinkedHashMap<>(128, .75F, true);
     private final Map<PredictionDiskCache.Key, Boolean> regions = new LinkedHashMap<>(32, .75F, true);
+    private final Map<PredictionDiskCache.Key, java.util.concurrent.CompletableFuture<Node>> decoding = new java.util.HashMap<>();
     private volatile boolean available;
     private long bytes;
-    private long updates, reads, evictions;
+    private long updates, reads, evictions, coalescedReads, generation;
 
     PredictionCapturedTerrain(PredictionDiskCache disk) { this(disk, MAX_BYTES); }
     PredictionCapturedTerrain(PredictionDiskCache disk, long limit) {
@@ -55,6 +56,18 @@ final class PredictionCapturedTerrain {
             return count == 0 ? null : new Summary(count, surface, fluid, wet, solid,
                     liquid == null ? material : material(material, liquid));
         }
+        static Summary columns(ClientColumnSample[] columns) {
+            long surface=0,fluid=0,wet=0,solid=0;
+            ClientColumnSample material=null,liquid=null;
+            for(var sample:columns) {
+                surface+=sample.surfaceY();fluid+=sample.fluidY();
+                wet+=sample.hasFluid()?1:0;solid+=sample.hasSurface()?1:0;
+                if(material==null || sample.surfaceY()<material.surfaceY())material=sample;
+                if(liquid==null && sample.hasFluid() && sample.fluid()!=0)liquid=sample;
+            }
+            return material==null?null:new Summary(columns.length,surface,fluid,wet,solid,
+                    material(material,liquid==null?material:liquid));
+        }
         ClientColumnSample sample(ClientColumnSample fallback, long area) {
             long missing = Math.max(0, area - count);
             int y = (int) Math.floorDiv(surface + missing * fallback.surfaceY() + area / 2, area);
@@ -81,13 +94,11 @@ final class PredictionCapturedTerrain {
         Node(ClientColumnSample[] columns, Summary[] children) {
             this.columns = columns; this.children = children;
             if (columns != null) {
-                Summary[] all = new Summary[columns.length];
                 long size = 64L + columns.length * 112L;
-                for (int i = 0; i < all.length; i++) {
-                    all[i] = Summary.of(columns[i]);
-                    if (columns[i].volume() != null) size += columns[i].volume().bytes();
+                for (var column : columns) {
+                    if (column.volume() != null) size += column.volume().bytes();
                 }
-                summary = Summary.combine(all); bytes = size;
+                summary = Summary.columns(columns); bytes = size;
             } else { summary = Summary.combine(children); bytes = 1024; }
         }
         void write(DataOutputStream output, PredictionCacheMappings mappings) throws IOException {
@@ -203,14 +214,27 @@ final class PredictionCapturedTerrain {
         // An absent region proves all its 1024 cells absent. Do not fill the node
         // cache with thousands of redundant misses and evict actual captures.
         if (disk == null || !regionPresent(key)) return null;
-        Node value = null;
-        try (var lease = disk.lease(key)) { value = disk.readCapturedNode(lease); }
+        java.util.concurrent.CompletableFuture<Node> flight;boolean owner=false;long stamp;
         synchronized (this) {
             if (cache.containsKey(key)) return cache.get(key);
-            reads++;
-            retain(key, value);
+            stamp=generation;flight=decoding.get(key);
+            if(flight==null) {flight=new java.util.concurrent.CompletableFuture<>();decoding.put(key,flight);owner=true;}
+            else coalescedReads++;
         }
-        return value;
+        if(!owner)return flight.join();
+        try {
+            Node value;
+            try(var lease=disk.lease(key)) {value=disk.readCapturedNode(lease);}
+            synchronized(this) {
+                if(stamp!=generation)value=null;
+                else if(flight.isDone())value=flight.getNow(null); // a newer capture wins even after eviction
+                else if(cache.containsKey(key))value=cache.get(key);
+                else {reads++;retain(key,value);}
+                flight.complete(value);
+            }
+            return value;
+        } catch(Throwable failure) {flight.completeExceptionally(failure);throw failure;}
+        finally {synchronized(this) {decoding.remove(key,flight);}}
     }
     private void save(PredictionDiskCache.Key key, Node node) {
         // Persist before eviction: dropping a decoded leaf must not drop the only real copy.
@@ -221,6 +245,8 @@ final class PredictionCapturedTerrain {
             regions.put(regionKey(key), true);
             trimRegions();
             retain(key, node);
+            var flight=decoding.get(key);
+            if(flight!=null)flight.complete(node);
         }
     }
     private static PredictionDiskCache.Key regionKey(PredictionDiskCache.Key key) {
@@ -253,9 +279,9 @@ final class PredictionCapturedTerrain {
     synchronized long bytes() { return bytes; }
     synchronized String diagnostics() {
         return "captures={bytes=" + bytes + ",entries=" + cache.size() + ",updates=" + updates
-                + ",reads=" + reads + ",evictions=" + evictions + "}";
+                + ",reads=" + reads + ",evictions=" + evictions + ",coalescedReads="+coalescedReads+",decoding="+decoding.size()+"}";
     }
-    synchronized void clear() { cache.clear(); regions.clear(); bytes = 0; }
+    synchronized void clear() { generation++;cache.clear(); regions.clear();decoding.clear(); bytes = 0; }
 
     private static void writeSamples(DataOutputStream out, ClientColumnSample[] samples,
                                      PredictionCacheMappings mappings) throws IOException {
@@ -284,10 +310,9 @@ final class PredictionCapturedTerrain {
         int[] blocks = new int[bound(in.readInt(), 65536)];
         for (int i = 0; i < blocks.length; i++) blocks[i] = PredictionCacheMappings.blockId(in.readUTF());
         ClientColumnSample[] result = new ClientColumnSample[count];
+        PredictionSampleStore.IdMapper biome=id->biomes[index(id,biomes.length)],block=id->blocks[index(id,blocks.length)];
         for (int i = 0; i < count; i++) {
-            var sample = PredictionSampleStore.readSample(in, true);
-            result[i] = PredictionSampleStore.remap(sample, id -> biomes[index(id, biomes.length)],
-                    id -> blocks[index(id, blocks.length)]);
+            result[i] = PredictionSampleStore.readSample(in,true,biome,block);
             if (!result[i].captured()) throw new IOException("non-authoritative capture");
         }
         return result;

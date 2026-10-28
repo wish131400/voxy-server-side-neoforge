@@ -55,7 +55,7 @@
   "vss.voxy_options.off_thread_processing": "Process LOD data in background",
   "vss.voxy_options.off_thread_processing.tooltip": "Process received LOD chunks on a background thread to reduce main-thread stutter.",
   "vss.voxy_options.prediction": "VSS far prediction (Beta)",
-  "vss.voxy_options.prediction.tooltip": "Master switch for displaying and generating prediction LODs. This feature is in beta and is disabled by default; enable it to generate and display prediction LODs. To pause loading while keeping existing terrain visible, turn off Prediction loading below.",
+  "vss.voxy_options.prediction.tooltip": "Master switch for displaying and generating prediction LODs. This feature is in beta and is enabled by default; turning it off stops generation and withdraws prediction LODs. To pause loading while keeping existing terrain visible, turn off Prediction loading below.",
   "vss.voxy_options.prediction_loading": "Prediction loading",
   "vss.voxy_options.prediction_loading.tooltip": "Generate new areas, refine terrain and load finished meshes from cache. Enabled by default. Turning it off keeps loaded prediction LODs visible; turning it back on resumes loading. Moving into unloaded areas while paused will not fill in prediction terrain. Does not limit real Voxy chunk reception or /vss chunky.",
   "vss.voxy_options.prediction_distance_blocks": "Prediction distance",

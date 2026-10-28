@@ -1,0 +1,18 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('dirtyHandoffTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/*Capture*Test.class', '**/PredictionCapturedTerrainTest.class'
+            include '**/PredictionParentLod*Test.class', '**/PredictionVegetationLocalInvalidationTest.class'
+            include '**/PredictionVegetationHandoffTest.class', '**/PredictionVoxyLoadingIntegrationTest.class'
+            include '**/LodRequestManagerDirtyRefreshTest.class', '**/LodRequestManagerStrictOrderTest.class'
+            include '**/ColumnFilterSessionTest.class', '**/LodColumnVersionGateTest.class'
+            forkEvery = 1
+            maxHeapSize = '2G'
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+        }
+    }
+}

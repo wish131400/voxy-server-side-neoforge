@@ -101,7 +101,8 @@ class PredictionCaptureInvalidationBatchTest {
         expected.addAll(other);
         assertEquals(expected, PredictionDiskCache.affected(columns));
         assertTrue(expected.size() < separate, "adjacent dirty columns share terrain and decoration dependencies");
-        var expanded = new HashSet<>(expected);
+        long compactCount=expected.stream().filter(k->k.kind()!=1).count()
+                + expected.stream().filter(k->k.kind()==1).map(k->PositionUtil.packPosition(k.x(),k.z())).distinct().count();
         try (var disk = new PredictionDiskCache(directory, 77);
              var terrain = disk.lease(PredictionDiskCache.Key.terrain(-1, -1, 0));
              var surface = disk.lease(PredictionDiskCache.Key.surface(-1, -1, 0));
@@ -109,7 +110,7 @@ class PredictionCaptureInvalidationBatchTest {
             Object shared = field(disk, "shared");
             long before = (Long) field(shared, "revision");
             disk.invalidateChunks(columns);
-            assertEquals(expanded.size(), (Long) field(shared, "revision") - before);
+            assertEquals(compactCount, (Long) field(shared, "revision") - before);
             assertFalse(terrain.valid()); assertFalse(surface.valid());
             assertTrue(unrelated.valid());
             assertFalse(disk.writeTerrain(terrain, new ClientColumnSample[]{PredictionVoxelFixtures.sample(120)}));
@@ -117,7 +118,7 @@ class PredictionCaptureInvalidationBatchTest {
                 assertTrue(replacement.valid());
                 disk.invalidateChunks(columns);
                 assertFalse(replacement.valid(), "a second edit must invalidate a newly acquired lease");
-                assertEquals(expanded.size() * 2L, (Long) field(shared, "revision") - before);
+                assertEquals(compactCount * 2L, (Long) field(shared, "revision") - before);
             }
         }
     }

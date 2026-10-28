@@ -38,7 +38,8 @@ public final class PredictionCpuBudget {
     private int reserved, reservedDetail;
     /** Reservations admitted into a bounded executor queue beyond active CPU capacity. */
     private int queuedOverflow, queuedOverflowDetail;
-    private long generationAt;
+    private long generationAt, generationWaitAt;
+    private boolean generationWaiting;
     private long deferrals;
     private final boolean[] admissionDelayed = new boolean[2];
     private final long[] admissionRejectedAt = new long[2];
@@ -183,7 +184,13 @@ public final class PredictionCpuBudget {
 
     private int localGeneration() {
         long age = clock.getAsLong() - generationAt;
-        return age >= 0 && age < GENERATION_STALE_NANOS ? generationInFlight : 0;
+        int running = age >= 0 && age < GENERATION_STALE_NANOS ? generationInFlight : 0;
+        return generationWaiting() ? Math.max(limit() > 1 ? 2 : 1, running) : running;
+    }
+
+    private boolean generationWaiting() {
+        long age = clock.getAsLong() - generationWaitAt;
+        return generationWaiting && age >= 0 && age < GENERATION_STALE_NANOS;
     }
 
     /** No waiting on a worker or render thread. Refused tiles retry on the next planning tick. */
@@ -200,7 +207,7 @@ public final class PredictionCpuBudget {
             int detailCap = !adaptive ? cap : trickle ? 1 : cap > 1 ? cap - 1 : 1;
             // Existing generation is allowed to finish. Keep one coverage/dirty-update lane
             // alive even while requests admitted under an earlier budget are draining.
-            boolean coverageRecovery = urgent && active == 0;
+            boolean coverageRecovery = urgent && active == 0 && !generationWaiting();
             if (active >= cap || active + localGeneration() >= cap && !coverageRecovery
                     || !urgent && (activeDetail + localGeneration() >= detailCap
                         || trickle && detailWaiting())) {
@@ -247,7 +254,7 @@ public final class PredictionCpuBudget {
             int queuedGeneration = localGeneration();
             // Keep the existing coverage-recovery exception to allow one urgent update
             // through an older integrated-server reservation, but never duplicate it.
-            boolean coverageRecovery = urgent && active == 0 && queued == 0;
+            boolean coverageRecovery = urgent && active == 0 && queued == 0 && !generationWaiting();
             // Keep one bounded handoff slot for urgent coverage work when a
             // worker is already occupying the shared budget. The task waits
             // in the executor queue and gets the normal final lease check;
@@ -344,6 +351,7 @@ public final class PredictionCpuBudget {
         long now = clock.getAsLong();
         synchronized (this) {
             generationInFlight = local ? Math.max(0, inFlight) : 0;
+            if (!local || inFlight > 0) generationWaiting = false;
             generationAt = now;
         }
     }
@@ -353,8 +361,11 @@ public final class PredictionCpuBudget {
         refresh();
         synchronized (this) {
             if (configured <= 0 || pressure >= 2) return 0;
-            int spare = limit() - active - (predictionActive ? 1 : 0);
-            return Math.max(0, Math.min(configured, spare));
+            int cap = limit();
+            int spare = cap - active - (predictionActive && cap > 1 ? 1 : 0);
+            int allowed = Math.max(0, Math.min(configured, spare));
+            if (allowed == 0) { generationWaiting = true; generationWaitAt = clock.getAsLong(); }
+            return allowed;
         }
     }
 
@@ -367,9 +378,12 @@ public final class PredictionCpuBudget {
             int allowed;
             if (ceiling <= 0 || pressure >= 2) allowed = 0;
             else {
-                int spare = limit() - active - (predictionActive ? 1 : 0);
+                int cap = limit();
+                int spare = cap - active - (predictionActive && cap > 1 ? 1 : 0);
                 allowed = Math.max(0, Math.min(ceiling, spare));
             }
+            if (allowed > 0 || ceiling <= 0 || pressure >= 2) generationWaiting = false;
+            else { generationWaiting = true; generationWaitAt = now; }
             generationInFlight = Math.max(Math.max(0, inFlight), allowed);
             generationAt = now;
             return allowed;

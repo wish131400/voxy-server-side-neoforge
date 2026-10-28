@@ -471,7 +471,8 @@ public class ClientTerrainSampler implements AutoCloseable {
         if (biomeCache != null) return biomeCache.get(quartX, quartY, quartZ);
         var source = biomeSourceContext();
         var state = randomStateContext();
-        return source == null || state == null ? null : source.getNoiseBiome(quartX, quartY, quartZ, state.sampler());
+        return source == null || state == null ? null
+                : PredictionBiomeCache.sample(source, state.sampler(), quartX, quartY, quartZ);
     }
 
     ClientTerrainSampler decorationContext() { return this; }

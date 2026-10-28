@@ -73,10 +73,19 @@ class PredictionScopedResidencyTest {
                 reclaim.invoke(manager,0,0);
             }
             var prune=PredictionTileManager.class.getDeclaredMethod("pruneReady",int.class,int.class); prune.setAccessible(true);
+            // Retirement is a 1 ms incremental scan. Drive subsequent ticks rather than
+            // assuming a cold/JIT-loaded JVM will finish even this small map in one tick.
+            long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while(ready.containsKey(other.key()) && System.nanoTime()<deadline) {
+                prune.invoke(manager,0,0);
+                assertSame(detail,ready.get(detail.key()),"focus must stay protected throughout incremental retirement");
+                Thread.sleep(1);
+            }
             assertSame(detail,ready.get(detail.key()),"extra telescope work must not reclaim the detail it is replacing");
             assertFalse(ready.containsKey(other.key()),"unrelated covered detail stays reclaimable under pressure");
             focus.set(manager,null);
-            prune.invoke(manager,0,0);
+            deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while(ready.containsKey(detail.key()) && System.nanoTime()<deadline) {prune.invoke(manager,0,0);Thread.sleep(1);}
             assertFalse(ready.containsKey(detail.key()),"the focus guard cannot pin detail after release");
         }
     }

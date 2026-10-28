@@ -82,6 +82,59 @@ class PredictionVegetationTest {
         assertTrue(prediction.diagnostics().contains("unsupportedFeatures=0"), prediction.diagnostics());
     }
 
+    @Test void biomeContextFailureDoesNotCommitPartialSurfaceAndCanRetry() throws Exception {
+        var broken = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var queries = new java.util.concurrent.atomic.AtomicInteger();
+        var feature = new Feature<NoneFeatureConfiguration>(NoneFeatureConfiguration.CODEC) {
+            @Override public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> placement) {
+                placement.level().setBlock(new BlockPos(1, 80, 1), Blocks.OAK_PLANKS.defaultBlockState(), 19);
+                placement.level().getNoiseBiome(0, 20, 0);
+                placement.level().setBlock(new BlockPos(1, 81, 1), Blocks.OAK_LEAVES.defaultBlockState(), 19);
+                return true;
+            }
+        };
+        var original = sampler(42, Blocks.GRASS_BLOCK,
+                List.of(placed(new ConfiguredFeature<>(feature, NoneFeatureConfiguration.INSTANCE), 1)));
+        var source = org.mockito.Mockito.mock(BiomeSource.class);
+        var climate = original.randomStateContext().sampler();
+        org.mockito.Mockito.when(source.getNoiseBiome(org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.same(climate)))
+                .thenAnswer(call -> {
+                    int x = call.getArgument(0), y = call.getArgument(1), z = call.getArgument(2);
+                    if (broken.get() && x == 0 && y == 20 && z == 0)
+                        throw new IllegalStateException("MultiNoiseSampler doesn't have a seed set");
+                    return original.noiseBiome(x, y, z);
+                });
+        var context = new ClientTerrainSampler(42, original.profile()) {
+            @Override public ClientColumnSample sample(int x, int z) { return original.sample(x, z); }
+            @Override NoiseBasedChunkGenerator generatorContext() { return original.generatorContext(); }
+            @Override RandomState randomStateContext() { return original.randomStateContext(); }
+            @Override BiomeSource biomeSourceContext() { return original.biomeSourceContext(); }
+            @Override RegistryAccess decorationAccess() { return RegistryAccess.EMPTY; }
+            @Override Holder<Biome> noiseBiome(int x, int y, int z) {
+                queries.incrementAndGet();
+                return PredictionBiomeCache.sample(source, randomStateContext().sampler(), x, y, z);
+            }
+        };
+        int settings = 3 | PredictionVegetation.runtimeSettings();
+        var key = PredictionDiskCache.Key.surface(0, 0, settings);
+        try (var disk = new PredictionDiskCache(diskDirectory, 42)) {
+            var vegetation = new PredictionVegetation(context, disk, false);
+            assertThrows(PredictionBiomeCache.LookupFailure.class, () -> vegetation.chunk(0, 0));
+            assertFalse(vegetation.hasCachedChunk(0, 0));
+            disk.flush();
+            try (var lease = disk.lease(key)) { assertNull(disk.readSurface(lease)); }
+            assertEquals(0, ((Number) vegetation.performanceSnapshot().get("generatedChunks")).intValue());
+            assertEquals(0, ((Number) vegetation.performanceSnapshot().get("unsupportedFeatures")).intValue());
+            broken.set(false);
+            var complete = vegetation.chunk(0, 0);
+            assertTrue(queries.get() > 1);
+            assertTrue(complete.values().stream().anyMatch(state -> state.is(Blocks.OAK_LEAVES)));
+            disk.flush();
+            try (var lease = disk.lease(key)) { assertEquals(complete, disk.readSurface(lease)); }
+        }
+    }
+
     @Test void nativeDownloadPreservesUnsyncedJavaWritesAndRollbackMarkers() {
         var sampler = sampler(42, Blocks.GRASS_BLOCK, List.of());
         var level = new PredictionDecorationLevel(sampler, sampler, RegistryAccess.EMPTY, 0, 0);
@@ -421,6 +474,32 @@ class PredictionVegetationTest {
         var sampler = sampler(17, Blocks.GRASS_BLOCK, List.of(placed(
                 new ConfiguredFeature<>(broken, NoneFeatureConfiguration.INSTANCE), 1)));
         assertTrue(new PredictionVegetation(sampler).chunk(0, 0).isEmpty());
+    }
+
+    @Test void localPlacementFailuresRollbackOnlyTheCurrentChunkAndDoNotDisableTheFeature() {
+        for(int mode=0;mode<3;mode++) {
+            int failureMode=mode;
+            var calls=new java.util.concurrent.atomic.AtomicInteger();
+            Feature<NoneFeatureConfiguration> feature=new Feature<>(NoneFeatureConfiguration.CODEC) {
+                @Override public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+                    var pos=context.origin();
+                    context.level().setBlock(pos,Blocks.OAK_LOG.defaultBlockState(),3);
+                    if(calls.getAndIncrement()==0) {
+                        if(failureMode==0)context.level().setBlock(pos.offset(512,0,0),Blocks.OAK_LOG.defaultBlockState(),3);
+                        else if(failureMode==1)for(int i=0;i<65_536;i++)context.level().setBlock(pos,Blocks.OAK_LOG.defaultBlockState(),3);
+                        else context.level().getBlockState(pos.offset(512,0,0));
+                    }
+                    return true;
+                }
+            };
+            var sampler=sampler(17,Blocks.GRASS_BLOCK,List.of(placed(new ConfiguredFeature<>(feature,NoneFeatureConfiguration.INSTANCE),1)));
+            var prediction=new PredictionVegetation(sampler,null,false);
+            assertTrue(prediction.chunk(0,0).isEmpty(),"failed transaction rolls back its partial trunk");
+            assertTrue(prediction.chunk(4,0).values().stream().anyMatch(s->s.is(Blocks.OAK_LOG)),prediction.diagnostics());
+            assertEquals(2,calls.get());
+            assertEquals(1L,prediction.performanceSnapshot().get("localFailures"));
+            assertEquals(0,prediction.performanceSnapshot().get("unsupportedFeatures"));
+        }
     }
 
     @Test

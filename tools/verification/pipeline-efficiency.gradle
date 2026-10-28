@@ -1,0 +1,13 @@
+allprojects { afterEvaluate {
+    tasks.register('pipelineEfficiencyTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionPipelineEfficiencyTest.class','**/PredictionRegionStorageTest.class','**/PredictionDiskCacheTest.class'
+        include '**/PredictionVoxyPreparationTest.class','**/PredictionFeatureMemoryTest.class','**/VoxySectionDataTest.class'
+        include '**/PredictionCaptureInvalidationBatchTest.class','**/PredictionEditedTerrainTest.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }
