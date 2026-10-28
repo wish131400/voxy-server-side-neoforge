@@ -7,6 +7,25 @@ import org.junit.jupiter.api.Test;
 class StrictIngestCompletionTest {
     @BeforeEach void reset() { VoxyIngestTracker.reset(); }
 
+    @Test void detachedSnapshotBindsToItsRawSubmissionAndCompletesOnlyItsOwnTicket() throws Throwable {
+        Object original = new Object(), snapshotTask = new Object(), localTask = new Object();
+        VoxyIngestTracker.submittedSnapshot(localTask);
+        assertEquals(0, VoxyIngestTracker.taskCount());
+        assertTrue(VoxyIngestTracker.runRawIngest(original, -7, 9, () -> {
+            VoxyIngestTracker.submittedSnapshot(snapshotTask);
+            return true;
+        }));
+        assertTrue(VoxyIngestTracker.pendingColumn(-7, 9));
+        VoxyIngestTracker.discarded(localTask);
+        assertEquals(1, VoxyIngestTracker.pendingSection(original));
+        Object token = VoxyIngestTracker.enterWorker();
+        VoxyIngestTracker.workerTask(snapshotTask);
+        VoxyIngestTracker.finishWorker(token);
+        VoxyIngestTracker.discarded(snapshotTask);
+        assertFalse(VoxyIngestTracker.pendingColumn(-7, 9));
+        assertEquals(0, VoxyIngestTracker.taskCount());
+    }
+
     @Test void lateCallbacksCannotReleaseAnotherSubmissionOfTheSameSection() throws Throwable {
         Object section = new Object(), oldTask = new Object(), newTask = new Object();
         assertFalse(VoxyIngestTracker.runRawIngest(section, 7, -2, () -> {

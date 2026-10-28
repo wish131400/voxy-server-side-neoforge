@@ -66,7 +66,7 @@ class PredictionViewSelectionTest {
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
         var samples = new ClientColumnSample[65*65]; java.util.Arrays.fill(samples, sample);
         var cliff = new PredictionTileManager.PredictionTile(shape.key(), heights, heights, samples,
-                shape.mesh(), new PredictionDepthBound(220,220), 0, 1, 64, 8);
+                shape.data(), new PredictionDepthBound(220,220), 0, 1, 64, 8);
         var snapshot = new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,
                 layout, java.util.Map.of(cliff.key(), cliff), java.util.Map.of());
         var origin = new Vec3(16, 177, 0);

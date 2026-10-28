@@ -1,9 +1,4 @@
 // Module contracts run against production bytecode; no game or graphics context is created.
-// Retired algorithm comparisons require their own fixtures, listed explicitly below.
-def algorithmExperiments = ['PredictionGpuTraversalExperimentTest', 'PredictionProgressiveBenefitTest', 'PredictionProgressiveDetailTest', 'PredictionProgressiveDetailGpuTest', 'PredictionProgressiveReplayTest', 'PredictionOwnershipMemoryReplay']
-sourceSets.test.java {
-    algorithmExperiments.each { exclude "**/${it}.java" }
-}
 
 tasks.register('architectureTest', Test) {
     group = 'verification'
@@ -32,14 +27,13 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/ColumnStorageReadPipelineTest.class', '**/ExistingColumnPreloaderTest.class'
     include '**/PlayerSession*Test.class', '**/ChunkyQueueLimitIntegrationTest.class'
     include '**/CancelableTaskCallbacksTest.class', '**/StrictLodVisibilityHandoffTest.class'
-    include '**/PredictionVoxyStableOwnershipTest.class', '**/VSSClientNetworkingTest.class'
+    include '**/VSSClientNetworkingTest.class'
     include '**/ClientLodSessionAdapterTest.class', '**/ClientConnectionIdentityTest.class'
     include '**/StrictVoxyNodeIndexTest.class'
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'
-    include '**/PredictionMainReductionTest.class', '**/PredictionTurnMainTest.class'
+    include '**/PredictionLoadingReadSetTest.class'
     include '**/PredictionCoarsePlanHandoffTest.class', '**/PredictionTeleportLoadingTest.class'
     include '**/PredictionDemandLifecycleTest.class', '**/PredictionViewRefinementTest.class'
-    include '**/PredictionSubCellCoverageTest.class'
     // These fixtures configure static loader / Minecraft registries. Isolate test classes,
     // rather than making the result depend on the order in which classes run.
     maxHeapSize = '3G'

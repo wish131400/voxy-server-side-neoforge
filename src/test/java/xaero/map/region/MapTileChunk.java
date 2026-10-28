@@ -15,7 +15,7 @@ public class MapTileChunk {
     public boolean toUpdateBuffers;
     public boolean hasHadTerrain;
     public boolean includeInSaveResult;
-    public final LeafRegionTexture leafTexture = new LeafRegionTexture();
+    public final LeafRegionTexture leafTexture = new LeafRegionTexture(this);
     public final MapTile[][] tiles = new MapTile[4][4];
     public boolean setTileThrows; // arms the throw-latch tests
     public int bufferUpdates;
@@ -57,12 +57,20 @@ public class MapTileChunk {
             throw new IllegalStateException("updateBuffers outside safe writer/resting gates");
         }
         if (this.updateBuffersThrows) throw new IllegalStateException("armed updateBuffers throw");
+        this.leafTexture.setCachePrepared(false);
+        this.region.setAllCachePrepared(false);
+        this.leafTexture.downloadFromPBO = false;
+        this.setHasHadTerrain(); // LeafRegionTexture.prepareBuffer in the released JAR.
+        this.toUpdateBuffers = false;
+        this.leafTexture.toUpload = true;
         this.bufferUpdates++;
         dev.xantha.vss.compat.XaeroStubEvents.record(
                 "tileChunk.updateBuffers " + this.tileChunkX + "," + this.tileChunkZ);
     }
 
     public boolean includeInSave() { return this.includeInSaveResult; }
+
+    public boolean hasHadTerrain() { return this.hasHadTerrain; }
 
     public void setHasHadTerrain() {
         this.hasHadTerrain = true;

@@ -1,0 +1,17 @@
+// CPU-only contracts for late prediction and movement refinement.
+allprojects {
+    afterEvaluate {
+        tasks.register('movementRefinementTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionVoxySourceTest.class', '**/VoxyPredictionNotificationTest.class'
+            include '**/PredictionVoxyDetailQueueTest.class', '**/VoxySubdivisionWaitersTest.class'
+            include '**/PredictionVoxyLoadingIntegrationTest.class', '**/PredictionLivePipelineTest.class'
+            maxHeapSize = '2G'
+            forkEvery = 1
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

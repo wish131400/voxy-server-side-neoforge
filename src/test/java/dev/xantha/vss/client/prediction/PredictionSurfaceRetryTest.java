@@ -59,7 +59,7 @@ class PredictionSurfaceRetryTest {
         var generator = new NoiseBasedChunkGenerator(biomes, settings);
         var random = RandomState.create(settings.value(), lookup.lookupOrThrow(Registries.NOISE), 42);
         return new ClientTerrainSampler(42, PredictionDecorationQueryTest.PROFILE) {
-            @Override public ClientColumnSample sample(int x, int z) { calls.incrementAndGet(); return PredictionSimpleVegetationTest.sample(100); }
+            @Override public ClientColumnSample sample(int x, int z) { calls.incrementAndGet(); return PredictionVoxelFixtures.sample(100); }
             @Override long colorCacheFingerprint() { return 99; }
             @Override public int surfaceColor(int x, int y, int z) { return 0xff779933; }
             @Override public int foliageColor(int x, int y, int z) { return 0xff449922; }
@@ -101,12 +101,12 @@ class PredictionSurfaceRetryTest {
                 () -> vegetation.deferIfRenderingBusy(x, z, span, 1, () -> false));
     }
 
-    @Test void busySurfaceRetriesSkipTerrainAndProduceIdenticalFinalMeshAfterOwnerCompletes() throws Exception {
+    @Test void busySurfaceRetriesReuseTerrainAndPublishIdenticalVoxelsAfterOwnerCompletes() throws Exception {
         var original = exercise(true, 5);
         var candidate = exercise(false, 5);
-        assertTrue(original.calls > 0, "the previous late deferral must prepare terrain");
+        assertEquals(0, original.calls, "surface publication reuses terrain even with late ownership deferral");
         assertEquals(0, candidate.calls, "known shared ownership must defer before terrain");
-        assertArrayEquals(original.words, candidate.words);
+        assertEquals(original.words, candidate.words);
         assertArrayEquals(original.samples, candidate.samples);
     }
 
@@ -119,7 +119,7 @@ class PredictionSurfaceRetryTest {
             Result old, next;
             if ((round & 1) == 0) { old = exercise(true, 20); next = exercise(false, 20); }
             else { next = exercise(false, 20); old = exercise(true, 20); }
-            assertArrayEquals(old.words, next.words);
+            assertEquals(old.words, next.words);
             assertArrayEquals(old.samples, next.samples);
             assertEquals(0, next.calls);
             if (round >= 0) {
@@ -140,8 +140,8 @@ class PredictionSurfaceRetryTest {
     @SuppressWarnings("unchecked")
     private static Result exercise(boolean legacy, int attempts) throws Exception {
         var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures, supersample = config.predictionSupersample;
-        config.predictionTrees = false; config.predictionStructures = false; config.predictionSupersample = false;
+        boolean  supersample = config.predictionSupersample;
+          config.predictionSupersample = false;
         var samples = new AtomicInteger();
         var terrain = terrain(samples);
         var budget = new PredictionMemoryBudget(2048L * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime, 1);
@@ -154,10 +154,10 @@ class PredictionSurfaceRetryTest {
                 ((Set<PredictionTileManager.PredictionTileKey>) field(manager, name)).add(key);
             int axis = manager.layout().cellAxis(0), spacing = manager.layout().tileBlocks(0) / axis;
             var previous = new ClientColumnSample[(axis + 1) * (axis + 1)];
-            Arrays.fill(previous, PredictionSimpleVegetationTest.sample(100));
+            Arrays.fill(previous, PredictionVoxelFixtures.sample(100));
             var heights = new int[previous.length]; Arrays.fill(heights, 100);
             ((Map<PredictionTileManager.PredictionTileKey, PredictionTileManager.PredictionTile>) field(manager, "ready"))
-                    .put(key, new PredictionTileManager.PredictionTile(key, heights, heights, previous, PredictionMeshCodecTest.fixture(axis),
+                    .put(key, new PredictionTileManager.PredictionTile(key, heights, heights, previous, PredictionVoxelFixtures.flat(key,axis,spacing,100),
                             new PredictionDepthBound(100, 100), 0, 1, axis, spacing));
             var vegetation = (PredictionVegetation) field(manager, "vegetation");
             Map<Long, Object> reservations = new java.util.concurrent.ConcurrentHashMap<>();
@@ -210,9 +210,9 @@ class PredictionSurfaceRetryTest {
             await(manager);
             assertTrue(((Set<?>) field(manager, "surfaceReady")).contains(key), manager.surfaceDiagnostics());
             var tile = manager.readyTiles().iterator().next();
-            return new Result(nanos, bytes, cpu, calls, tile.samples().clone(), tile.mesh().gpuPayload().restoreWords());
+            return new Result(nanos, bytes, cpu, calls, tile.samples().clone(), tile.data().voxyTile.features());
         } finally {
-            config.predictionTrees = trees; config.predictionStructures = structures; config.predictionSupersample = supersample;
+              config.predictionSupersample = supersample;
         }
     }
 
@@ -231,5 +231,5 @@ class PredictionSurfaceRetryTest {
     private static double median(long[] values) {
         Arrays.sort(values); return (values[values.length / 2 - 1] + values[values.length / 2]) / 2.0;
     }
-    record Result(long nanos, long bytes, long cpu, int calls, ClientColumnSample[] samples, int[] words) { }
+    record Result(long nanos, long bytes, long cpu, int calls, ClientColumnSample[] samples, List<PredictionVoxySource.Box> words) { }
 }

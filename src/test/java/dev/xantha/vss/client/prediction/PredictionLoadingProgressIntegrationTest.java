@@ -41,6 +41,76 @@ class PredictionLoadingProgressIntegrationTest {
         }
     }
 
+    @Test void observationsSurviveChurnWithoutPublishingStaleReadinessOrGoals() throws Exception {
+        try (var manager = manager()) {
+            var queue = new java.util.ArrayDeque<Runnable>();
+            var pipeline = new PredictionPlanningPipeline(queue::add,
+                    (dimension,now) -> new PredictionExactCoverageIndex.View(Map.of()));
+            field("planning").set(manager,pipeline);
+            var key = nearKey(); plan(manager,key,64);
+            field("scheduledLeaves").set(manager,List.of(key));
+            residents(manager).put(key,tile(manager,key,64,false));
+            var input = loadingInput(manager);
+            assertTrue(pipeline.loading.request(input));
+            call(manager,"invalidateLoadingWork",new Class<?>[0]);
+            keys(manager,"dirtyTiles").add(key); // Actual read evidence changed, not only the global counter.
+            queue.removeFirst().run();
+            call(manager,"publishLoadingWork",new Class<?>[0]);
+            assertEquals(1L,field("loadingDisplayCommits").getLong(manager));
+            assertEquals(0L,field("loadingReadinessCommits").getLong(manager));
+            assertEquals(1,manager.loadingObservation().get("targetTotal"));
+            assertEquals(false,manager.loadingObservation().get("fresh"));
+            assertEquals("refreshing",manager.loadingObservation().get("waitingFor"));
+            assertFalse(manager.loadingProgress().planned());
+            assertTrue(field("foregroundWorkPending").getBoolean(manager));
+            assertEquals(input.goals(),field("displayGoals").get(manager));
+            keys(manager,"dirtyTiles").remove(key);
+            assertTrue(pipeline.loading.request(loadingInput(manager)));
+            queue.removeFirst().run(); call(manager,"publishLoadingWork",new Class<?>[0]);
+            assertEquals(1L,field("loadingReadinessCommits").getLong(manager));
+            assertTrue(manager.loadingProgress().ready(95));
+            assertEquals(true,manager.loadingObservation().get("fresh"));
+            assertTrue(pipeline.loading.request(loadingInput(manager,System.nanoTime()-2_000_000_000L)));
+            queue.removeFirst().run(); call(manager,"publishLoadingWork",new Class<?>[0]);
+            assertEquals(2L,field("loadingReadinessCommits").getLong(manager),"unchanged exact evidence remains valid despite a slow worker");
+            assertTrue(manager.loadingProgress().ready(95));
+            call(manager,"invalidateLoadingWork",new Class<?>[0]);
+            assertEquals(1,manager.loadingObservation().get("targetTotal"),"invalidating readiness preserves dated counts");
+            assertFalse(manager.loadingProgress().planned());
+            call(manager,"abandonOldViewWork",new Class<?>[0]);
+            assertEquals(0,manager.loadingObservation().get("targetTotal"),"teleport discards the previous view observation");
+            assertEquals("initializing",manager.loadingObservation().get("waitingFor"));
+        }
+    }
+
+    @Test void unrelatedLoadingInvalidationCanCommitUnchangedReadEvidence() throws Exception {
+        try(var manager=manager()) {
+            var queue=new java.util.ArrayDeque<Runnable>();
+            var pipeline=new PredictionPlanningPipeline(queue::add,(dimension,now)->new PredictionExactCoverageIndex.View(Map.of()));
+            field("planning").set(manager,pipeline);
+            var key=nearKey();plan(manager,key,64);field("scheduledLeaves").set(manager,List.of(key));
+            residents(manager).put(key,tile(manager,key,64,false));
+            assertTrue(pipeline.loading.request(loadingInput(manager)));
+            call(manager,"invalidateLoadingWork",new Class<?>[0]);
+            queue.removeFirst().run();call(manager,"publishLoadingWork",new Class<?>[0]);
+            assertEquals(1L,field("loadingReadinessCommits").getLong(manager));
+            assertEquals(0L,field("loadingReadinessDiscards").getLong(manager));
+            assertTrue(manager.loadingProgress().ready(95));
+            assertEquals(true,manager.loadingObservation().get("fresh"));
+        }
+    }
+
+    private static PredictionLoadingPreparation.Input loadingInput(PredictionTileManager manager) throws Exception {
+        return loadingInput(manager,System.nanoTime());
+    }
+    private static PredictionLoadingPreparation.Input loadingInput(PredictionTileManager manager,long now) throws Exception {
+        var scheduling = (PredictionSchedulePreparation.Input)call(manager,"schedulingInput",new Class<?>[]{long.class},now);
+        return (PredictionLoadingPreparation.Input)call(manager,"loadingInput",new Class<?>[]{PredictionSchedulePreparation.Input.class},scheduling);
+    }
+    private static Object call(PredictionTileManager manager,String name,Class<?>[] types,Object... args) throws Exception {
+        var method = PredictionTileManager.class.getDeclaredMethod(name,types); method.setAccessible(true); return method.invoke(manager,args);
+    }
+
     @Test void surfaceFlagNeedsCompleteCurrentTerrainEvenOutsideNearTargetRadius() throws Exception {
         try (var manager = manager()) {
             int radius = PredictionDetailBands.fineRadius(manager.layout().maxDistanceBlocks(), PROFILE.levelKey());
@@ -166,10 +236,8 @@ class PredictionLoadingProgressIntegrationTest {
         int[] heights = new int[(axis + 1) * (axis + 1)];
         Arrays.fill(heights, 64);
         var samples = new ClientColumnSample[heights.length];
-        Arrays.fill(samples, PredictionSimpleVegetationTest.sample(64));
-        var mesh = new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
-                new int[0], new boolean[axis * axis], 0, 0, axis * axis,
-                null, null, null, null, axis, spacing);
+        Arrays.fill(samples, PredictionVoxelFixtures.sample(64));
+        var mesh = PredictionVoxelFixtures.flat(key,axis,spacing,64);
         return new PredictionTile(key, heights, heights, samples, mesh,
                 new PredictionDepthBound(64, 64), 0, 0, axis, spacing, scopeOnly);
     }

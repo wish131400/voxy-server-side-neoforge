@@ -58,6 +58,16 @@ replaceability for huge-fungus placement; absent metadata causes Java fallback
 instead of guessing. See `docs/nether-end-prediction.md` for support limits and
 the paired surface/decoration/structure fixtures.
 
+The 2026-10-25 ABI 6 build also adds the optional `displayGrid` entry. It accepts
+an 8x8 grid origin, spacing and a row-major 64-bit missing-cell mask, and writes
+64 ten-int32 records. Java consumes only missing records and retains known exact
+values. This preserves adaptive grid admission after partial Java cache reuse;
+ineligible grids evaluate only missing points. Adaptive probes use consistent
+display provenance even if an exact point is already cached, without writing
+display approximations into exact caches. External ABI 6 libraries without this
+symbol retain the existing sparse `displayPoints` fallback. Existing JNI entries,
+the ABI number, network protocol and exact disk-cache identity are unchanged.
+
 Cross compilation from Windows uses Rust target standard libraries and pinned
 Zig 0.13.0 / cargo-zigbuild 0.23.4, through `build-cross-platform.ps1 -Package`.
 Install the tools with `python -m pip install --target build/cross-tools ziglang==0.13.0 cargo-zigbuild==0.23.4`.

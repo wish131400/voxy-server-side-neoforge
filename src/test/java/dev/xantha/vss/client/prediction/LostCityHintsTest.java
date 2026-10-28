@@ -137,19 +137,5 @@ class LostCityHintsTest {
         assertNull(present.snapshot(0, 0, 64));
     }
 
-    @Test
-    void cityBuildingsExtendTileDepthAndHaveDistinctCacheIdentities() {
-        var low = building(64, 18);
-        var high = building(64, 24);
-        var lowTile = new LostCityPreview.Tile(0, 0, 1, List.of(low));
-        var highTile = new LostCityPreview.Tile(0, 0, 1, List.of(high));
-        assertEquals(new PredictionDepthBound(40, 82),
-                LostCityHints.includeBuildings(new PredictionDepthBound(40, 70), lowTile));
-        byte[] base = new byte[32];
-        assertArrayEquals(base, PredictionMeshCodec.withCityBuildings(base, null));
-        assertArrayEquals(PredictionMeshCodec.withCityBuildings(base, lowTile),
-                PredictionMeshCodec.withCityBuildings(base, lowTile));
-        assertFalse(java.util.Arrays.equals(PredictionMeshCodec.withCityBuildings(base, lowTile),
-                PredictionMeshCodec.withCityBuildings(base, highTile)));
-    }
+
 }

@@ -1,0 +1,33 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('surfaceHeightTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+            include '**/VoxySurfaceHeightsTest.class', '**/VoxySectionDataTest.class', '**/PredictionVoxySourceTest.class'
+            maxHeapSize = '2G'
+            forkEvery = 1
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+        }
+        if(providers.gradleProperty('vssVoxyMatrix').isPresent()) {
+            def rows=new groovy.json.JsonSlurper().parse(project.file(providers.gradleProperty('vssVoxyMatrix').get()))
+            def checks=rows.collect { row ->
+                tasks.register('surfaceHeight_' + row.id, Test) {
+                    dependsOn tasks.named('testClasses')
+                    testClassesDirs=sourceSets.test.output.classesDirs
+                    classpath=sourceSets.test.runtimeClasspath
+                    useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+                    include '**/VoxySurfaceHeightsTest.class'
+                    maxHeapSize='2G'
+                    systemProperty 'vss.voxyJar', project.file(row.jar).absolutePath
+                    testLogging {events 'failed','skipped';exceptionFormat 'full'}
+                }
+            }
+            tasks.register('surfaceHeightMatrix') {dependsOn checks}
+        }
+    }
+}

@@ -119,7 +119,7 @@ final class XaeroTileExtractor {
                 ? worldBottomY - 1
                 : (highestNonAir << 4) + 15;
 
-        var column = new ColumnAccess(byY, minSecY);
+        var column = new ReceivedColumnAccess(byY, minSecY);
         var scan = new PixelScan();
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
@@ -142,12 +142,64 @@ final class XaeroTileExtractor {
 
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
 
+    /** Surface projection shares the received-column scanner, without allocating chunk sections. */
+    @SuppressWarnings("unchecked")
+    static PreparedTile extractPrediction(int chunkX,int chunkZ,int bottom,int top,
+                                          XaeroPredictionBridge.Surface surface) {
+        var states=new BlockState[256]; var heights=new short[256]; var tops=new short[256];
+        var biomes=(ResourceKey<Biome>[])new ResourceKey[256]; var light=new byte[256];
+        var glow=new boolean[256]; var overlays=new OverlayRun[256][];
+        var keys=new java.util.HashMap<String,ResourceKey<Biome>>();
+        ColumnAccess access=new ColumnAccess() {
+            public BlockState blockAt(int x,int y,int z) {
+                var runs=surface.pixels()[x*16+z].runs();
+                for (int i=runs.size()-1;i>=0;i--) {
+                    var r=runs.get(i); if (y>=r.bottom() && y<r.top()) return r.state();
+                }
+                return AIR;
+            }
+            public int occupiedAtOrBelow(int x,int y,int z) {
+                int highest=bottom-1;
+                for (var r:surface.pixels()[x*16+z].runs())
+                    if (!r.state().isAir() && r.bottom()<=y) highest=Math.max(highest,Math.min(y,r.top()-1));
+                return highest;
+            }
+            public byte lightAt(int x,int y,int z) { return 0; }
+            public ResourceKey<Biome> biomeAt(int x,int y,int z) {
+                String name=surface.pixels()[x*16+z].biome();
+                if (name==null) return null;
+                return keys.computeIfAbsent(name,n -> {
+                    var id=net.minecraft.resources.ResourceLocation.tryParse(n);
+                    return id==null ? null : ResourceKey.create(net.minecraft.core.registries.Registries.BIOME,id);
+                });
+            }
+        };
+        var scan=new PixelScan();
+        var projected=new java.util.IdentityHashMap<XaeroPredictionBridge.Pixel,Integer>();
+        for (int x=0;x<16;x++) for(int z=0;z<16;z++) {
+            int i=x*16+z;
+            Integer previous=projected.putIfAbsent(surface.pixels()[i],i);
+            if(previous!=null) {
+                int p=previous; states[i]=states[p]; heights[i]=heights[p]; tops[i]=tops[p];
+                biomes[i]=biomes[p]; glow[i]=glow[p]; overlays[i]=overlays[p]; continue;
+            }
+            scan.reset(bottom); scanPixel(access,x,z,top-1,scan);
+            BlockState state=scan.floorState==null ? AIR : scan.floorState;
+            states[i]=state; heights[i]=(short)(scan.floorState==null ? bottom : scan.floorY);
+            tops[i]=(short)scan.topH; biomes[i]=access.biomeAt(x,scan.topH,z);
+            glow[i]=isGlowing(state); overlays[i]=scan.finishedRuns();
+        }
+        return new PreparedTile(chunkX,chunkZ,bottom,states,heights,tops,biomes,light,glow,overlays);
+    }
+
     /** Top-down scan of one pixel — the loadPixel loop with the cave branches folded away. */
     private static void scanPixel(ColumnAccess column, int x, int z, int startY, PixelScan scan) {
         int lowY = scan.lowY;
         boolean extendedLastStep = false;
         int h = startY;
         while (h >= lowY) {
+            h = column.occupiedAtOrBelow(x,h,z);
+            if (h < lowY) break;
             BlockState state = column.blockAt(x, h, z);
             FluidState fluid = state.getFluidState();
             BlockState fluidLegacyBlock = fluid.isEmpty() ? null : fluid.createLegacyBlock();
@@ -296,7 +348,14 @@ final class XaeroTileExtractor {
     }
 
     /** Section-indexed access to one column's blocks/light/biomes; absent sections read as air. */
-    private record ColumnAccess(VoxelColumnData.SectionData[] byY, int minSecY) {
+    private interface ColumnAccess {
+        BlockState blockAt(int x,int y,int z);
+        byte lightAt(int x,int y,int z);
+        ResourceKey<Biome> biomeAt(int x,int y,int z);
+        default int occupiedAtOrBelow(int x,int y,int z) { return y; }
+    }
+
+    private record ReceivedColumnAccess(VoxelColumnData.SectionData[] byY, int minSecY) implements ColumnAccess {
 
         private LevelChunkSection sectionFor(int y) {
             int idx = (y >> 4) - this.minSecY;
@@ -304,21 +363,21 @@ final class XaeroTileExtractor {
             return this.byY[idx].section();
         }
 
-        BlockState blockAt(int x, int y, int z) {
+        public BlockState blockAt(int x, int y, int z) {
             var section = sectionFor(y);
             if (section == null) return AIR;
             var state = section.getBlockState(x, y & 15, z);
             return state == null ? AIR : state;
         }
 
-        byte lightAt(int x, int y, int z) {
+        public byte lightAt(int x, int y, int z) {
             int idx = (y >> 4) - this.minSecY;
             if (idx < 0 || idx >= this.byY.length || this.byY[idx] == null) return 0;
             DataLayer blockLight = this.byY[idx].blockLight();
             return blockLight == null ? 0 : (byte) blockLight.get(x, y & 15, z);
         }
 
-        ResourceKey<Biome> biomeAt(int x, int y, int z) {
+        public ResourceKey<Biome> biomeAt(int x, int y, int z) {
             var section = sectionFor(y);
             if (section == null) return null;
             try {

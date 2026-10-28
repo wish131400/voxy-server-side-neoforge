@@ -51,6 +51,29 @@ final class VoxyCompat {
     private VoxyCompat() {
     }
 
+    /** Completed real coverage survives later updates. Stored section bounds alone do not prove air. */
+    static boolean confirmedPredictionColumn(Object engine, int x, int z) {
+        LocalSectionIndex index = localIndexes.get(engine);
+        return index != null && index.hasSettled(x, z);
+    }
+
+    /** Resolve the world index once per composition, rather than once per voxel column. */
+    static VoxyPredictionBridge.RealColumn confirmedPredictionColumns(Object engine) {
+        LocalSectionIndex index = localIndexes.get(engine);
+        return index == null ? (x,z) -> false
+                : index::hasSettled;
+    }
+
+    /** Record completion even before a render context exists; later ingests do not revoke it. */
+    static void settlePredictionColumn(int x, int z) {
+        if (VoxyIngestTracker.pendingColumn(x, z)) return;
+        synchronized (localIndexes) {
+            for (LocalSectionIndex index : localIndexes.values())
+                if (!index.cancelled && index.hasConfirmed(x, z) && !index.hasSettled(x, z))
+                    index.markSettled(x, z);
+        }
+    }
+
     static boolean init() {
         try {
             MethodHandles.Lookup lookup = MethodHandles.lookup();
@@ -158,6 +181,7 @@ final class VoxyCompat {
     private static void initLocalIndexHandles(MethodHandles.Lookup lookup, Class<?> worldIdClass) {
         try {
             Class<?> worldEngineClass = Class.forName("me.cortex.voxy.common.world.WorldEngine");
+            VoxySectionPosition.bind(worldEngineClass);
             Class<?> sectionStorageClass = Class.forName("me.cortex.voxy.common.config.section.SectionStorage");
             worldEngineNullable = lookup
                     .findStatic(worldIdClass, "ofEngineNullable", MethodType.methodType(worldEngineClass, Level.class))
@@ -389,6 +413,7 @@ final class VoxyCompat {
             }
             LocalSectionIndex index = localIndex(engine);
             index.markConfirmed(chunkX, chunkZ);
+            VoxyPredictionBridge.realColumnSettled(chunkX, chunkZ);
         } catch (Throwable ignored) {
         }
     }
@@ -490,11 +515,11 @@ final class VoxyCompat {
     }
 
     private static int unpackSectionX(long sectionKey) {
-        return (int) (sectionKey << 36 >> 40);
+        return VoxySectionPosition.x(sectionKey);
     }
 
     private static int unpackSectionZ(long sectionKey) {
-        return (int) (sectionKey << 12 >> 40);
+        return VoxySectionPosition.z(sectionKey);
     }
 
     static int chunkCoordinateForWorldSection(int worldSectionCoordinate, int localChunk) {
@@ -518,6 +543,7 @@ final class VoxyCompat {
 
     private static final class LocalSectionIndex {
         private final ConcurrentHashMap<Long, long[]> confirmedRegions = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<Long, long[]> settledRegions = new ConcurrentHashMap<>();
         private volatile ConcurrentHashMap<Long, long[]> storedRegions = new ConcurrentHashMap<>();
         private final AtomicBoolean buildStarted = new AtomicBoolean();
         private volatile boolean ready;
@@ -531,6 +557,14 @@ final class VoxyCompat {
 
         private void markConfirmed(int chunkX, int chunkZ) {
             mark(confirmedRegions, chunkX, chunkZ);
+        }
+
+        private void markSettled(int chunkX, int chunkZ) {
+            mark(settledRegions, chunkX, chunkZ);
+        }
+
+        private boolean hasSettled(int chunkX, int chunkZ) {
+            return !cancelled && has(settledRegions, chunkX, chunkZ);
         }
 
         private void markStoredWorldSection(ConcurrentHashMap<Long, long[]> target,
@@ -603,7 +637,7 @@ final class VoxyCompat {
                 return OptionalInt.of(0);
             }
             float sectionDist = (float) getSectionRenderDist.invokeExact(config);
-            return OptionalInt.of(Math.round(sectionDist * 32.0f));
+            return OptionalInt.of(Math.max(Math.round(sectionDist * 32.0f), VoxyPredictionBridge.renderDistanceChunks()));
         } catch (Throwable e) {
             return OptionalInt.empty();
         }
@@ -649,9 +683,7 @@ final class VoxyCompat {
         MethodHandles.Lookup lookup = MethodHandles.lookup();
         Class<?> voxyConfigClass = Class.forName("me.cortex.voxy.client.config.VoxyConfig");
         Field configField = voxyConfigClass.getField("CONFIG");
-        getSectionRenderDist = lookup
-                .findGetter(voxyConfigClass, "sectionRenderDistance", Float.TYPE)
-                .asType(MethodType.methodType(Float.TYPE, Object.class));
+        getSectionRenderDist = VoxyRenderAccess.distanceField(voxyConfigClass);
         getEnabled = lookup
                 .findGetter(voxyConfigClass, "enabled", Boolean.TYPE)
                 .asType(MethodType.methodType(Boolean.TYPE, Object.class));

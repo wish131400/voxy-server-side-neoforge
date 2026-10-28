@@ -41,7 +41,7 @@ final class PredictionVegetation {
     private final RegistryAccess access;
     private final List<List<PlacedFeature>> featureSteps;
     private volatile EnabledFeatures enabledFeatures;
-    private record EnabledFeatures(int settings, int[][] indices) { }
+    private record EnabledFeatures(int[][] indices) { }
     private final Set<PlacedFeature> biomeFiltered = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final PredictionSurfaceStructures structures;
     private final PredictionTreeModels treeModels;
@@ -73,7 +73,16 @@ final class PredictionVegetation {
 
     boolean available() {
         for (var step : enabledFeatures().indices()) if (step.length != 0) return true;
-        return VSSClientConfig.CONFIG.predictionStructures && structures.available();
+        return structures.available();
+    }
+
+    /** Counters only: sampling never waits for placement, tree models or display-cache locks. */
+    Map<String,Object> performanceSnapshot() {
+        return Map.of("initialized",true,"generatedChunks",generatedChunks.sum(),
+                "generatedBlocks",generatedBlocks.sum(),"meshedBlocks",meshedBlocks.sum(),
+                "memoryHits",memoryHits.sum(),"diskHits",diskHits.sum(),
+                "activeChunks",generationJobs.size(),"failedFeatures",failedFeatures.sum(),
+                "lastFailure",lastFeatureFailure);
     }
 
     String diagnostics() {
@@ -100,7 +109,7 @@ final class PredictionVegetation {
         this.terrain = terrain;
         this.terrainColumns = new VssLodSampleCache(terrain.interiorTerrain() ? 512 : 32_768);
         this.diskCache = diskCache;
-        this.settings = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0)
+        this.settings = 3
                 | (reuseTrees ? 28 : 0) | (terrain.interiorTerrain() ? 96 : 0) | runtimeSettings();
         this.context = terrain.decorationContext();
         this.access = context.decorationAccess();
@@ -156,16 +165,9 @@ final class PredictionVegetation {
 
     Tile tileForRendering(int x, int z, int span, int spacing, boolean trees,
             java.util.function.LongPredicate captured, java.util.function.BooleanSupplier current) {
-        return tileForRendering(x, z, span, spacing, trees, captured, current,
-                dev.xantha.vss.config.PredictionVegetationDensity.HIGH);
-    }
-
-    Tile tileForRendering(int x, int z, int span, int spacing, boolean trees,
-            java.util.function.LongPredicate captured, java.util.function.BooleanSupplier current,
-            dev.xantha.vss.config.PredictionVegetationDensity density) {
         requireCurrent(current);
         if (spacing > 8 || !available()) return Tile.EMPTY;
-        try (var build = displayCache.begin(x, z, span, spacing, trees, density)) {
+        try (var build = displayCache.begin(x, z, span, spacing, trees)) {
             var sources = generationSources(x, z, span, current);
             requireCurrent(current);
             var result = displayCache.tile(build, sources, captured);
@@ -207,14 +209,8 @@ final class PredictionVegetation {
     }
 
     Tile cachedDisplayForRendering(int x, int z, int span, int spacing, java.util.function.LongPredicate captured) {
-        return cachedDisplayForRendering(x, z, span, spacing, captured,
-                dev.xantha.vss.config.PredictionVegetationDensity.HIGH);
-    }
-
-    Tile cachedDisplayForRendering(int x, int z, int span, int spacing, java.util.function.LongPredicate captured,
-            dev.xantha.vss.config.PredictionVegetationDensity density) {
         if (spacing > 8) return Tile.EMPTY;
-        try (var build = displayCache.begin(x, z, span, spacing, VSSClientConfig.CONFIG.predictionTrees, density)) {
+        try (var build = displayCache.begin(x, z, span, spacing, true)) {
             return displayCache.tile(build, cachedSources(x, z, span), captured);
         }
     }
@@ -246,211 +242,8 @@ final class PredictionVegetation {
                        BiPredicate<Integer,Integer> captured) {
         if (spacing > 8) return Tile.EMPTY;
         return PredictionVegetationDisplayCache.merge(baseX, baseZ, span, spacing,
-                VSSClientConfig.CONFIG.predictionTrees, cachedSources(baseX, baseZ, span),
+                true, cachedSources(baseX, baseZ, span),
                 pos -> captured.test(pos.getX(), pos.getZ()));
-    }
-
-    static Tile cachedRepresentative(Map<BlockPos,BlockState> blocks, int x, int z, int span, int spacing) {
-        if (blocks.isEmpty()) return Tile.EMPTY;
-        // Stable spatial selection, bounded before meshing. Retain original
-        // geometry rather than inventing a canopy box or rescaling its blocks.
-        var selected = new LinkedHashMap<BlockPos,BlockState>();
-        blocks.entrySet().stream().sorted(Map.Entry.comparingByKey(Comparator
-                .<BlockPos>comparingInt(BlockPos::getX).thenComparingInt(BlockPos::getZ).thenComparingInt(BlockPos::getY)))
-                .limit(4096).forEach(e -> selected.put(e.getKey(),e.getValue()));
-        return Tile.of(Map.copyOf(selected),x,z,span,spacing,1).withExteriorEnvelope();
-    }
-
-    private final Map<Long,Float> forestCoverage = new ConcurrentHashMap<>();
-    private float forestCoverage(long chunkKey, Map<BlockPos,BlockState> blocks) {
-        int cx=(int)(chunkKey>>32), cz=(int)chunkKey;
-        var columns = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
-        for(var e:blocks.entrySet()) if(e.getValue().is(BlockTags.LEAVES)) {
-            var p=e.getKey();
-            if(Math.floorDiv(p.getX(),16)==cx && Math.floorDiv(p.getZ(),16)==cz)
-                columns.add((long)p.getX()<<32 | p.getZ() & 0xffffffffL);
-        }
-        return Math.min(1,columns.size()/256F);
-    }
-
-    int forestTint(ClientColumnSample sample, int x, int z, int spacing, int grass, int foliage) {
-        if (spacing<=8 || !VSSClientConfig.CONFIG.predictionTrees || sample.hasFluid() || sample.snow()
-                || sample.ice() || sample.topBlockIndex()!=PredictionMaterialPalette.grassBlockIndex()) return grass;
-        float cover=forestCoverage.getOrDefault((long)Math.floorDiv(x,16)<<32 | Math.floorDiv(z,16)&0xffffffffL,0F);
-        cover *= dev.xantha.vss.config.PredictionVegetationDensity.current().percentage() / 100F;
-        return forestTint(grass,foliage,cover);
-    }
-
-    static int forestTint(int grass,int foliage,float coverage) {
-        float weight=Math.max(0,Math.min(1,coverage))*.35F;
-        int color=grass&0xff000000;
-        for(int shift:new int[]{0,8,16}) color|=Math.round(((grass>>>shift)&255)*(1-weight)
-                +((foliage>>>shift)&255)*weight)<<shift;
-        return color;
-    }
-
-    static Tile boundedTile(Map<BlockPos, BlockState> blocks, int baseX, int baseZ,
-                            int span, int spacing, int initialSize) {
-        if (spacing <= 2) {
-            Map<BlockPos, BlockState> fine = fineBlocks(blocks, initialSize);
-            boolean envelope = initialSize > 1 || fineVegetationVertices(fine, 1) > 131_072;
-            if (envelope) {
-                int thinning = Math.max(2, initialSize);
-                fine = fineBlocks(blocks, thinning);
-                while (groundCoverVertices(fine) > 98_304 && thinning < 8) fine = fineBlocks(blocks, thinning *= 2);
-            }
-            Tile tile = Tile.of(fine, baseX, baseZ, span, spacing, 1);
-            return envelope ? tile.withExteriorEnvelope() : tile;
-        }
-        int size = initialSize;
-        Map<BlockPos, BlockState> reduced = reduceBlocks(blocks, size, true);
-        // Leave room for terrain and cliff walls within the mesh's hard cap.
-        // Dense forests simplify on a fixed world grid before allocation,
-        // instead of making the entire terrain tile fail and retry forever.
-        // Distant coarse tiles may still use representative tree voxels.
-        // The fine path above never enters this size-increasing fallback.
-        while (vegetationVertices(reduced, size) > 131_072 && size < 8) {
-            size *= 2;
-            reduced = reduceBlocks(blocks, size, true);
-        }
-        return Tile.of(reduced, baseX, baseZ, span, spacing, size);
-    }
-
-    private static long groundCoverVertices(Map<BlockPos, BlockState> blocks) {
-        long vertices = 0;
-        for (BlockState state : blocks.values()) {
-            if (state.is(Blocks.BAMBOO)) vertices += 54;
-            else if (thinGroundCover(state)) vertices += 12;
-        }
-        return vertices;
-    }
-
-    private static Map<BlockPos, BlockState> fineBlocks(Map<BlockPos, BlockState> blocks, int thinning) {
-        if (thinning <= 1) return blocks;
-        Map<BlockPos, BlockState> result = new HashMap<>(blocks.size());
-        blocks.forEach((p, state) -> {
-            if ((thinGroundCover(state) || state.is(Blocks.BAMBOO))
-                    && (Math.floorMod(p.getX(), thinning) != 0 || Math.floorMod(p.getZ(), thinning) != 0)) return;
-            // Resource packs may select different leaf models by distance and
-            // persistence. Merge matching rendered materials in the mesh, never
-            // rewrite a healthy leaf to the default decaying state here.
-            result.put(p, state);
-        });
-        return result;
-    }
-
-    /**
-     * Conservative estimate before the final per-cell rectangle merge.
-     * Complete cubes merge into exposed vertical runs; shaped blocks and
-     * bamboo retain their individual model geometry.
-     */
-    static long fineVegetationVertices(Map<BlockPos, BlockState> blocks, int size) {
-        long vertices = 0;
-        // Count a run only at its first exposed face. Looking at its immediate
-        // predecessor is equivalent to sorting every vertical column, without
-        // allocating a TreeMap node (and boxed Y) for every placed block.
-        BlockPos.MutableBlockPos neighborPos = new BlockPos.MutableBlockPos();
-        for (var entry : blocks.entrySet()) {
-            BlockState state = entry.getValue();
-            if (!renderable(state)) continue;
-            if (state.is(Blocks.BAMBOO)) { vertices += 54; continue; }
-            if (!solid(state)) { vertices += 12; continue; }
-            BlockPos p = entry.getKey();
-            int step = voxelSize(state, size);
-            if (!mergeable(state, step)) {
-                // Shape interiors can emit faces even next to another block.
-                vertices += PredictionSurfaceShapes.boxes(state, step).size() * 30L;
-                continue;
-            }
-            BlockState above = blocks.get(neighborPos.set(p.getX(), p.getY() + 1, p.getZ()));
-            if (!occluding(above)) vertices += 6;
-            BlockState below = blocks.get(neighborPos.set(p.getX(), p.getY() - 1, p.getZ()));
-            for (var direction : EXTERIOR_FACES) {
-                if (direction == net.minecraft.core.Direction.UP) continue;
-                int nx = p.getX() + direction.getStepX(), nz = p.getZ() + direction.getStepZ();
-                BlockState neighbor = blocks.get(neighborPos.set(nx, p.getY(), nz));
-                if (occluding(neighbor)) continue;
-                BlockState predecessorNeighbor = below == state
-                        ? blocks.get(neighborPos.set(nx, p.getY() - 1, nz)) : null;
-                if (below != state || occluding(predecessorNeighbor)) vertices += 6;
-            }
-        }
-        return vertices;
-    }
-
-    private static boolean occluding(BlockState state) {
-        return state != null && solid(state) && PredictionSurfaceShapes.occludes(state);
-    }
-
-    static boolean mergeable(BlockState state, int size) {
-        return size == 1 && renderable(state) && solid(state) && PredictionSurfaceShapes.occludes(state);
-    }
-
-    static boolean thinGroundCover(BlockState state) {
-        // Modded stalks (including BOP high grass) inherit GrowingPlantBlock,
-        // not BushBlock. Keep their complete vertical stacks when thinning.
-        return state.getBlock() instanceof net.minecraft.world.level.block.GrowingPlantBlock
-                || state.is(Blocks.SHORT_GRASS) || state.is(Blocks.TALL_GRASS)
-                || state.is(Blocks.FERN) || state.is(Blocks.LARGE_FERN)
-                || state.is(Blocks.KELP) || state.is(Blocks.KELP_PLANT)
-                || state.is(Blocks.SEAGRASS) || state.is(Blocks.TALL_SEAGRASS);
-    }
-
-    static Map<BlockPos, BlockState> reduceBlocks(Map<BlockPos, BlockState> blocks, int size) {
-        return reduceBlocks(blocks,size,false);
-    }
-
-    private static Map<BlockPos, BlockState> reduceBlocks(Map<BlockPos, BlockState> blocks, int size, boolean thinCover) {
-        if (size <= 1) return blocks;
-        Map<BlockPos, BlockState> result = new HashMap<>();
-        Map<BlockPos, Map<BlockState, Integer>> votes = new HashMap<>();
-        // Count original blocks at every level, not winners from the previous
-        // reduction. A single log must not repaint an entire leaf-filled voxel.
-        for (var entry : blocks.entrySet()) {
-                BlockPos p = entry.getKey();
-                if (entry.getValue().is(Blocks.BAMBOO) || thinGroundCover(entry.getValue())) {
-                    // Keep complete stalks and double-height plants on a stable
-                    // world grid only under mesh pressure; never enlarge them.
-                    if (!thinCover || Math.floorMod(p.getX(), size) == 0 && Math.floorMod(p.getZ(), size) == 0)
-                        result.put(p, entry.getValue());
-                    continue;
-                }
-                if (!woody(entry.getValue())) {
-                    result.put(p, entry.getValue());
-                    continue;
-                }
-                BlockPos key = new BlockPos(Math.floorDiv(p.getX(), size) * size,
-                        Math.floorDiv(p.getY(), size) * size, Math.floorDiv(p.getZ(), size) * size);
-                votes.computeIfAbsent(key, ignored -> new HashMap<>()).merge(entry.getValue(), 1, Integer::sum);
-        }
-        votes.forEach((pos, counts) -> {
-            Map<net.minecraft.world.level.block.Block,Integer> materialCounts = new HashMap<>();
-            counts.forEach((state,count) -> materialCounts.merge(state.getBlock(),count,Integer::sum));
-            result.putIfAbsent(pos, counts.entrySet().stream().max(Comparator
-                    .comparingInt((Map.Entry<BlockState,Integer> entry) -> materialCounts.get(entry.getKey().getBlock()))
-                    .thenComparingInt(entry -> entry.getKey().is(BlockTags.LEAVES) ? 1 : 0)
-                    .thenComparingInt(Map.Entry::getValue)
-                    .thenComparingInt(entry -> -net.minecraft.world.level.block.Block.getId(entry.getKey())))
-                    .orElseThrow().getKey());
-        });
-        return result;
-    }
-
-    private static long vegetationVertices(Map<BlockPos, BlockState> blocks, int size) {
-        long vertices = 0;
-        for (var entry : blocks.entrySet()) {
-            // Four sides + top + up to four double-sided leaf quads.
-            if (!renderable(entry.getValue())) continue;
-            if (entry.getValue().is(Blocks.BAMBOO)) { vertices += 54; continue; }
-            if (!solid(entry.getValue())) { vertices += 12; continue; }
-            BlockPos p = entry.getKey();
-            int step = voxelSize(entry.getValue(), size);
-            for (var direction : EXTERIOR_FACES) {
-                BlockState neighbor = blocks.get(p.relative(direction, step));
-                if (neighbor == null || !solid(neighbor)) vertices += 6;
-            }
-        }
-        return vertices;
     }
 
     Map<BlockPos, BlockState> chunk(int x, int z) {
@@ -489,24 +282,18 @@ final class PredictionVegetation {
                 }
                 if (result == null) {
                     result = generate(x, z, generationCurrent);
-                    // A toggle during generation cannot save partial content
-                    // under the old settings identity.
-                    int currentSettings = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0);
-                    if (lease != null && currentSettings == (settings & 3)) diskCache.writeSurfaceLater(lease, result, true);
+                    if (lease != null) diskCache.writeSurfaceLater(lease, result, true);
                 }
             }
             requireCurrent(generationCurrent);
-            float cover = forestCoverage(key, result);
             synchronized (chunks) {
                 requireCurrent(generationCurrent);
                 chunks.put(key, result);
-                forestCoverage.put(key, cover);
                 cachedBlocks += result.size();
                 while (chunks.size() > MAX_CHUNKS || cachedBlocks > MAX_BLOCKS) {
                     var first = chunks.entrySet().iterator();
                     var retired = first.next();
                     cachedBlocks -= retired.getValue().size();
-                    forestCoverage.remove(retired.getKey());
                     first.remove();
                 }
             }
@@ -533,7 +320,6 @@ final class PredictionVegetation {
                     job.valid = false;
                     job.dirtyChunks.add(PredictionVegetationDisplayCache.chunkKey(chunkX, chunkZ));
                 }
-                forestCoverage.remove(key);
                 var removed = chunks.remove(key);
                 if (removed != null) cachedBlocks -= removed.size();
             }
@@ -649,19 +435,18 @@ final class PredictionVegetation {
     }
 
     private EnabledFeatures enabledFeatures() {
-        int flags = (VSSClientConfig.CONFIG.predictionTrees ? 1 : 0) | (VSSClientConfig.CONFIG.predictionStructures ? 2 : 0);
         var cached = enabledFeatures;
-        if (cached != null && cached.settings() == flags) return cached;
+        if (cached != null) return cached;
         var indices = new int[featureSteps.size()][];
         for (int step = 0; step < indices.length; step++) {
             var features = featureSteps.get(step);
             var selected = new int[features.size()];
             int count = 0;
             for (int index = 0; index < features.size(); index++)
-                if (enabled(step, features.get(index), (flags & 1) != 0, (flags & 2) != 0)) selected[count++] = index;
+                if (enabled(step, features.get(index), true, true)) selected[count++] = index;
             indices[step] = java.util.Arrays.copyOf(selected, count);
         }
-        var result = new EnabledFeatures(flags, indices);
+        var result = new EnabledFeatures(indices);
         enabledFeatures = result;
         return result;
     }
@@ -719,8 +504,7 @@ final class PredictionVegetation {
             level.placed().forEach((pos, state) -> {
                 // The volume mesher applies these edits at their exact footprint,
                 // including rooms carved into rock and fluid replacements.
-                if ((renderable(state) || state.isAir() || state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock)
-                        && (!level.isStructureBlock(pos) || VSSClientConfig.CONFIG.predictionStructures))
+                if (renderable(state) || state.isAir() || state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock)
                     interior.put(pos, state);
             });
             return interior;
@@ -737,8 +521,7 @@ final class PredictionVegetation {
                 return y;
             });
             if (pos.getY() >= floor && (renderable(state) || state.isAir()
-                    || state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock)
-                    && (!level.isStructureBlock(pos) || VSSClientConfig.CONFIG.predictionStructures))
+                    || state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock))
                 exterior.put(pos, state);
         });
         return exterior;
@@ -766,62 +549,15 @@ final class PredictionVegetation {
 
     record Voxel(int x, int y, int z, int size, BlockState state) { }
 
-    static PredictionMesh meshWithinBudget(Tile original, int span, int spacing,
-                                           java.util.function.Function<Tile, PredictionMesh> build) {
-        Tile current = original;
-        int reduction = spacing <= 2 ? 1 : original.voxelSize();
-        while (true) {
-            try { return build.apply(current); }
-            catch (PredictionMemoryBudget.MeshLimitException limit) {
-                if (current.blocks().isEmpty() || reduction >= 8) throw limit;
-                // Retry geometry from retained blocks, never replay worldgen.
-                // Always reduce from the original map to retain material votes.
-                Tile reduced = boundedTile(original.blocks(), original.baseX(), original.baseZ(),
-                        span, spacing, reduction *= 2);
-                if (reduced.blocks().equals(current.blocks()) && reduced.voxelSize() == current.voxelSize()) throw limit;
-                current = reduced;
-            }
-        }
-    }
-
     record Tile(Map<Integer, List<Voxel>> cells, Map<BlockPos, BlockState> blocks,
-                int baseX, int baseZ, int voxelSize, int maxY, it.unimi.dsi.fastutil.longs.Long2IntMap exteriorTops,
-                it.unimi.dsi.fastutil.longs.Long2IntMap exteriorFloors, SignatureCache signatureCache) {
+                int baseX, int baseZ, int voxelSize, int maxY) {
         Tile {
             var immutableCells = new HashMap<Integer, List<Voxel>>();
-            cells.forEach((cell, values) -> immutableCells.put(cell, List.copyOf(values)));
+            cells.forEach((cell,values) -> immutableCells.put(cell,List.copyOf(values)));
             cells = Map.copyOf(immutableCells);
-            // BlockPos hashes are linear in X/Y/Z. MapN probes those raw
-            // hashes without mixing, which clusters dense canopy neighbours.
-            blocks = blocks.isEmpty() ? Map.of()
-                    : java.util.Collections.unmodifiableMap(new HashMap<>(blocks));
-            exteriorTops = immutable(exteriorTops);
-            exteriorFloors = immutable(exteriorFloors);
+            blocks = blocks.isEmpty() ? Map.of() : java.util.Collections.unmodifiableMap(new HashMap<>(blocks));
         }
-
-        private static it.unimi.dsi.fastutil.longs.Long2IntMap immutable(it.unimi.dsi.fastutil.longs.Long2IntMap map) {
-            return map.isEmpty() ? it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP
-                    : it.unimi.dsi.fastutil.longs.Long2IntMaps.unmodifiable(new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap(map));
-        }
-
-        Tile(Map<Integer, List<Voxel>> cells, Map<BlockPos, BlockState> blocks, int baseX, int baseZ,
-                int voxelSize, int maxY, it.unimi.dsi.fastutil.longs.Long2IntMap tops,
-                it.unimi.dsi.fastutil.longs.Long2IntMap floors) {
-            this(cells, blocks, baseX, baseZ, voxelSize, maxY, tops, floors, new SignatureCache());
-        }
-        static final Tile EMPTY = new Tile(Map.of(), Map.of(), 0, 0, 1, Integer.MIN_VALUE, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
-
-        Tile withoutExteriorEnvelope() {
-            return exteriorTops.isEmpty() ? this : new Tile(cells, blocks, baseX, baseZ, voxelSize, maxY,
-                    it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
-        }
-
-        Tile withExteriorEnvelope() {
-            // A highest-leaf envelope cannot represent separated spruce/acacia
-            // layers. Exact neighbor occupancy and face runs already remove
-            // hidden faces without deleting lower crowns or exposed trunks.
-            return withoutExteriorEnvelope();
-        }
+        static final Tile EMPTY = new Tile(Map.of(),Map.of(),0,0,1,Integer.MIN_VALUE);
 
         static Tile of(Map<BlockPos, BlockState> blocks, int baseX, int baseZ, int span,
                        int spacing, int voxelSize) {
@@ -839,43 +575,12 @@ final class PredictionVegetation {
             }
             cells.values().forEach(list -> list.sort(Comparator.comparingInt(Voxel::y)
                     .thenComparingInt(Voxel::z).thenComparingInt(Voxel::x)));
-            return new Tile(cells, blocks, baseX, baseZ, voxelSize, maxY,
-                    it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP, it.unimi.dsi.fastutil.longs.Long2IntMaps.EMPTY_MAP);
+            return new Tile(cells,blocks,baseX,baseZ,voxelSize,maxY);
         }
 
         List<Voxel> cell(int cell) { return cells.getOrDefault(cell, List.of()); }
 
-        boolean occupied(int x, int y, int z) {
-            BlockState state = blocks.get(new BlockPos(baseX + x, y, baseZ + z));
-            return state != null && solid(state) && PredictionSurfaceShapes.occludes(state);
-        }
-
-        boolean occupied(int x, int y, int z, BlockPos.MutableBlockPos probe) {
-            BlockState state = blocks.get(probe.set(baseX + x, y, baseZ + z));
-            return state != null && solid(state) && PredictionSurfaceShapes.occludes(state);
-        }
-
-        @Override public boolean equals(Object other) {
-            return other instanceof Tile tile && baseX == tile.baseX && baseZ == tile.baseZ
-                    && voxelSize == tile.voxelSize && maxY == tile.maxY && cells.equals(tile.cells)
-                    && blocks.equals(tile.blocks) && exteriorTops.equals(tile.exteriorTops)
-                    && exteriorFloors.equals(tile.exteriorFloors);
-        }
-
-        @Override public int hashCode() {
-            return java.util.Objects.hash(cells, blocks, baseX, baseZ, voxelSize, maxY, exteriorTops, exteriorFloors);
-        }
     }
 
-    static final class SignatureCache {
-        private volatile byte[] data;
-        byte[] data(Tile tile) throws java.io.IOException {
-            byte[] result = data;
-            if (result != null) return result;
-            synchronized (this) {
-                if (data == null) data = PredictionMeshCodec.decorationBytes(tile);
-                return data;
-            }
-        }
-    }
+
 }

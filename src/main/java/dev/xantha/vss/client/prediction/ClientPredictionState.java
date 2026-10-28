@@ -5,6 +5,7 @@ import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
 import dev.xantha.vss.compat.ModCompat;
+import dev.xantha.vss.compat.VoxyPredictionBridge;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile;
 import java.util.ArrayList;
@@ -34,6 +35,7 @@ import dev.xantha.vss.api.VoxelColumnData;
  * GPU 资源的释放仍由渲染线程执行。
  */
 public final class ClientPredictionState {
+    private static Object resourceAtlasToken;
     private static final Map<ResourceKey<Level>, PredictionTileManager> MANAGERS = new ConcurrentHashMap<>();
     private static volatile long seed;
     private static volatile long revision;
@@ -94,6 +96,7 @@ public final class ClientPredictionState {
     private static volatile int sweepRadiusChunks = -1;
     private static final long REQUEST_STATE_TIMEOUT_NANOS = 15_000_000_000L;
     private static final AtomicLong DECODE_GENERATION = new AtomicLong();
+    private static final AtomicLong LEVEL_GENERATION = new AtomicLong();
     private static final ExecutorService PROFILE_DECODER = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "vss-worldgen-profile");
         thread.setDaemon(true);
@@ -131,13 +134,6 @@ public final class ClientPredictionState {
         if (minecraft.getConnection() == null) {
             return;
         }
-        // Start the cache identity scan as soon as the profile arrives.  It
-        // is independent of registry decoding and can run in parallel with
-        // the expensive worldgen preparation; VssLodSpriteTable.prepare()
-        // remains the render-thread fallback after an atlas reload.
-        if (VSSClientConfig.CONFIG.rememberTerrain) {
-            PredictionMeshResources.prepare(minecraft.getResourceManager());
-        }
         RegistryAccess clientRegistries = minecraft.getConnection().registryAccess();
         acceptedProfile = payload;
         if (connectionInputs == null) connectionInputs = new RustWorldgenDocument.SharedInputs();
@@ -150,6 +146,9 @@ public final class ClientPredictionState {
         CompletableFuture.runAsync(() -> {
             ClientWorldgenProfileDecoder.Session decoder = null;
             try {
+                // Release the previous world's workers/native sampler before allocating a new registry snapshot.
+                PredictionResources.awaitRetired();
+                if (generation != DECODE_GENERATION.get()) return;
                 decoder = ClientWorldgenProfileDecoder.prepare(payload, clientRegistries,
                         () -> generation == DECODE_GENERATION.get(), inputs);
                 var preparedDecoder = decoder;
@@ -173,7 +172,7 @@ public final class ClientPredictionState {
 
     /** Called on the client thread, including before the first manager is ready. */
     private static void requestCurrentDimension(Minecraft minecraft, long requestedNanos) {
-        if (!VSSClientConfig.CONFIG.isPredictionLoadingEnabled() || minecraft.level == null) return;
+        if (!VSSClientConfig.CONFIG.isPredictionLoadingEnabled() || !VoxyPredictionBridge.isLevelActive(minecraft.level)) return;
         ResourceKey<Level> key = minecraft.level.dimension();
         // Some modded transfers omit the server dimension-change event. Returning
         // to a visited dimension must not depend on another profile packet.
@@ -186,23 +185,15 @@ public final class ClientPredictionState {
         PreparedProfile prepared = preparedProfile;
         if (prepared == null || dimensionInitializing || !PredictionDimensionProfiles.contains(acceptedProfile, key)) return;
         if (MANAGERS.containsKey(key) || !requestedDimensions.add(key)) return;
-        // Keep the current/previous manager warm. Additional visited dimensions can restore from disk.
-        // The native API has a four-world limit; never fill it with unused dimensions.
-        if (MANAGERS.size() >= 2) {
-            for (var entry : MANAGERS.entrySet()) {
-                if (!entry.getKey().equals(key) && MANAGERS.remove(entry.getKey(), entry.getValue())) {
-                    requestedDimensions.remove(entry.getKey());
-                    entry.getValue().close();
-                    break;
-                }
-            }
-        }
+        long levelGeneration = LEVEL_GENERATION.get();
+        java.util.function.BooleanSupplier active = () -> prepared.generation() == DECODE_GENERATION.get()
+                && levelGeneration == LEVEL_GENERATION.get();
         dimensionInitializing = true;
         PROFILE_DECODER.execute(() -> {
-            if (prepared.generation() != DECODE_GENERATION.get()) return;
+            if (!active.getAsBoolean()) return;
             try {
                 PredictionResources.awaitRetired();
-                prepared.decoder().decode(key, () -> prepared.generation() == DECODE_GENERATION.get(), (dimension, sampler) -> {
+                prepared.decoder().decode(key, active, (dimension, sampler) -> {
                     var timing = new PredictionInitializationTiming(dimension.location() + " install");
                     PredictionDiskCache cache = prepared.storage() == null ? null : prepared.storage().open(sampler);
                     PredictionTileManager manager;
@@ -214,7 +205,7 @@ public final class ClientPredictionState {
                     timing.mark("cacheAndManager");
                     long queued = System.nanoTime();
                     minecraft.execute(() -> {
-                        if (prepared.generation() != DECODE_GENERATION.get()) { manager.close(); return; }
+                        if (!active.getAsBoolean()) { manager.close(); return; }
                         // A dimension switch during initialization must not install an unbounded queue of worlds.
                         if (minecraft.level == null || !minecraft.level.dimension().equals(dimension)) {
                             manager.close(); requestedDimensions.remove(dimension); return;
@@ -233,98 +224,17 @@ public final class ClientPredictionState {
                 });
             } catch (java.util.concurrent.CancellationException ignored) {
             } catch (Exception failure) {
-                if (prepared.generation() == DECODE_GENERATION.get())
+                if (active.getAsBoolean())
                     VSSLogger.error("VSS prediction dimension initialization failed: " + key.location(), failure);
             } finally {
                 minecraft.execute(() -> {
-                    if (prepared.generation() == DECODE_GENERATION.get()) dimensionInitializing = false;
+                    if (active.getAsBoolean()) dimensionInitializing = false;
                 });
             }
         });
     }
 
     /** Extra detail is scoped; ordinary selection covers the whole camera neighbourhood. */
-    private static VssLodFocus combinedFocus(Minecraft minecraft, LocalPlayer player) {
-        if (!VSSClientConfig.CONFIG.predictionSpyglassLoading || !player.isScoping()) return null;
-        ViewFocus current = viewFocus;
-        if (current == null || current.focus() == null) {
-            return null;
-        }
-        VssLodFocus look = current.focus();
-        return VssLodFocus.stabilize(lastFocus, look);
-    }
-
-    private static volatile ViewFocus viewFocus;
-
-    /** Latest combined focus shared by detail planning and coverage selection. */
-    private static volatile VssLodFocus lastFocus;
-
-    static VssLodFocus currentFocus() {
-        return VSSClientConfig.CONFIG.predictionSpyglassLoading ? lastFocus : null;
-    }
-
-    private record ViewFocus(VssLodFocus focus) {
-    }
-
-    /** Refreshes the look-direction focus target on a background thread. */
-    private static void updateViewFocus(Minecraft minecraft, ClientLevel level) {
-        boolean scoping = VSSClientConfig.CONFIG.predictionSpyglassLoading && minecraft.player.isScoping();
-        if (scoping != focusScoping) {
-            focusScoping = scoping;
-            focusGeneration.incrementAndGet();
-            lastViewFocusNanos = 0L;
-        }
-        if (!scoping) {
-            viewFocus = null;
-            lastFocus = null;
-            return;
-        }
-        if (viewFocusUpdating.getAndSet(true)) {
-            return;
-        }
-        long now = System.nanoTime();
-        if (now - lastViewFocusNanos < 500_000_000L) {
-            viewFocusUpdating.set(false);
-            return;
-        }
-        lastViewFocusNanos = now;
-        var camera = minecraft.gameRenderer.getMainCamera();
-        var ray = PredictionRenderer.viewRay();
-        net.minecraft.world.phys.Vec3 origin = ray == null ? camera.getPosition() : ray.origin();
-        net.minecraft.world.phys.Vec3 direction = ray == null
-                ? new net.minecraft.world.phys.Vec3(camera.getLookVector()) : ray.direction();
-        PredictionTileManager manager = MANAGERS.get(level.dimension());
-        if (manager == null) {
-            viewFocusUpdating.set(false);
-            return;
-        }
-        var samplerRef = manager.sampler();
-        var resident = manager.renderSnapshot();
-        long generation = focusGeneration.get();
-        double scale = PredictionRenderer.selectionPixelsPerBlock(minecraft);
-        double tanHalf = Math.max(1, minecraft.getMainRenderTarget().height) / (2.0D * scale);
-        PROFILE_DECODER.execute(() -> {
-            try {
-                VssLodFocus picked = pickResidentViewFocus(resident, origin, direction,
-                        predictionHorizonBlocks(), tanHalf, scale);
-                if (picked == null && VSSClientConfig.CONFIG.isPredictionLoadingEnabled()) picked = pickViewFocus(samplerRef, origin, direction,
-                        predictionHorizonBlocks(), tanHalf, scale);
-                VssLodFocus selected = picked;
-                minecraft.execute(() -> {
-                    if (generation == focusGeneration.get() && minecraft.level == level
-                            && VSSClientConfig.CONFIG.predictionSpyglassLoading
-                            && minecraft.player != null && minecraft.player.isScoping()) {
-                        viewFocus = new ViewFocus(selected);
-                    }
-                });
-            } catch (Throwable ignored) {
-                if (generation == focusGeneration.get()) viewFocus = null;
-            } finally {
-                viewFocusUpdating.set(false);
-            }
-        });
-    }
-
     static VssLodFocus pickViewFocus(ClientTerrainSampler sampler,
                                    net.minecraft.world.phys.Vec3 origin,
                                    net.minecraft.world.phys.Vec3 direction,
@@ -392,12 +302,6 @@ public final class ClientPredictionState {
         return (low + high) * 0.5D;
     }
 
-    private static final java.util.concurrent.atomic.AtomicBoolean viewFocusUpdating =
-            new java.util.concurrent.atomic.AtomicBoolean();
-    private static volatile long lastViewFocusNanos;
-    private static final AtomicLong focusGeneration = new AtomicLong();
-    private static boolean focusScoping;
-
     private static double predictionHorizonBlocks() {
         return Math.max(VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
                 Math.min(VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
@@ -412,6 +316,7 @@ public final class ClientPredictionState {
 
     public static void tick() {
         Minecraft current = Minecraft.getInstance();
+        if (!VoxyPredictionBridge.isLevelActive(current.level)) return;
         requestCurrentDimension(current, System.nanoTime());
         updateLoadingState(current.level == null ? null : current.level.dimension());
         if (!profileReady || !VSSClientConfig.CONFIG.enablePrediction) {
@@ -423,35 +328,13 @@ public final class ClientPredictionState {
         if (level == null || player == null || player.isRemoved()) {
             return;
         }
-        PredictionMaterialPalette.refreshAtlas(level);
-        // A resource reload replaces atlas sprites while prediction workers
-        // may still hold packed row indices. Drop those meshes once the token
-        // changes so the next frame rebuilds against the new atlas.
         var blockAtlas = Minecraft.getInstance().getModelManager()
                 .getAtlas(net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS);
-        if (VssLodSpriteTable.refresh(blockAtlas.getSprite(
-                net.minecraft.resources.ResourceLocation.withDefaultNamespace("block/stone")))) {
-            RustWorldgenDocument.invalidateSharedInputs();
-            PredictionColorCache.RESOURCES.invalidate();
-            MANAGERS.values().forEach(PredictionTileManager::invalidateAppearance);
-            for (var manager : List.copyOf(MANAGERS.values())) {
-                if (manager.sampler() instanceof RustTerrainSampler rust) PROFILE_DECODER.execute(() -> {
-                    try {
-                        rust.reloadColormaps();
-                        minecraft.execute(() -> {
-                            if (MANAGERS.get(rust.profile().levelKey()) == manager) manager.invalidateAppearance();
-                        });
-                    } catch (java.util.concurrent.CancellationException ignored) {
-                        // The resource reload finished after the world was closed.
-                    } catch (java.io.IOException | IllegalArgumentException failure) {
-                        if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS native colormap reload failed: " + failure);
-                    }
-                });
-            }
-            PredictionRenderer.resetOcclusion();
+        Object atlasToken = blockAtlas.getSprite(net.minecraft.resources.ResourceLocation.tryParse("minecraft:block/stone"));
+        if (resourceAtlasToken != atlasToken) {
+            resourceAtlasToken = atlasToken;
+            resourcesChanged();
         }
-        VssLodSpriteTable.prepare();
-        updateViewFocus(minecraft, level);
         // Keep the exact-coverage cache warm off-thread: the render thread
         // reads it without probing, so a stale entry only means prediction
         // keeps drawing (the safe default) until the sweep refreshes it.
@@ -462,21 +345,21 @@ public final class ClientPredictionState {
                 Math.max(nearChunks, voxyRender));
         PredictionTileManager manager = MANAGERS.get(level.dimension());
         if (manager != null) {
+            manager.connectVoxy();
             captureLocalColumns(level, manager);
             manager.serviceCaptures();
             PredictionMotionPace.record(level.dimension(), player.getX(), player.getZ(), player.isSprinting(), System.nanoTime());
             if (VSSClientConfig.CONFIG.isPredictionLoadingEnabled())
                 manager.tickCityHints(player.getBlockX() >> 4, player.getBlockZ() >> 4);
             double pixelsPerBlock = PredictionRenderer.basePixelsPerBlock(minecraft);
-            VssLodFocus focus = combinedFocus(minecraft, player);
-            lastFocus = focus;
             var camera = minecraft.gameRenderer.getMainCamera().getPosition();
             var look = minecraft.gameRenderer.getMainCamera().getLookVector();
             var target = minecraft.getMainRenderTarget();
             manager.setWorkView(PredictionWorkView.of(camera.x, camera.y, camera.z,
                     look.x(), look.y(), look.z(), minecraft.options.fov().get(),
                     target.width / (double) Math.max(1, target.height)));
-            manager.tick(camera.x, camera.y, camera.z, pixelsPerBlock, focus, minecraft.options.renderDistance().get() * 16);
+            if (manager.usesVoxyRendering())
+                manager.tick(camera.x, camera.y, camera.z, pixelsPerBlock, null, minecraft.options.renderDistance().get() * 16);
         }
         long now = System.nanoTime();
         requestTimes.forEach((key, started) -> {
@@ -487,9 +370,12 @@ public final class ClientPredictionState {
         });
     }
 
-    static void publishWorkView(ResourceKey<Level> dimension, PredictionWorkView view) {
+    static void publishWorkView(ResourceKey<Level> dimension, PredictionWorkView view, boolean detailLoading) {
         var manager = MANAGERS.get(dimension);
-        if (manager != null) manager.setRenderWorkView(view);
+        if (manager != null) {
+            manager.setRenderWorkView(view);
+            manager.setNativeDetailLoading(detailLoading);
+        }
     }
 
     static void publishVisibilityFeedback(ResourceKey<Level> dimension, PredictionVisibilityFeedback.Snapshot feedback) {
@@ -499,11 +385,6 @@ public final class ClientPredictionState {
 
     static void clearVisibilityFeedback() {
         MANAGERS.values().forEach(manager -> manager.setVisibilityFeedback(PredictionVisibilityFeedback.Snapshot.EMPTY));
-    }
-
-    static void publishDrawableSnapshot(PredictionTileManager.RenderSnapshot snapshot) {
-        var manager = MANAGERS.get(snapshot.dimension());
-        if (manager != null) manager.setDrawableSnapshot(snapshot);
     }
 
     public static PredictionLoadingProgress loadingProgress(ResourceKey<Level> dimension) {
@@ -810,7 +691,7 @@ public final class ClientPredictionState {
     public static String diagnostics() {
         int ready = 0;
         int pending = 0;
-        int vertices = 0;
+        long voxelBytes = 0;
         int cachedSamples = 0;
         int persistentSamples = 0;
         long built = 0L;
@@ -821,7 +702,7 @@ public final class ClientPredictionState {
         for (PredictionTileManager manager : MANAGERS.values()) {
             ready += manager.readyCount();
             pending += manager.pendingCount();
-            vertices += manager.readyVertexCount();
+            voxelBytes += manager.readyVoxelBytes();
             cachedSamples += manager.sampleCacheSize();
             persistentSamples += manager.persistentSampleCount();
             built += manager.builtTileCount();
@@ -859,22 +740,51 @@ public final class ClientPredictionState {
                 + ",persistentSamples=" + persistentSamples
                 + ",layoutLevels=" + MANAGERS.values().stream()
                         .mapToInt(manager -> manager.layout().levelCount()).max().orElse(0)
-                + ",meshVertices=" + vertices
+                + ",voxelBytes=" + voxelBytes
                 + ",surface=" + MANAGERS.values().stream().map(PredictionTileManager::surfaceDiagnostics).toList()
                 + ",render=" + PredictionRenderer.diagnostics();
     }
 
-    public static void clear() { dimensionProfiles.clear(); reset(false); }
+    /** Retire scene notifications before closing sources; preserve compressed profiles for returning. */
+    public static void onLevelUnload(ClientLevel level) {
+        VoxyPredictionBridge.levelUnloaded(level);
+        LEVEL_GENERATION.incrementAndGet();
+        dimensionInitializing = false;
+        requestedDimensions.clear();
+        for (PredictionTileManager manager : MANAGERS.values()) manager.close();
+        MANAGERS.clear();
+        profileReady = false;
+        clearLevelTracking();
+    }
+
+    public static void clear() { VoxyPredictionBridge.reset(); dimensionProfiles.clear(); reset(false); }
+
+    /** Refresh resource-derived colors; Voxy owns model/atlas and GPU reconstruction. */
+    static void resourcesChanged() {
+        RustWorldgenDocument.invalidateSharedInputs();
+        PredictionColorCache.RESOURCES.invalidate();
+        for (var manager : List.copyOf(MANAGERS.values())) {
+            if (manager.sampler() instanceof RustTerrainSampler rust) PROFILE_DECODER.execute(() -> {
+                try {
+                    rust.reloadColormaps();
+                } catch (java.util.concurrent.CancellationException ignored) {
+                    // The resource reload finished after the world was closed.
+                } catch (java.io.IOException | IllegalArgumentException failure) {
+                    if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS native colormap reload failed: " + failure);
+                }
+            });
+        }
+        PredictionRenderer.resetOcclusion();
+    }
 
     public static void tagsChanged() {
         PredictionVegetationTraits.invalidate();
-        PredictionSurfaceShapes.invalidate();
-        MANAGERS.values().forEach(PredictionTileManager::invalidateAppearance);
+        MANAGERS.values().forEach(PredictionTileManager::invalidateContent);
     }
 
     private static void reset(boolean preserveInputs) {
+        PredictionPerformanceMonitor.reset();
         PredictionVegetationTraits.invalidate();
-        PredictionSurfaceShapes.invalidate();
         if (!preserveInputs) {
             RustWorldgenDocument.invalidateSharedInputs();
             PredictionColorCache.RESOURCES.invalidate();
@@ -883,11 +793,6 @@ public final class ClientPredictionState {
             if (oldInputs != null) PROFILE_DECODER.execute(oldInputs::close);
         }
         acceptedProfile = null;
-        focusGeneration.incrementAndGet();
-        focusScoping = false;
-        viewFocus = null;
-        lastFocus = null;
-        lastViewFocusNanos = 0L;
         DECODE_GENERATION.incrementAndGet();
         PreparedProfile oldProfile = preparedProfile;
         preparedProfile = null;
@@ -899,15 +804,19 @@ public final class ClientPredictionState {
             manager.close();
         }
         MANAGERS.clear();
+        clearLevelTracking();
+        seed = 0L;
+        revision = 0L;
+        profileReady = false;
+    }
+
+    private static void clearLevelTracking() {
         cellStates.clear();
         exactCoverage.clear();
         exactCoverageRemovalRevision.incrementAndGet();
         exactCoverageRevision.incrementAndGet();
         exactAcceptedTimes.clear();
         requestTimes.clear();
-        seed = 0L;
-        revision = 0L;
-        profileReady = false;
     }
 
     public enum CellState {

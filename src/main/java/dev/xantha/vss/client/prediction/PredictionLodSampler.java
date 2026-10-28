@@ -38,6 +38,8 @@ final class PredictionLodSampler extends ClientTerrainSampler {
     }
     @Override public boolean exactWorldgen() { return true; }
     @Override boolean interiorTerrain() { return source.interiorTerrain(); }
+    // A selected LOD provider owns its spans/volumes; the inherited noise context is only auxiliary.
+    @Override boolean floatingTerrain() { return false; }
     @Override PredictionColumnVolume exteriorColumn(int x, int z) { return source.column(x, z); }
     @Override ClientColumnSample sampleInterior(int x, int z) { return source.sample(x, z, 1); }
     @Override ClientColumnSample wallEvidence(int x, int z, ClientColumnSample sample) { return sample; }

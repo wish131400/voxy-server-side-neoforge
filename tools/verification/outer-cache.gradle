@@ -1,0 +1,20 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('outerCacheTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            ['PredictionDiskCacheTest','PredictionDeferredCacheWriteTest','PredictionCpuBudgetTest',
+             'PredictionCacheWorkerLifecycleTest','PredictionCacheStorageTest','PredictionAsyncTerrainCacheTest',
+             'PredictionColorCacheTest','PredictionTemplateCacheIdentityTest','VssLodSampleCacheTest',
+             'PredictionMemoryBudgetTest','PredictionRefinementBudgetTest','PredictionScopeBudgetTest'].each {
+                include "**/${it}.class"
+            }
+            maxHeapSize = '3G'
+            maxParallelForks = 1
+            forkEvery = 1
+            testLogging { events 'failed','skipped'; exceptionFormat 'full' }
+        }
+    }
+}

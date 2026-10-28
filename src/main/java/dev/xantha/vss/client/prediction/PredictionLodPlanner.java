@@ -312,7 +312,8 @@ final class PredictionLodPlanner {
         boolean normalSurface = surfaceRadius > 0 && (view == null ? distance <= surfaceRadius
                 : PredictionScreenDetail.surfaceVisible(view, key, layout, cameraX, cameraY, cameraZ,
                         pixelsPerBlock, minBuildY, maxBuildY));
-        if (level > 1 && (normalSurface || surfaceFocused) && needsSurface.test(key)) {
+        if (!PredictionWorkOrder.surfaceTile(key, layout)
+                && (normalSurface || surfaceFocused) && needsSurface.test(key)) {
             projected = Math.max(projected, layout.pixelThreshold() * (2.0D + level));
         }
         return new RuntimeNode(new PredictionTileManager.PredictionTileKey(dimension, tileX, tileZ, level),

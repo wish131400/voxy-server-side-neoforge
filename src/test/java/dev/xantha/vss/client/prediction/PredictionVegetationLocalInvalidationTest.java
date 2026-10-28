@@ -103,7 +103,7 @@ class PredictionVegetationLocalInvalidationTest {
                     var gate = sampleGate;
                     if (gate != null && x == blockedX && z == blockedZ) gate.block();
                     if (failSamples) throw new IllegalStateException("fixture sample failure");
-                    return PredictionSimpleVegetationTest.sample(100);
+                    return PredictionVoxelFixtures.sample(100);
                 }
                 @Override public ClientColumnSample sample(int x, int z) { return sampleSurface(x, z); }
                 @Override Holder<Biome> noiseBiome(int x, int y, int z) { return Holder.direct(biome); }
@@ -222,7 +222,7 @@ class PredictionVegetationLocalInvalidationTest {
 
     @Test void localEvictionRetainsNegativeChunkBordersAndDistantColumns() {
         var cache = new VssLodSampleCache(1024);
-        var sample = PredictionSimpleVegetationTest.sample(100);
+        var sample = PredictionVoxelFixtures.sample(100);
         for (int z = -48; z < -32; z++) for (int x = -32; x < -16; x++) cache.put(key(x, z), sample);
         long[] neighbors = {key(-33, -48), key(-16, -48), key(-32, -49), key(-32, -32), key(900, -1000)};
         for (long neighbor : neighbors) cache.put(neighbor, sample);

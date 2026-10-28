@@ -61,6 +61,7 @@ public final class ModCompat {
     }
 
     public static void clientTick() {
+        // Prediction-to-Xaero projection is temporarily suspended.
         if (voxyLoaded) {
             VoxyCompat.clientTick();
         }
@@ -76,6 +77,8 @@ public final class ModCompat {
     }
 
     public static void onDisconnect() {
+        XaeroPredictionBridge.reset();
+        VoxyPredictionBridge.reset();
         if (voxyLoaded) {
             VoxyCompat.onDisconnect();
         }

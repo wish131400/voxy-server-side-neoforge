@@ -10,6 +10,29 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class PredictionMemoryBudgetTest {
+    @Test void aCollectionBeforeNewReleasesCannotEraseTheirPendingCredit() {
+        long mib=PredictionMemoryBudget.MIB;var free=new AtomicLong(2048*mib);var collections=new AtomicLong();
+        var budget=PredictionMemoryBudget.adaptive(4096*mib,free::get,()->1,8,collections::get);
+        var lease=budget.tryReserve(mib);assertNotNull(lease);assertTrue(lease.retain(mib));
+        free.set(4096*mib/10+PredictionMemoryBudget.BUILD_BYTES-mib);
+        assertEquals(mib,budget.reclaimTargetBytes());
+        collections.incrementAndGet();lease.close();
+        assertEquals(0,budget.reclaimTargetBytes(),"The new release may have happened after the observed GC");
+        collections.incrementAndGet();assertEquals(mib,budget.reclaimTargetBytes());
+    }
+    @Test void releasingThousandsOfCacheEntriesDoesNotQueryTheGarbageCollectorsPerEntry() {
+        long mib=PredictionMemoryBudget.MIB;
+        var free=new AtomicLong(2048*mib);var reads=new AtomicLong();var collections=new AtomicLong();
+        var budget=PredictionMemoryBudget.adaptive(4096*mib,free::get,()->1,8,()->{reads.incrementAndGet();return collections.get();});
+        var entries=new ArrayList<PredictionMemoryBudget.Reservation>();
+        for(int i=0;i<4096;i++){var lease=budget.tryReserve(1024);assertNotNull(lease);assertTrue(lease.retain(1024));entries.add(lease);}
+        free.set(4096*mib/10+PredictionMemoryBudget.BUILD_BYTES-3*mib);
+        assertEquals(3*mib,budget.reclaimTargetBytes());long before=reads.get();
+        entries.forEach(PredictionMemoryBudget.Reservation::close);
+        assertEquals(before,reads.get());assertEquals(0,budget.usedBytes());
+        assertEquals(0,budget.reclaimTargetBytes(),"Released bytes still await collection");
+        collections.incrementAndGet();assertEquals(3*mib,budget.reclaimTargetBytes());
+    }
     @org.junit.jupiter.api.BeforeAll
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void transientHeapTroughStopsBuildsWithoutImmediatelyDroppingVisibleDetail() {

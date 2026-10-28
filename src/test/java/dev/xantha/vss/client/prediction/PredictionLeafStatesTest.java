@@ -43,14 +43,14 @@ class PredictionLeafStatesTest {
         assertEquals(3, result.get(p.east()).getValue(LeavesBlock.DISTANCE));
     }
 
-    @Test void fineMeshesKeepResourcePackStateVariantsEvenUnderPressure() {
+    @Test void completeVoxelsKeepResourcePackStateVariantsOnCoarseTerrain() {
         var source = new HashMap<BlockPos, BlockState>();
         for (int d = 1; d <= 7; d++) for (boolean persistent : new boolean[]{false, true}) {
             source.put(new BlockPos(d, 80, persistent ? 1 : 0), Blocks.BIRCH_LEAVES.defaultBlockState()
                     .setValue(LeavesBlock.DISTANCE, d).setValue(LeavesBlock.PERSISTENT, persistent));
         }
-        for (int thinning : new int[]{1, 2, 8}) {
-            var tile = PredictionVegetation.boundedTile(source, 0, 0, 16, 1, thinning);
+        for (int spacing : new int[]{1, 2, 4, 8}) {
+            var tile = PredictionVegetation.Tile.of(source, 0, 0, 16, spacing, 1);
             assertEquals(source, tile.blocks(), "distance=7/persistent=false can select a dying-leaf model");
         }
     }

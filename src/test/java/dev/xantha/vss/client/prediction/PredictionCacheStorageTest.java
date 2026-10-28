@@ -27,95 +27,9 @@ class PredictionCacheStorageTest {
         ((java.util.concurrent.ExecutorService) field.get(null)).submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
     }
 
-    @Test void worldCacheMigratesFineTerrainAndFinishedMeshThenRestoresMappedCapturesAcrossReconnect() throws Exception {
-        var storage = PredictionCacheStorage.forWorld(game, game.resolve("saves/local"), null, null);
-        var original = sampler();
-        Path oldRoot = PredictionCacheMigration.wireDirectory(storage.base(), original);
-        var surface = PredictionDiskCache.Key.surface(0, 0, 1);
-        var terrain = PredictionDiskCache.Key.terrain(0, 0, 0);
-        var states = Map.of(new BlockPos(1, 72, 2), Blocks.SPRUCE_LEAVES.defaultBlockState());
-        var mesh = PredictionMeshCodecTest.fixture();
-        var samples = new ClientColumnSample[18 * 18];
-        java.util.Arrays.fill(samples, original.sampleSurface(1, 2));
-        byte[] full = new byte[32], base = new byte[32]; full[0] = 7;
-        try (var cache = new PredictionDiskCache(oldRoot, PROFILE.fingerprint())) {
-            try (var lease = cache.lease(surface)) { assertTrue(cache.writeSurface(lease, states)); }
-            try (var lease = cache.lease(terrain)) {
-                assertTrue(cache.writeTerrain(lease, samples));
-                cache.writeMeshLater(lease, full, mesh, base, true);
-                cache.flushMeshes(); cache.flush();
-            }
-        }
-        awaitCacheClose();
-        try (var captures = new PredictionSampleStore(oldRoot.resolve("captures.smp"), PROFILE.fingerprint())) {
-            captures.put(4, samples[0]);
-        }
-        var first = sampler(PROFILE);
-        Path contentRoot = storage.directory(first);
-        assertNotEquals(oldRoot, contentRoot);
-        try (var cache = storage.open(first); var lease = cache.lease(terrain)) {
-            assertNotNull(cache);
-            assertArrayEquals(samples, cache.readTerrain(lease, samples.length));
-            var restored = cache.readMeshBase(lease, base, mesh.cellAxis());
-            assertNotNull(restored);
-            assertArrayEquals(mesh.gpuPayload().quads(), restored.gpuPayload().quads());
-            assertEquals(PROFILE.fingerprint(), first.cacheFingerprint());
-            try (var captures = new PredictionSampleStore(cache.root().resolve("captures.smp"), first.cacheFingerprint(), cache.mappings())) {
-                assertNull(captures.get(4), "legacy captures without block names must be recaptured, never remapped by guessing");
-                captures.put(4, samples[0]);
-            }
-        }
-        assertFalse(Files.exists(oldRoot));
-        assertTrue(Files.isRegularFile(contentRoot.resolve("world.json")));
-        var changedWireProfile = new DimensionProfile(PROFILE.dimension(), PROFILE.seed(), PROFILE.minY(),
-                PROFILE.height(), PROFILE.generatorType(), PROFILE.generatorSettings(), 999L);
-        var second = sampler(changedWireProfile);
-        assertEquals(contentRoot, storage.directory(second));
-        try (var cache = storage.open(second)) {
-            assertEquals(PROFILE.fingerprint(), second.cacheFingerprint());
-            assertEquals(999L, second.profile().fingerprint(), "network session fingerprint stays intact");
-            try (var lease = cache.lease(surface)) { assertEquals(states, cache.readSurface(lease)); }
-            try (var lease = cache.lease(terrain)) { assertNotNull(cache.readMeshBase(lease, base, mesh.cellAxis())); }
-            try (var captures = new PredictionSampleStore(cache.root().resolve("captures.smp"), second.cacheFingerprint(), cache.mappings())) {
-                assertEquals(samples[0], captures.get(4));
-            }
-            cache.invalidateChunk(0, 0); cache.flush();
-        }
-        // A retained old copy must not refill dirty entries in the initialized content cache.
-        try (var old = new PredictionDiskCache(oldRoot, PROFILE.fingerprint()); var lease = old.lease(surface)) {
-            assertTrue(old.writeSurface(lease, states));
-        }
-        try (var cache = storage.open(sampler(changedWireProfile)); var lease = cache.lease(surface)) {
-            assertNull(cache.readSurface(lease));
-        }
-    }
 
-    @Test void domainToIpReconnectRestoresFineMeshDespiteChangedTransportFingerprint() throws Exception {
-        var domain = PredictionCacheStorage.forWorld(game, null, "vss:7k4m9pxa", "play.example.com:25565");
-        var direct = PredictionCacheStorage.forWorld(game, null, "vss:7k4m9pxa", "192.0.2.25:25565");
-        var first = sampler(PROFILE);
-        var key = PredictionDiskCache.Key.terrain(0, 0, 0);
-        var mesh = PredictionMeshCodecTest.fixture();
-        byte[] full = new byte[32], base = new byte[32]; full[0] = 7;
-        try (var cache = domain.open(first); var lease = cache.lease(key)) {
-            cache.writeMeshLater(lease, full, mesh, base, true);
-            cache.flushMeshes(); cache.flush();
-        }
-        awaitCacheClose();
-        var changedWire = new DimensionProfile(PROFILE.dimension(), PROFILE.seed(), PROFILE.minY(),
-                PROFILE.height(), PROFILE.generatorType(), PROFILE.generatorSettings(), 999L);
-        var second = sampler(changedWire);
-        assertEquals(domain.directory(first), direct.directory(second));
-        try (var cache = direct.open(second); var lease = cache.lease(key)) {
-            var restored = cache.readMeshBase(lease, base, mesh.cellAxis());
-            assertNotNull(restored, "a different connection address must restore the finished fine mesh");
-            assertArrayEquals(mesh.gpuPayload().quads(), restored.gpuPayload().quads());
-        }
-        var differentServer = PredictionCacheStorage.forWorld(game, null, "vss:8k4m9pxa", "192.0.2.25:25565");
-        try (var cache = differentServer.open(sampler(changedWire)); var lease = cache.lease(key)) {
-            assertNull(cache.readMeshBase(lease, base, mesh.cellAxis()));
-        }
-    }
+
+
 
     @Test void exactLegacyContentMigratesOnceAndUnidentifiedDirectoriesRemainUntouched() throws Exception {
         var storage = PredictionCacheStorage.forWorld(game, game.resolve("saves/content"), null, null);

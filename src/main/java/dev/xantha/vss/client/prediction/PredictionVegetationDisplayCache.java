@@ -1,6 +1,5 @@
 package dev.xantha.vss.client.prediction;
 
-import dev.xantha.vss.config.PredictionVegetationDensity;
 import java.lang.ref.WeakReference;
 import java.util.*;
 import java.util.concurrent.atomic.LongAdder;
@@ -14,13 +13,7 @@ final class PredictionVegetationDisplayCache {
     static final long MAX_BYTES = 16L * 1024 * 1024;
     private static final int MAX_ENTRIES = 64;
     record Source(long key, Map<BlockPos, BlockState> blocks) { }
-    private record Key(int x, int z, int span, int spacing, boolean trees, PredictionVegetationDensity density) { }
-    private record DensityKey(long chunk, PredictionVegetationDensity density) { }
-    private record DensitySource(WeakReference<Map<BlockPos, BlockState>> original,
-                                 Map<BlockPos, BlockState> selected, long generation, long bytes) { }
-    private static final long MAX_DENSITY_BYTES = 8L * 1024 * 1024;
-    private final Map<DensityKey, DensitySource> densitySources = new LinkedHashMap<>(16, .75F, true);
-    private long densityBytes;
+    private record Key(int x, int z, int span, int spacing, boolean trees) { }
     private static final class Entry {
         final long[] sources, captures;
         final List<WeakReference<Map<BlockPos, BlockState>>> maps;
@@ -63,13 +56,9 @@ final class PredictionVegetationDisplayCache {
     }
 
     Build begin(int x, int z, int span, int spacing, boolean trees) {
-        return begin(x, z, span, spacing, trees, PredictionVegetationDensity.HIGH);
-    }
-
-    Build begin(int x, int z, int span, int spacing, boolean trees, PredictionVegetationDensity density) {
         synchronized (entries) {
             if (active.size() >= 256) throw new PredictionWorkDeferred();
-            var build = new Build(new Key(x, z, span, spacing, trees, density));
+            var build = new Build(new Key(x, z, span, spacing, trees));
             active.add(build);
             return build;
         }
@@ -83,10 +72,9 @@ final class PredictionVegetationDisplayCache {
     PredictionVegetation.Tile tile(Build build, List<Source> sources, LongPredicate captured) {
         var key = build.key;
         int x = key.x, z = key.z, span = key.span, spacing = key.spacing;
-        int size = Math.max(1, spacing / 2);
         var mask = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
-        for (int cz = Math.floorDiv(z - size, 16); cz <= Math.floorDiv(z + span + size - 1, 16); cz++)
-            for (int cx = Math.floorDiv(x - size, 16); cx <= Math.floorDiv(x + span + size - 1, 16); cx++) {
+        for (int cz = Math.floorDiv(z - 1, 16); cz <= Math.floorDiv(z + span + 1 - 1, 16); cz++)
+            for (int cx = Math.floorDiv(x - 1, 16); cx <= Math.floorDiv(x + span + 1 - 1, 16); cx++) {
                 long chunk = chunkKey(cx, cz);
                 if (captured.test(chunk)) mask.add(chunk);
             }
@@ -97,8 +85,7 @@ final class PredictionVegetationDisplayCache {
             var previous = entries.get(key);
             if (previous != null && previous.matches(sources, captures)) { hits.increment(); return previous.tile; }
         }
-        var displaySources = key.trees ? selectSources(build, sources) : sources;
-        var tile = merge(x, z, span, spacing, key.trees, displaySources,
+        var tile = merge(x, z, span, spacing, key.trees, sources,
                 pos -> !mask.isEmpty() && mask.contains(chunkKey(Math.floorDiv(pos.getX(), 16), Math.floorDiv(pos.getZ(), 16))));
         var result = new Entry(sources, captures, tile, generation);
         builds.increment();
@@ -115,67 +102,24 @@ final class PredictionVegetationDisplayCache {
         return tile;
     }
 
-    private List<Source> selectSources(Build build, List<Source> sources) {
-        var density = build.key.density;
-        if (density == PredictionVegetationDensity.HIGH) return sources;
-        var selected = new ArrayList<Source>(sources.size());
-        for (var source : sources) {
-            long generation = PredictionVegetationTraits.generation();
-            var key = new DensityKey(source.key(), density);
-            DensitySource cached;
-            synchronized (entries) {
-                requireValid(build);
-                cached = densitySources.get(key);
-            }
-            Map<BlockPos, BlockState> blocks;
-            if (cached != null && cached.generation() == generation
-                    && cached.original().get() == source.blocks()) blocks = cached.selected();
-            else {
-                blocks = PredictionVegetationSelection.select(source.blocks(), density);
-                long cost = 128L + blocks.size() * 96L;
-                synchronized (entries) {
-                    requireValid(build);
-                    if (generation == PredictionVegetationTraits.generation() && cost <= MAX_DENSITY_BYTES) {
-                        var previous = densitySources.put(key, new DensitySource(
-                                new WeakReference<>(source.blocks()), blocks, generation, cost));
-                        densityBytes += cost - (previous == null ? 0 : previous.bytes());
-                        while (densitySources.size() > 128 || densityBytes > MAX_DENSITY_BYTES) {
-                            var iterator = densitySources.values().iterator();
-                            densityBytes -= iterator.next().bytes(); iterator.remove();
-                        }
-                    }
-                }
-            }
-            selected.add(new Source(source.key(), blocks));
-        }
-        return selected;
-    }
-
-    /** The legacy per-column capture API shares exactly the production merge and reduction. */
+    /** The per-column capture API shares the complete block publication used by rendering. */
     static PredictionVegetation.Tile merge(int x, int z, int span, int spacing, boolean trees,
             List<Source> sources, Predicate<BlockPos> captured) {
-        int size = Math.max(1, spacing / 2);
         Map<BlockPos, BlockState> blocks = new HashMap<>();
         for (var source : sources) for (var entry : source.blocks().entrySet()) {
             var pos = entry.getKey(); var state = entry.getValue();
-            if (pos.getX() < x - size || pos.getX() >= x + span + size
-                    || pos.getZ() < z - size || pos.getZ() >= z + span + size
+            if (pos.getX() < x - 1 || pos.getX() >= x + span + 1
+                    || pos.getZ() < z - 1 || pos.getZ() >= z + span + 1
                     || captured.test(pos)) continue;
-            if (PredictionVegetation.vegetation(state) && !trees || !PredictionVegetation.solid(state) && spacing > 2) continue;
+            if (PredictionVegetation.vegetation(state) && !trees) continue;
             blocks.put(pos, state);
         }
-        return PredictionVegetation.boundedTile(blocks, x, z, span, spacing, size);
+        // Publish complete blocks; Voxy owns geometry reduction.
+        return PredictionVegetation.Tile.of(blocks, x, z, span, spacing, 1);
     }
 
     void invalidate(int chunkX, int chunkZ) {
         synchronized (entries) {
-            densitySources.entrySet().removeIf(entry -> {
-                long source = entry.getKey().chunk();
-                boolean overlaps = Math.abs((long) (int) (source >> 32) - chunkX) <= 2
-                        && Math.abs((long) (int) source - chunkZ) <= 2;
-                if (overlaps) densityBytes -= entry.getValue().bytes();
-                return overlaps;
-            });
             for (var build : active) if (affected(build.key, chunkX, chunkZ)) build.valid = false;
             entries.entrySet().removeIf(entry -> {
                 boolean overlaps = affected(entry.getKey(), chunkX, chunkZ);
@@ -202,7 +146,7 @@ final class PredictionVegetationDisplayCache {
     String diagnostics() {
         synchronized (entries) { return "displayCache={hits=" + hits.sum() + ",builds=" + builds.sum()
                 + ",entries=" + entries.size() + ",bytes=" + bytes
-                + ",densityEntries=" + densitySources.size() + ",densityBytes=" + densityBytes + "}"; }
+                + "}"; }
     }
     static long chunkKey(int x, int z) { return (long) x << 32 | z & 0xffffffffL; }
 }

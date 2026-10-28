@@ -35,8 +35,7 @@ class PredictionProgressiveLoadingTest {
     @Test void fineCacheRestoresWithoutParentOrSamplingAndCorruptionDoesNotGenerate() throws Exception {
         var config = VSSClientConfig.CONFIG;
         int distance = config.predictionDistanceBlocks;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures;
-        config.predictionDistanceBlocks = 4096; config.predictionTrees = false; config.predictionStructures = false;
+        config.predictionDistanceBlocks = 4096;
         try {
             for (boolean corrupt : new boolean[]{false,true}) {
                 var path = cacheDirectory.resolve(Boolean.toString(corrupt));
@@ -71,16 +70,16 @@ class PredictionProgressiveLoadingTest {
                     } else {
                         assertEquals(1,manager.readyTiles().size(),manager.surfaceDiagnostics());
                         assertEquals(64,manager.readyTiles().iterator().next().cellAxis());
-                        assertNotNull(manager.readyTiles().iterator().next().mesh().gpuPayload());
+                        assertNotNull(manager.readyTiles().iterator().next().data().voxyTile);
                     }
                 }
             }
         } finally {
-            config.predictionDistanceBlocks=distance; config.predictionTrees=trees; config.predictionStructures=structures;
+            config.predictionDistanceBlocks=distance;
         }
     }
 
-    @Test void nearbyGroundWaitsForMediumCoverageThenResumes() throws Exception {
+    @Test void nearbyGroundProgressesWhileDistantCoverageIsBlocked() throws Exception {
         verifyLocalProgress(new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
             @Override public ClientColumnSample sample(int x, int z) { return ground(); }
             @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return ground(); }
@@ -89,8 +88,6 @@ class PredictionProgressiveLoadingTest {
 
     @Test void cachedRestoreKeepsFourSlotsAndRefillsWithoutPlannerTicks() throws Exception {
         var config=VSSClientConfig.CONFIG;
-        boolean trees=config.predictionTrees, structures=config.predictionStructures;
-        config.predictionTrees=false; config.predictionStructures=false;
         var gate=new CountDownLatch(1);
         var entered=new CountDownLatch(2);
         ThreadPoolExecutor executor=null;
@@ -138,15 +135,12 @@ class PredictionProgressiveLoadingTest {
             }
         } finally {
             gate.countDown();
-            config.predictionTrees=trees; config.predictionStructures=structures;
             if (executor!=null) assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));
         }
     }
 
     @Test void telescopeQueueStaysBoundedAndRefillsWithoutPlannerTicks() throws Exception {
         var config=VSSClientConfig.CONFIG;
-        boolean trees=config.predictionTrees, structures=config.predictionStructures;
-        config.predictionTrees=false; config.predictionStructures=false;
         var gate=new CountDownLatch(1);
         ThreadPoolExecutor executor=null;
         try {
@@ -203,7 +197,7 @@ class PredictionProgressiveLoadingTest {
                 assertEquals(0,manager.failedTileCount());
             }
         } finally {
-            gate.countDown(); config.predictionTrees=trees; config.predictionStructures=structures;
+            gate.countDown();
             if (executor!=null) assertTrue(executor.awaitTermination(5,TimeUnit.SECONDS));
         }
     }
@@ -211,10 +205,7 @@ class PredictionProgressiveLoadingTest {
     @Test void sharedWorkContentionReleasesWorkersAndRetriesWithoutFailureBackoff() throws Exception {
         var config=VSSClientConfig.CONFIG;
         int distance=config.predictionDistanceBlocks;
-        boolean trees=config.predictionTrees, structures=config.predictionStructures;
         config.predictionDistanceBlocks=512;
-        config.predictionTrees=false;
-        config.predictionStructures=false;
         var available=new AtomicBoolean(false);
         var deferred=new CountDownLatch(1);
         var sampler=new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
@@ -254,8 +245,6 @@ class PredictionProgressiveLoadingTest {
             assertEquals(0,manager.failedTileCount());
         } finally {
             config.predictionDistanceBlocks=distance;
-            config.predictionTrees=trees;
-            config.predictionStructures=structures;
         }
         // close() deliberately retires workers asynchronously to avoid a client
         // frame stall. Their finally blocks own the active reservations.
@@ -266,20 +255,17 @@ class PredictionProgressiveLoadingTest {
     static void verifyLocalProgress(ClientTerrainSampler source, boolean surface) throws Exception {
         var config = VSSClientConfig.CONFIG;
         int oldDistance = config.predictionDistanceBlocks;
-        boolean oldTrees = config.predictionTrees, oldStructures = config.predictionStructures;
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var blockOnce = new AtomicBoolean(true);
         config.predictionDistanceBlocks = surface ? 65536 : 1024;
-        config.predictionTrees = surface;
-        config.predictionStructures = false;
         var sampler = new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
             @Override public ClientColumnSample sample(int x, int z) {
                 return source.sample(x, z);
             }
             @Override ClientTerrainSampler decorationContext() { return source; }
             @Override public ClientColumnSample sampleForLod(int x, int z, int step) {
-                if (step == (surface ? 1024 : 16) && x > (surface ? 65536 : 1024) && blockOnce.compareAndSet(true, false)) {
+                if (x > (surface ? 65536 : 1024) && blockOnce.compareAndSet(true, false)) {
                     entered.countDown();
                     try {
                         if (!release.await(20, TimeUnit.SECONDS)) throw new IllegalStateException("blocked root timed out");
@@ -298,7 +284,7 @@ class PredictionProgressiveLoadingTest {
             var executor = (ThreadPoolExecutor) executorField.get(manager);
             executor.setCorePoolSize(2);
             executor.setMaximumPoolSize(2);
-            if(surface) {
+            {
                 // Start one unrelated root before applying the telescope's
                 // priority. This fixture must not build a 64 km medium world
                 // merely to exercise a single decoration publication.
@@ -313,17 +299,12 @@ class PredictionProgressiveLoadingTest {
                 replan(manager,surface); entered.await(10,TimeUnit.MILLISECONDS);
             }
             assertEquals(0,entered.getCount(), "fixture must keep one far horizon job unfinished");
-            if (!surface) {
-                for (int i=0;i<20;i++) { replan(manager,false); Thread.sleep(10); }
-                assertFalse(hasNearDetail(manager,false), "ordinary local fine terrain waits for medium horizon coverage");
-                release.countDown();
-            }
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12);
             while (!hasNearDetail(manager, surface) && System.nanoTime() < deadline) {
                 replan(manager,surface);
                 Thread.sleep(10);
             }
-            assertTrue(hasNearDetail(manager, surface), "detail resumes after medium coverage, or via explicit telescope priority: "
+            assertTrue(hasNearDetail(manager, surface), "near detail finishes while unrelated distant coverage is still blocked: "
                     + manager.surfaceDiagnostics());
             if(surface) assertEquals(1, release.getCount(), "explicit telescope work bypasses the distant medium wave");
             assertEquals(0, manager.failedTileCount());
@@ -331,12 +312,10 @@ class PredictionProgressiveLoadingTest {
         } finally {
             release.countDown();
             config.predictionDistanceBlocks = oldDistance;
-            config.predictionTrees = oldTrees;
-            config.predictionStructures = oldStructures;
         }
     }
 
-    @Test void mediumHorizonPrecedesOrdinaryLocalTerrainAndPlants() {
+    @Test void nearTerrainAndPlantsPrecedeDistantMediumHorizon() {
         var layout = VssLodLayout.of(65536, 6, true, false);
         var near = key(1, 0);
         var far = key(2, layout.levelCount() - 1);
@@ -345,8 +324,7 @@ class PredictionProgressiveLoadingTest {
         for (boolean surface : new boolean[]{false, true}) {
             int nearPriority = PredictionWorkOrder.priority(near, layout,
                     PredictionWorkOrder.distanceSquared(near, layout, 32, 32), 32, surface);
-            if(surface) assertTrue(nearPriority > farPriority,"distant medium terrain precedes ordinary plants");
-            else assertTrue(nearPriority > farPriority,"local fine terrain waits for distant medium");
+            assertTrue(nearPriority < farPriority,"near terrain and plants precede distant medium");
         }
     }
 
@@ -457,7 +435,7 @@ class PredictionProgressiveLoadingTest {
         assertEquals(java.util.List.of("capture", "retained"), completed);
     }
 
-    @Test void mediumHorizonPrecedesPlantsAndLocalFineTerrain() {
+    @Test void distanceBandsPrecedeGlobalTerrainStages() {
         var layout = VssLodLayout.of(65536, 2, true, false);
         var key = key(1, 0);
         int preview = PredictionWorkOrder.priority(key, layout, 48D * 48, 16, false);
@@ -465,11 +443,11 @@ class PredictionProgressiveLoadingTest {
         int plants = PredictionWorkOrder.priority(key, layout, 0, 64, true);
         int farPreview = PredictionWorkOrder.priority(key, layout, 2048D * 2048, 0, false);
         assertTrue(preview < fine);
-        assertTrue(fine < plants);
-        assertTrue(farPreview < fine);
-        assertTrue(farPreview < plants);
+        assertTrue(plants < fine);
+        assertTrue(fine < farPreview);
+        assertTrue(plants < farPreview);
         int neighborPreview = PredictionWorkOrder.priority(key, layout, 64D * 64, 16, false);
-        assertTrue(neighborPreview < plants, "medium terrain precedes ordinary decoration");
+        assertTrue(plants < neighborPreview, "near plants must not wait for every farther preview");
     }
 
     @Test void distantFirstCoverageDoesNotPayForLocalPreviewDensity() {
@@ -495,7 +473,7 @@ class PredictionProgressiveLoadingTest {
                         PredictionWorkOrder.distanceSquared(key, layout, 0, 0), key.equals(near) ? 32 : 16, surface),
                 key -> PredictionWorkOrder.distanceSquared(key, layout, 0, 0));
         while (!queue.isEmpty()) queue.poll().run();
-        assertEquals(java.util.List.of("preview", "fine", "plants"), completed);
+        assertEquals(java.util.List.of("plants", "fine", "preview"), completed);
     }
 
     private static ClientColumnSample ground() {
@@ -512,7 +490,7 @@ class PredictionProgressiveLoadingTest {
         var readyField = PredictionTileManager.class.getDeclaredField("surfaceReady");
         readyField.setAccessible(true);
         var surfaces = (Set<?>) readyField.get(manager);
-        for (var tile : manager.readyTiles()) assertNotNull(tile.mesh().gpuPayload(),
+        for (var tile : manager.readyTiles()) assertNotNull(tile.data().voxyTile,
                 "workers must finish GPU payload packing before publishing any tile");
         return manager.readyTiles().stream().anyMatch(tile -> tile.spacingBlocks() == 1
                 && (!surface || surfaces.contains(tile.key()) && tile.depthBound().maxY() > 64)

@@ -13,6 +13,8 @@ public class MapRegion extends LeveledRegion<Object> {
     public boolean canRequestReload = true;
     public int visits;
     public boolean hasHadTerrain;
+    public boolean allCachePrepared;
+    public boolean recacheRequested;
     public Boolean beingWritten; // null until first set — pins "set true, never cleared"
     public final MapTileChunk[][] chunks = new MapTileChunk[8][8];
 
@@ -43,7 +45,8 @@ public class MapRegion extends LeveledRegion<Object> {
 
     public boolean isResting() {
         requireRegionMonitor("isResting");
-        return this.resting && this.loadState != 3 && this.loadState != 1;
+        return this.resting && this.loadState != 3 && this.loadState != 1
+                && !this.recacheRequested;
     }
 
     public void registerVisit() {
@@ -64,6 +67,7 @@ public class MapRegion extends LeveledRegion<Object> {
     }
 
     public void setAllCachePrepared(boolean prepared) {
+        this.allCachePrepared = prepared;
         dev.xantha.vss.compat.XaeroStubEvents.record("region.setAllCachePrepared " + prepared);
     }
 

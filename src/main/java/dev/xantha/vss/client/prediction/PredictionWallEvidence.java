@@ -12,6 +12,7 @@ final class PredictionWallEvidence {
     // Versioned separately: older captures classified ores and fluids as air.
     static final int CAPTURED_OCCUPANCY = 1 << 24;
     static final int MAX_PROBES = 64;
+    record HeightSpan(int bottom, int top) { }
     private record Probe(int index, int drop) { }
     private static final Comparator<Probe> PROBE_ORDER = Comparator.comparingInt(Probe::drop)
             .thenComparingInt(Probe::index);
@@ -57,8 +58,8 @@ final class PredictionWallEvidence {
                 lowerTop, lowerBottom, minY);
     }
 
-    static List<PredictionLodSeams.HeightSpan> intervals(ClientColumnSample s, int bottom, int top, int spacing) {
-        var result = new ArrayList<PredictionLodSeams.HeightSpan>(2);
+    static List<HeightSpan> intervals(ClientColumnSample s, int bottom, int top, int spacing) {
+        var result = new ArrayList<HeightSpan>(2);
         if (PredictionExteriorColumns.profiled(s) && hasInterior(s, spacing)) {
             var v = s.volume();
             for (int i = 0; i < v.size(); i++) add(result, Math.max(bottom, v.bottom(i)), Math.min(top, v.top(i)));
@@ -78,16 +79,16 @@ final class PredictionWallEvidence {
         return result;
     }
 
-    private static void add(List<PredictionLodSeams.HeightSpan> out, int bottom, int top) {
-        if (top > bottom) out.add(new PredictionLodSeams.HeightSpan(bottom, top));
+    private static void add(List<HeightSpan> out, int bottom, int top) {
+        if (top > bottom) out.add(new HeightSpan(bottom, top));
     }
 
-    static List<PredictionLodSeams.HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
+    static List<HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
                                                       int height, int neighborHeight, int spacing) {
         return exposed(sample, neighbor, height, neighborHeight, spacing, spacing);
     }
 
-    static List<PredictionLodSeams.HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
+    static List<HeightSpan> exposed(ClientColumnSample sample, ClientColumnSample neighbor,
                                                       int height, int neighborHeight, int spacing, int neighborSpacing) {
         int bottom = hasInterior(neighbor, neighborSpacing)
                 ? Math.min(neighborHeight, floor(neighbor)) : neighborHeight;
@@ -97,7 +98,7 @@ final class PredictionWallEvidence {
         // A cave exposes rock below its neighbor's top as well as above it.
         // Subtract the neighbor's solid spans, leaving shared air untouched.
         for (var solid : intervals(neighbor, bottom, Math.min(height, neighborHeight), neighborSpacing)) {
-            var remaining = new ArrayList<PredictionLodSeams.HeightSpan>(3);
+            var remaining = new ArrayList<HeightSpan>(3);
             for (var span : result) {
                 if (solid.top() <= span.bottom() || solid.bottom() >= span.top()) remaining.add(span);
                 else {

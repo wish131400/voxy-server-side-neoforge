@@ -89,6 +89,17 @@ class PredictionRefinementBudgetTest {
             var keys=List.of(new PredictionTileKey(profile.levelKey(),0,0,lod),
                     new PredictionTileKey(profile.levelKey(),1,0,lod),new PredictionTileKey(profile.levelKey(),2,0,lod));
             desired.addAll(keys);leaves.addAll(keys);
+            // Ordinary refinement starts from resident terrain; missing regions use coverage admission.
+            var residents=(Map<PredictionTileKey,PredictionTile>)field(manager,"ready");
+            for(var key:keys) residents.put(key,new PredictionTile(key,new int[0],new int[0],
+                    new ClientColumnSample[0],PredictionVoxelFixtures.flat(key,8,manager.layout().tileBlocks(lod)/8,64),
+                    new PredictionDepthBound(64,64),0,1,8,
+                    manager.layout().tileBlocks(lod)/8));
+            var targets=new HashMap<PredictionTileKey,Integer>();keys.forEach(key->targets.put(key,32));
+            for(String name:List.of("ordinaryTargets","terrainTargets")) {
+                var targetField=manager.getClass().getDeclaredField(name);targetField.setAccessible(true);
+                targetField.set(manager,Map.copyOf(targets));
+            }
             var enqueue=manager.getClass().getDeclaredMethod("enqueue",PredictionTileKey.class,int.class,int.class,boolean.class);
             enqueue.setAccessible(true);
             for(int i=0;i<30;i++) for(var key:keys) enqueue.invoke(manager,key,0,0,false);

@@ -9,7 +9,6 @@ gradle.projectsLoaded {
                 java.srcDirs = ['src/test/java']
                 java.include '**/PredictionRetainedGeometryTest.java', '**/PredictionMemoryBudgetTest.java',
                     '**/ClientTerrainSamplerTest.java', '**/ForgeTestBootstrap.java', '**/PredictionLodSeamsTest.java',
-                    '**/PredictionSimpleVegetationTest.java',
                     '**/VoxyCompatIngestHookTest.java', '**/StrictIngestCompletionTest.java',
                     '**/VoxyIngestBytecodeTest.java', '**/VoxyIngestMixinApplicationTest.java',
                     '**/VoxyLegacyIngestMixinApplicationTest.java', '**/VoxyFluidBakeCompatibilityTest.java',

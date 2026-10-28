@@ -42,7 +42,7 @@ class PredictionCaptureInvalidationBatchTest {
             var empty = new dev.xantha.vss.api.VoxelColumnData(
                     new dev.xantha.vss.api.VoxelColumnData.SectionData[0], 1L, true);
             latest.put(a, empty); latest.put(b, empty);
-            var sample = PredictionSimpleVegetationTest.sample(120);
+            var sample = PredictionVoxelFixtures.sample(120);
             samples.put(PositionUtil.packPosition(0, 0), sample);
             samples.put(PositionUtil.packPosition(15, 15), sample);
             samples.put(PositionUtil.packPosition(16, 0), sample);
@@ -102,19 +102,17 @@ class PredictionCaptureInvalidationBatchTest {
         assertEquals(expected, PredictionDiskCache.affected(columns));
         assertTrue(expected.size() < separate, "adjacent dirty columns share terrain and decoration dependencies");
         var expanded = new HashSet<>(expected);
-        for (var key : expected) if (key.kind() == 0) expanded.add(PredictionDiskCache.Key.mesh(key));
         try (var disk = new PredictionDiskCache(directory, 77);
              var terrain = disk.lease(PredictionDiskCache.Key.terrain(-1, -1, 0));
-             var mesh = disk.lease(PredictionDiskCache.Key.mesh(terrain.key));
              var surface = disk.lease(PredictionDiskCache.Key.surface(-1, -1, 0));
              var unrelated = disk.lease(PredictionDiskCache.Key.terrain(1000, 1000, 0))) {
             Object shared = field(disk, "shared");
             long before = (Long) field(shared, "revision");
             disk.invalidateChunks(columns);
             assertEquals(expanded.size(), (Long) field(shared, "revision") - before);
-            assertFalse(terrain.valid()); assertFalse(mesh.valid()); assertFalse(surface.valid());
+            assertFalse(terrain.valid()); assertFalse(surface.valid());
             assertTrue(unrelated.valid());
-            assertFalse(disk.writeTerrain(terrain, new ClientColumnSample[]{PredictionSimpleVegetationTest.sample(120)}));
+            assertFalse(disk.writeTerrain(terrain, new ClientColumnSample[]{PredictionVoxelFixtures.sample(120)}));
             try (var replacement = disk.lease(terrain.key)) {
                 assertTrue(replacement.valid());
                 disk.invalidateChunks(columns);
@@ -129,11 +127,10 @@ class PredictionCaptureInvalidationBatchTest {
                 PositionUtil.packPosition(1, 1), PositionUtil.packPosition(2, 2)});
         try (var disk = new PredictionDiskCache(directory, 77);
              var nearby = disk.lease(PredictionDiskCache.Key.terrain(0, 0, 0));
-             var nearbyMesh = disk.lease(PredictionDiskCache.Key.mesh(nearby.key));
              var sparse = disk.lease(PredictionDiskCache.Key.terrain(0, 0, 6));
              var surface = disk.lease(PredictionDiskCache.Key.surface(1, 1, 0))) {
             disk.invalidateCaptures(between);
-            assertFalse(nearby.valid()); assertFalse(nearbyMesh.valid());
+            assertFalse(nearby.valid());
             assertFalse(sparse.valid(), "area captures between sample points must invalidate the persisted ancestor");
             assertTrue(surface.valid(), "authoritative captures do not invalidate reusable decoration");
             disk.invalidateCapture(4, 4);

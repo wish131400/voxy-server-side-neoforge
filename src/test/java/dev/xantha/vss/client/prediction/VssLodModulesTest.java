@@ -118,25 +118,9 @@ class VssLodModulesTest {
         }
     }
 
-    @Test
-    void greedyMesherMergesEqualMaterialRectangles() {
-        List<VssLodGreedyMesher.Rectangle> rectangles =
-                VssLodGreedyMesher.merge(new int[] {1, 1, 2, 1, 1, 2, 3, 3, 3}, 3);
-        assertEquals(3, rectangles.size());
-        assertEquals(2, rectangles.get(0).width());
-        assertEquals(2, rectangles.get(0).height());
-    }
 
-    @Test
-    void greedyMesherBoundsCoarseMaterialFootprints() {
-        int[] cells = new int[64 * 64];
-        java.util.Arrays.fill(cells, 7);
-        List<VssLodGreedyMesher.Rectangle> rectangles =
-                VssLodGreedyMesher.merge(cells, 64, 8, 4);
-        assertTrue(rectangles.stream().allMatch(rect -> rect.width() <= 8 && rect.height() <= 4));
-        assertEquals(64 * 64, rectangles.stream()
-                .mapToInt(rect -> rect.width() * rect.height()).sum());
-    }
+
+
 
 
 

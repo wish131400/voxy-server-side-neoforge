@@ -41,7 +41,8 @@ public record ClientColumnSample(
     public static final int FLAG_TREE_HERE = 1 << 2;
     public static final int FLAG_CAPTURED = 1 << 30;
     public static final int FLAG_NO_SURFACE = 1 << 29;
-    /** Underground occupancy was deliberately not sampled; never infer a filled volume from it. */
+    /** No underground occupancy was sampled. Exterior rendering may close the heightfield;
+     * this flag does not describe real underground blocks or override known real air. */
     public static final int FLAG_SURFACE_ONLY = 1 << 28;
     /** Preview geometry must be resampled before exact terrain or decoration. */
     public static final int FLAG_APPROXIMATE = 1 << 27;
@@ -82,6 +83,12 @@ public record ClientColumnSample(
         return (flags & (FLAG_PARENT_LOD | FLAG_CAPTURE_MIP)) == 0 && !cityGround() && (preview || captured() || (!approximate() && (flags & FLAG_DISPLAY) == 0));
     }
     boolean reusableForDisplay() { return (flags & (FLAG_PARENT_LOD | FLAG_CAPTURE_MIP)) == 0 && !cityGround() && (!approximate() || captured() || (flags & FLAG_DISPLAY) != 0); }
+
+    ClientColumnSample withBiomeIndex(int index) {
+        return index == biomeIndex ? this : new ClientColumnSample(surfaceY, fluidY, index, topBlockIndex,
+                structureIndex, treeKind, treeDensity, treeHeight, fluid, flags, groundFeatureKind,
+                underBlockIndex, deepBlockIndex, surfaceBottom, lowerTop, lowerBottom, spanFloor, volume);
+    }
 
     ClientColumnSample withoutVegetationHints() {
         return new ClientColumnSample(surfaceY, fluidY, biomeIndex, topBlockIndex,

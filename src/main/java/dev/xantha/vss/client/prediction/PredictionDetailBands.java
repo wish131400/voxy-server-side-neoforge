@@ -10,9 +10,9 @@ final class PredictionDetailBands {
         return distance < fineRadius(horizon) ? 64 : 32;
     }
 
+    // Bounded bootstrap only; actual view detail is selected from projected cell size.
     static int fineRadius(int horizon) {
-        return Math.min(horizon, Math.max(256, Math.min(4096,
-                dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionFineDistanceBlocks)));
+        return Math.min(horizon, 512);
     }
 
     static int fineRadius(int horizon, net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension) {

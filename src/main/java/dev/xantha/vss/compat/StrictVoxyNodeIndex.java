@@ -76,13 +76,14 @@ public final class StrictVoxyNodeIndex {
     public boolean coversBox(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
         if (minX > maxX || minZ > maxZ) return false;
         int firstY = Math.min(minY, maxY), lastY = Math.max(minY, maxY);
-        if ((long) lastY - firstY + 1 >= 8192) {
+        if (!VoxySectionPosition.extended() && (long) lastY - firstY + 1 >= 8192) {
             firstY &= ~31;
             lastY = firstY + 8191;
         }
         int firstNodeY = firstY >> 5;
-        // Packed Y repeats after 256 coarsest nodes; checking another period adds no information.
-        int yCount = (int) Math.min(256L, (long) (lastY >> 5) - firstNodeY + 1);
+        // Only the legacy layout wraps Y. Extended keys retain the full supported height.
+        int yCount = (int) Math.min(VoxySectionPosition.extended() ? Integer.MAX_VALUE : 256L,
+                (long) (lastY >> 5) - firstNodeY + 1);
         for (int z = minZ >> 5; z <= maxZ >> 5; z++)
             for (int x = minX >> 5; x <= maxX >> 5; x++)
                 for (int offset = 0; offset < yCount; offset++)
@@ -118,12 +119,12 @@ public final class StrictVoxyNodeIndex {
     }
 
     public static long key(int lod, int x, int y, int z) {
-        return (long) lod << 60 | (long) (y & 255) << 52
-                | (long) (z & 0xFFFFFF) << 28 | (long) (x & 0xFFFFFF) << 4;
+        return VoxySectionPosition.key(lod, x, y, z);
     }
-    public static int level(long key) { return (int) (key >>> 60); }
-    public static int x(long key) { return (int) (key << 36 >> 40); }
-    public static int z(long key) { return (int) (key << 12 >> 40); }
+    public static int level(long key) { return VoxySectionPosition.level(key); }
+    public static int x(long key) { return VoxySectionPosition.x(key); }
+    public static int y(long key) { return VoxySectionPosition.y(key); }
+    public static int z(long key) { return VoxySectionPosition.z(key); }
     public void retractUncovered(dev.xantha.vss.common.StrictLodFrontier frontier,
                                  it.unimi.dsi.fastutil.longs.LongSet removed,
                                  java.util.function.BiPredicate<Integer, Integer> columnReady) {
@@ -145,7 +146,7 @@ public final class StrictVoxyNodeIndex {
         int level = level(position);
         for (int lod = level; lod <= 4; lod++) {
             int shift = lod - level;
-            if (ready.containsKey(key(lod, x(position) >> shift, ((byte)(position >>> 52)) >> shift, z(position) >> shift))) return true;
+            if (ready.containsKey(key(lod, x(position) >> shift, y(position) >> shift, z(position) >> shift))) return true;
         }
         return false;
     }

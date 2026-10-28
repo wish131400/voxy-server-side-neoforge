@@ -173,9 +173,8 @@ class PredictionTeleportLoadingTest {
     static PredictionTile tile(PredictionTileManager manager,PredictionTileKey key,int axis) {
         int spacing=manager.layout().tileBlocks(key.lod())/axis;
         int[] heights=new int[(axis+1)*(axis+1)];Arrays.fill(heights,64);
-        var samples=new ClientColumnSample[heights.length];Arrays.fill(samples,PredictionSimpleVegetationTest.sample(64));
-        var mesh=new PredictionMesh(new float[0],new float[0],new int[0],new float[0],new float[0],new int[0],
-                new boolean[axis*axis],0,0,axis*axis,null,null,null,null,axis,spacing);
+        var samples=new ClientColumnSample[heights.length];Arrays.fill(samples,PredictionVoxelFixtures.sample(64));
+        var mesh=PredictionVoxelFixtures.flat(key,axis,spacing,64);
         return new PredictionTile(key,heights,heights,samples,mesh,new PredictionDepthBound(64,64),0,1,axis,spacing,false);
     }
     static void enqueue(PredictionTileManager m,PredictionTileKey key)throws Exception {

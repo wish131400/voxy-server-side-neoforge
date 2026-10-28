@@ -36,6 +36,7 @@ public final class StrictVoxyPipeline {
     public synchronized boolean idleRange(int cx, int minSectionY, int maxSectionY, int cz) {
         if (pending.isEmpty()) return true;
         int first = Math.min(minSectionY, maxSectionY), last = Math.max(minSectionY, maxSectionY);
+        if (VoxySectionPosition.extended()) return idleBox(cx, first, cz, cx, last, cz);
         for (int lod = 0; lod <= 4; lod++) {
             int shift = lod + 1;
             int minY = first >> shift, maxY = last >> shift;
@@ -62,15 +63,19 @@ public final class StrictVoxyPipeline {
             long countY = Math.min(256L, (long) (lastY >> shift) - (firstY >> shift) + 1);
             nodes += countX * countY * countZ;
         }
-        if (pending.size() < nodes) {
+        if (VoxySectionPosition.extended() || pending.size() < nodes) {
             var iterator = pending.keySet().iterator();
             while (iterator.hasNext()) {
                 long position = iterator.nextLong();
                 int lod = StrictVoxyNodeIndex.level(position);
                 if (lod > 4) continue;
                 int shift = lod + 1;
-                if (containsWrapped(minX >> shift, maxX >> shift, StrictVoxyNodeIndex.x(position), 0xFFFFFF)
-                        && containsWrapped(firstY >> shift, lastY >> shift, (byte) (position >>> 52), 255)
+                if (VoxySectionPosition.extended()) {
+                    if (contains(minX >> shift, maxX >> shift, StrictVoxyNodeIndex.x(position))
+                            && contains(firstY >> shift, lastY >> shift, StrictVoxyNodeIndex.y(position))
+                            && contains(minZ >> shift, maxZ >> shift, StrictVoxyNodeIndex.z(position))) return false;
+                } else if (containsWrapped(minX >> shift, maxX >> shift, StrictVoxyNodeIndex.x(position), 0xFFFFFF)
+                        && containsWrapped(firstY >> shift, lastY >> shift, StrictVoxyNodeIndex.y(position), 255)
                         && containsWrapped(minZ >> shift, maxZ >> shift, StrictVoxyNodeIndex.z(position), 0xFFFFFF)) return false;
             }
             return true;
@@ -89,6 +94,7 @@ public final class StrictVoxyPipeline {
     private static boolean containsWrapped(int min, int max, int value, int mask) {
         return (long) max - min >= mask || ((long) value - min & mask) <= (long) max - min;
     }
+    private static boolean contains(int min, int max, int value) { return min <= value && value <= max; }
 
     public synchronized int size() { return pending.size(); }
 

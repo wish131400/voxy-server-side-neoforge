@@ -21,7 +21,8 @@ class PredictionScreenDetailTest {
         var target = owner(front, layout, 1800, 32);
         var unseen = owner(rear, layout, 1800, 32);
         System.out.println("SCREEN_PLAN front=" + target + ",rear=" + unseen + ",leaves=" + front.size());
-        assertTrue(target.lod() <= 1, "visible tree-sized features beyond 768 blocks need plant-capable ordinary leaves");
+        assertTrue(PredictionWorkOrder.surfaceTile(target, layout),
+                "visible tree-sized features beyond 768 blocks need plant-capable ordinary leaves");
         assertTrue(unseen.lod() > target.lod(), "unseen regions keep the skeleton instead of spending fine subdivision slots");
         assertTrue(PredictionScreenDetail.surfaceVisible(frontView, target, layout, 0, 137, 0, 1400, -64, 384));
         assertFalse(PredictionScreenDetail.surfaceVisible(rearView, target, layout, 0, 137, 0, 1400, -64, 384));
@@ -34,11 +35,14 @@ class PredictionScreenDetailTest {
     @Test void confirmedHiddenRegionsYieldPlanningSlotsToExposedScreenRegions() {
         var layout = VssLodLayout.of(32768, 6, true, true);
         var view = PredictionWorkView.of(0, 137, 0, 1, 0, 0, 70, 16D / 9);
-        var keys = PredictionLodPlanner.plan(Level.OVERWORLD, 0, 137, 0, layout, null, 2600, -64, 384,
+        // Larger plant-capable leaves need fewer splits. Use enough projected
+        // detail to exhaust the budget and exercise occlusion priority.
+        var keys = PredictionLodPlanner.plan(Level.OVERWORLD, 0, 137, 0, layout, null, 5200, -64, 384,
                 768, key -> true, key -> false, view, key -> key.tileZ() >= 0);
         var exposed = owner(keys, layout, 1800, -100);
         var hidden = owner(keys, layout, 1800, 100);
-        assertTrue(exposed.lod() <= 1, "exposed surface keeps ordinary fine planning slots");
+        assertTrue(PredictionWorkOrder.surfaceTile(exposed, layout),
+                "exposed surface keeps plant-capable ordinary planning slots");
         assertTrue(hidden.lod() > exposed.lod(), "same-distance hidden surface yields the bounded subdivision budget");
     }
 

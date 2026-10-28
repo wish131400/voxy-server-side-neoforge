@@ -1,0 +1,31 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('nativeBiomeTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/RustBiomeIdentityTest.class', '**/RustBiomeCompatibilityTest.class'
+            include '**/RustDisplayGridReuseTest.class', '**/PredictionTintReuseTest.class'
+            include '**/RustGridReuseTest.class', '**/RustDecorationReuseTest.class'
+            include '**/RustVegetationStageTest.class', '**/RustVegetationDeltaUploadTest.class'
+            maxHeapSize = '3G'
+            maxParallelForks = 1
+            forkEvery = 1
+            testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+        }
+        if (providers.gradleProperty('vssLegacyNativeLibrary').isPresent()) {
+            tasks.register('nativeBiomeLegacyTest', Test) {
+                dependsOn tasks.named('testClasses')
+                testClassesDirs = sourceSets.test.output.classesDirs
+                classpath = sourceSets.test.runtimeClasspath
+                useJUnitPlatform()
+                include '**/RustBiomeCompatibilityTest.class'
+                maxHeapSize = '2G'
+                systemProperty 'vss.testNativeLibrary', providers.gradleProperty('vssLegacyNativeLibrary').get()
+                systemProperty 'vss.expectLegacyBiome', 'true'
+                testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full' }
+            }
+        }
+    }
+}

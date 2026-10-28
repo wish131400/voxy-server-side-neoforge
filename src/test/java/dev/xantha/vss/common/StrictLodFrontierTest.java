@@ -52,4 +52,33 @@ class StrictLodFrontierTest {
         f.center(0, 0, 128);
         assertEquals(-1, f.visibleRing(), "new world cannot inherit completion");
     }
+    @Test void anUnchangedBlockerCostsOneProbeButRecoveryRevalidatesEarlierSuccesses() {
+        var f=new StrictLodFrontier();f.center(-13,-7,30);
+        for(int n=0;n<20;n++)assertTrue(f.advance((x,z)->true,(x,z)->true));
+        var count=new java.util.concurrent.atomic.AtomicInteger();
+        int end=ChebyshevRingOffsets.firstIndexForRing(21)-1;
+        long offset=ChebyshevRingOffsets.offsetAt(end);
+        int bx=-13+ChebyshevRingOffsets.decodeX(offset),bz=-7+ChebyshevRingOffsets.decodeZ(offset);
+        java.util.function.BiPredicate<Integer,Integer> blocked=(x,z)->{count.incrementAndGet();return x!=bx||z!=bz;};
+        assertFalse(f.advance(blocked,(x,z)->true));assertEquals(160,count.get());
+        for(int retry=0;retry<100;retry++){count.set(0);assertFalse(f.advance(blocked,(x,z)->true));assertEquals(1,count.get());}
+        long first=ChebyshevRingOffsets.offsetAt(ChebyshevRingOffsets.firstIndexForRing(20));
+        int fx=-13+ChebyshevRingOffsets.decodeX(first),fz=-7+ChebyshevRingOffsets.decodeZ(first);
+        assertFalse(f.advance((x,z)->x!=fx||z!=fz,(x,z)->true),"Recovery must not reuse a previously ready prefix");
+        assertEquals(19,f.visibleRing());
+        assertTrue(f.advance((x,z)->true,(x,z)->true));
+    }
+    @Test void renderBlockerRecoveryRechecksDataAndMovementAndResetDiscardTheOldBlocker() {
+        var f=new StrictLodFrontier();f.center(0,0,5);assertTrue(f.advance((x,z)->true,(x,z)->true));
+        assertFalse(f.advance((x,z)->true,(x,z)->x!=1||z!=1));
+        var count=new java.util.concurrent.atomic.AtomicInteger();
+        assertFalse(f.advance((x,z)->{fail("Do not rescan data while the render blocker is still absent");return true;},(x,z)->{count.incrementAndGet();return false;}));
+        assertEquals(1,count.get());
+        assertFalse(f.advance((x,z)->false,(x,z)->true));
+        f.center(-100,-200,5);assertTrue(f.advance((x,z)->x==-100&&z==-200,(x,z)->true));
+        assertFalse(f.advance((x,z)->false,(x,z)->true));f.reset();f.center(1,2,5);
+        assertTrue(f.advance((x,z)->x==1&&z==2,(x,z)->true));
+        assertFalse(f.advance((x,z)->false,(x,z)->true));f.missing(1,2);
+        assertTrue(f.advance((x,z)->x==1&&z==2,(x,z)->true));
+    }
 }

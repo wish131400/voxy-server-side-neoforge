@@ -129,7 +129,6 @@ final class PredictionCityGeometry {
                     ClientColumnSample.FLAG_SURFACE_ONLY | ClientColumnSample.FLAG_CITY_GROUND, 0, stone, stone,
                     ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
                     ClientColumnSample.NO_SPAN);
-            if (displayColors != null) displayColors[i] = PredictionMaterialPalette.colorForState(state, 0xff808080, 0, 0);
         }
         return new Ground(result == null ? original : result, displayColors);
     }

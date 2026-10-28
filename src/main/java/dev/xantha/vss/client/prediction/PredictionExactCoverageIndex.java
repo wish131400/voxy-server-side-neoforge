@@ -130,6 +130,12 @@ final class PredictionExactCoverageIndex {
     static final class View {
         private final java.util.Map<Long, long[]> positives;
         View(java.util.Map<Long, long[]> positives) { this.positives = java.util.Map.copyOf(positives); }
+        boolean sameCoverage(View other) {
+            if (other == null || positives.size() != other.positives.size()) return false;
+            for (var entry : positives.entrySet())
+                if (!java.util.Arrays.equals(entry.getValue(), other.positives.get(entry.getKey()))) return false;
+            return true;
+        }
         boolean owns(int x, int z) {
             var bits = positives.get(PositionUtil.packPosition(x >> SHIFT, z >> SHIFT));
             int i = cell(x, z);

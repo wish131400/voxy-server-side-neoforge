@@ -9,6 +9,10 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 record PredictionMediumCoverage(Set<PredictionTileKey> frontier, Set<PredictionTileKey> paths) {
     static final PredictionMediumCoverage EMPTY = new PredictionMediumCoverage(Set.of(), Set.of());
 
+    static int level(VssLodLayout layout, int bias) {
+        return Math.min(layout.levelCount()-1, Math.max(0, layout.levelCount()-4) + Math.max(0,bias));
+    }
+
     static PredictionMediumCoverage plan(List<PredictionTileKey> leaves, VssLodLayout layout) {
         return plan(leaves, layout, 0);
     }
@@ -16,7 +20,7 @@ record PredictionMediumCoverage(Set<PredictionTileKey> frontier, Set<PredictionT
     static PredictionMediumCoverage plan(List<PredictionTileKey> leaves, VssLodLayout layout, int levelBias) {
         // Eight tiles per horizon radius. Unlike the final quadtree, this
         // wave does not grow thousands of small tiles around the player.
-        int level = Math.min(layout.levelCount()-1, Math.max(0, layout.levelCount() - 4) + levelBias);
+        int level = level(layout, levelBias);
         Set<PredictionTileKey> frontier = new LinkedHashSet<>();
         for (var leaf : leaves) {
             int shift = Math.max(0, level - leaf.lod());

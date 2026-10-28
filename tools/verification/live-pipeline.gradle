@@ -1,0 +1,15 @@
+// CPU regressions for the live demand, publication and section invalidation pipeline.
+allprojects {
+    afterEvaluate {
+        tasks.register('livePipelineTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionLivePipelineTest.class', '**/VoxySectionVersionsTest.class'
+            maxHeapSize = '2G'
+            forkEvery = 1
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

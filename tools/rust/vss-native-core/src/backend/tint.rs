@@ -8,11 +8,11 @@ const WORK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Default)]
 pub(super) struct BiomeCache {
-    values: HashMap<Pos, Biome>,
+    values: HashMap<Pos, i32>,
     order: VecDeque<Pos>,
 }
 impl BiomeCache {
-    fn insert(&mut self, q: Pos, biome: Biome) {
+    fn insert(&mut self, q: Pos, biome: i32) {
         if self.values.contains_key(&q) { return; }
         if self.values.len() >= SHARD_CAPACITY {
             if let Some(old) = self.order.pop_front() { self.values.remove(&old); }
@@ -28,17 +28,22 @@ pub(super) struct WorkPool {
     bytes: usize,
 }
 impl World {
-    pub(super) fn color_biome(&self, q: Pos) -> Result<Biome> {
+    pub fn biome_names(&self) -> &[String] { &self.biome_names }
+
+    /// Raw noise quart coordinates, exactly as BiomeSource.getNoiseBiome.
+    /// Do not apply BiomeManager zoom or clamp to the terrain height here.
+    pub fn noise_biome_index(&self, q: Pos) -> Result<i32> {
+        self.check_active()?;
         let hash = (q[0] as u32).wrapping_mul(0x9e3779b9)
             ^ (q[1] as u32).wrapping_mul(0x85ebca6b).rotate_left(11)
             ^ (q[2] as u32).wrapping_mul(0xc2b2ae35).rotate_left(21);
         let shard = &self.color_biomes[((hash ^ (hash >> 16)) & 15) as usize];
-        if let Some(b) = shard.lock().map_err(|_| "biome color cache lock")?.values.get(&q).cloned() {
+        if let Some(b) = shard.lock().map_err(|_| "biome color cache lock")?.values.get(&q).copied() {
             return Ok(b);
         }
         // Fixed sources need no graph workspace at all.
         let biome = if let BiomeSource::Fixed(name) = &self.source {
-            self.biomes.get(name).cloned().ok_or_else(|| format!("missing biome {name}"))?
+            self.biome_indices.get(name).copied().ok_or_else(|| format!("missing biome {name}"))?
         } else {
             let cached = {
                 let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
@@ -54,7 +59,7 @@ impl World {
             // requests. Do not retain ParameterTree's last-leaf tie preference:
             // the old single-point query started that preference afresh too.
             let name = self.source.sample(&self.terrain.graph, q, &mut scratch, &mut None);
-            let result = self.biomes.get(name).cloned().ok_or_else(|| format!("missing biome {name}"));
+            let result = self.biome_indices.get(name).copied().ok_or_else(|| format!("missing biome {name}"));
             let bytes = scratch.retained_bytes();
             let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
             if pool.idle.len() < 8 && bytes <= WORK_BYTES.saturating_sub(pool.bytes) {
@@ -63,8 +68,13 @@ impl World {
             }
             result?
         };
-        shard.lock().map_err(|_| "biome color cache lock")?.insert(q, biome.clone());
+        shard.lock().map_err(|_| "biome color cache lock")?.insert(q, biome);
         Ok(biome)
+    }
+
+    pub(super) fn color_biome(&self, q: Pos) -> Result<Biome> {
+        let index = self.noise_biome_index(q)?;
+        Ok(self.biomes[&self.biome_names[index as usize]].clone())
     }
 }
 
@@ -91,6 +101,44 @@ mod tests {
         let name = world.source.sample(&t.graph, q, &mut work, &mut None);
         let biome = &world.biomes[name];
         [world.colors.grass(biome, p[0] as f64, p[2] as f64), world.colors.foliage(biome), biome.water]
+    }
+
+    #[test]
+    fn raw_identity_matches_fresh_selection_and_reuses_the_tint_cache() {
+        let world = World::new(731, 912345, document()).unwrap();
+        assert!(world.biome_names().windows(2).all(|w| w[0] < w[1]));
+        let mut scratch = world.terrain.graph.raw_scratch().unwrap();
+        let points: Vec<Pos> = (0..1024).map(|i| [i*137-40000,(i%19)*13-80,32000-i*193]).collect();
+        let expected: Vec<_> = points.iter().map(|&q|
+            world.source.sample(&world.terrain.graph,q,&mut scratch,&mut None).to_owned()).collect();
+        for (&q, name) in points.iter().zip(&expected).rev() {
+            let index = world.noise_biome_index(q).unwrap();
+            assert_eq!(&world.biome_names()[index as usize], name);
+        }
+        // Tints and raw queries share identity entries, but only tints apply the zoom.
+        let p = [-17, 63, 31];
+        let mut q = zoom_quart(world.zoom_seed,p);
+        q[1] = q[1].clamp(world.terrain.min_y>>2,(world.terrain.min_y+world.terrain.height-1)>>2);
+        let index = world.noise_biome_index(q).unwrap();
+        assert_eq!(world.color_biome(q).unwrap().water,world.biomes[&world.biome_names()[index as usize]].water);
+        assert_eq!(world.colors_at(p).unwrap(),fresh(&world,p));
+        let entries: usize = world.color_biomes.iter().map(|s|s.lock().unwrap().values.len()).sum();
+        for q in points { world.noise_biome_index(q).unwrap(); }
+        assert_eq!(entries,world.color_biomes.iter().map(|s|s.lock().unwrap().values.len()).sum::<usize>());
+        world.cancel();
+        assert!(world.noise_biome_index(q).is_err(),"cached queries must respect cancellation");
+    }
+
+    #[test]
+    fn fixed_identity_needs_no_density_workspace() {
+        let mut doc = document();
+        doc["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:swamp"});
+        let world = World::new(9,13,doc).unwrap();
+        for q in [[-1,-1000,1],[7_500_000,500_000,-7_500_000]] {
+            let index=world.noise_biome_index(q).unwrap();
+            assert_eq!(world.biome_names()[index as usize],"minecraft:swamp");
+        }
+        assert_eq!(world.color_work.lock().unwrap().idle.len(),0);
     }
 
     #[test]
@@ -128,8 +176,8 @@ mod tests {
         doc["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});
         let world = World::new(1, 0, doc).unwrap();
         let mut cache = BiomeCache::default();
-        let biome = world.biomes["minecraft:plains"].clone();
-        for x in 0..=SHARD_CAPACITY as i32 { cache.insert([x, 0, 0], biome.clone()); }
+        let biome = world.biome_indices["minecraft:plains"];
+        for x in 0..=SHARD_CAPACITY as i32 { cache.insert([x, 0, 0], biome); }
         assert_eq!(cache.values.len(), SHARD_CAPACITY);
         assert_eq!(cache.order.len(), SHARD_CAPACITY);
         assert!(!cache.values.contains_key(&[0, 0, 0]));

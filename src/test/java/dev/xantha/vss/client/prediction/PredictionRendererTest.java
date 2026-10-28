@@ -10,67 +10,13 @@ import org.junit.jupiter.api.Test;
 class PredictionRendererTest {
     @org.junit.jupiter.api.BeforeAll
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
-    @Test void seamDeltasIgnoreInputOrderAndReleaseOwnersOnReset() {
-        var seams=new PredictionLodSeams();
-        var a=PredictionLodSeamsTest.surface(PredictionLodSeamsTest.tile(-10,-10,2,64));
-        var b=PredictionLodSeamsTest.surface(PredictionLodSeamsTest.tile(10,10,2,64));
-        seams.apply(java.util.List.of(a,b),java.util.Set.of());
-        long before=seams.updatedSurfaces();
-        var reordered=seams.apply(java.util.List.of(b,a),java.util.Set.of());
-        assertTrue(reordered.surfaces().isEmpty());assertEquals(before,seams.updatedSurfaces());
-        var mask=a.allowed().clone();mask[0]=false;
-        var changed=seams.apply(java.util.List.of(new PredictionLodSeams.Surface(a.tile(),mask)),java.util.Set.of());
-        assertEquals(java.util.Set.of(a.tile().key()),changed.surfaces());
-        seams.apply(java.util.List.of(),java.util.Set.of(a.tile().key()));
-        org.junit.jupiter.api.Assertions.assertNull(seams.surface(a.tile().key()));
-        seams.clear();org.junit.jupiter.api.Assertions.assertNull(seams.surface(b.tile().key()));
-    }
 
-    @Test
-    void ownershipVersionsRetainStableMasksAndRejectChangedOwners() {
-        var view = new PredictionRenderer.CoverageView(0, 0, 700.0, null);
-        var coverage = new PredictionRenderer.TileCoverage(new boolean[]{true}, 1, 1, 0, 0);
-        var cached = new PredictionRenderer.CachedCoverage(1L, 5L, view, coverage);
-        // Ownership is versioned; no timer can silently retire this proof.
-        assertTrue(cached.matchesOwnership(1L, 5L, view));
-        assertFalse(cached.matchesOwnership(1L, 6L, view));
-        assertFalse(cached.matchesOwnership(2L, 5L, view));
-    }
 
-    @Test
-    void movementAndTelescopeChangesInvalidateTheWholeCoverageView() {
-        var view = new PredictionRenderer.CoverageView(0, 0, 700.0, null);
-        var cached = new PredictionRenderer.CachedCoverage(1L, 5L, view, null);
-        assertFalse(cached.matchesOwnership(1L, 5L,
-                new PredictionRenderer.CoverageView(1, 0, 700.0, null)));
-        assertFalse(cached.matchesOwnership(1L, 5L,
-                new PredictionRenderer.CoverageView(0, 0, 7000.0, null)));
-        assertFalse(cached.matchesOwnership(1L, 5L,
-                new PredictionRenderer.CoverageView(0, 0, 700.0, new VssLodFocus(2000, 2000, 128))));
-    }
 
-    @Test
-    void residentPredictionMasksNeverYieldToCachedRealColumns() throws Exception {
-        var method = PredictionRenderer.class.getDeclaredMethod("resolveCoverage",
-                PredictionTileManager.PredictionTile.class, int.class, int.class, double.class,
-                PredictionTileManager.RenderSnapshot.class, VssLodFocus.class);
-        method.setAccessible(true);
-        var layout = VssLodLayout.of(4096, 6, true, false);
-        for (int step : new int[]{1, 8, 16, 32, 64}) {
-            var tile = PredictionLodSeamsTest.tile(-1, -1, step, 64);
-            var snapshot = new PredictionTileManager.RenderSnapshot(net.minecraft.world.level.Level.OVERWORLD,
-                    layout, java.util.Map.of(tile.key(), tile), java.util.Map.of());
-            ClientPredictionState.exactCoverageChanged(snapshot.dimension(), -1, -1);
-            for (int[] player : new int[][]{{0, 0}, {1, 0}, {1, -1}, {0, -1}, {0, 0}}) {
-                var fallback = (PredictionRenderer.TileCoverage) method.invoke(null, tile,
-                        player[0], player[1], 900D, snapshot, null);
-                assertEquals(4096, fallback.rendered(), "a sole resident tile keeps fallback at spacing " + step);
-                assertEquals(0, fallback.authoritativeSkipped());
-                assertEquals(0, fallback.coverageSkipped());
-                for (boolean allowed : fallback.allowed()) assertTrue(allowed);
-            }
-        }
-    }
+
+
+
+
 
     @Test
     void geometricLodStepsOneLevelPerDistanceDoubling() {

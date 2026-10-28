@@ -4,14 +4,15 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.*;
 
 /** Pure loading/foreground/visibility accounting on the existing control worker. */
 final class PredictionLoadingPreparation {
-    record DisplayGoal(long revision, long captureEpoch, long meshRevision, int axis, boolean empty) { }
+    record DisplayGoal(long revision, long captureEpoch, long meshRevision, int axis, boolean empty, boolean uploaded) { }
     record Input(PredictionSchedulePreparation.Input scheduling, List<PredictionTileKey> leaves,
-                 Set<PredictionTileKey> terrainLeaves, Set<PredictionTileKey> owned, RenderSnapshot drawable,
+                 Set<PredictionTileKey> terrainLeaves, Set<PredictionTileKey> owned,
                  Map<PredictionTileKey,Long> captureEpochs, Map<PredictionTileKey,DisplayGoal> goals,
                  int surfaceRadius, PredictionVisibilityFeedback.Snapshot visibility,
-                 Map<PredictionTileKey,PredictionMeshFailure> limits, int settings, long stateVersion) { }
+                 int settings, long stateVersion) { }
     record Result(Input input, PredictionLoadingProgress progress, Map<PredictionTileKey,DisplayGoal> goals,
-                  boolean foreground, boolean preview, boolean surfacePreview, Set<PredictionTileKey> hidden) { }
+                  boolean foreground, boolean preview, boolean surfacePreview, Set<PredictionTileKey> hidden,
+                  Set<PredictionTileKey> reads) { }
     static Result build(Input input) { return new Calculation(input).build(); }
     private static final class Calculation {
         final Input request;
@@ -21,22 +22,30 @@ final class PredictionLoadingPreparation {
         final Map<PredictionTileKey,PredictionTile> ready;
         final Set<PredictionTileKey> dirtyTiles, voxyOwnedTiles, terrainLeaves, surfaceDesired, surfaceReady;
         final Map<PredictionTileKey,Integer> ordinaryTargets;
-        final RenderSnapshot drawableSnapshot;
         final PredictionMediumCoverage mediumCoverage;
         final Map<PredictionTileKey,Long> captureEpochs;
         Map<PredictionTileKey,DisplayGoal> displayGoals;
         boolean goalsChanged;
+        final Set<PredictionTileKey> reads = new HashSet<>();
         final net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension;
         PredictionLoadingProgress loadingProgress;
         Calculation(Input request) {
             this.request=request;input=request.scheduling();layout=input.layout();workView=input.view();
-            ready=input.residents().tiles();dirtyTiles=input.dirty();voxyOwnedTiles=request.owned();
+            var residents=input.residents().tiles();
+            ready=new AbstractMap<>() {
+                @Override public PredictionTile get(Object key) {
+                    if(key instanceof PredictionTileKey tile)reads.add(tile);
+                    return residents.get(key);
+                }
+                @Override public Set<Entry<PredictionTileKey,PredictionTile>> entrySet() {return residents.entrySet();}
+            };
+            dirtyTiles=input.dirty();voxyOwnedTiles=request.owned();
             terrainLeaves=request.terrainLeaves();surfaceDesired=input.surfaceDesired();surfaceReady=input.surfaceReady();
-            ordinaryTargets=input.ordinary();drawableSnapshot=request.drawable();mediumCoverage=input.medium();
+            ordinaryTargets=input.ordinary();mediumCoverage=input.medium();
             captureEpochs=request.captureEpochs();displayGoals=request.goals();
             dimension=input.residents().dimension();
         }
-        int viewBand(PredictionTileKey key){return input.band(key);}
+        int viewBand(PredictionTileKey key){reads.add(key);return input.band(key);}
         void removeGoal(PredictionTileKey key) {
             if (!displayGoals.containsKey(key)) return;
             mutableGoals(); displayGoals.remove(key);
@@ -46,12 +55,8 @@ final class PredictionLoadingPreparation {
         }
         void putGoal(PredictionTileKey key,DisplayGoal goal) { mutableGoals();displayGoals.put(key,goal); }
         int mediumAxis(PredictionTileKey key){return input.mediumAxis(key);}
-        boolean relevant(PredictionTileKey key){return input.relevant(key);}
-        boolean retry(PredictionTileKey key) {
-            var limit = request.limits().get(key);
-            return (limit == null || !limit.matches(input.revision(),captureEpochs.getOrDefault(key,0L),
-                    input.target(key),request.settings())) && input.retry(key);
-        }
+        boolean relevant(PredictionTileKey key){reads.add(key);return input.relevant(key);}
+        boolean retry(PredictionTileKey key) { return input.retry(key); }
         boolean foreground() {
             for(var entry:input.ordinary().entrySet()) {
                 var key=entry.getKey();if(!relevant(key)||voxyOwnedTiles.contains(key)||!retry(key))continue;
@@ -60,7 +65,7 @@ final class PredictionLoadingPreparation {
             for(var entry:input.transitions().entrySet())if(relevant(entry.getKey())&&retry(entry.getKey())) {
                 var tile=ready.get(entry.getKey());if(tile==null||tile.cellAxis()<entry.getValue())return true;
             }
-            for(var key:surfaceDesired)if(input.band(key)<=PredictionWorkView.BUFFER&&retry(key)
+            for(var key:surfaceDesired)if(viewBand(key)<=PredictionWorkView.BUFFER&&retry(key)
                     &&!voxyOwnedTiles.contains(key)&&!surfaceReady.contains(key))return true;
             return false;
         }
@@ -77,11 +82,13 @@ final class PredictionLoadingPreparation {
                 if(relevant(key)&&PredictionWorkOrder.distanceSquared(key,layout,input.x(),input.z())
                         <=(double)request.surfaceRadius()*request.surfaceRadius())surfacePreview=true;
             }
-            if(!request.visibility().proofs().isEmpty())for(var key:input.desired())
+            if(!request.visibility().proofs().isEmpty())for(var key:input.desired()) {
+                reads.add(key);
                 if(!input.scoped(key)&&request.visibility().hidden(key,layout,workView,input.now(),
                         ready,input.residents().epochs(),dirtyTiles))hidden.add(key);
+            }
             return new Result(request,loadingProgress,goalsChanged ? Map.copyOf(displayGoals) : displayGoals,
-                    foreground(),preview,surfacePreview,Set.copyOf(hidden));
+                    foreground(),preview,surfacePreview,Set.copyOf(hidden),Set.copyOf(reads));
         }
     private void progress(List<PredictionTileKey> leaves, double x, double z) {
         int covered = 0, near = 0, nearReady = 0, targetReady = 0, importantSurfaces = 0, surfacesReady = 0;
@@ -118,21 +125,31 @@ final class PredictionLoadingPreparation {
                     visibleSurface++;
                     if (complete && surfaceReady.contains(key)) visibleSurfaceReady++;
                 }
-                var uploaded = drawableSnapshot == null ? null : drawableSnapshot.tiles().get(key);
                 // Optional upgrades preserve the ordinary goal; content changes require a new revision.
                 DisplayGoal goal = displayGoals.get(key);
                 if (!complete || surface && !surfaceReady.contains(key)) removeGoal(key);
                 else {
                     long epoch = captureEpochs.getOrDefault(key, 0L), revision = input.revision();
                     if (goal == null || goal.captureEpoch() != epoch || goal.meshRevision() != revision || goal.axis() != target) {
-                        boolean empty = tile.mesh() != null && tile.mesh().gpuPayload() != null
-                                && tile.mesh().gpuPayload().quadCount() == 0;
-                        goal = new DisplayGoal(tile.revision(), epoch, revision, target, empty);
+                        boolean empty = tile.data().voxyTile.features().isEmpty()
+                                && java.util.Arrays.stream(tile.data().voxyTile.columns()).allMatch(column -> column.runs().isEmpty());
+                        goal = new DisplayGoal(tile.revision(), epoch, revision, target, empty, false);
                         putGoal(key, goal);
                     }
-                    boolean uploadedGoal = uploaded != null && !uploaded.scopeOnly() && uploaded.cellAxis() >= target
-                            && uploaded.revision() >= goal.revision() && uploaded.revision() <= tile.revision()
-                            && (uploaded.revision() != tile.revision() || uploaded == tile);
+                    var voxel=tile.data().voxyTile;
+                    boolean uploadedGoal = goal.uploaded()
+                            ? dev.xantha.vss.compat.StrictLodVisibility.overlayResident(dimension,
+                                Math.floorDiv(voxel.baseX(),16),tile.depthBound().minY(),Math.floorDiv(voxel.baseZ(),16),
+                                Math.floorDiv(voxel.baseX()+voxel.span()-1,16),tile.depthBound().maxY(),
+                                Math.floorDiv(voxel.baseZ()+voxel.span()-1,16))
+                            : dev.xantha.vss.compat.StrictLodVisibility.overlayUploaded(dimension,
+                                Math.floorDiv(voxel.baseX(),16),tile.depthBound().minY(),Math.floorDiv(voxel.baseZ(),16),
+                                Math.floorDiv(voxel.baseX()+voxel.span()-1,16),tile.depthBound().maxY(),
+                                Math.floorDiv(voxel.baseZ()+voxel.span()-1,16));
+                    if (uploadedGoal != goal.uploaded()) {
+                        goal = new DisplayGoal(goal.revision(),goal.captureEpoch(),goal.meshRevision(),goal.axis(),goal.empty(),uploadedGoal);
+                        putGoal(key,goal);
+                    }
                     if (goal.empty() || uploadedGoal) drawable++;
                 }
             } else if (tracking && viewBand(key) == PredictionWorkView.BACKGROUND

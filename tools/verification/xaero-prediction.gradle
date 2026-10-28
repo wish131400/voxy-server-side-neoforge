@@ -1,0 +1,14 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('xaeroPredictionTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/Xaero*Test.class', '**/PredictionXaero*Test.class'
+            systemProperty 'vss.xaeroJars', project.file(providers.gradleProperty('vssXaeroJarList').get()).readLines().findAll { it }.join('|')
+            maxHeapSize = '2G'
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

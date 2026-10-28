@@ -59,7 +59,6 @@ class PredictionVegetationLocalInvalidationBenchmark {
         var vegetation = fixture.vegetation();
         var columns = (VssLodSampleCache) field(vegetation, "terrainColumns");
         var chunks = (Map<Long, Map<BlockPos, BlockState>>) field(vegetation, "chunks");
-        var cover = (Map<Long, Float>) field(vegetation, "forestCoverage");
         var size = PredictionVegetation.class.getDeclaredField("cachedBlocks"); size.setAccessible(true);
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         bean.setThreadAllocatedMemoryEnabled(true); bean.setThreadCpuTimeEnabled(true);
@@ -80,7 +79,6 @@ class PredictionVegetationLocalInvalidationBenchmark {
                 synchronized (chunks) {
                     var removed = chunks.remove(key(x, z));
                     assertSame(first, removed);
-                    cover.remove(key(x, z));
                     size.setInt(vegetation, size.getInt(vegetation) - removed.size());
                 }
             }

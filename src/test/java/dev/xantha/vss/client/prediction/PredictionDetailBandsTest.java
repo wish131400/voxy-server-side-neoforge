@@ -13,7 +13,7 @@ class PredictionDetailBandsTest {
     @org.junit.jupiter.api.BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void fineDistanceIsIndependentOfTheHorizonAndOuterTerrainReachesMedium() {
         for (int horizon : new int[]{1024, 4096, 8192, 10000, 65536}) {
-            int fine=Math.min(dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionFineDistanceBlocks,horizon);
+            int fine = Math.min(512, horizon);
             assertEquals(64, PredictionDetailBands.cellAxis(fine - .001, horizon));
             assertEquals(32, PredictionDetailBands.cellAxis(fine, horizon));
             assertEquals(32, PredictionDetailBands.cellAxis(horizon, horizon));
@@ -131,7 +131,7 @@ class PredictionDetailBandsTest {
             var leaves = PredictionLodPlanner.plan(Level.OVERWORLD,x,170,z,layout,null,700);
             assertTrue(leaves.size() <= 1024 + PredictionLodPlanner.MAX_BAND_LEAVES + PredictionTransitionPlan.MAX_EXTRA_LEAVES);
             for (int angle = 0; angle < 360; angle += 30) {
-                for (double fraction : new double[]{.5,.78,.99}) {
+                for (double fraction : new double[]{.5,.78,.8,.85,.9,.95,.99,.999}) {
                     double px = x + horizon * fraction * Math.cos(Math.toRadians(angle));
                     double pz = z + horizon * fraction * Math.sin(Math.toRadians(angle));
                     var owners = leaves.stream().filter(key -> contains(key,layout,px,pz)).toList();

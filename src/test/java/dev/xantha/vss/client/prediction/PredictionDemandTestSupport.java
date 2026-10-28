@@ -68,14 +68,13 @@ final class PredictionDemandTestSupport {
         var i = Objects.requireNonNull(captured.get());
         var candidates = new HashSet<>(i.ownershipCandidates()); candidates.addAll(i.residents().tiles().keySet());
         candidates.addAll(i.previousOwned());
-        @SuppressWarnings("unchecked") var uploaded = (Set<PredictionTileKey>) invoke(manager, "uploadedOwnership",
-                new Class<?>[]{Collection.class, int.class}, candidates, PredictionVoxyOwnership.radiusBlocks(voxyRadius));
+        var uploaded = uploaded(manager, candidates, PredictionVoxyOwnership.radiusBlocks(voxyRadius));
         return new PredictionPlanPreparation.Input(i.dimension(), i.layout(), i.view(), i.focus(), i.x(), i.y(), i.z(),
                 i.pixels(), i.vanillaRadius(), i.surfaceExtension(), i.minY(), i.maxY(), i.vegetation(), i.initialAxes(),
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 i.ownershipCandidates(), i.previousOwned(), uploaded, voxyRadius, i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now());
+                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
     }
 
     static boolean fullyAuthoritative(PredictionTileManager manager, PredictionTileKey key) throws Exception {
@@ -99,7 +98,7 @@ final class PredictionDemandTestSupport {
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 Set.copyOf(candidates), i.previousOwned(), i.uploaded(), i.voxyRadius(), i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now());
+                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
         var preparation = new PredictionClientPreparation<PredictionPlanPreparation.Input, PredictionPlanPreparation.Result>(
                 Runnable::run, source -> {
                     var result = PredictionPlanningTestSupport.buildPlan(source);
@@ -124,8 +123,10 @@ final class PredictionDemandTestSupport {
     @SuppressWarnings("unchecked")
     private static Set<PredictionTileKey> uploaded(PredictionTileManager manager, Collection<PredictionTileKey> keys,
                                                     int radius) throws Exception {
-        return (Set<PredictionTileKey>) invoke(manager, "uploadedOwnership",
-                new Class<?>[]{Collection.class, int.class}, keys, radius);
+        var owned = new HashSet<PredictionTileKey>();
+        for (var key : keys) if (Boolean.TRUE.equals(invoke(manager, "uploadedOwnership",
+                new Class<?>[]{PredictionTileKey.class}, key))) owned.add(key);
+        return Set.copyOf(owned);
     }
 
     static PredictionPlanPreparation.Input withUploaded(PredictionPlanPreparation.Input i, Set<PredictionTileKey> uploaded) {
@@ -134,7 +135,7 @@ final class PredictionDemandTestSupport {
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 i.ownershipCandidates(), i.previousOwned(), uploaded, i.voxyRadius(), i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now());
+                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
     }
 
     static boolean hiddenChanged(PredictionTileManager manager, long now) throws Exception {
@@ -181,7 +182,7 @@ final class PredictionDemandTestSupport {
         if (published instanceof Map<?, ?> table) {
             for (var entry : table.entrySet()) if (entry.getKey() instanceof PredictionTileKey key) changes.add(key);
         }
-        field("publishedDesiredVersion").setLong(manager, -1);
+        // Demand mutations invalidate their tracked snapshots automatically.
     }
 
     private static void checkDeadline(long deadline, String stage) {

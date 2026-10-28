@@ -71,6 +71,15 @@ final class PredictionWorkView {
         return rendered && now - observedAt < 1_000_000_000L;
     }
 
+    /** Exact geometry identity; observation age is deliberately not part of visibility. */
+    boolean sameGeometry(PredictionWorkView other) {
+        return other != null && x == other.x && y == other.y && z == other.z
+                && dx == other.dx && dy == other.dy && dz == other.dz
+                && pixelScale == other.pixelScale && rendered == other.rendered
+                && java.util.Arrays.equals(planes, other.planes)
+                && java.util.Arrays.equals(bufferedPlanes, other.bufferedPlanes);
+    }
+
     boolean changedFrom(PredictionWorkView previous) {
         if (previous == null || rendered != previous.rendered) return true;
         if (Math.abs(pixelScale - previous.pixelScale) > Math.max(1, previous.pixelScale) * .05) return true;

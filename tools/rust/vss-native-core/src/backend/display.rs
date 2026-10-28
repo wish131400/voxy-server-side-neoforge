@@ -111,7 +111,46 @@ impl World {
             && self.surface.display_safe_at(&self.palette, name, &self.terrain.graph, x, z)
     }
 
+    /// Keep a caller's sparse reuse mask without destroying the regular grid.
+    /// Known Java records are not replaced; fallback evaluates only missing cells.
+    pub fn display_grid(&self, x: i32, z: i32, step: i32, missing: u64) -> Result<Vec<SurfaceColumn>> {
+        self.check_active()?;
+        if !(1..=EXPERIMENTAL_MAX_STEP).contains(&step) {
+            return Err("display grid spacing".into());
+        }
+        let mut points = Vec::with_capacity(64);
+        for i in 0..64 {
+            let xx = x.checked_add(i % 8 * step).ok_or("display grid coordinates")?;
+            let zz = z.checked_add(i / 8 * step).ok_or("display grid coordinates")?;
+            if xx.abs_diff(0) > 29999990 || zz.abs_diff(0) > 29999990 {
+                return Err("display grid coordinates".into());
+            }
+            points.push((xx, zz));
+        }
+        if missing == u64::MAX { return self.display_points(&points); }
+        let count = missing.count_ones();
+        let probes = if step >= 4 { 36 } else { 32 };
+        if count > probes && !self.terrain.graph.requires_complete_column_order() {
+            if let Some(grid) = self.adaptive_display_grid(&points)? {
+                self.display_queries[0].fetch_add(count as u64, Ordering::Relaxed);
+                self.display_queries[2].fetch_add(1, Ordering::Relaxed);
+                return Ok(grid);
+            }
+        }
+        let indices: Vec<_> = (0..64).filter(|&i| missing & (1u64 << i) != 0).collect();
+        let requests: Vec<_> = indices.iter().map(|&i| points[i]).collect();
+        let mut result = vec![SurfaceColumn { values: [0; 10] }; 64];
+        for (i, value) in indices.into_iter().zip(self.display_points(&requests)?) {
+            result[i] = value;
+        }
+        Ok(result)
+    }
+
     pub fn display_points(&self, points: &[(i32, i32)]) -> Result<Vec<SurfaceColumn>> {
+        self.display_points_impl(points, true)
+    }
+
+    fn display_points_impl(&self, points: &[(i32, i32)], reuse_exact: bool) -> Result<Vec<SurfaceColumn>> {
         self.check_active()?;
         self.display_queries[0].fetch_add(points.len() as u64, Ordering::Relaxed);
         if points.len() > 64
@@ -133,7 +172,7 @@ impl World {
                 .map_err(|_| "display cache lock")?;
             if let Some(rows) = points
                 .iter()
-                .map(|p| cache.get(p).copied())
+                .map(|p| cache.get(p).copied().filter(|r| reuse_exact || r.values[3] & (1 << 26) != 0))
                 .collect::<Option<Vec<_>>>()
             {
                 self.display_queries[1].fetch_add(points.len() as u64, Ordering::Relaxed);
@@ -153,7 +192,7 @@ impl World {
                 .lock()
                 .map_err(|_| "display cache lock")?;
             for (i, &(x, z)) in points.iter().enumerate() {
-                if let Some(&value) = cache.get(&(x, z)) {
+                if let Some(value) = cache.get(&(x, z)).copied().filter(|r| reuse_exact || r.values[3] & (1 << 26) != 0) {
                     self.display_queries[1].fetch_add(1, Ordering::Relaxed);
                     result[i] = value;
                 } else {
@@ -223,7 +262,8 @@ impl World {
             for i in indices {
                 self.check_active()?;
                 let (x, z) = points[i];
-                let row = match self.cached_surface_point(x, z)? {
+                let exact = if reuse_exact { self.cached_surface_point(x, z)? } else { None };
+                let row = match exact {
                     Some(row) => row,
                     None => match if eligible {
                         self.display_record(x, z, &mut job, scratch)?
@@ -449,7 +489,10 @@ impl World {
             })
             .collect();
         let probes: Vec<_> = indices.iter().map(|&i| points[i]).collect();
-        let values = self.display_points(&probes)?;
+        // A previously exact point has different provenance flags. Evaluate
+        // probes consistently under the visual policy; the Java caller still
+        // retains its exact cells, and these results never enter exact caches.
+        let values = self.display_points_impl(&probes, false)?;
         let first = values[0].values;
         if first[3] & (1 << 29) != 0
             || first[3] & (1 << 26) == 0

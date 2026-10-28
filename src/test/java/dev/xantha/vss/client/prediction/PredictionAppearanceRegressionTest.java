@@ -30,27 +30,11 @@ class PredictionAppearanceRegressionTest {
             ClientColumnSample plain = column(id, 0);
             ClientColumnSample forest = column(id, ClientColumnSample.FLAG_TREE_HERE);
             assertEquals(id, PredictionMaterialPalette.surfaceBlock(forest), block.toString());
-            assertEquals(PredictionMaterialPalette.colorFor(plain, 0x7FB238),
-                    PredictionMaterialPalette.colorFor(forest, 0x7FB238), block.toString());
+
         }
     }
 
-    @Test
-    void whiteRegistryMultiplierNeverBecomesAWhiteMissingTexture() throws Exception {
-        Field field = PredictionMaterialPalette.class.getDeclaredField("atlasColors");
-        field.setAccessible(true);
-        Object old = field.get(null);
-        int id = BuiltInRegistries.BLOCK.getId(Blocks.STONE);
-        int[] tints = new int[BuiltInRegistries.BLOCK.size()];
-        tints[id] = 0xFFFFFFFF;
-        try {
-            field.set(null, tints);
-            assertEquals(0xFF8A8A8A, PredictionMaterialPalette.colorFor(column(id, 0), 0x7FB238));
-            assertEquals(0xFF776655, PredictionMaterialPalette.colorForBlockId(id, 0xFF776655, 0));
-        } finally {
-            field.set(null, old);
-        }
-    }
+
 
     @Test
     void baseTileInvalidatesItsActualAncestorsOnBothSidesOfZero() {

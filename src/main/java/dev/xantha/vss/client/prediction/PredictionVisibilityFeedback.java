@@ -34,6 +34,31 @@ final class PredictionVisibilityFeedback {
 
         Map<PredictionTileKey, Proof> proofs() { return proofs; }
 
+        /** Time can only change a fixed snapshot at proof age boundaries. */
+        boolean sameAgeWindow(long before, long after) {
+            for (var proof : proofs.values()) {
+                long a = before - proof.observedAt(), b = after - proof.observedAt();
+                if ((a >= 0 && a <= MAX_AGE_NANOS) != (b >= 0 && b <= MAX_AGE_NANOS)) return false;
+            }
+            return true;
+        }
+
+        /** Refreshing observation timestamps alone does not change hidden().
+         * Preserve the exact key/proof/view checks and compare validity at both
+         * request times, including future observations and expiration. */
+        boolean sameHints(Snapshot other, long before, long after) {
+            if (this == other) return sameAgeWindow(before, after);
+            if (other == null || proofs.size() != other.proofs.size()) return false;
+            for (var entry : proofs.entrySet()) {
+                var a = entry.getValue(); var b = other.proofs.get(entry.getKey());
+                if (b == null || a.revision() != b.revision() || a.epoch() != b.epoch() || a.hidden() != b.hidden()
+                        || (a.view() == null ? b.view() != null : !a.view().sameGeometry(b.view()))) return false;
+                long ageA = before - a.observedAt(), ageB = after - b.observedAt();
+                if ((ageA >= 0 && ageA <= MAX_AGE_NANOS) != (ageB >= 0 && ageB <= MAX_AGE_NANOS)) return false;
+            }
+            return true;
+        }
+
         boolean hidden(PredictionTileKey key, VssLodLayout layout, PredictionWorkView view, long now,
                        Map<PredictionTileKey, PredictionTile> ready, Map<PredictionTileKey, Long> epochs,
                        Set<PredictionTileKey> dirty) {

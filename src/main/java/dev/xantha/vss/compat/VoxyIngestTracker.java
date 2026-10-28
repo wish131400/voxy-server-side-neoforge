@@ -50,6 +50,7 @@ public final class VoxyIngestTracker {
 
     public static void complete(Ticket ticket) {
         if (ticket == null) return;
+        boolean settled;
         synchronized (LOCK) {
             if (ticket.done) return;
             ticket.done = true;
@@ -58,9 +59,12 @@ public final class VoxyIngestTracker {
             // A late old-world callback cannot consume a new-world registration.
             if (ticket.generation != generation) return;
             SECTIONS.computeIfPresent(ticket.section, (key, n) -> n == 1 ? null : n - 1);
-            COLUMNS.computeIfPresent(ticket.column, (key, n) -> n == 1 ? null : n - 1);
+            settled = COLUMNS.computeIfPresent(ticket.column, (key, n) -> n == 1 ? null : n - 1) == null;
         }
         StrictLodVisibility.workChanged();
+        if (settled) VoxyPredictionBridge.realColumnSettled(
+                dev.xantha.vss.common.PositionUtil.unpackX(ticket.column),
+                dev.xantha.vss.common.PositionUtil.unpackZ(ticket.column));
     }
 
     static boolean runRawIngest(Object section, int x, int z,
@@ -90,6 +94,12 @@ public final class VoxyIngestTracker {
             ticket.bound = true;
             TASKS.put(task, ticket);
         }
+    }
+
+    /** Only injected at a verified rawIngest0 publication; the native task may contain a copy. */
+    public static void submittedSnapshot(Object task) {
+        RawScope scope = RAW.get();
+        if (scope != null) submitted(task, scope.ticket.section);
     }
 
     /** Replaced/evicted tasks and actual worker tasks share the same exact-once settlement. */

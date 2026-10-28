@@ -24,10 +24,8 @@ class PredictionMemoryLifecycleTest {
     void constrainedBudgetKeepsCoarseCoverageAndClosesWithoutLeakingReservations() throws Exception {
         boolean remember = VSSClientConfig.CONFIG.rememberTerrain;
         int distance = VSSClientConfig.CONFIG.predictionDistanceBlocks;
-        boolean trees = VSSClientConfig.CONFIG.predictionTrees;
         VSSClientConfig.CONFIG.rememberTerrain = false;
         VSSClientConfig.CONFIG.predictionDistanceBlocks = 1024;
-        VSSClientConfig.CONFIG.predictionTrees = false;
         // Keep only 4 MiB above the current build allowance: enough to start one
         // worker, while retained results still exercise actual memory pressure.
         PredictionMemoryBudget budget = new PredictionMemoryBudget(PredictionMemoryBudget.BUILD_BYTES + 4L * PredictionMemoryBudget.MIB,
@@ -84,7 +82,6 @@ class PredictionMemoryLifecycleTest {
         } finally {
             VSSClientConfig.CONFIG.rememberTerrain = remember;
             VSSClientConfig.CONFIG.predictionDistanceBlocks = distance;
-            VSSClientConfig.CONFIG.predictionTrees = trees;
         }
         await(() -> budget.usedBytes() == 0);
     }
@@ -93,10 +90,8 @@ class PredictionMemoryLifecycleTest {
     void fullyIngestedRegionKeepsSelectedDetailAndRebuildsItsFallback() throws Exception {
         boolean remember = VSSClientConfig.CONFIG.rememberTerrain;
         int distance = VSSClientConfig.CONFIG.predictionDistanceBlocks;
-        boolean trees = VSSClientConfig.CONFIG.predictionTrees;
         VSSClientConfig.CONFIG.rememberTerrain = false;
         VSSClientConfig.CONFIG.predictionDistanceBlocks = 1024;
-        VSSClientConfig.CONFIG.predictionTrees = false;
         PredictionMemoryBudget budget = new PredictionMemoryBudget(256L * PredictionMemoryBudget.MIB,
                 0, () -> Long.MAX_VALUE, System::nanoTime);
         try (PredictionTileManager manager = new PredictionTileManager(PROFILE.levelKey(), plain(), budget)) {
@@ -138,7 +133,7 @@ class PredictionMemoryLifecycleTest {
                 assertNotNull(manager.coveringTile(key.tileX() * span, key.tileZ() * span, 0),
                         "ingest must retain drawable coverage");
             }
-            manager.invalidateAppearance();
+            manager.invalidateContent();
             for (int cycle = 0; cycle < 100; cycle++) {
                 replan(manager);
                 await(() -> manager.pendingCount() == 0);
@@ -153,7 +148,6 @@ class PredictionMemoryLifecycleTest {
         } finally {
             VSSClientConfig.CONFIG.rememberTerrain = remember;
             VSSClientConfig.CONFIG.predictionDistanceBlocks = distance;
-            VSSClientConfig.CONFIG.predictionTrees = trees;
         }
         await(() -> budget.usedBytes() == 0);
     }
@@ -234,7 +228,7 @@ class PredictionMemoryLifecycleTest {
     }
 
     @Test
-    void atlasReloadRejectsInFlightMeshesAndReleasesResidentMemory() throws Exception {
+    void contentChangeRejectsInFlightVoxelsAndReleasesResidentMemory() throws Exception {
         boolean remember = VSSClientConfig.CONFIG.rememberTerrain;
         VSSClientConfig.CONFIG.rememberTerrain = false;
         CountDownLatch entered = new CountDownLatch(1);
@@ -253,20 +247,20 @@ class PredictionMemoryLifecycleTest {
         try (PredictionTileManager manager = new PredictionTileManager(PROFILE.levelKey(), sampler, budget)) {
             replan(manager);
             assertTrue(entered.await(3, TimeUnit.SECONDS));
-            manager.invalidateAppearance();
+            manager.invalidateContent();
             release.countDown();
             await(() -> manager.pendingCount() == 0);
-            assertEquals(0, manager.readyCount(), "old sprite rows must not be published");
+            assertEquals(0, manager.readyCount(), "outdated generation inputs must not be published");
             assertEquals(0, budget.usedBytes());
             replan(manager);
             await(() -> manager.pendingCount() == 0);
-            assertTrue(manager.readyCount() > 0, "prediction must resume after the reload");
+            assertTrue(manager.readyCount() > 0, "prediction must resume after the content change");
             assertTrue(manager.readyTiles().stream().allMatch(tile -> tile.revision() > 0));
             assertEquals(manager.readyCount(), manager.readyTiles().stream()
                     .map(PredictionTileManager.PredictionTile::revision).distinct().count());
-            manager.invalidateAppearance();
+            manager.invalidateContent();
             assertEquals(0, manager.readyCount());
-            assertEquals(0, budget.usedBytes(), "invalidated resident meshes release reservations");
+            assertEquals(0, budget.usedBytes(), "invalidated resident voxels release reservations");
         } finally {
             release.countDown();
             VSSClientConfig.CONFIG.rememberTerrain = remember;
@@ -291,11 +285,15 @@ class PredictionMemoryLifecycleTest {
         var budget = new PredictionMemoryBudget(512L * PredictionMemoryBudget.MIB,
                 0, () -> Long.MAX_VALUE, System::nanoTime);
         try (var manager = new PredictionTileManager(PROFILE.levelKey(), plain(), budget)) {
-            for (int i = 0; i < 8; i++) {
+            // Start the capture from a finished resident. An ordinary preview may
+            // legitimately gain precision while we check duplicate invalidations.
+            for (int i = 0; i < 100; i++) {
                 coarsePlan(manager);
                 await(() -> manager.pendingCount() == 0);
+                if (manager.readyTiles().stream().anyMatch(tile -> tile.cellAxis() == manager.layout().cellAxis(tile.key().lod()))) break;
             }
-            var old = manager.readyTiles().stream().findFirst().orElseThrow();
+            var old = manager.readyTiles().stream()
+                    .filter(tile -> tile.cellAxis() == manager.layout().cellAxis(tile.key().lod())).findFirst().orElseThrow();
             int span = manager.layout().tileBlocks(old.key().lod());
             int chunkX = old.key().tileX() * span / 16, chunkZ = old.key().tileZ() * span / 16;
             manager.captureExactColumn(chunkX, chunkZ, new dev.xantha.vss.api.VoxelColumnData(
@@ -331,9 +329,15 @@ class PredictionMemoryLifecycleTest {
             long built = manager.builtTileCount();
             for (int i = 0; i < 5; i++) coarsePlan(manager);
             await(() -> manager.pendingCount() == 0);
-            assertEquals(replacement.revision(), manager.readyTiles().stream()
-                    .filter(tile -> tile.key().equals(old.key())).findFirst().orElseThrow().revision(),
-                    "one capture must not rebuild the same tile again while neighboring stages finish");
+            var latest=manager.readyTiles().stream().filter(tile -> tile.key().equals(old.key())).findFirst().orElseThrow();
+            assertEquals(replacement.revision(),latest.revision(),
+                    () -> "one capture must not rebuild identical inputs: key="+old.key()
+                        +",axis="+replacement.cellAxis()+"->"+latest.cellAxis()
+                        +",spacing="+replacement.spacingBlocks()+"->"+latest.spacingBlocks()
+                        +",scope="+replacement.scopeOnly()+"->"+latest.scopeOnly()
+                        +",equalSamples="+java.util.Arrays.equals(replacement.samples(),latest.samples())
+                        +",equalVoxel="+replacement.data().voxyTile.equals(latest.data().voxyTile)
+                        +",built="+built+"->"+manager.builtTileCount());
         } finally {
             VSSClientConfig.CONFIG.rememberTerrain = remember;
             VSSClientConfig.CONFIG.predictionDistanceBlocks = distance;

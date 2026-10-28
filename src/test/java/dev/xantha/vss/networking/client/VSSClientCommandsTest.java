@@ -24,10 +24,25 @@ class VSSClientCommandsTest {
                 null, 0, "test", Component.literal("test"), null, null);
         for (String input : new String[] {"vssclient", "vssclient help prediction", "vssclient 帮助 地图",
                 "vssclient 状态", "vssclient 地图 开启", "vssclient 地图 关闭", "vssclient 地图 重载",
-                "vssclient 预测 渲染采集 0.5 0.65", "vssclient 预测 参考采集"}) {
+                "vssclient 预测 渲染采集 0.5 0.65", "vssclient 预测 参考采集",
+                "vssclient prediction perf start", "vssclient prediction perf stop", "vssclient prediction perf hud",
+                "vssclient prediction perf status", "vssclient prediction perf report", "vssclient prediction perf mark loading a",
+                "vssclient 预测 性能 开始", "vssclient 预测 性能 状态", "vssclient 预测 性能 报告", "vssclient 预测 性能 标记 缓存恢复"}) {
             var parsed = dispatcher.parse(input, source);
             assertFalse(parsed.getReader().canRead(), input + " => " + parsed.getExceptions());
             assertNotNull(parsed.getContext().getCommand(), input);
+        }
+    }
+
+    @Test void retiredIndependentRendererPathSelectorsAreUnavailable() {
+        CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();
+        VSSClientCommands.registerCommands(dispatcher);
+        CommandSourceStack source = new CommandSourceStack(CommandSource.NULL, Vec3.ZERO, Vec2.ZERO,
+                null, 0, "test", Component.literal("test"), null, null);
+        for (String input : new String[]{"vssclient prediction perf path auto",
+                "vssclient prediction perf path resident", "vssclient prediction perf path ordinary",
+                "vssclient 预测 性能 路径 ordinary"}) {
+            assertTrue(dispatcher.parse(input, source).getReader().canRead(), input);
         }
     }
 }

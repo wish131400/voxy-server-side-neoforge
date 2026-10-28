@@ -17,6 +17,7 @@ public class MapTile {
     }
 
     public void setBlock(int x, int z, MapBlock block) { this.blocks[x][z] = block; }
+    public MapBlock getBlock(int x,int z) { return blocks[x][z]; }
 
     public void setWorldInterpretationVersion(int version) {
         this.worldInterpretationVersion = version;

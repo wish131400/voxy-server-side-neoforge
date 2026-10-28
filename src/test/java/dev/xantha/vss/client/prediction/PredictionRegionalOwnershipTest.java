@@ -12,49 +12,7 @@ import org.junit.jupiter.api.Test;
 class PredictionRegionalOwnershipTest {
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
-    @Test void storedColumnsAndUploadedVolumeSuppressWholeTileWorkAndMissingRestoresIt() throws Exception {
-        var index = index();
-        index.clear();
-        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
-                Level.OVERWORLD.location(), 42, -64, 384, "noise", "minecraft:overworld", 1);
-        try (var manager = new PredictionTileManager(Level.OVERWORLD,
-                ClientTerrainSampler.custom(42, profile, (x, z) -> 64),
-                new PredictionMemoryBudget(256 * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime), null)) {
-            PredictionCoarsePlanHandoffTest.field("voxyUploads").set(manager, PredictionCoarseHandoffTest.ready());
-            var key = new PredictionTileManager.PredictionTileKey(Level.OVERWORLD, -1, -1, 0);
-            int span = manager.layout().tileBlocks(0) / 16;
-            long settled = System.nanoTime() - ExactCoverageGate.SETTLE_NANOS;
-            for (int z = -span; z < 0; z++) for (int x = -span; x < 0; x++) index.confirm(Level.OVERWORLD, x, z, settled);
-            assertFalse(manager.isAuthoritative(-1, -1), "local storage is independent of VSS deliveries");
-            assertTrue(manager.isRenderAuthoritative(-1, -1));
-            assertFalse(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 8192), "index edge must keep depth-tested fallback");
-            for (int z = -span - 1; z <= 0; z++) for (int x = -span - 1; x <= 0; x++)
-                index.confirm(Level.OVERWORLD, x, z, settled);
-            assertTrue(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 8192));
-            assertFalse(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 0), "disabled Voxy cannot own terrain");
-            assertFalse(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 128), "all possible tile heights must be in range before retirement");
 
-            var tile = PredictionCoverageWorkTest.tile(-1, -1, 0, manager.layout());
-            ready(manager).put(key, tile);
-            desired(manager).add(key);
-            assertTrue(effectivelyDesired(manager, key));
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 512);
-            assertSame(tile, ready(manager).get(key), "completed fallback remains under the existing residency budgets");
-            assertFalse(effectivelyDesired(manager, key), "covered work cannot publish through the grace period");
-            var enqueue = PredictionTileManager.class.getDeclaredMethod("enqueue", PredictionTileManager.PredictionTileKey.class,
-                    int.class, int.class, boolean.class, boolean.class);
-            enqueue.setAccessible(true);
-            enqueue.invoke(manager, key, 0, 0, false, false);
-            assertEquals(0, manager.pendingCount(), "covered terrain must not start new generation");
-
-            index.remove(Level.OVERWORLD, -1, -1);
-            assertFalse(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 8192), "one missing chunk retains the entire mixed tile");
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 512);
-            assertTrue(effectivelyDesired(manager, key), "a definite miss permits fallback generation again");
-            index.confirm(Level.OVERWORLD, -1, -1, System.nanoTime());
-            assertFalse(PredictionDemandTestSupport.fullyVoxyOwned(manager, key, 8192), "new delivery must settle before transfer");
-        } finally { index.clear(); }
-    }
 
     @Test void boxQueriesPreservePartialCoverageAcrossPagesAndDimensions() {
         var index = new PredictionExactCoverageIndex();
@@ -100,54 +58,7 @@ class PredictionRegionalOwnershipTest {
     }
 
 
-    @Test void movingBackAndForthAtVoxyEdgeKeepsOwnershipUntilExitAndRetractionRevokesIt() throws Exception {
-        var index = index();
-        index.clear();
-        var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
-                Level.OVERWORLD.location(), 42, -64, 384, "noise", "minecraft:overworld", 1);
-        try (var manager = new PredictionTileManager(Level.OVERWORLD,
-                ClientTerrainSampler.custom(42, profile, (x, z) -> 64),
-                new PredictionMemoryBudget(256 * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime), null)) {
-            PredictionCoarsePlanHandoffTest.field("voxyUploads").set(manager, PredictionCoarseHandoffTest.ready());
-            var key = new PredictionTileManager.PredictionTileKey(Level.OVERWORLD, 0, 0, 0);
-            int span = manager.layout().tileBlocks(0), chunks = span / 16;
-            long settled = System.nanoTime() - ExactCoverageGate.SETTLE_NANOS;
-            for (int z = -1; z <= chunks; z++) for (int x = -1; x <= chunks; x++)
-                index.confirm(Level.OVERWORLD, x, z, settled);
-            desired(manager).add(key);
-            ready(manager).put(key, PredictionCoverageWorkTest.tile(0, 0, 0, manager.layout()));
-            camera(manager, span - 380, 128, span / 2);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertTrue(effectivelyDesired(manager, key), "first arrival in the edge band keeps prediction work");
-            assertTrue(ready(manager).containsKey(key));
 
-            camera(manager, span - 340, 128, span / 2);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertFalse(effectivelyDesired(manager, key), "settled interior coverage may retire prediction");
-            assertTrue(ready(manager).containsKey(key));
-            for (int move = 0; move < 20; move++) {
-                camera(manager, span - (move % 2 == 0 ? 376 : 384), 128, span / 2);
-                PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-                assertFalse(effectivelyDesired(manager, key), "small reversals must not restart and retire the same tile");
-            }
-
-            camera(manager, span - 415, 128, span / 2);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertTrue(effectivelyDesired(manager, key), "leaving the band permits prediction to resume");
-            camera(manager, span - 380, 128, span / 2);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertTrue(effectivelyDesired(manager, key), "returning just to the band cannot immediately retire again");
-            camera(manager, span - 340, 128, span / 2);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertFalse(effectivelyDesired(manager, key));
-            index.remove(Level.OVERWORLD, 0, 0);
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertTrue(effectivelyDesired(manager, key), "coverage retraction bypasses spatial hysteresis immediately");
-            index.confirm(Level.OVERWORLD, 0, 0, System.nanoTime());
-            PredictionDemandTestSupport.refreshVoxyOwnership(manager, List.of(key), 32);
-            assertTrue(effectivelyDesired(manager, key), "an unsettled replacement cannot take ownership back");
-        } finally { index.clear(); }
-    }
 
     private static void camera(PredictionTileManager manager, double x, double y, double z) throws Exception {
         var fx = PredictionTileManager.class.getDeclaredField("cameraBlockX"); fx.setAccessible(true); fx.setDouble(manager, x);

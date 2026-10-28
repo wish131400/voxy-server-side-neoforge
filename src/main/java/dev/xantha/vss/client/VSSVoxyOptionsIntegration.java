@@ -4,7 +4,6 @@ import com.google.common.collect.ImmutableList;
 import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
-import dev.xantha.vss.config.PredictionVegetationDensity;
 import dev.xantha.vss.config.VSSServerConfig;
 import dev.xantha.vss.networking.client.VSSClientNetworking;
 import dev.xantha.vss.networking.server.VSSServerNetworking;
@@ -254,24 +253,10 @@ public final class VSSVoxyOptionsIntegration {
             invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.prediction_detail",
-                    sodium08BooleanOption(configBuilder, "prediction_antialiasing", "vss.voxy_options.prediction_antialiasing",
-                            "vss.voxy_options.prediction_antialiasing.tooltip", "LOW", true,
-                            value -> VSSClientConfig.CONFIG.predictionAntialiasing = value,
-                            () -> VSSClientConfig.CONFIG.predictionAntialiasing, VSSVoxyOptionsIntegration::saveClientConfig),
-                    sodium08IntOption(configBuilder, "prediction_vegetation_density", "vss.voxy_options.prediction_trees",
-                            "vss.voxy_options.prediction_trees.tooltip", "HIGH", 1, 0, 2, 1,
-                            value -> VSSClientConfig.CONFIG.predictionVegetationDensity =
-                                    PredictionVegetationDensity.values()[Math.max(0, Math.min(2, value))].configName(),
-                            () -> PredictionVegetationDensity.current().ordinal(),
-                            VSSVoxyOptionsIntegration::formatVegetationIndex, VSSVoxyOptionsIntegration::saveClientConfig),
                     sodium08BooleanOption(configBuilder, "prediction_spyglass_loading", "vss.voxy_options.prediction_spyglass_loading",
                             "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH", true,
                             value -> VSSClientConfig.CONFIG.predictionSpyglassLoading = value,
-                            () -> VSSClientConfig.CONFIG.predictionSpyglassLoading, VSSVoxyOptionsIntegration::saveClientConfig),
-                    sodium08BooleanOption(configBuilder, "prediction_structures", "vss.voxy_options.prediction_structures",
-                            "vss.voxy_options.prediction_structures.tooltip", "HIGH", true,
-                            value -> VSSClientConfig.CONFIG.predictionStructures = value,
-                            () -> VSSClientConfig.CONFIG.predictionStructures, VSSVoxyOptionsIntegration::saveClientConfig)));
+                            () -> VSSClientConfig.CONFIG.predictionSpyglassLoading, VSSVoxyOptionsIntegration::saveClientConfig)));
 
             invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
@@ -282,11 +267,6 @@ public final class VSSVoxyOptionsIntegration {
                              VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS, 1_024,
                              value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,
                              () -> VSSClientConfig.CONFIG.predictionDistanceBlocks,
-                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig),
-                     sodium08IntOption(configBuilder, "prediction_surface_distance", "vss.voxy_options.prediction_surface_distance",
-                             "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 768, 128, 2048, 128,
-                             value -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks = value,
-                             () -> VSSClientConfig.CONFIG.predictionSurfaceDistanceBlocks,
                              VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig)));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
@@ -597,13 +577,7 @@ public final class VSSVoxyOptionsIntegration {
         });
     }
 
-    private static Component formatVegetationIndex(int index) {
-        return Component.translatable(switch (index) {
-            case 0 -> "vss.voxy_options.vegetation_low";
-            case 2 -> "vss.voxy_options.vegetation_high";
-            default -> "vss.voxy_options.vegetation_medium";
-        });
-    }
+
 
     private static Object sodium08Group(Object configBuilder, String nameKey, Object... options) throws ReflectiveOperationException {
         Object group = invokeByName(configBuilder, "createOptionGroup");
@@ -941,17 +915,10 @@ public final class VSSVoxyOptionsIntegration {
             }
 
             groups.add(oldGroup(
-                    oldVegetationOption(clientStorage),
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_spyglass_loading",
                             "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH",
                             (VSSClientConfig config, Boolean value) -> config.predictionSpyglassLoading = value,
-                            config -> config.predictionSpyglassLoading),
-                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_antialiasing",
-                            "vss.voxy_options.prediction_antialiasing.tooltip", "LOW",
-                            (VSSClientConfig config, Boolean value) -> config.predictionAntialiasing = value, config -> config.predictionAntialiasing),
-                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_structures",
-                            "vss.voxy_options.prediction_structures.tooltip", "HIGH",
-                            (VSSClientConfig config, Boolean value) -> config.predictionStructures = value, config -> config.predictionStructures)));
+                            config -> config.predictionSpyglassLoading)));
 
             groups.add(oldGroup(
                     oldIntOption(
@@ -964,12 +931,7 @@ public final class VSSVoxyOptionsIntegration {
                             1_024,
                             VSSVoxyOptionsIntegration::formatBlocks,
                             (VSSClientConfig config, Integer value) -> config.predictionDistanceBlocks = value,
-                            config -> config.predictionDistanceBlocks),
-                    oldIntOption(clientStorage, "vss.voxy_options.prediction_surface_distance",
-                            "vss.voxy_options.prediction_surface_distance.tooltip", "HIGH", 128, 2048, 128,
-                            VSSVoxyOptionsIntegration::formatBlocks,
-                            (VSSClientConfig config, Integer value) -> config.predictionSurfaceDistanceBlocks = value,
-                            config -> config.predictionSurfaceDistanceBlocks)));
+                            config -> config.predictionDistanceBlocks)));
 
             Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
             return pageConstructor.newInstance(Component.translatable("vss.voxy_options.prediction_title"), ImmutableList.copyOf(groups));
@@ -1005,14 +967,7 @@ public final class VSSVoxyOptionsIntegration {
                         Component.translatable("vss.voxy_options.tier_high")});
     }
 
-    private static Object oldVegetationOption(Object storage) throws ReflectiveOperationException {
-        return oldOption(PredictionVegetationDensity.class, storage,
-                "vss.voxy_options.prediction_trees", "vss.voxy_options.prediction_trees.tooltip", "HIGH",
-                option -> oldCyclingControl(option, PredictionVegetationDensity.class,
-                        new Component[]{formatVegetationIndex(0), formatVegetationIndex(1), formatVegetationIndex(2)}),
-                (VSSClientConfig config, PredictionVegetationDensity value) -> config.predictionVegetationDensity = value.configName(),
-                (VSSClientConfig config) -> PredictionVegetationDensity.fromName(config.predictionVegetationDensity));
-    }
+
 
     private static Object oldCyclingControl(Object option, Class<?> valueClass, Component[] names) {
         try {

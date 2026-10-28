@@ -73,6 +73,10 @@ public final class RustWorldgenBackend {
     public static native int previewPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
     /** Display-only approximation, including visual vegetation; never seed exact caches. */
     public static native int displayPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+    /** Additive ABI 6 entry: complete 8x8 shape plus missing bits (row-major).
+     * Writes 64 ten-int records; callers consume only missing cells and keep known exact values.
+     * Older external ABI 6 libraries may lack this entry; callers must use displayPoints then. */
+    public static native int displayGrid(long world, int x, int z, int spacing, long missing, ByteBuffer output);
     /** Existing prediction surface context, 5x5 chunks, assembled in Rust. */
     public static native long surfaceProxy(long world, int centerChunkX, int centerChunkZ);
     /** Separate display policy; exact surfaceProxy callers never see approximate records. */
@@ -89,4 +93,9 @@ public final class RustWorldgenBackend {
     public static native String colors(long world, int x, int y, int z);
     /** Three RGB int32 values at the exact block position, using BiomeManager zoom. */
     public static native int tints(long world, int x, int y, int z, ByteBuffer output);
+    /** Additive ABI 6 sidecar: up to 256 raw noise-quart XYZ int32 positions, one int32
+     * biome index per position into describe(world).biome_names (also in describeCompact).
+     * No BiomeManager zoom or height clamp; existing ten-int surface records are unchanged.
+     * Older libraries may omit both the palette and this entry point. */
+    public static native int biomeIndices(long world, ByteBuffer quartXyz, ByteBuffer output, int count);
 }

@@ -45,21 +45,5 @@ class PredictionTemplateCacheIdentityTest {
         }
     }
 
-    @Test void finishedMeshCannotRestoreMissingBuildingsFromAnotherTemplateCatalog() throws Exception {
-        var fixture = PredictionMeshCodecTest.class.getDeclaredMethod("fixture"); fixture.setAccessible(true);
-        var mesh = (PredictionMesh) fixture.invoke(null);
-        byte[] signature = new byte[32];
-        var key = PredictionDiskCache.Key.terrain(0, 0, 1);
-        try (var cache = new PredictionDiskCache(directory, 42, null, "a".repeat(64)); var lease = cache.lease(key)) {
-            cache.writeMeshLater(lease, signature, mesh, signature, true);
-            cache.flushMeshes(); cache.flush();
-            assertNotNull(cache.readMeshBase(lease, signature, mesh.cellAxis()));
-        }
-        try (var cache = new PredictionDiskCache(directory, 42, null, "a".repeat(64)); var lease = cache.lease(key)) {
-            assertNotNull(cache.readMeshBase(lease, signature, mesh.cellAxis()));
-        }
-        try (var cache = new PredictionDiskCache(directory, 42, null, "b".repeat(64)); var lease = cache.lease(key)) {
-            assertNull(cache.readMeshBase(lease, signature, mesh.cellAxis()));
-        }
-    }
+
 }

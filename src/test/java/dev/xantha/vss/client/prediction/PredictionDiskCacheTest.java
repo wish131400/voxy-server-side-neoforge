@@ -127,6 +127,30 @@ class PredictionDiskCacheTest {
         }
     }
 
+    @Test void newHeaderProbeDoesNotDiscardOlderUnfinishedDemand() throws Exception {
+        var first=PredictionDiskCache.Key.terrain(0,0,0);
+        var last=PredictionDiskCache.Key.terrain(256,0,0);
+        var grid=new ClientColumnSample[66*66];Arrays.fill(grid,samples()[0]);
+        try(var cache=new PredictionDiskCache(directory,77);var lease=cache.lease(last)) {assertTrue(cache.writeTerrain(lease,grid));}
+        try(var cache=new PredictionDiskCache(directory,77)) {
+            var field=PredictionDiskCache.class.getDeclaredField("COMMITS");field.setAccessible(true);
+            var executor=(java.util.concurrent.ExecutorService)field.get(null);
+            var entered=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
+            var gate=executor.submit(()->{entered.countDown();release.await();return true;});
+            try {
+                assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                var older=new ArrayList<PredictionDiskCache.Key>();
+                for(int x=0;x<=256;x++)older.add(PredictionDiskCache.Key.terrain(x,0,0));
+                cache.probeTerrain(older);
+                cache.probeTerrain(List.of(PredictionDiskCache.Key.terrain(999,0,0)));
+                assertTrue(cache.terrainProbePending(first));assertTrue(cache.terrainProbePending(last));
+            } finally {release.countDown();gate.get();}
+            long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while(cache.terrainProbePending(last) && System.nanoTime()<deadline)Thread.sleep(2);
+            assertEquals(64,cache.cachedTerrainAxis(last),"A new plan or Voxy request cannot erase a queued outer-cache probe");
+        }
+    }
+
     @Test void headerBatchesContinueWithoutAnotherPlannerTick() throws Exception {
         var keys = new ArrayList<PredictionDiskCache.Key>();
         for (int x=0;x<257;x++) keys.add(PredictionDiskCache.Key.terrain(x,0,0));
@@ -240,7 +264,7 @@ class PredictionDiskCacheTest {
         }
     }
 
-    @Test void arrivalBetweenGridPointsPreservesUnloadedTerrainButEditsStillInvalidate() {
+    @Test void arrivalBetweenGridPointsInvalidatesAreaMipsAndEditsStillInvalidateDecoration() {
         for (int sign : new int[]{-1, 1}) {
             int tile = sign < 0 ? -1 : 0;
             int between = sign < 0 ? -3 : 1;
@@ -259,9 +283,11 @@ class PredictionDiskCacheTest {
                 cache.flush();
             }
             try (var cache = new PredictionDiskCache(directory, 77)) {
-                try (var lease = cache.lease(coarse)) { assertNotNull(cache.readTerrain(lease, samples().length)); }
+                // An area mip contains captured occupancy between point samples too.
+                try (var lease = cache.lease(coarse)) { assertNull(cache.readTerrain(lease, samples().length)); }
                 try (var lease = cache.lease(nearby)) { assertNull(cache.readTerrain(lease, samples().length)); }
                 try (var lease = cache.lease(plants)) { assertEquals(Map.of(), cache.readSurface(lease), "ordinary arrival must preserve deterministic decoration"); }
+                try (var lease = cache.lease(coarse)) { assertTrue(cache.writeTerrain(lease, samples())); }
                 cache.invalidateCapture(sampled, sampled);
                 try (var lease = cache.lease(coarse)) { assertNull(cache.readTerrain(lease, samples().length)); }
                 cache.flush();

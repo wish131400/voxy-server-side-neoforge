@@ -2,6 +2,7 @@
   "required": false,
   "minVersion": "0.8",
   "package": "dev.xantha.vss.mixin",
+  "plugin": "dev.xantha.vss.mixin.voxy.VoxyPredictionPlugin",
   "refmap": "vss.refmap.json",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
@@ -16,6 +17,11 @@
     "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
+    "voxy.PredictionVoxyMeshSourceMixin",
+    "voxy.PredictionVoxyNeighborSourceMixin",
+    "voxy.PredictionVoxyWorldEventMixin",
+    "voxy.PredictionVoxyDetailMixin",
+    "voxy.PredictionVoxyTraversalShaderMixin",
     "voxy.VoxelIngestServiceSourceMixin",
     "voxy.VoxyClientInstanceServerIngestMixin",
     "client.IrisPredictionCaptureMixin",
@@ -30,19 +36,15 @@
     "client.ClientLevelFarPlayerLeaveEventMixin",
     "client.EntityFallFlyingFlagAccessorMixin",
     "client.LevelRendererFarPlayerChunkMixin",
-    "client.LevelRendererPredictionMaskMixin",
-    "client.ClientChunkCachePredictionMaskMixin",
     "client.LevelChunkPredictionCaptureMixin",
-    "client.SpriteContentsImageAccessor",
     "voxy.ModelBakerySubsystemShutdownMixin",
     "voxy.ModelFactoryFluidBakeOrderMixin",
     "voxy.IrisVoxyRenderPipelineDepthMaskMixin",
-    "voxy.IrisVoxyPredictionMixin",
-    "voxy.VoxyTranslucentPredictionMixin",
     "voxy.NormalRenderPipelineDepthMaskMixin",
     "voxy.PredictionFogShaderMixin",
     "voxy.VoxyClientInstanceStoragePathMixin",
-    "voxy.VoxyRenderSystemDefaultFramebufferMixin"
+    "voxy.VoxyRenderSystemDefaultFramebufferMixin",
+    "voxy.VoxyRenderDistanceMixin"
   ],
   "injectors": {
     "defaultRequire": 1

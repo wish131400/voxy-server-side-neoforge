@@ -265,7 +265,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     let result = guarded(|| {
         if let Ok(w) = world(id) {
             Ok(
-                json!({"kind":"world","abi":5,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset","approximate_preview"],"complete_worldgen":false,"terrablender_routing":w.uses_terrablender_routing(),"signed_sqrt":w.terrain.graph.uses_signed_sqrt()}),
+                json!({"kind":"world","abi":6,"min_y":w.terrain.min_y,"height":w.terrain.height,"states":World::state_table(&w.palette),"biome_names":w.biome_names(),"phases":["density","base_columns","surface_rules","biome_colors","configured_feature_subset","approximate_preview"],"complete_worldgen":false,"terrablender_routing":w.uses_terrablender_routing(),"signed_sqrt":w.terrain.graph.uses_signed_sqrt()}),
             )
         } else {
             let v = volume(id)?;
@@ -790,6 +790,20 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_displayPoints(
     e: JNIEnv, _c: JClass, id: jlong, input: JByteBuffer, out: JByteBuffer, count: jint,
 ) -> jint { surface_points_jni(e,id,input,out,count,2) }
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_displayGrid(
+    mut e: JNIEnv, _c: JClass, id: jlong, x: jint, z: jint, step: jint, missing: jlong, out: JByteBuffer,
+) -> jint {
+    let result = guarded(|| {
+        buffer(&mut e, &out, 64 * 40, true)?;
+        let columns = world(id)?.display_grid(x, z, step, missing as u64)?;
+        let mut bytes = Vec::with_capacity(64 * 40);
+        for column in columns { for n in column.values { bytes.extend(n.to_le_bytes()); } }
+        put(&mut e, &out, &bytes)?;
+        Ok(64)
+    });
+    match result { Ok(n) => n, Err(err) => { fail(&mut e, err); -1 } }
+}
 fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBuffer,
     count: jint, mode: u8) -> jint {
     let result = guarded(|| {
@@ -1041,6 +1055,34 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     }
 }
 
+/// Additive ABI 6 sidecar; the existing ten-int surface records stay unchanged.
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_biomeIndices(
+    mut e: JNIEnv, _c: JClass, id: jlong, input: JByteBuffer, out: JByteBuffer, count: jint,
+) -> jint {
+    let result = guarded(|| {
+        if !(0..=256).contains(&count) { return Err("biome batch count".into()); }
+        let ptr = buffer(&mut e, &input, count as usize * 12, false)?;
+        buffer(&mut e, &out, count as usize * 4, true)?;
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, count as usize * 12) };
+        let w = world(id)?;
+        w.check_active()?;
+        let mut result = Vec::with_capacity(count as usize * 4);
+        for row in bytes.chunks_exact(12) {
+            let q = std::array::from_fn(|i| i32::from_le_bytes(row[i*4..i*4+4].try_into().unwrap()));
+            if q[0].abs_diff(0) > 7_500_000 || q[2].abs_diff(0) > 7_500_000
+                || q[1].abs_diff(0) > 500_000 {
+                return Err("biome quart coordinates".into());
+            }
+            result.extend(w.noise_biome_index(q)?.to_le_bytes());
+        }
+        // Commit only after the complete batch succeeds, including aliased buffers.
+        put(&mut e, &out, &result)?;
+        Ok(count)
+    });
+    match result { Ok(n) => n, Err(err) => { fail(&mut e, err); -1 } }
+}
+
 /// Session-owned immutable palette. Worlds retain an Arc snapshot after this handle is closed.
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_openPalette(
@@ -1073,6 +1115,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
         let mut description = w.palette.compact_mapping();
         description["terrablender_routing"] = json!(w.uses_terrablender_routing());
         description["signed_sqrt"] = json!(w.terrain.graph.uses_signed_sqrt());
+        description["biome_names"] = json!(w.biome_names());
         Ok(description)
     }))
 }

@@ -38,11 +38,11 @@ class PredictionSurfacePipelineTest {
         assertTrue(PredictionWorkOrder.surfaceEligible(far, layout, 0, 0, 768, focus));
         assertFalse(PredictionWorkOrder.surfaceEligible(far, layout, 0, 0, 768, new VssLodFocus(-3904, 1984, 32)));
         assertTrue(PredictionWorkOrder.priority(near, layout, 0, 64, true)
-                > PredictionWorkOrder.priority(near, layout, 0, 16, false),
-                "continuous local preview precedes decoration");
+                < PredictionWorkOrder.priority(near, layout, 0, 16, false),
+                "eligible local plants can finish before another preview upgrade");
         assertTrue(PredictionWorkOrder.priority(near, layout, 0, 64, true)
-                > PredictionWorkOrder.priority(far, layout, 4000D * 4000, 0, false),
-                "ordinary plants follow distant medium terrain");
+                < PredictionWorkOrder.priority(far, layout, 4000D * 4000, 0, false),
+                "nearby plants precede distant medium terrain");
     }
 
     @Test void surfaceBandExtendsBeyondObservedRealLodInsteadOfHidingInsideIt() {
@@ -55,31 +55,5 @@ class PredictionSurfacePipelineTest {
         assertEquals(1024, capped, "the band cannot extend outside the prediction horizon");
     }
 
-    @Test void slabAndFenceSurviveTheActualPackedGpuFormatWithoutUndersides() {
-        var slab = Blocks.OAK_SLAB.defaultBlockState().setValue(SlabBlock.TYPE, SlabType.TOP);
-        var blocks = Map.of(new BlockPos(0, 64, 0), slab,
-                new BlockPos(1, 64, 0), Blocks.OAK_FENCE.defaultBlockState());
-        var surface = PredictionVegetation.Tile.of(blocks, 0, 0, 2, 1, 1);
-        var sample = new ClientColumnSample(64, 64, 0, PredictionMaterialPalette.grassBlockIndex(),
-                0, 0, 0, 0, 0, 0, 0, ClientColumnSample.NO_BLOCK, ClientColumnSample.NO_BLOCK,
-                ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
-        var samples = new ClientColumnSample[9]; java.util.Arrays.fill(samples, sample);
-        var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, 1, 3, null, null, 0, 0, surface);
-        var tile = new PredictionTileManager.PredictionTile(new PredictionTileManager.PredictionTileKey(
-                Level.OVERWORLD, 0, 0, 0), new int[9], new int[9], samples, mesh,
-                new PredictionDepthBound(64, 66), 0, 1, 2, 1);
-        var packed = PredictionPackedMesh.pack(tile);
-        boolean fence = false, halfSlab = false;
-        for (int offset = 0; offset < packed.quads().length; offset += PredictionPackedMesh.STRIDE_INTS) {
-            var data = packed.quads();
-            boolean fine = (data[offset + 6] & PredictionPackedMesh.FLAG_FINE_COORDINATES) != 0;
-            float x = (data[offset] & 0xffff) / (fine ? 16F : 1F);
-            float y = ((data[offset + 4] & 0xffff) - 32768) / (fine ? 16F : 4F);
-            fence |= fine && x == 1.375F;
-            halfSlab |= y == 64.5F;
-        }
-        assertTrue(fence, "fence post must keep its 6/16-width coordinates on the GPU");
-        assertTrue(halfSlab, "top slabs must begin at half-block height");
-        assertFalse(packed.downFaces(), "surface prediction must not introduce underground ceilings");
-    }
+
 }

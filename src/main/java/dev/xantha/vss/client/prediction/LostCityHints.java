@@ -144,7 +144,11 @@ final class LostCityHints {
     boolean regionKnown(int x, int z) { return regions.containsKey(key(x, z)); }
 
     record Snapshot(LostCityPreview.Tile tile, boolean complete) {
-        LostCityPreview.Tile buildings() { return PredictionCityMeshCache.buildings(tile); }
+        LostCityPreview.Tile buildings() {
+            if (tile != null) for (var chunk : tile.chunks())
+                if (chunk.kind() != 0 || !chunk.overlays().isEmpty()) return tile;
+            return null;
+        }
     }
 
     LostCityPreview.Tile snapshot(int baseX, int baseZ, int span) {

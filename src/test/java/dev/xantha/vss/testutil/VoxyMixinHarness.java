@@ -58,6 +58,12 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
         return transformer.transformClass(MixinEnvironment.getCurrentEnvironment(), name, bytes);
     }
 
+    /** Fixture variants are installed before Sponge prepares any target metadata. */
+    public void replaceClass(String name, byte[] bytes) {
+        if (transformer != null) throw new IllegalStateException("Mixin already prepared");
+        classes.put(name.replace('.', '/') + ".class", bytes);
+    }
+
     @Override public String getName() { return "VSS focused regression"; }
     @Override public boolean isValid() { return true; }
     @Override public MixinEnvironment.Phase getInitialPhase() { return MixinEnvironment.Phase.DEFAULT; }

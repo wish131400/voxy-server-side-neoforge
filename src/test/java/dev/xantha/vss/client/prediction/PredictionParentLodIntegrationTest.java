@@ -15,8 +15,8 @@ class PredictionParentLodIntegrationTest {
     @SuppressWarnings("unchecked")
     @Test void productionQueueBuildsParentWithoutNewDensityReadsAndRejectsObsoleteProof() throws Exception {
         var config=VSSClientConfig.CONFIG;
-        int distance=config.predictionDistanceBlocks;boolean trees=config.predictionTrees,structures=config.predictionStructures;
-        config.predictionDistanceBlocks=4096;config.predictionTrees=false;config.predictionStructures=false;
+        int distance=config.predictionDistanceBlocks;
+        config.predictionDistanceBlocks=4096;
         var calls=new AtomicInteger();
         try {
             var samplerMethod=PredictionFirstCoverageTest.class.getDeclaredMethod("sampler",AtomicInteger.class,
@@ -38,9 +38,9 @@ class PredictionParentLodIntegrationTest {
                 var idle=PredictionFirstCoverageTest.class.getDeclaredMethod("awaitIdle",PredictionTileManager.class);
                 idle.setAccessible(true);idle.invoke(null,manager);
                 var parent=ready.get(key);assertNotNull(parent);
-                assertNotNull(parent.mesh().parentLod,"real queue must publish source proof, not a separately sampled parent");
+                assertNotNull(parent.data().parentLod,"real queue must publish source proof, not a separately sampled parent");
                 assertEquals(0,calls.get(),"mip generation must reuse all four fine grids without new density calls");
-                var source=parent.mesh().parentLod.child(0).key();
+                var source=parent.data().parentLod.child(0).key();
                 ready.put(source,PredictionParentLodTest.tile(source,777,70));
                 var publish=PredictionTileManager.class.getDeclaredMethod("publishTile",PredictionTile.class,
                         PredictionMemoryBudget.Reservation.class,long.class,long.class,boolean.class,boolean.class,boolean.class,PredictionRelief.class);
@@ -56,7 +56,7 @@ class PredictionParentLodIntegrationTest {
                 assertSame(parent,ready.get(key),"refresh must preserve old geometry until replacement is ready");
             }
         } finally {
-            config.predictionDistanceBlocks=distance;config.predictionTrees=trees;config.predictionStructures=structures;
+            config.predictionDistanceBlocks=distance;
         }
     }
     private static java.lang.reflect.Field field(String name) throws Exception {

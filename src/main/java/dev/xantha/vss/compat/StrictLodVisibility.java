@@ -120,6 +120,20 @@ public final class StrictLodVisibility {
         return dim != null && dimension != null && dim.equals(dimension) && (renderHookSeen || ModCompat.isVoxyLoaded())
                 && uploadedNodes && !failed && meshPipeline != null;
     }
+    /** Loading observation for unified prediction, across its entire horizon. Uses actual uploaded Voxy nodes. */
+    public static synchronized boolean overlayUploaded(ResourceKey<Level> dim, int minX, int minY, int minZ,
+                                                        int maxX, int maxY, int maxZ) {
+        if (!predictionReady(dim) || VoxyPredictionBridge.notificationsPending(dim,minX,minZ,maxX,maxZ)) return false;
+        int first=Math.floorDiv(minY,16), last=Math.floorDiv(maxY,16);
+        return meshPipeline.idleBox(minX,first,minZ,maxX,last,maxZ)
+                && NODES.coversBox(minX,first,minZ,maxX,last,maxZ);
+    }
+    /** Existing ordinary content stays drawable while an optional refinement is pending. */
+    public static synchronized boolean overlayResident(ResourceKey<Level> dim, int minX, int minY, int minZ,
+                                                        int maxX, int maxY, int maxZ) {
+        return predictionReady(dim) && NODES.coversBox(minX,Math.floorDiv(minY,16),minZ,
+                maxX,Math.floorDiv(maxY,16),maxZ);
+    }
     public static void invalidate() { invalidated.set(true); workChanged(); }
     /** Restart coverage bookkeeping while keeping uploaded nodes and valid cache state. */
     public static synchronized void restartOrdering(ResourceKey<Level> dim, int cx, int cz) {
@@ -144,7 +158,7 @@ public final class StrictLodVisibility {
         return dim != null && dim.equals(s.dimension()) && s.visible(cx, cz);
     }
 
-    public static void reset() {
+    public static synchronized void reset() {
         resetGeometry();
         VoxyIngestTracker.reset();
     }
@@ -158,13 +172,14 @@ public final class StrictLodVisibility {
     }
 
     /** Called on the render thread before any Voxy terrain draws, even after a teleport. */
-    public static void beginFrame(Object renderSystem, Object viewport) {
+    public static synchronized void beginFrame(Object renderSystem, Object viewport) {
         try {
             // Iris shadow calls enter renderOpaque without a drawable Voxy viewport.
             // They must not clear the main view or consume its pending restart.
             if (viewport == null || ((Number) field(viewport, "width")).intValue() <= 0
                     || ((Number) field(viewport, "height")).intValue() <= 0) return;
             renderHookSeen = true;
+            VoxyPredictionBridge.beginFrame(renderSystem);
             Minecraft mc = Minecraft.getInstance();
             if (mc == null || mc.level == null || mc.player == null) { resetGeometry(); return; }
             FRONTIER.center(mc.player.getBlockX() >> 4, mc.player.getBlockZ() >> 4,
@@ -233,7 +248,7 @@ public final class StrictLodVisibility {
     }
 
     /** Runs before Voxy recycles a SyncResults object, after its GPU upload commands. */
-    public static void uploaded(Object owner, Object result) {
+    public static synchronized void uploaded(Object owner, Object result) {
         if (owner == null || result == null || failed) return;
         // The upload callback can run before the first renderOpaque hook. Bind
         // the mirror to that manager so the first frame can retain its nodes.

@@ -22,16 +22,14 @@ class PredictionCaptureQueueTest {
     @Test void queuedRestoreUsesLatestCaptureAndUpdatedCacheInsteadOfStartingOver() throws Exception {
         var config = VSSClientConfig.CONFIG;
         int distance = config.predictionDistanceBlocks;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures;
         config.predictionDistanceBlocks = 4096;
-        config.predictionTrees = false; config.predictionStructures = false;
         var profile = new DimensionProfile(Level.OVERWORLD.location(),42,-64,384,"noise","minecraft:overworld",77);
         var tile = new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,0,0,0);
         var diskKey = PredictionDiskCache.Key.terrain(0,0,0);
         var sampled = new AtomicInteger();
         var source = new ClientTerrainSampler(42,profile) {
             @Override long colorCacheFingerprint() { return 77; }
-            @Override public ClientColumnSample sample(int x,int z) { sampled.incrementAndGet(); return PredictionSimpleVegetationTest.sample(120); }
+            @Override public ClientColumnSample sample(int x,int z) { sampled.incrementAndGet(); return PredictionVoxelFixtures.sample(120); }
             @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
         };
         var budget = new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1);
@@ -55,7 +53,7 @@ class PredictionCaptureQueueTest {
                 assertEquals(1,manager.pendingCount());
                 manager.invalidate(0,0);
                 cache.flush();
-                var updated = new ClientColumnSample[66*66]; Arrays.fill(updated,PredictionSimpleVegetationTest.sample(160));
+                var updated = new ClientColumnSample[66*66]; Arrays.fill(updated,PredictionVoxelFixtures.sample(160));
                 PredictionCacheTestFiles.finishedTerrain(cache, diskKey, updated, source);
                 release.countDown();
                 long deadline = System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
@@ -67,7 +65,6 @@ class PredictionCaptureQueueTest {
             }
         } finally {
             release.countDown(); config.predictionDistanceBlocks = distance;
-            config.predictionTrees = trees; config.predictionStructures = structures;
         }
         assertEquals(0,budget.usedBytes());
     }

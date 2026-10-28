@@ -20,6 +20,7 @@ final class PredictionMemoryBudget {
     private long workingBytes;
     /** Dropped cache references must reach GC before asking caches to drop more. */
     private long awaitingCollectionBytes;
+    private long unobservedReleaseBytes;
     private int activeBuilders;
     private long used;
     private long pausedUntil;
@@ -63,7 +64,11 @@ final class PredictionMemoryBudget {
         return adaptive(runtime.maxMemory(),
                 () -> runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory(),
                 System::nanoTime, workerCount(runtime.availableProcessors()),
-                () -> collectors.stream().mapToLong(gc -> Math.max(0, gc.getCollectionCount())).sum());
+                () -> {
+                    long count = 0;
+                    for (var collector : collectors) count += Math.max(0, collector.getCollectionCount());
+                    return count;
+                });
     }
 
     static PredictionMemoryBudget adaptive(long maxHeap, LongSupplier freeHeap, LongSupplier clock,
@@ -181,6 +186,10 @@ final class PredictionMemoryBudget {
             observedCollections = count;
             awaitingCollectionBytes = 0;
         }
+        // Releases since our last observation may have happened after that GC.
+        // Keep their credit until a later observation rather than evicting them twice.
+        awaitingCollectionBytes += unobservedReleaseBytes;
+        unobservedReleaseBytes = 0;
     }
 
     synchronized String diagnostics() {
@@ -304,8 +313,9 @@ final class PredictionMemoryBudget {
                     finishBuild(BuildOutcome.CANCELLED);
                     if (working) workingBytes -= bytes;
                     else if (adaptive) {
-                        refreshCollections();
-                        awaitingCollectionBytes += bytes;
+                        // The reclaim decision refreshes GC state once for the batch.
+                        // Closing each cached column/section only updates accounting.
+                        unobservedReleaseBytes += bytes;
                     }
                     used -= bytes;
                     releaseBuildSlot();
@@ -322,9 +332,4 @@ final class PredictionMemoryBudget {
         }
     }
 
-    static final class MeshLimitException extends RuntimeException {
-        MeshLimitException() {
-            super("prediction tile exceeds the bounded mesh workspace", null, false, false);
-        }
-    }
 }

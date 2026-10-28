@@ -19,6 +19,38 @@ fn document() -> Value {
 }
 
 #[test]
+fn partial_java_reuse_keeps_grid_admission_and_sparse_fallback() {
+    let mut d = document();
+    d["biome_source"] = json!({"type":"minecraft:fixed","biome":"minecraft:plains"});
+    d["settings"]["aquifers_enabled"] = json!(false);
+    d["settings"]["surface_rule"] = json!({"type":"minecraft:block","result_state":{"Name":"minecraft:stone"}});
+    let flat = json!({"type":"minecraft:y_clamped_gradient","from_y":64,"to_y":80,"from_value":1.,"to_value":-1.});
+    d["settings"]["noise_router"]["final_density"] = flat.clone();
+    d["settings"]["noise_router"]["initial_density_without_jaggedness"] = flat;
+    let world = World::new(1, 0, d.clone()).unwrap();
+    let exact = world.surface_points(&[(-16, -16)]).unwrap()[0].values;
+    let mask = u64::MAX ^ 1;
+    let grid = world.display_grid(-16, -16, 1, mask).unwrap();
+    assert_eq!(world.display_query_stats()[2], 1);
+    assert_eq!(world.display_query_stats()[5], 32);
+    assert_eq!(world.surface_points(&[(-16, -16)]).unwrap()[0].values, exact);
+    let oracle = World::new(1, 0, d.clone()).unwrap();
+    let points: Vec<_> = (0..64).map(|i| (-16 + i % 8, -16 + i / 8)).collect();
+    let full = oracle.display_points(&points).unwrap();
+    for i in 1..64 { assert_eq!(grid[i].values, full[i].values); }
+    // With almost every point retained, do not speculate on all 32 probes.
+    let sparse = World::new(1, 0, d).unwrap();
+    let one = sparse.display_grid(-16, -16, 1, 1u64 << 63).unwrap();
+    assert_eq!(sparse.display_query_stats()[2], 0);
+    assert_eq!(sparse.display_query_stats()[5], 1);
+    assert_eq!(one[63].values, sparse.display_points(&[points[63]]).unwrap()[0].values);
+    assert!(sparse.display_grid(i32::MAX, 0, 1, 1).is_err());
+    assert!(sparse.display_grid(0, 0, 0, 1).is_err());
+    sparse.cancel();
+    assert!(sparse.display_grid(0, 0, 1, 1).is_err());
+}
+
+#[test]
 fn sparse_workspace_matches_individual_queries_across_chunks_and_revisits() {
     for seed in [0, -917] {
         let d = document();

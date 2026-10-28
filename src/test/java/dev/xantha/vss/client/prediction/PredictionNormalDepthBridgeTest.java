@@ -19,9 +19,9 @@ class PredictionNormalDepthBridgeTest {
 
     @Test void installedLegacyContractReceivesForegroundAndSourceConventionBridge() {
         String result = PredictionNormalDepthBridge.patch(PATH, LEGACY);
-        assertTrue(result.contains("uniform bool VssPredictionBeforeWater;"));
+        assertTrue(result.contains("uniform bool VssNormalDepthBridge;"));
         assertTrue(result.contains("VssSourceDepthTransform.x"));
-        assertTrue(result.contains("predicted > seed"));
+        assertFalse(result.contains("VssPredictionDepth"));
         assertTrue(result.contains("1.0 - 1.0 / 16777215.0"));
         assertFalse(result.contains("SCREEN2NDC"));
         assertFalse(result.contains("NDC2SCREEN_DEPTH"));
@@ -34,7 +34,7 @@ class PredictionNormalDepthBridgeTest {
                         "depth = REDUCTION2(FAR+CLOSER_SIGN*(2.0f/((1<<24)-1)), depth);")
                 .replace("depth = depth * 0.5f + 0.5f;", "depth = NDC2SCREEN_DEPTH(depth);");
         String result = PredictionNormalDepthBridge.patch(PATH, modern);
-        assertTrue(result.contains("VssPredictionBeforeWater"));
+        assertTrue(result.contains("VssNormalDepthBridge"));
         assertTrue(result.contains("SCREEN2NDC(clip)"));
         assertTrue(result.contains("NDC2SCREEN_DEPTH(depth)"));
         assertSame(result, PredictionNormalDepthBridge.patch(PATH, result));

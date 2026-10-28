@@ -9,29 +9,7 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.*;
 class PredictionScopedResidencyTest {
     @org.junit.jupiter.api.BeforeAll
     static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
-    @Test void scopeReleaseSelectsCachedMediumAndNextLookReusesTheSameFineMesh() throws Exception {
-        ClientTerrainSamplerTest.bootstrapMinecraft();
-        var layout=VssLodLayout.of(8192,6,true,false);
-        var ordinaryFine=PredictionCoverageWorkTest.tile(64,0,0,layout);
-        var fine=new PredictionTile(ordinaryFine.key(),ordinaryFine.heights(),ordinaryFine.groundHeights(),
-                ordinaryFine.samples(),ordinaryFine.mesh(),ordinaryFine.depthBound(),0,1,
-                ordinaryFine.cellAxis(),ordinaryFine.spacingBlocks(),true);
-        var medium=PredictionCoverageWorkTest.tile(8,0,3,layout);
-        var root=PredictionCoverageWorkTest.tile(0,0,7,layout);
-        var snapshot=new RenderSnapshot(Level.OVERWORLD,layout,
-                Map.of(fine.key(),fine,medium.key(),medium,root.key(),root),Map.of());
-        var method=PredictionRenderer.class.getDeclaredMethod("resolveCoverage",PredictionTile.class,
-                int.class,int.class,double.class,RenderSnapshot.class,VssLodFocus.class);
-        method.setAccessible(true);
-        var focus=new VssLodFocus(4128,32,1024,8);
-        for(var look:new VssLodFocus[]{focus,null,focus,null}) {
-            var fineMask=(PredictionRenderer.TileCoverage)method.invoke(null,fine,0,0,448D,snapshot,look);
-            var mediumMask=(PredictionRenderer.TileCoverage)method.invoke(null,medium,0,0,448D,snapshot,look);
-            assertEquals(look!=null,fineMask.allowed()[0]);
-            assertEquals(look==null,mediumMask.allowed()[0],"one owner, no blank frame or overlap");
-            assertSame(fine,snapshot.tiles().get(fine.key()),"view changes must not discard cached generation");
-        }
-    }
+
 
     @Test void delayedAncestorsNeverDowngradeOrdinaryRefinement() {
         var layout=VssLodLayout.of(8192,6,true,false);
@@ -61,59 +39,9 @@ class PredictionScopedResidencyTest {
         assertSame(fine,snapshot.coveringTileAtDetail(-1,-1,0));
     }
 
-    @Test void activeTerrainFocusKeepsItsFinestUploadedMeshOutsideTheDecorationPatch() throws Exception {
-        var layout=VssLodLayout.of(8192,6,true,false);
-        var base=PredictionCoverageWorkTest.tile(16,-1,2,layout);
-        var fine=new PredictionTile(base.key(),base.heights(),base.groundHeights(),base.samples(),base.mesh(),
-                base.depthBound(),0,1,base.cellAxis(),base.spacingBlocks(),true);
-        var parent=PredictionCoverageWorkTest.tile(8,-1,3,layout);
-        var focus=new VssLodFocus(3400,-128,1024,512);
-        assertTrue(PredictionWorkOrder.scoped(fine.key(),layout,focus));
-        assertFalse(PredictionWorkOrder.surfaceEligible(fine.key(),layout,0,0,512,focus));
-        var method=PredictionRenderer.class.getDeclaredMethod("resolveCoverage",PredictionTile.class,
-                int.class,int.class,double.class,RenderSnapshot.class,VssLodFocus.class);
-        method.setAccessible(true);
-        for (var tiles:java.util.List.of(Map.of(fine.key(),fine),Map.of(fine.key(),fine,parent.key(),parent))) {
-            var snapshot=new RenderSnapshot(Level.OVERWORLD,layout,tiles,Map.of());
-            var mask=(PredictionRenderer.TileCoverage)method.invoke(null,fine,0,0,448D,snapshot,focus);
-            assertEquals(mask.considered(),mask.rendered(),"a delayed ordinary parent cannot coarsen the active terrain focus");
-            if (tiles.size()>1) {
-                var fallback=(PredictionRenderer.TileCoverage)method.invoke(null,parent,0,0,448D,snapshot,focus);
-                assertFalse(fallback.allowed()[32*64],"only one uploaded mesh owns the focused chunk");
-                var released=(PredictionRenderer.TileCoverage)method.invoke(null,fine,0,0,448D,snapshot,null);
-                assertEquals(0,released.rendered(),"telescope-only detail may relax after the telescope closes");
-            }
-        }
-    }
 
-    @Test void finishedCacheUpgradePreservesOrdinaryCoverageWithoutKeepingASecondMesh() throws Exception {
-        var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
-                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"),42,-64,384,"noise","minecraft:overworld",1);
-        var sampler=ClientTerrainSampler.custom(42,profile,(x,z)->64);
-        try (var manager=new PredictionTileManager(Level.OVERWORLD,sampler,
-                new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime),null)) {
-            var layout=manager.layout();
-            var key=new PredictionTileKey(Level.OVERWORLD,-9,-1,3);
-            var ordinary=new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],null,
-                    new PredictionDepthBound(64,64),0,1,16,32);
-            var mesh=PredictionMeshCodecTest.fixture(32);
-            var samples=new ClientColumnSample[34*34];
-            java.util.Arrays.fill(samples,sampler.sample(0,0));
-            var method=PredictionTileManager.class.getDeclaredMethod("restoreFinishedMesh",PredictionTileKey.class,
-                    VssLodLayout.class,int.class,ClientColumnSample[].class,PredictionMesh.class,boolean.class,PredictionTile.class,
-                    dev.xantha.vss.common.worldgen.LostCityPreview.Tile.class);
-            method.setAccessible(true);
-            var upgraded=(PredictionTile)method.invoke(manager,key,layout,16,samples,mesh,true,ordinary,null);
-            assertFalse(upgraded.scopeOnly(),"an ordinary resident cannot become telescope-only during refinement");
-            var parent=PredictionCoverageWorkTest.tile(-5,-1,4,layout);
-            var snapshot=new RenderSnapshot(Level.OVERWORLD,layout,Map.of(upgraded.key(),upgraded,parent.key(),parent),Map.of());
-            assertSame(upgraded,snapshot.coveringTileAtDetail(-288,-1,5));
-            var fresh=(PredictionTile)method.invoke(manager,key,layout,16,samples,mesh,true,null,null);
-            assertTrue(fresh.scopeOnly(),"new telescope-only work must still be distinguishable from ordinary work");
-            var continued=(PredictionTile)method.invoke(manager,key,layout,16,samples,mesh,true,fresh,null);
-            assertTrue(continued.scopeOnly());
-        }
-    }
+
+
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings={"pruneReady","prepared"})

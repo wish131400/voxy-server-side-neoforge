@@ -227,6 +227,16 @@ public final class PredictionCpuBudget {
      * call {@link Reservation#close()} instead.
      */
     Reservation tryReserve(boolean urgent, boolean pausedDetail) {
+        return tryReserve(urgent,pausedDetail,true);
+    }
+
+    /** Completion-driven managers arbitrate the next lane after capacity is
+     * released; an urgent handoff queued in advance would steal that turn. */
+    Reservation tryReserveCurrent(boolean urgent, boolean pausedDetail) {
+        return tryReserve(urgent,pausedDetail,false);
+    }
+
+    private Reservation tryReserve(boolean urgent, boolean pausedDetail, boolean allowHandoff) {
         refresh();
         synchronized (this) {
             if (admissionWaiting(urgent, pausedDetail)) { deferrals++; return null; }
@@ -243,7 +253,7 @@ public final class PredictionCpuBudget {
             // in the executor queue and gets the normal final lease check;
             // this avoids dropping the next coverage target while preventing
             // an unbounded queue of workers that will immediately refuse.
-            boolean handoff = urgent && active >= cap && queued == 0 && queuedGeneration == 0;
+            boolean handoff = allowHandoff && urgent && active >= cap && queued == 0 && queuedGeneration == 0;
             // Reservations own total worker capacity. The detail lane is
             // intentionally checked again by tryAcquire after a worker starts:
             // queued managers must be allowed to wait for the same lease rather

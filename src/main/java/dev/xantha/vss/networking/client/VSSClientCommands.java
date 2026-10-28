@@ -35,6 +35,7 @@ public final class VSSClientCommands {
                         })))
                 .then(Commands.literal("prediction")
                         .executes(context -> VSSCommandHelp.client(context.getSource(), "prediction"))
+                        .then(performanceCommand())
                         .then(Commands.literal("rendercapture")
                                 .executes(context -> captureRender(context.getSource(), 0.5, 0.65))
                                 .then(Commands.argument("x", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0, 1))
@@ -85,6 +86,48 @@ public final class VSSClientCommands {
                         .executes(context -> VSSCommandHelp.client(context.getSource(),
                                 StringArgumentType.getString(context, "unknown_command")))));
         VSSCommandHelp.clientAliases(root);
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> performanceCommand() {
+        return Commands.literal("perf")
+                .executes(context -> performanceStatus(context.getSource()))
+                .then(Commands.literal("status").executes(context -> performanceStatus(context.getSource())))
+                .then(Commands.literal("start").executes(context -> {
+                    performanceResult(context.getSource(),
+                            dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.start(), "vss.command.perf.started");
+                    return 1;
+                }))
+                .then(Commands.literal("stop").executes(context -> {
+                    dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.stop();
+                    context.getSource().sendSuccess(() -> Component.translatable("vss.command.perf.stopped"), false); return 1;
+                }))
+                .then(Commands.literal("hud").executes(context -> {
+                    boolean on = dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.toggleHud();
+                    context.getSource().sendSuccess(() -> Component.translatable("vss.command.perf.hud", on), false); return 1;
+                }))
+                .then(Commands.literal("mark").then(Commands.argument("label", StringArgumentType.greedyString()).executes(context -> {
+                    String label = StringArgumentType.getString(context, "label");
+                    dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.mark(label);
+                    context.getSource().sendSuccess(() -> Component.translatable("vss.command.perf.mark", label), false); return 1;
+                })))
+                .then(Commands.literal("report").executes(context -> {
+                    performanceResult(context.getSource(),
+                            dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.report(), "vss.command.perf.report"); return 1;
+                }));
+    }
+
+
+
+    private static int performanceStatus(CommandSourceStack source) {
+        source.sendSuccess(() -> Component.translatable("vss.command.perf.status",
+                dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.status()), false); return 1;
+    }
+
+    private static void performanceResult(CommandSourceStack source, java.util.concurrent.CompletableFuture<java.nio.file.Path> future, String key) {
+        future.whenComplete((path, failure) -> net.minecraft.client.Minecraft.getInstance().execute(() -> {
+            if (failure == null) source.sendSuccess(() -> Component.translatable(key, path.toString()), false);
+            else source.sendFailure(Component.translatable("vss.command.perf.failed", failure.getClass().getSimpleName()));
+        }));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> helpCommand() {

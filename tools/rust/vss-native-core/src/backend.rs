@@ -195,6 +195,8 @@ pub struct World {
     surface: Surface,
     colors: ClimateColors,
     biomes: HashMap<String, Biome>,
+    biome_names: Vec<String>,
+    biome_indices: HashMap<String, i32>,
     zoom_seed: i64,
     pub base_ids: [StateId; 10],
     pub schedule: Option<Schedule>,
@@ -256,6 +258,11 @@ impl World {
         for (name, definition) in document["biomes"].as_object().ok_or("missing biomes")? {
             biomes.insert(name.clone(), Biome::from_json(definition)?);
         }
+        // Stable within a world and independent of HashMap iteration or registry IDs.
+        let mut biome_names: Vec<String> = biomes.keys().cloned().collect();
+        biome_names.sort_unstable();
+        let biome_indices = biome_names.iter().enumerate()
+            .map(|(index, name)| (name.clone(), index as i32)).collect();
         let source = BiomeSource::from_document(&document, &terrain.graph, seed)?;
         let schedule = document
             .get("possible_biomes")
@@ -315,6 +322,8 @@ impl World {
             surface,
             colors,
             biomes,
+            biome_names,
+            biome_indices,
             zoom_seed,
             base_ids,
             schedule,

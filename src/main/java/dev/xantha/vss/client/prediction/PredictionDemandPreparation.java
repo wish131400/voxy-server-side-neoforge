@@ -48,7 +48,7 @@ final class PredictionDemandPreparation {
         for (var key : input.desired()) {
             double minY = input.minY(), maxY = input.maxY();
             var tile = input.tiles().get(key);
-            if (tile != null && tile.mesh() != null && tile.cellAxis() > 8
+            if (tile != null && tile.data() != null && tile.cellAxis() > 8
                     && tile.cellAxis() >= Math.max(input.ordinary().getOrDefault(key, tile.cellAxis()),
                             input.terrain().getOrDefault(key, tile.cellAxis()))
                     && (!input.surfaceDesired().contains(key) || input.surfaceReady().contains(key))) {

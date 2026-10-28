@@ -53,31 +53,7 @@ class ClientCaptureExtractorTest {
         assertTrue(captured.captured());
     }
 
-    @Test
-    void completeEmptyCaptureErasesPredictedSurfaceWhilePartialDataDoesNot() {
-        var sampler = sampler();
-        var empty = new VoxelColumnData(new VoxelColumnData.SectionData[0], 1L, true);
-        var captured = ClientCaptureExtractor.extract(0, 0, empty, sampler);
-        assertTrue(captured.captured());
-        assertFalse(captured.hasSurface());
-        assertFalse(captured.hasFluid());
-        assertEquals(0, captured.structureIndex());
-        ClientColumnSample[] grid = new ClientColumnSample[81];
-        java.util.Arrays.fill(grid, captured);
-        for (int spacing : new int[]{1, 2, 4, 8, 16, 32}) {
-            var mesh = PredictionMeshBuilder.build(grid, null, 63, 0, spacing, 9, null, null, 0, 0, PredictionVegetation.Tile.EMPTY);
-            assertEquals(0, mesh.vertexCount(), "empty authoritative terrain cannot render a floor");
-            assertEquals(0, mesh.waterVertexCount());
-        }
-        var partial = ClientCaptureExtractor.extract(0, 0,
-                new VoxelColumnData(empty.sections(), 1L, false, new int[0], false), sampler);
-        assertFalse(partial.captured());
-        assertTrue(partial.hasSurface());
-        assertEquals(64, partial.surfaceY());
-        assertTrue(ClientCaptureExtractor.extract(0, 0,
-                new VoxelColumnData(empty.sections(), 1L, false), sampler).captured(),
-                "a fresh complete column need not replace existing Voxy storage");
-    }
+
 
     @Test
     void portalFrameAndUndergroundBuildingDoNotBecomeExtrudedTerrain() {
@@ -107,24 +83,7 @@ class ClientCaptureExtractorTest {
                 "supported surface obsidian remains a valid ground material");
     }
 
-    @Test
-    void oresUntaggedBlocksAndLiquidsBelowGroundAreNotAir() {
-        for (var block : new net.minecraft.world.level.block.Block[]{Blocks.IRON_ORE,
-                Blocks.DEEPSLATE_DIAMOND_ORE, Blocks.STONE_BRICKS, Blocks.GLASS, Blocks.WATER, Blocks.LAVA}) {
-            var section = section();
-            section.setBlockState(8, 15, 8, Blocks.COARSE_DIRT.defaultBlockState());
-            for (int y=0;y<15;y++) section.setBlockState(8,y,8,block.defaultBlockState());
-            var data = new VoxelColumnData(new VoxelColumnData.SectionData[]{
-                    new VoxelColumnData.SectionData(0,section,null,null)},1L,true);
-            var captured = ClientCaptureExtractor.extract(0,0,data,sampler());
-            assertEquals(16,captured.surfaceY());
-            assertEquals(0,captured.surfaceBottom(),block.toString());
-            assertNotEquals(0,captured.flags() & PredictionWallEvidence.CAPTURED_OCCUPANCY);
-            assertFalse(PredictionWallEvidence.hasInterior(captured));
-            assertEquals(java.util.List.of(new PredictionLodSeams.HeightSpan(0,16)),
-                    PredictionWallEvidence.intervals(captured,0,16,1));
-        }
-    }
+
 
     @Test
     void completeCaptureCutsOnlyActualBoundedAir() {

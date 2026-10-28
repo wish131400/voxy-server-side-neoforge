@@ -22,6 +22,11 @@ final class PredictionSchedulePreparation {
         int axis(PredictionTileKey key) {
             var tile = residents.tiles().get(key); return tile == null ? 0 : tile.cellAxis();
         }
+        boolean surfaceTerrainReady(PredictionTileKey key) {
+            var tile = residents.tiles().get(key);
+            return tile != null && (tile.data() != null && tile.data().voxyTile != null
+                    || tile.cellAxis() == layout.cellAxis(key.lod()));
+        }
         boolean scoped(PredictionTileKey key) { return PredictionWorkOrder.scoped(key, layout, focus); }
         int band(PredictionTileKey key) {
             if (scoped(key)) return PredictionWorkView.VISIBLE;
@@ -39,7 +44,7 @@ final class PredictionSchedulePreparation {
             if (dirty.contains(key) || fallback.contains(key) || scoped(key)) return true;
             if (surface) return false;
             var tile = residents.tiles().get(key);
-            return (medium.paths().contains(key) || dependencies.contains(key)) && (tile == null || tile.scopeOnly())
+            return tile == null || (medium.paths().contains(key) || dependencies.contains(key)) && tile.scopeOnly()
                     || dependencies.contains(key) && transitions.containsKey(key) && axis(key) < transitions.get(key);
         }
         boolean relevant(PredictionTileKey key) { return band(key) <= PredictionWorkView.BUFFER || dependencies.contains(key); }
@@ -56,28 +61,17 @@ final class PredictionSchedulePreparation {
         int priority(PredictionTileKey key, boolean surface) {
             if (dirty.contains(key)) return Integer.MIN_VALUE + 1 + key.lod();
             if (!surface && idleWork(key)) return view == null ? 2_000_000 : 400_000 + offset(key, surface);
-            if (view != null && !surface && required(key, false) && !scoped(key))
-                return 10_000 + (relevant(key) ? 0 : 10_000) + (layout.levelCount() - 1 - key.lod()) * 100;
-            if (!moving && !scoped(key) && surfaceDesired.contains(key) && localTurn && !mediumWork(key)
-                    && !hidden.contains(key)) {
-                double nearby = PredictionWorkOrder.distanceSquared(key, layout, x, z);
-                return offset(key, surface) + 5000 + Math.min(1023, (int) (Math.sqrt(nearby) / 64)) * 3 + (surface ? 0 : 1);
-            }
-            if (view != null && band(key) <= PredictionWorkView.BUFFER && !scoped(key) && !mediumWork(key)) {
+            double distance = PredictionWorkOrder.orderingDistance(key, layout, x, z, focus);
+            if (scoped(key)) return PredictionWorkOrder.priority(key, layout, distance, axis(key), surface, focus);
+            int screen = 0;
+            if (view != null && band(key) <= PredictionWorkView.BUFFER && !mediumWork(key)) {
                 double projected = PredictionScreenDetail.projected(view, key, layout, x, y, z, pixels, minY, maxY);
                 double perCell = layout.pixelThreshold() / VssLodLayout.TILE_QUADS;
                 double error = surface ? projected * 8 / layout.tileBlocks(key.lod()) / Math.max(1.5, Math.min(3, perCell))
                         : projected / Math.max(1, axis(key) == 0 ? 8 : axis(key)) / perCell;
-                return offset(key, surface) + 40_000 + (int) (6000 / (1 + Math.max(0, error)));
+                screen = (int) (6000 / (1 + Math.max(0, error)));
             }
-            double distance = PredictionWorkOrder.distanceSquared(key, layout, x, z);
-            boolean ordinaryWork = !required(key, false) && (!mediumWork(key) || band(key) >= PredictionWorkView.RECENT);
-            if (ordinaryWork && moving && !scoped(key) && (surface || axis(key) > 0))
-                return offset(key, surface) + 500_000 + Math.min(65535, (int) (Math.sqrt(distance) / 64));
-            if (!surface && mediumWork(key) && !scoped(key))
-                return offset(key, surface) + 10_000 + (axis(key) == 0 ? 0 : 10_000) + (layout.levelCount() - 1 - key.lod()) * 100;
-            return offset(key, surface) + (scoped(key) ? PredictionWorkOrder.priority(key, layout, distance, axis(key), surface, focus)
-                    : PredictionWorkOrder.localRefinementPriority(distance, axis(key), surface));
+            return offset(key, surface) + PredictionWorkOrder.nearPriority(distance, axis(key), surface, screen);
         }
         int target(PredictionTileKey key) {
             int target = terrain.getOrDefault(key, initialAxes.get(key.lod()));
@@ -110,17 +104,22 @@ final class PredictionSchedulePreparation {
             if (i.retry(key) && !i.defer(key, false) && (i.dirty().contains(key) || i.axis(key) < i.target(key)))
                 work.add(new Request(key, false, hint.terrain(), distance));
             if (i.retry(key) && !i.defer(key, true) && i.surfaceDesired().contains(key)
-                    && i.axis(key) == i.layout().cellAxis(key.lod()) && !i.dirty().contains(key) && !i.surfaceReady().contains(key))
+                    && i.surfaceTerrainReady(key) && !i.dirty().contains(key) && !i.surfaceReady().contains(key))
                 work.add(new Request(key, true, hint.surface(), distance));
-            if (i.disk() != null && i.now() - i.cacheMiss().getOrDefault(key, Long.MIN_VALUE / 2) >= 0
+        }
+        // Native node demand can be outside the ordinary plan. Restore every desired
+        // cached upgrade independently of generation priority and CPU admission.
+        if (i.disk() != null) for (var key : i.desired()) {
+            if (key.lod() < 0 || key.lod() >= i.layout().levelCount() || i.pending().contains(key)) continue;
+            if (i.now() - i.cacheMiss().getOrDefault(key, Long.MIN_VALUE / 2) >= 0
                     && i.disk().cachedTerrainAxis(PredictionDiskCache.Key.terrain(key.tileX(), key.tileZ(), key.lod())) > i.axis(key))
                 cached.add(key);
         }
         work.sort(Comparator.comparingInt(Request::priority).thenComparingDouble(Request::distance)
                 .thenComparingInt(request -> -request.key().lod()));
-        cached.sort(Comparator.<PredictionTileKey>comparingInt(i::band).thenComparingInt(key -> i.axis(key) > 0 ? 1 : 0)
-                .thenComparingInt(key -> -key.lod()).thenComparingDouble(key -> PredictionWorkOrder.orderingDistance(
-                        key, i.layout(), i.x(), i.z(), i.focus())));
+        cached.sort(Comparator.<PredictionTileKey>comparingInt(i::band)
+                .thenComparingDouble(key -> PredictionWorkOrder.orderingDistance(key, i.layout(), i.x(), i.z(), i.focus()))
+                .thenComparingInt(key -> i.axis(key) > 0 ? 1 : 0).thenComparingInt(key -> -key.lod()));
         var reclaim = new ArrayList<PredictionTileKey>();
         if (i.reclaimNeeded()) {
         reclaim.addAll(i.residents().tiles().keySet());

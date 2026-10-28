@@ -1,0 +1,19 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('dimensionTransitionTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionDimensionLifecycleTest.class', '**/PredictionDimensionProfilesTest.class'
+            include '**/PredictionCacheWorkerLifecycleTest.class', '**/PredictionDemandLifecycleTest.class'
+            include '**/PredictionMemoryLifecycleTest.class', '**/VoxyPredictionNotificationTest.class'
+            include '**/PredictionCpuLeaseLifecycleTest.class', '**/PredictionIrisHookTest.class'
+            include '**/PredictionVoxySourceTest.class'
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').getOrElse('')
+            forkEvery = 1
+            maxHeapSize = '2G'
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

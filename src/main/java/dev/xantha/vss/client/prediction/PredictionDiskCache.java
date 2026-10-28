@@ -46,13 +46,15 @@ final class PredictionDiskCache implements AutoCloseable {
     }
     private static final class Entry { volatile boolean valid = true; int users; }
     record Key(int kind, int x, int z, int detail) {
+        @Override public int hashCode() { return PredictionKeyHash.hash(x,z,detail) ^ it.unimi.dsi.fastutil.HashCommon.mix(kind); }
         static Key terrain(int x, int z, int lod) { return new Key(0, x, z, lod); }
         static Key surface(int x, int z, int settings) { return new Key(1, x, z, settings); }
-        static Key mesh(Key terrain) { return new Key(2, terrain.x, terrain.z, terrain.detail); }
+        static Key voxels(int x, int z, int lod) { return new Key(4, x, z, lod); }
     }
     // Schema 3 includes surface features from their actual decoration stages.
     // Old empty/vegetation-only surface entries must regenerate; terrain stays reusable.
-    private int schema(Key key) { return (key.kind == 0 || key.kind == 3) ? SCHEMA : templateIdentity == null ? 5 : 7; }
+    private int schema(Key key) { return key.kind == 4 ? PredictionVoxelCache.VERSION
+            : (key.kind == 0 || key.kind == 3) ? SCHEMA : templateIdentity == null ? 5 : 7; }
     final class Lease implements AutoCloseable {
         final Key key;
         final Entry entry;
@@ -74,6 +76,8 @@ final class PredictionDiskCache implements AutoCloseable {
     private final byte[] templateIdentity;
     private final Shared shared;
     private volatile boolean closed;
+    private volatile boolean finishing;
+    private final CompletableFuture<Void> finished = new CompletableFuture<>();
     private volatile long lastDemandNanos = System.nanoTime();
     private final LongAdder terrainRepairs = new LongAdder();
     static final long MAINTENANCE_IDLE_NANOS = TimeUnit.SECONDS.toNanos(15);
@@ -87,10 +91,8 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<String, BlockState> decodedStates = new LinkedHashMap<>(64, .75F, true);
     private final Map<BlockState, String> encodedStates = new LinkedHashMap<>(64, .75F, true);
     private final LongAdder stateDecodes = new LongAdder();
-    private final LongAdder meshHits = new LongAdder(), meshMisses = new LongAdder(), meshWrites = new LongAdder();
     static final int MAX_PENDING_TERRAIN_WRITES = 64;
     static final long MAX_PENDING_TERRAIN_BYTES = 32L * 1024 * 1024;
-    static final int MAX_MESH_WRITE_ORDERS = 32768;
     private static final java.util.concurrent.atomic.AtomicInteger TERRAIN_PENDING = new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicLong TERRAIN_PENDING_BYTES = new java.util.concurrent.atomic.AtomicLong();
     private final LongAdder terrainWriteDeferrals = new LongAdder();
@@ -98,18 +100,14 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Object pendingLock = new Object();
     private final Map<Key, PendingWrite> pendingWrites = new HashMap<>();
     private final Map<Key, Integer> terrainWriteColumns = new LinkedHashMap<>(256, .75F, true);
-    private final Map<Key, MeshWriteOrder> meshWriteOrders = new LinkedHashMap<>(256, .75F, true);
-    private long meshWriteSequence;
-    private static final class MeshWriteOrder {
-        final long sequence;
-        final int axis;
-        final byte[] baseIdentity;
-        final boolean surfaceCompleted;
-        boolean pending = true;
-        MeshWriteOrder(long sequence, int axis, byte[] baseIdentity, boolean surfaceCompleted) {
-            this.sequence = sequence; this.axis = axis; this.baseIdentity = baseIdentity.clone();
-            this.surfaceCompleted = surfaceCompleted;
-        }
+    private record VoxelIdentity(int settings, String content) { }
+    private final Map<Key, VoxelIdentity> voxelWriteIdentities = new LinkedHashMap<>(256, .75F, true);
+
+    private void rememberVoxelIdentity(Key key, int settings, byte[] identity) {
+        var next = new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
+        if (!next.equals(voxelWriteIdentities.put(key,next))) terrainWriteColumns.remove(key);
+        while (voxelWriteIdentities.size() > 32768)
+            voxelWriteIdentities.remove(voxelWriteIdentities.keySet().iterator().next());
     }
     private final LongAdder coalescedWrites = new LongAdder(), deferredEncodes = new LongAdder(), deferredEncodeNanos = new LongAdder();
     private final class PendingWrite {
@@ -122,171 +120,20 @@ final class PredictionDiskCache implements AutoCloseable {
             this.lease = lease; this.version = version; this.encoder = encoder; this.bytes = bytes;
         }
     }
-    private static final java.util.concurrent.atomic.AtomicLong MESH_QUEUED = new java.util.concurrent.atomic.AtomicLong();
-    private static final ThreadPoolExecutor MESH_WRITES = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(2), task -> {
-                Thread thread = new Thread(task, "vss-finished-mesh-disk"); thread.setDaemon(true);
-                thread.setPriority(Thread.NORM_PRIORITY - 1); return thread;
-            }, new ThreadPoolExecutor.AbortPolicy());
-
-    PredictionMesh readMesh(Lease terrain, byte[] identity, int axis) {
-        return readMesh(terrain, identity, axis, 0);
-    }
-
-    PredictionMesh readMesh(Lease terrain, byte[] identity, int axis, int spacing) {
-        if (identity == null || !terrain.valid() || !terrain.readable) return null;
-        try (var lease = lease(Key.mesh(terrain.key))) {
-            var mesh = read(lease, (input, version) -> {
-                int length = bounded(input.readInt(), PredictionMeshCodec.MAX_BYTES);
-                byte[] bytes = input.readNBytes(length);
-                if (bytes.length != length) throw new EOFException("mesh payload");
-                return PredictionMeshCodec.decode(bytes, identity, axis, spacing);
-            });
-            if (!terrain.valid()) return null;
-            if (mesh == null) meshMisses.increment(); else meshHits.increment();
-            return mesh;
-        }
-    }
-
-    /**
-     * Restores finished geometry after the terrain record has been decoded,
-     * before feature replay. The base identity is independent of vegetation;
-     * dirty captures and resource fingerprints still invalidate it.
-     */
-    PredictionMesh readMeshBase(Lease terrain, byte[] baseIdentity, int axis) {
-        var record = readMeshBaseRecord(terrain, baseIdentity, axis);
-        return record == null ? null : record.mesh();
-    }
-
-    PredictionMeshCodec.MeshRecord readMeshBaseRecord(Lease terrain, byte[] baseIdentity, int axis) {
-        return readMeshBaseRecord(terrain, baseIdentity, axis, null, null);
-    }
-
-    PredictionMeshCodec.MeshRecord readMeshBaseRecord(Lease terrain, byte[] baseIdentity, int axis,
-            byte[] rawIdentity, java.util.function.Predicate<dev.xantha.vss.common.worldgen.LostCityPreview.Tile> validate) {
-        return readMeshBaseRecord(terrain, baseIdentity, axis, 0, rawIdentity, validate);
-    }
-
-    PredictionMeshCodec.MeshRecord readMeshBaseRecord(Lease terrain, byte[] baseIdentity, int axis, int spacing,
-            byte[] rawIdentity, java.util.function.Predicate<dev.xantha.vss.common.worldgen.LostCityPreview.Tile> validate) {
-        if (baseIdentity == null || !terrain.valid() || !terrain.readable) return null;
-        try (var lease = lease(Key.mesh(terrain.key))) {
-            var record = read(lease, (input, version) -> {
-                int length = bounded(input.readInt(), PredictionMeshCodec.MAX_BYTES);
-                byte[] bytes = input.readNBytes(length);
-                if (bytes.length != length) throw new EOFException("mesh payload");
-                return rawIdentity == null ? PredictionMeshCodec.decodeBaseRecord(bytes, baseIdentity, axis, spacing)
-                        : PredictionMeshCodec.decodeCityBaseRecord(bytes, rawIdentity, baseIdentity, axis, spacing, validate);
-            });
-            if (!terrain.valid()) return null;
-            if (record == null) meshMisses.increment(); else {
-                meshHits.increment();
-                if (record.surfaceCompleted()) synchronized (shared) {
-                    if (terrain.valid() && !meshWriteOrders.containsKey(lease.key) && makeMeshOrderRoom()) {
-                        var order = new MeshWriteOrder(0, axis, record.baseIdentity(), true);
-                        order.pending = false;
-                        meshWriteOrders.put(lease.key, order);
-                    }
-                }
-            }
-            return record;
-        }
-    }
-
-    /** Bounded detached bytes only; never retain a tile/vegetation graph in an IO queue. */
-    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh) {
-        writeMeshLater(terrain, identity, mesh, identity, true);
-    }
-
-    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity) {
-        writeMeshLater(terrain, identity, mesh, baseIdentity, true);
-    }
-
-    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
-                        boolean baseSafe) {
-        writeMeshLater(terrain, identity, mesh, baseIdentity, baseSafe, false);
-    }
-
-    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
-                        boolean baseSafe, boolean surfaceCompleted) {
-        writeMeshLater(terrain, identity, mesh, baseIdentity, baseSafe, surfaceCompleted, null, null);
-    }
-
-    void writeMeshLater(Lease terrain, byte[] identity, PredictionMesh mesh, byte[] baseIdentity,
-                        boolean baseSafe, boolean surfaceCompleted, byte[] rawIdentity,
-                        dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) {
-        if (identity == null || baseIdentity == null || !terrain.valid()
-                || MESH_WRITES.getQueue().remainingCapacity() == 0) return;
-        long sequence;
-        synchronized (shared) {
-            if (!terrain.valid()) return;
-            sequence = ++meshWriteSequence;
-        }
-        byte[] bytes;
-        try { bytes = PredictionMeshCodec.encode(mesh, identity, baseIdentity, baseSafe, surfaceCompleted, rawIdentity, cities); }
-        catch (IOException | RuntimeException unavailable) { return; }
-        if (MESH_QUEUED.addAndGet(bytes.length) > 32L * 1024 * 1024) { MESH_QUEUED.addAndGet(-bytes.length); return; }
-        Key meshKey = Key.mesh(terrain.key);
-        MeshWriteOrder order = new MeshWriteOrder(sequence, mesh.cellAxis(), baseIdentity, surfaceCompleted);
-        synchronized (shared) {
-            MeshWriteOrder previous = meshWriteOrders.get(meshKey);
-            if (!terrain.valid() || previous != null && (previous.axis > order.axis
-                    || previous.axis == order.axis && (previous.sequence > sequence
-                        || previous.surfaceCompleted && !surfaceCompleted && Arrays.equals(previous.baseIdentity, baseIdentity)))
-                    || previous == null && !makeMeshOrderRoom()) {
-                MESH_QUEUED.addAndGet(-bytes.length);
-                return;
-            }
-            Lease owned = lease(meshKey);
-            try {
-                MESH_WRITES.execute(() -> {
-                    try (owned) {
-                        if (meshWriteCurrent(owned, order) && write(owned, schema(meshKey),
-                                output -> { output.writeInt(bytes.length); output.write(bytes); },
-                                () -> meshWriteCurrent(owned, order))) meshWrites.increment();
-                    } finally {
-                        synchronized (shared) { order.pending = false; }
-                        MESH_QUEUED.addAndGet(-bytes.length);
-                    }
-                });
-                // Publish only after admission succeeds. A full queue must not revoke an accepted fine result.
-                meshWriteOrders.put(meshKey, order);
-            } catch (RejectedExecutionException busy) { owned.close(); MESH_QUEUED.addAndGet(-bytes.length); }
-        }
-    }
-
-    private boolean meshWriteCurrent(Lease lease, MeshWriteOrder order) {
-        synchronized (shared) { return lease.valid() && meshWriteOrders.get(lease.key) == order; }
-    }
-
-    private boolean makeMeshOrderRoom() {
-        if (meshWriteOrders.size() < MAX_MESH_WRITE_ORDERS) return true;
-        var iterator = meshWriteOrders.entrySet().iterator();
-        while (iterator.hasNext()) {
-            var candidate = iterator.next();
-            Key key = candidate.getKey();
-            // An older encoder retains its terrain lease before it has a mesh token.
-            // Keep that key's accepted order until no such producer can finish late.
-            if (!candidate.getValue().pending && !shared.active.containsKey(Key.terrain(key.x, key.z, key.detail))) {
-                iterator.remove();
-                return true;
-            }
-        }
-        return false;
-    }
     private final java.util.concurrent.atomic.AtomicBoolean loggedError = new java.util.concurrent.atomic.AtomicBoolean();
     private final Map<Key, Integer> terrainHints = new LinkedHashMap<>(256, .75F, true);
     private final ArrayDeque<Key> probeQueue = new ArrayDeque<>();
+    private final Set<Key> pendingProbes = new HashSet<>();
     private boolean probing;
 
     /** Header-only batch lookup; hints never replace the validated read or its lease. */
     void probeTerrain(Collection<Key> candidates) {
         synchronized (shared) {
             if (closed || shared.owner != this) return;
-            probeQueue.clear();
             int count = 0;
             for (Key key : candidates) {
-                if (key.kind == 0 && !terrainHints.containsKey(key)) probeQueue.add(key);
+                if (key.kind == 0 && !terrainHints.containsKey(key) && pendingProbes.size() < 32768
+                        && pendingProbes.add(key)) probeQueue.add(key);
                 if (++count >= 32768) break;
             }
             probeNextBatch();
@@ -299,7 +146,9 @@ final class PredictionDiskCache implements AutoCloseable {
             if (closed || shared.owner != this || probing) return;
             while (!probeQueue.isEmpty()) {
                 Key key = probeQueue.removeFirst();
-                if (key.kind != 0 || terrainHints.containsKey(key) || shared.invalidations.containsKey(key)) continue;
+                if (key.kind != 0 || terrainHints.containsKey(key) || shared.invalidations.containsKey(key)) {
+                    pendingProbes.remove(key); continue;
+                }
                 batch.add(lease(key));
                 if (batch.size() == 128) break;
             }
@@ -311,6 +160,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 for (Lease lease : batch) try (lease) {
                     int axis = 0;
                     if (lease.valid() && lease.readable) {
+                        axis = voxelHeaderAxis(lease.key);
                         try {
                             byte[] header = shared.regions.header(lease.key);
                             if (header != null) try (var input = new DataInputStream(new ByteArrayInputStream(header))) {
@@ -320,23 +170,73 @@ final class PredictionDiskCache implements AutoCloseable {
                                         && input.readInt() == lease.key.z && input.readInt() == lease.key.detail) {
                                     int count = input.readInt(), candidate = (int) Math.sqrt(count) - 2;
                                     if (candidate > 0 && candidate <= 64 && (candidate & (candidate - 1)) == 0
-                                            && (candidate + 2) * (candidate + 2) == count) axis = candidate;
+                                            && (candidate + 2) * (candidate + 2) == count) axis = Math.max(axis, candidate);
                                 }
                             }
                         } catch (IOException | RuntimeException ignored) { }
                     }
                     synchronized (shared) {
                         if (lease.valid() && lease.readable) rememberTerrain(lease.key, axis);
+                        pendingProbes.remove(lease.key);
                     }
                 }
             } finally {
                 synchronized (shared) {
+                    for (Lease lease : batch) pendingProbes.remove(lease.key);
                     probing = false;
                     // Yield between batches to writes/invalidations, without waiting for a planner tick.
                     probeNextBatch();
                 }
             }
         });
+    }
+
+    boolean terrainProbePending(Key key) {
+        synchronized (shared) { return !closed && shared.owner == this && pendingProbes.contains(key); }
+    }
+
+    private int voxelHeaderAxis(Key terrain) {
+        Key key = Key.voxels(terrain.x,terrain.z,terrain.detail);
+        synchronized (shared) { if (shared.invalidations.containsKey(key)) return 0; }
+        try {
+            byte[] header = shared.regions.header(key);
+            if (header != null) try (var input = new DataInputStream(new ByteArrayInputStream(header))) {
+                if (input.readInt() == MAGIC && input.readInt() == PredictionVoxelCache.VERSION
+                        && input.readLong() == fingerprint && input.readInt() == 4
+                        && input.readInt() == key.x && input.readInt() == key.z && input.readInt() == key.detail) {
+                    int axis = input.readInt();
+                    if (axis > 0 && axis <= 64 && (axis & (axis-1)) == 0) return axis;
+                }
+            }
+        } catch (IOException | RuntimeException ignored) { }
+        return 0;
+    }
+
+    PredictionVoxelCache.Data readVoxels(Lease lease, PredictionTileManager.PredictionTileKey key,
+                                        int settings, byte[] identity) {
+        var data = read(lease, (input, version) -> PredictionVoxelCache.read(input,key,settings,identity,templateIdentity,this));
+        synchronized (shared) {
+            if (data != null && lease.valid()) {
+                rememberVoxelIdentity(lease.key,settings,identity);
+                rememberWriteColumns(lease.key,data.voxels().axis()*2 + (data.voxels().surfaceComplete() ? 1 : 0));
+            }
+        }
+        return data;
+    }
+
+    CompletableFuture<Boolean> writeVoxelsLater(Lease lease, PredictionTileManager.PredictionTile tile,
+                                                int settings, byte[] identity) {
+        var voxels = tile.data().voxyTile;
+        if (voxels.features().size() > 262_144) return CompletableFuture.completedFuture(false);
+        long bytes = tile.retainedHeapBytes();
+        synchronized (pendingLock) {
+            synchronized (shared) { rememberVoxelIdentity(lease.key,settings,identity); }
+            return defer(lease,bytes,voxels.axis()*2+(voxels.surfaceComplete() ? 1 : 0), () -> {
+                var snapshot = PredictionVoxelCache.Data.snapshot(tile);
+                return new PendingWrite(retain(lease),PredictionVoxelCache.VERSION,
+                        output -> PredictionVoxelCache.write(output,snapshot,settings,identity,templateIdentity,this),bytes);
+            });
+        }
     }
 
     int cachedTerrainAxis(Key key) {
@@ -370,6 +270,10 @@ final class PredictionDiskCache implements AutoCloseable {
         if (templateIdentity != null && templateIdentity.length != 32)
             throw new IllegalArgumentException("Invalid surface template identity");
         shared = ROOTS.computeIfAbsent(this.root, ignored -> new Shared());
+        // Opening a world happens on the profile worker. Let the prior session's
+        // accepted writes finish before transferring ownership of this directory.
+        var previous = shared.owner;
+        if (previous != null && previous.finishing) previous.finished.join();
         synchronized (shared) {
             if (shared.regions == null) shared.regions = new PredictionRegionStorage(this.root);
             shared.active.values().forEach(entry -> entry.valid = false);
@@ -428,59 +332,7 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     TerrainData readTerrainData(Lease lease, int count) {
-        TerrainData data = read(lease, (input, version) -> {
-            int size = bounded(input.readInt(), MAX_COLUMNS);
-            if (count > 0 && size != count) throw new IOException("grid size changed");
-            int paletteSize = bounded(input.readInt(), MAX_COLUMNS * 3);
-            int[] palette = new int[paletteSize];
-            for (int i = 0; i < paletteSize; i++) {
-                String name = input.readUTF();
-                ResourceLocation id = name.isEmpty() ? null : ResourceLocation.tryParse(name);
-                if (!name.isEmpty() && (id == null || !BuiltInRegistries.BLOCK.containsKey(id))) throw new IOException("block unavailable: " + name);
-                palette[i] = name.isEmpty() ? ClientColumnSample.NO_BLOCK : BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.get(id));
-            }
-            int[] biomes = null;
-            if (version >= 6) {
-                if (mappings == null) throw new IOException("Biome mapping unavailable");
-                int biomeCount = bounded(input.readInt(), MAX_COLUMNS);
-                biomes = new int[biomeCount];
-                for (int i = 0; i < biomeCount; i++) biomes[i] = mappings.biomeId(input.readUTF());
-            }
-            ClientColumnSample[] samples = new ClientColumnSample[size];
-            for (int i = 0; i < size; i++) {
-                int y = input.readInt(), fluidY = input.readInt(), biome = input.readInt();
-                biome = biomes != null ? biomes[index(biome, biomes.length)]
-                        : mappings == null ? biome : mappings.legacyBiome(biome);
-                int top = palette[index(input.readInt(), palette.length)];
-                int structure = input.readInt(), tree = input.readInt(), density = input.readInt(), height = input.readInt();
-                int fluid = input.readInt(), flags = input.readInt(), ground = input.readInt();
-                int under = palette[index(input.readInt(), palette.length)], deep = palette[index(input.readInt(), palette.length)];
-                int bottom = input.readInt(), lowerTop = input.readInt(), lowerBottom = input.readInt(), floor = input.readInt();
-                PredictionColumnVolume volume = null;
-                if (version >= 3 && input.readBoolean()) {
-                    int runs = bounded(input.readInt(), PredictionColumnVolume.MAX_RUNS);
-                    int[] intervals = new int[runs * 4];
-                    for (int r = 0; r < intervals.length; r += 4) {
-                        intervals[r] = input.readInt(); intervals[r + 1] = input.readInt();
-                        intervals[r + 2] = palette[index(input.readInt(), palette.length)];
-                        intervals[r + 3] = input.readUnsignedByte();
-                    }
-                    volume = new PredictionColumnVolume(intervals);
-                }
-                samples[i] = new ClientColumnSample(y, fluidY, biome, top, structure, tree, density, height, fluid, flags,
-                        ground, under, deep, bottom, lowerTop, lowerBottom, floor, volume);
-            }
-            long colors = Long.MIN_VALUE;
-            int[] surface = null, foliage = null, water = null;
-            if (version >= 2) {
-                colors = input.readLong();
-                if (input.readBoolean()) {
-                    surface=new int[size];foliage=new int[size];water=new int[size];
-                    for(int i=0;i<size;i++) {surface[i]=input.readInt();foliage[i]=input.readInt();water[i]=input.readInt();}
-                }
-            }
-            return new TerrainData(samples, colors, surface, foliage, water);
-        });
+        TerrainData data = read(lease, (input, version) -> decodeTerrain(input, version, count));
         if (data != null && Arrays.stream(data.samples()).anyMatch(ClientColumnSample::cityGround)) {
             // Only contaminated terrain is rebuilt; captures and decoration
             // records stay intact. Do not let its old fine grid block repair.
@@ -489,9 +341,66 @@ final class PredictionDiskCache implements AutoCloseable {
             return null;
         }
         if (data != null) synchronized (shared) {
-            if (lease.valid()) rememberWriteColumns(lease.key, data.samples().length);
+            if (lease.valid()) {
+                rememberWriteColumns(lease.key, data.samples().length);
+                rememberTerrain(lease.key, (int)Math.sqrt(data.samples().length)-2);
+            }
         }
         return data;
+    }
+
+    TerrainData decodeTerrain(DataInputStream input, int version, int count) throws IOException {
+        int size = bounded(input.readInt(), MAX_COLUMNS);
+        if (count > 0 && size != count) throw new IOException("grid size changed");
+        int paletteSize = bounded(input.readInt(), MAX_COLUMNS * 3);
+        int[] palette = new int[paletteSize];
+        for (int i = 0; i < paletteSize; i++) {
+            String name = input.readUTF();
+            ResourceLocation id = name.isEmpty() ? null : ResourceLocation.tryParse(name);
+            if (!name.isEmpty() && (id == null || !BuiltInRegistries.BLOCK.containsKey(id))) throw new IOException("block unavailable: " + name);
+            palette[i] = name.isEmpty() ? ClientColumnSample.NO_BLOCK : BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.get(id));
+        }
+        int[] biomes = null;
+        if (version >= 6) {
+            if (mappings == null) throw new IOException("Biome mapping unavailable");
+            int biomeCount = bounded(input.readInt(), MAX_COLUMNS);
+            biomes = new int[biomeCount];
+            for (int i = 0; i < biomeCount; i++) biomes[i] = mappings.biomeId(input.readUTF());
+        }
+        ClientColumnSample[] samples = new ClientColumnSample[size];
+        for (int i = 0; i < size; i++) {
+            int y = input.readInt(), fluidY = input.readInt(), biome = input.readInt();
+            biome = biomes != null ? biomes[index(biome, biomes.length)]
+                    : mappings == null ? biome : mappings.legacyBiome(biome);
+            int top = palette[index(input.readInt(), palette.length)];
+            int structure = input.readInt(), tree = input.readInt(), density = input.readInt(), height = input.readInt();
+            int fluid = input.readInt(), flags = input.readInt(), ground = input.readInt();
+            int under = palette[index(input.readInt(), palette.length)], deep = palette[index(input.readInt(), palette.length)];
+            int bottom = input.readInt(), lowerTop = input.readInt(), lowerBottom = input.readInt(), floor = input.readInt();
+            PredictionColumnVolume volume = null;
+            if (version >= 3 && input.readBoolean()) {
+                int runs = bounded(input.readInt(), PredictionColumnVolume.MAX_RUNS);
+                int[] intervals = new int[runs * 4];
+                for (int r = 0; r < intervals.length; r += 4) {
+                    intervals[r] = input.readInt(); intervals[r + 1] = input.readInt();
+                    intervals[r + 2] = palette[index(input.readInt(), palette.length)];
+                    intervals[r + 3] = input.readUnsignedByte();
+                }
+                volume = new PredictionColumnVolume(intervals);
+            }
+            samples[i] = new ClientColumnSample(y, fluidY, biome, top, structure, tree, density, height, fluid, flags,
+                    ground, under, deep, bottom, lowerTop, lowerBottom, floor, volume);
+        }
+        long colors = Long.MIN_VALUE;
+        int[] surface = null, foliage = null, water = null;
+        if (version >= 2) {
+            colors = input.readLong();
+            if (input.readBoolean()) {
+                surface=new int[size];foliage=new int[size];water=new int[size];
+                for(int i=0;i<size;i++) {surface[i]=input.readInt();foliage[i]=input.readInt();water[i]=input.readInt();}
+            }
+        }
+        return new TerrainData(samples, colors, surface, foliage, water);
     }
 
     boolean writeTerrain(Lease lease, ClientColumnSample[] samples) {
@@ -528,52 +437,54 @@ final class PredictionDiskCache implements AutoCloseable {
     }
 
     private Encoder terrainEncoder(TerrainData terrain) {
+        return output -> encodeTerrain(output, terrain);
+    }
+
+    void encodeTerrain(DataOutputStream output, TerrainData terrain) throws IOException {
         ClientColumnSample[] samples = terrain.samples();
         boolean volumes = mappings != null || java.util.Arrays.stream(samples).anyMatch(sample -> sample.volume() != null);
-        return output -> {
-            Map<Integer, Integer> palette = new LinkedHashMap<>();
-            for (var sample : samples) for (int block : new int[]{sample.topBlockIndex(), sample.underBlockIndex(), sample.deepBlockIndex()}) {
-                palette.computeIfAbsent(block, ignored -> palette.size());
-            }
-            for (var sample : samples) if (sample.volume() != null) {
-                for (int i = 0; i < sample.volume().size(); i++)
-                    palette.computeIfAbsent(sample.volume().block(i), ignored -> palette.size());
-            }
-            output.writeInt(samples.length);
-            output.writeInt(palette.size());
-            for (int block : palette.keySet()) output.writeUTF(block == ClientColumnSample.NO_BLOCK ? ""
-                    : BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString());
-            Map<Integer, Integer> biomes = new LinkedHashMap<>();
-            if (mappings != null) {
-                for (var sample : samples) biomes.computeIfAbsent(sample.biomeIndex(), ignored -> biomes.size());
-                output.writeInt(biomes.size());
-                for (int biome : biomes.keySet()) output.writeUTF(mappings.biomeName(biome));
-            }
-            for (var sample : samples) {
-                output.writeInt(sample.surfaceY()); output.writeInt(sample.fluidY());
-                output.writeInt(mappings == null ? sample.biomeIndex() : biomes.get(sample.biomeIndex()));
-                output.writeInt(palette.get(sample.topBlockIndex())); output.writeInt(sample.structureIndex());
-                output.writeInt(sample.treeKind()); output.writeInt(sample.treeDensity()); output.writeInt(sample.treeHeight());
-                output.writeInt(sample.fluid()); output.writeInt(sample.flags()); output.writeInt(sample.groundFeatureKind());
-                output.writeInt(palette.get(sample.underBlockIndex())); output.writeInt(palette.get(sample.deepBlockIndex()));
-                output.writeInt(sample.surfaceBottom()); output.writeInt(sample.lowerTop()); output.writeInt(sample.lowerBottom()); output.writeInt(sample.spanFloor());
-                var volume = sample.volume();
-                if (volumes) output.writeBoolean(volume != null);
-                if (volume != null) {
-                    output.writeInt(volume.size());
-                    for (int i = 0; i < volume.size(); i++) {
-                        output.writeInt(volume.bottom(i)); output.writeInt(volume.top(i));
-                        output.writeInt(palette.get(volume.block(i))); output.writeByte(volume.fluid(i));
-                    }
+        Map<Integer, Integer> palette = new LinkedHashMap<>();
+        for (var sample : samples) for (int block : new int[]{sample.topBlockIndex(), sample.underBlockIndex(), sample.deepBlockIndex()}) {
+            palette.computeIfAbsent(block, ignored -> palette.size());
+        }
+        for (var sample : samples) if (sample.volume() != null) {
+            for (int i = 0; i < sample.volume().size(); i++)
+                palette.computeIfAbsent(sample.volume().block(i), ignored -> palette.size());
+        }
+        output.writeInt(samples.length);
+        output.writeInt(palette.size());
+        for (int block : palette.keySet()) output.writeUTF(block == ClientColumnSample.NO_BLOCK ? ""
+                : BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString());
+        Map<Integer, Integer> biomes = new LinkedHashMap<>();
+        if (mappings != null) {
+            for (var sample : samples) biomes.computeIfAbsent(sample.biomeIndex(), ignored -> biomes.size());
+            output.writeInt(biomes.size());
+            for (int biome : biomes.keySet()) output.writeUTF(mappings.biomeName(biome));
+        }
+        for (var sample : samples) {
+            output.writeInt(sample.surfaceY()); output.writeInt(sample.fluidY());
+            output.writeInt(mappings == null ? sample.biomeIndex() : biomes.get(sample.biomeIndex()));
+            output.writeInt(palette.get(sample.topBlockIndex())); output.writeInt(sample.structureIndex());
+            output.writeInt(sample.treeKind()); output.writeInt(sample.treeDensity()); output.writeInt(sample.treeHeight());
+            output.writeInt(sample.fluid()); output.writeInt(sample.flags()); output.writeInt(sample.groundFeatureKind());
+            output.writeInt(palette.get(sample.underBlockIndex())); output.writeInt(palette.get(sample.deepBlockIndex()));
+            output.writeInt(sample.surfaceBottom()); output.writeInt(sample.lowerTop()); output.writeInt(sample.lowerBottom()); output.writeInt(sample.spanFloor());
+            var volume = sample.volume();
+            if (volumes) output.writeBoolean(volume != null);
+            if (volume != null) {
+                output.writeInt(volume.size());
+                for (int i = 0; i < volume.size(); i++) {
+                    output.writeInt(volume.bottom(i)); output.writeInt(volume.top(i));
+                    output.writeInt(palette.get(volume.block(i))); output.writeByte(volume.fluid(i));
                 }
             }
-            output.writeLong(terrain.colorFingerprint());
-            boolean colors=terrain.colorsMatch(terrain.colorFingerprint());
-            output.writeBoolean(colors);
-            if(colors)for(int i=0;i<samples.length;i++) {
-                output.writeInt(terrain.surfaceTints()[i]);output.writeInt(terrain.foliageTints()[i]);output.writeInt(terrain.waterTints()[i]);
-            }
-        };
+        }
+        output.writeLong(terrain.colorFingerprint());
+        boolean colors=terrain.colorsMatch(terrain.colorFingerprint());
+        output.writeBoolean(colors);
+        if(colors)for(int i=0;i<samples.length;i++) {
+            output.writeInt(terrain.surfaceTints()[i]);output.writeInt(terrain.foliageTints()[i]);output.writeInt(terrain.waterTints()[i]);
+        }
     }
 
     Map<BlockPos, BlockState> readSurface(Lease lease) {
@@ -630,7 +541,7 @@ final class PredictionDiskCache implements AutoCloseable {
         try {
             synchronized (pendingLock) {
                 synchronized (shared) {
-                    if (!lease.valid() || Thread.currentThread().isInterrupted()
+                    if (!lease.valid() || finishing || Thread.currentThread().isInterrupted()
                             || columns > 0 && columns < terrainWriteColumns.getOrDefault(lease.key, 0))
                         return CompletableFuture.completedFuture(false);
                 }
@@ -745,7 +656,7 @@ final class PredictionDiskCache implements AutoCloseable {
         };
     }
 
-    private BlockState decodeState(String json) {
+    BlockState decodeState(String json) {
         synchronized (decodedStates) {
             BlockState state = decodedStates.get(json);
             if (state != null) return state;
@@ -757,7 +668,7 @@ final class PredictionDiskCache implements AutoCloseable {
         }
     }
 
-    private String encodeState(BlockState state) {
+    String encodeState(BlockState state) {
         synchronized (encodedStates) {
             String json = encodedStates.get(state);
             if (json != null) return json;
@@ -782,7 +693,8 @@ final class PredictionDiskCache implements AutoCloseable {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
             boolean templateRecord = (lease.key.kind == 1 || lease.key.kind == 2) && templateIdentity != null;
-            boolean validVersion = templateRecord ? version == 7 || version == 8
+            boolean validVersion = lease.key.kind == 4 ? version == PredictionVoxelCache.VERSION
+                    : templateRecord ? version == 7 || version == 8
                     : version == schema(lease.key) || lease.key.kind == 3 && version == 6 || version == 5 || version == 4 || version == 3
                     || lease.key.kind == 0 && (version == 1 || version == 2);
             if (!validVersion || input.readLong() != fingerprint
@@ -878,7 +790,9 @@ final class PredictionDiskCache implements AutoCloseable {
             return false;
         }
         writes.increment();
-        synchronized (shared) { terrainHints.remove(token.key); }
+        synchronized (shared) {
+            terrainHints.remove(token.key.kind == 4 ? Key.terrain(token.key.x,token.key.z,token.key.detail) : token.key);
+        }
         scheduleMaintenance();
         return token.valid();
     }
@@ -892,11 +806,11 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (shared) {
             if (closed || shared.owner != this) return;
             var expanded = new HashSet<>(keys);
-            for (Key key : keys) if (key.kind == 0) expanded.add(Key.mesh(key));
+            for (Key key : keys) if (key.kind == 0) expanded.add(Key.voxels(key.x,key.z,key.detail));
             for (Key key : expanded) {
                 terrainHints.remove(key);
                 terrainWriteColumns.remove(key);
-                meshWriteOrders.remove(key);
+                voxelWriteIdentities.remove(key);
                 Entry entry = shared.active.remove(key);
                 if (entry != null) entry.valid = false;
                 shared.invalidations.put(key, ++shared.revision);
@@ -969,8 +883,7 @@ final class PredictionDiskCache implements AutoCloseable {
     private boolean maintenanceIdle() {
         return !closed && shared.owner == this
                 && System.nanoTime() - lastDemandNanos >= MAINTENANCE_IDLE_NANOS
-                && COMMITS.getActiveCount() == 0 && COMMITS.getQueue().isEmpty()
-                && TERRAIN_PENDING.get() == 0 && MESH_QUEUED.get() == 0;
+                && COMMITS.getActiveCount() == 0 && COMMITS.getQueue().isEmpty();
     }
 
     private static void addAffectedTerrain(Set<Key> keys, int chunkX, int chunkZ, boolean capture) {
@@ -979,7 +892,10 @@ final class PredictionDiskCache implements AutoCloseable {
             for (long z = Math.floorDiv(chunkZ * 16L - margin, span); z <= Math.floorDiv(chunkZ * 16L + 15 + margin, span); z++) {
                 for (long x = Math.floorDiv(chunkX * 16L - margin, span); x <= Math.floorDiv(chunkX * 16L + 15 + margin, span); x++) {
                     Key key = Key.terrain((int) x, (int) z, lod);
-                    if (!capture || captureIntersects(key, chunkX, chunkZ)) keys.add(key);
+                    if (!capture || captureIntersects(key, chunkX, chunkZ)) {
+                        keys.add(key);
+                        keys.add(Key.voxels((int)x,(int)z,lod));
+                    }
                 }
             }
         }
@@ -1045,8 +961,6 @@ final class PredictionDiskCache implements AutoCloseable {
         return shared.regions.legacy(key);
     }
     String diagnostics() { return "disk={hits=" + hits.sum() + ",misses=" + misses.sum() + ",writes=" + writes.sum()
-            + ",meshHits=" + meshHits.sum() + ",meshMisses=" + meshMisses.sum() + ",meshWrites=" + meshWrites.sum()
-            + ",meshQueuedBytes=" + MESH_QUEUED.get()
             + ",terrainPending=" + TERRAIN_PENDING.get() + ",terrainPendingBytes=" + TERRAIN_PENDING_BYTES.get()
             + ",terrainWriteDeferrals=" + terrainWriteDeferrals.sum()
             + ",terrainRepairs=" + terrainRepairs.sum()
@@ -1061,16 +975,6 @@ final class PredictionDiskCache implements AutoCloseable {
             + ",raced=" + missRaced.sum() + "}"; }
     Path root() { return root; }
     long hits() { return hits.sum(); }
-    void flushMeshes() {
-        var barrier = new FutureTask<Void>(() -> null);
-        try {
-            MESH_WRITES.prestartCoreThread();
-            MESH_WRITES.getQueue().put(barrier);
-            barrier.get();
-        }
-        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
-        catch (ExecutionException failure) { error(failure); }
-    }
     void flush() {
         List<CompletableFuture<Boolean>> pending;
         synchronized (pendingLock) { pending = pendingWrites.values().stream().map(write -> write.result).toList(); }
@@ -1081,6 +985,27 @@ final class PredictionDiskCache implements AutoCloseable {
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         catch (ExecutionException failure) { error(failure); }
     }
+    /** Stop new snapshots now, drain accepted commits on IO, then release the cache. */
+    void finishWrites() {
+        synchronized (pendingLock) {
+            if (closed || finishing) return;
+            finishing = true;
+            COMMITS.execute(this::finishPendingWrites);
+        }
+    }
+
+    private void finishPendingWrites() {
+        synchronized (pendingLock) {
+            // A replacement write can have yielded to a queued invalidation.
+            // Stay behind its rescheduled drain instead of cancelling it.
+            if (!pendingWrites.isEmpty()) {
+                COMMITS.execute(this::finishPendingWrites);
+                return;
+            }
+        }
+        close();
+    }
+
     @Override public void close() {
         closed = true;
         List<PendingWrite> cancelled;
@@ -1096,9 +1021,9 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (decodedStates) { decodedStates.clear(); }
         synchronized (encodedStates) { encodedStates.clear(); }
         synchronized (shared) {
-            terrainHints.clear();
+            terrainHints.clear(); pendingProbes.clear(); probeQueue.clear();
             terrainWriteColumns.clear();
-            meshWriteOrders.clear();
+            voxelWriteIdentities.clear();
             probeQueue.clear();
             if (shared.owner == this) {
                 shared.active.values().forEach(entry -> entry.valid = false);
@@ -1111,6 +1036,7 @@ final class PredictionDiskCache implements AutoCloseable {
                 });
             }
         }
+        finished.complete(null);
     }
     private void error(Throwable failure) {
         errors.increment();

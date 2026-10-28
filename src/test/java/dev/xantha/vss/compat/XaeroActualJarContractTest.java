@@ -35,6 +35,7 @@ class XaeroActualJarContractTest {
             api.methods("MapProcessor", "isWritingPaused()Z", "isWaitingForWorldUpdate()Z",
                     "isCurrentMapLocked()Z", "isCurrentMultiworldWritable()Z",
                     "getCurrentWorldId()Ljava/lang/String;", "getCurrentDimension()Ljava/lang/String;",
+                    "getCurrentDimId()Ljava/lang/String;", "getCurrentMWId()Ljava/lang/String;",
                     "getMapWorld()Lxaero/map/world/MapWorld;",
                     "getMapSaveLoad()Lxaero/map/file/MapSaveLoad;",
                     "getLeafMapRegion(IIIZ)Lxaero/map/region/MapRegion;",
@@ -48,6 +49,7 @@ class XaeroActualJarContractTest {
             api.methods("world/MapWorld", "isCacheOnlyMode()Z",
                     "getCurrentDimensionId()Lnet/minecraft/resources/ResourceKey;");
             api.methods("file/MapSaveLoad", "isRegionDetectionComplete()Z",
+                    "getMWSubFolder(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/nio/file/Path;",
                     "requestLoad(Lxaero/map/region/MapRegion;Ljava/lang/String;)V");
             api.fields("region/MapRegion", "writerThreadPauseSync");
             api.methods("region/MapRegion", "isWritingPaused()Z", "getLoadState()B",
@@ -63,17 +65,22 @@ class XaeroActualJarContractTest {
                     "updateBuffers(Lxaero/map/MapProcessor;Lxaero/map/biome/BlockTintProvider;"
                             + "Lxaero/map/region/OverlayManager;ZLxaero/map/cache/BlockStateShortShapeCache;"
                             + "Lxaero/map/region/MapUpdateFastConfig;)V");
-            api.methods("region/texture/LeafRegionTexture", "shouldDownloadFromPBO()Z");
+            api.methods("region/texture/LeafRegionTexture", "shouldDownloadFromPBO()Z",
+                    "shouldUpload()Z", "isCachePrepared()Z", "setCachePrepared(Z)V");
             api.methods("pool/MapTilePool", "get(Ljava/lang/String;II)Lxaero/map/region/MapTile;");
             api.methods("region/MapTile", "isLoaded()Z", "wasWrittenOnce()Z",
+                    "getBlock(II)Lxaero/map/region/MapBlock;",
                     "setBlock(IILxaero/map/region/MapBlock;)V", "setWorldInterpretationVersion(I)V",
                     "setWrittenCave(II)V", "setWrittenOnce(Z)V", "setLoaded(Z)V");
             api.methods("region/MapBlock", "<init>()V", "prepareForWriting(I)V",
+                    "getHeight()I", "getTopHeight()I", "getBiome()Lnet/minecraft/resources/ResourceKey;",
+                    "getOverlays()Ljava/util/ArrayList;",
                     "write(Lnet/minecraft/world/level/block/state/BlockState;II"
                             + "Lnet/minecraft/resources/ResourceKey;BZZ)V",
                     "addOverlay(Lxaero/map/region/Overlay;)V");
             api.methods("region/Overlay", "<init>(Lnet/minecraft/world/level/block/state/BlockState;BZ)V",
-                    "increaseOpacity(I)V");
+                    "increaseOpacity(I)V", "getOpacity()I");
+            api.methods("region/MapPixel", "getState()Lnet/minecraft/world/level/block/state/BlockState;");
             api.methods("region/OverlayManager", "getOriginal(Lxaero/map/region/Overlay;)Lxaero/map/region/Overlay;");
             api.methods("highlight/MapRegionHighlightsPreparer", "prepare(Lxaero/map/region/MapRegion;IIZ)V");
 
@@ -106,6 +113,50 @@ class XaeroActualJarContractTest {
                                     && call.desc.equals("()Z")),
                     "the real save path must use the terrain flag covered by our regression");
         }
+    }
+
+    @ParameterizedTest(name = "texture cache readiness: {0}")
+    @MethodSource("jars")
+    void releasedCacheLifecycleMatchesTheDeferredCommitRegression(Path path) throws Exception {
+        try (var api = new JarApi(path)) {
+            assertTrue(calls(api.method("region/texture/LeafRegionTexture", "shouldIncludeInCache()Z"),
+                    "hasHadTerrain"), "terrain membership determines which leaf the saver validates");
+            MethodNode mark = api.method("region/MapTileChunk", "setHasHadTerrain()V");
+            assertFalse(calls(mark, "setAllCachePrepared") || calls(mark, "setCachePrepared"),
+                    "the native terrain marker does not invalidate either cache-ready flag");
+            MethodNode rebuild = api.read("xaero/map/region/MapTileChunk").methods.stream()
+                    .filter(method -> method.name.equals("updateBuffers")).findFirst().orElseThrow();
+            assertTrue(calls(rebuild, "setCachePrepared") && calls(rebuild, "setAllCachePrepared"));
+            MethodNode upload = api.read("xaero/map/region/texture/RegionTexture").methods.stream()
+                    .filter(method -> method.name.equals("uploadBuffer")).findFirst().orElseThrow();
+            assertTrue(calls(upload, "setCachePrepared"),
+                    "completion of an old upload can make the texture cache-ready again");
+            MethodNode render = api.read("xaero/map/MapProcessor").methods.stream()
+                    .filter(method -> method.name.equals("onRenderProcess")).findFirst().orElseThrow();
+            int writes = 0;
+            for (var instruction : render.instructions) {
+                if (!(instruction instanceof MethodInsnNode call)
+                        || !call.name.equals("setAllCachePrepared")) continue;
+                var value = instruction.getPrevious();
+                while (value != null && value.getOpcode() < 0) value = value.getPrevious();
+                assertNotNull(value);
+                assertEquals(Opcodes.ICONST_1, value.getOpcode(),
+                        "native scanning only raises readiness; VSS must explicitly invalidate changes");
+                writes++;
+            }
+            assertTrue(writes > 0);
+            MethodNode metadata = api.read("xaero/map/region/LeveledRegion").methods.stream()
+                    .filter(method -> method.name.equals("writeCacheMetaData")).findFirst().orElseThrow();
+            assertTrue(calls(metadata, "shouldIncludeInCache") && calls(metadata, "isCachePrepared"));
+            assertTrue(Stream.of(metadata.instructions.toArray()).anyMatch(instruction ->
+                    instruction.getOpcode() == Opcodes.ATHROW),
+                    "an included unprepared leaf is a fatal invariant, not an optional cache miss");
+        }
+    }
+
+    private static boolean calls(MethodNode method, String name) {
+        return Stream.of(method.instructions.toArray()).anyMatch(instruction ->
+                instruction instanceof MethodInsnNode call && call.name.equals(name));
     }
 
     private static final class JarApi implements AutoCloseable {

@@ -20,8 +20,7 @@ class PredictionParentLodTest {
         var samples = new ClientColumnSample[81]; Arrays.fill(samples, sample(height));
         int[] heights = new int[81]; Arrays.fill(heights, height);
         return new PredictionTile(key, heights, heights, samples,
-                new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
-                        new int[0], new boolean[64], 0, 0, 64), new PredictionDepthBound(height, height),
+                PredictionVoxelFixtures.flat(key,axis,step,height), new PredictionDepthBound(height, height),
                 1, revision, axis, step);
     }
     static Map<PredictionTileKey, PredictionTile> children(PredictionTileKey parent) {

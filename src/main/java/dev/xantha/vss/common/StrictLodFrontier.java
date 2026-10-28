@@ -13,10 +13,15 @@ public final class StrictLodFrontier {
     private int visible = -1;
     private boolean initialized;
     private long revision;
+    private int blockedX, blockedZ;
+    private int blockedStage; // 0: none, 1: data, 2: render
 
     public void center(int x, int z, int limit) {
         int retained = initialized ? Math.max(-1, visible - Math.max(Math.abs(x - this.x), Math.abs(z - this.z))) : -1;
-        if (!initialized || this.x != x || this.z != z || this.limit != limit) revision++;
+        if (!initialized || this.x != x || this.z != z || this.limit != Math.max(0, limit)) {
+            revision++;
+            blockedStage = 0;
+        }
         this.x = x;
         this.z = z;
         this.limit = Math.max(0, limit);
@@ -26,6 +31,10 @@ public final class StrictLodFrontier {
 
     public boolean advance(BiPredicate<Integer, Integer> dataReady, BiPredicate<Integer, Integer> renderReady) {
         if (!initialized || visible >= limit) return false;
+        // A still-missing column is sufficient to reject this ring. Successful
+        // evidence is never retained: once it recovers, recheck the entire ring.
+        if (blockedStage != 0 && !(blockedStage == 1 ? dataReady : renderReady).test(blockedX, blockedZ)) return false;
+        blockedStage = 0;
         int ring = visible + 1;
         int start = ChebyshevRingOffsets.firstIndexForRing(ring);
         int end = ChebyshevRingOffsets.firstIndexForRing(ring + 1);
@@ -33,11 +42,13 @@ public final class StrictLodFrontier {
         // partial readiness over to a later frame where nodes might be evicted.
         for (int i = start; i < end; i++) {
             long offset = ChebyshevRingOffsets.offsetAt(i);
-            if (!dataReady.test(x + ChebyshevRingOffsets.decodeX(offset), z + ChebyshevRingOffsets.decodeZ(offset))) return false;
+            int cx = x + ChebyshevRingOffsets.decodeX(offset), cz = z + ChebyshevRingOffsets.decodeZ(offset);
+            if (!dataReady.test(cx, cz)) { blockedX = cx; blockedZ = cz; blockedStage = 1; return false; }
         }
         for (int i = start; i < end; i++) {
             long offset = ChebyshevRingOffsets.offsetAt(i);
-            if (!renderReady.test(x + ChebyshevRingOffsets.decodeX(offset), z + ChebyshevRingOffsets.decodeZ(offset))) return false;
+            int cx = x + ChebyshevRingOffsets.decodeX(offset), cz = z + ChebyshevRingOffsets.decodeZ(offset);
+            if (!renderReady.test(cx, cz)) { blockedX = cx; blockedZ = cz; blockedStage = 2; return false; }
         }
         visible = ring;
         revision++;
@@ -46,10 +57,10 @@ public final class StrictLodFrontier {
 
     public void missing(int cx, int cz) {
         int ring = Math.max(Math.abs(cx - x), Math.abs(cz - z));
-        if (ring <= visible) { visible = ring - 1; revision++; }
+        if (ring <= visible) { visible = ring - 1; blockedStage = 0; revision++; }
     }
 
-    public void reset() { visible = -1; initialized = false; revision++; }
+    public void reset() { visible = -1; initialized = false; blockedStage = 0; revision++; }
     public int visibleRing() { return visible; }
     public int requestRing() { return Math.min(limit, visible + 1); }
     public int centerX() { return x; }

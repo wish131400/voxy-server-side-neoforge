@@ -24,14 +24,12 @@ class PredictionDemandLifecycleTest {
         try (var f = new Fixture(true); var loading = new LoadingSwitch(f.manager)) {
             var previous = f.ready().get(f.key);
             var snapshot = ClientPredictionState.renderSnapshot(PROFILE.levelKey());
-            f.manager.setDrawableSnapshot(snapshot);
             f.start();
             loading.enabled(false);
             f.finish();
             assertTrue(VSSClientConfig.CONFIG.enablePrediction, "loading must not turn off prediction rendering");
             assertSame(previous, f.ready().get(f.key));
             assertSame(snapshot, ClientPredictionState.renderSnapshot(PROFILE.levelKey()));
-            assertSame(snapshot, get(f.manager, "drawableSnapshot"));
             assertFalse(f.map("failedAt").containsKey(f.key));
             f.assertReleased();
 
@@ -223,7 +221,7 @@ class PredictionDemandLifecycleTest {
         }
     }
 
-    @Test void mediumFrontierUpgradeCompletesAndUnlocksLocalRefinement() throws Exception {
+    @Test void mediumFrontierAndLocalRefinementCanProgressIndependently() throws Exception {
         try (var f = new Fixture(true, true)) {
             var leaf = new PredictionTileKey(PROFILE.levelKey(), 0, 0, 2);
             f.keys("desiredKeys").add(leaf);
@@ -231,19 +229,19 @@ class PredictionDemandLifecycleTest {
             f.ready().put(leaf, f.tile(leaf, 32));
             set(f.manager, "ordinaryTargets", Map.of(leaf, 64, f.key, 8));
             set(f.manager, "terrainTargets", Map.of(leaf, 64));
-            assertEquals(false, invoke(f.manager, "mediumWorkAllowed",
+            assertEquals(true, invoke(f.manager, "localWorkAllowed",
                     new Class<?>[]{PredictionTileKey.class, boolean.class}, leaf, false));
             f.release.countDown();
             f.enqueue(); f.awaitIdle();
             assertEquals(16, f.ready().get(f.key).cellAxis(), "a resident preview must advance in the medium wave");
             f.enqueue(); f.awaitIdle();
             assertEquals(32, f.ready().get(f.key).cellAxis());
-            assertEquals(true, invoke(f.manager, "mediumWorkAllowed",
+            assertEquals(true, invoke(f.manager, "localWorkAllowed",
                     new Class<?>[]{PredictionTileKey.class, boolean.class}, leaf, false));
             invoke(f.manager, "enqueue", new Class<?>[]{PredictionTileKey.class, int.class, int.class, boolean.class},
                     leaf, 0, 0, false);
             f.awaitIdle();
-            assertEquals(64, f.ready().get(leaf).cellAxis(), "the completed local medium grid must unlock nearby detail");
+            assertEquals(64, f.ready().get(leaf).cellAxis(), "nearby detail completes without a medium-quality barrier");
             assertEquals(0L, ((LongAdder)get(f.manager, "supersededBuilds")).sum());
             f.assertReleased();
         }
@@ -264,28 +262,7 @@ class PredictionDemandLifecycleTest {
         }
     }
 
-    @Test void measureActualWorkerWorkAfterTheSameControlledDemandChange() throws Exception {
-        var rows = new ArrayList<String>();
-        rows.add("change,round,mode,samples,worker_cpu_ns,worker_tail_allocated_bytes,completed_axis");
-        var bean = (com.sun.management.ThreadMXBean)java.lang.management.ManagementFactory.getThreadMXBean();
-        for (String change : new String[]{"turn","zoom-out"}) for (int round = -3; round < 11; round++) {
-            try (var f = new Fixture(true)) {
-                f.start();
-                long worker = f.worker.get().getId();
-                long bytes = bean.getThreadAllocatedBytes(worker);
-                if (change.equals("turn")) f.face(-1); else f.target(32);
-                f.finish();
-                long allocated = bean.getThreadAllocatedBytes(worker) - bytes;
-                long cpu = ((LongAdder)get(f.manager,"visibleCpuNanos")).sum()
-                        + ((LongAdder)get(f.manager,"backgroundCpuNanos")).sum();
-                if (round >= 0) rows.add(change + "," + round + "," + (BASELINE ? "baseline" : "demand")
-                        + "," + f.samples.get() + "," + cpu + "," + allocated + "," + f.ready().get(f.key).cellAxis());
-                f.assertReleased();
-                if (!BASELINE) { assertEquals(32,f.ready().get(f.key).cellAxis()); assertTrue(f.samples.get() <= 66); }
-            }
-        }
-        CompletionGpuFixture.save("demand-worker-" + (BASELINE ? "baseline" : "current") + ".csv",rows);
-    }
+
 
     static Object get(Object target,String name) throws Exception {
         return PredictionPlanningTestSupport.get(target, name);
@@ -302,7 +279,7 @@ class PredictionDemandLifecycleTest {
         final AtomicReference<Thread> worker=new AtomicReference<>();
         final CountDownLatch entered=new CountDownLatch(1), release=new CountDownLatch(1);
         final PredictionCpuBudget cpu=PredictionCpuBudget.fixed(1);
-        final ClientColumnSample sample=PredictionSimpleVegetationTest.sample(64);
+        final ClientColumnSample sample=PredictionVoxelFixtures.sample(64);
         final PredictionTileKey key;
         final PredictionTileKey parent;
         final PredictionTileManager manager;
@@ -338,8 +315,7 @@ class PredictionDemandLifecycleTest {
             int spacing=manager.layout().tileBlocks(key.lod())/axis;
             int[] heights=new int[(axis+1)*(axis+1)]; Arrays.fill(heights,64);
             var points=new ClientColumnSample[heights.length]; Arrays.fill(points,sample);
-            var mesh=new PredictionMesh(new float[0],new float[0],new int[0],new float[0],new float[0],
-                    new int[0],new boolean[axis*axis],0,0,axis*axis,null,null,null,null,axis,spacing);
+            var mesh=PredictionVoxelFixtures.flat(key,axis,spacing,64);
             return new PredictionTile(key,heights,heights,points,mesh,new PredictionDepthBound(64,64),0,axis,axis,spacing);
         }
         @SuppressWarnings("unchecked") Map<PredictionTileKey,PredictionTile> ready() throws Exception { return (Map<PredictionTileKey,PredictionTile>)get(manager,"ready"); }

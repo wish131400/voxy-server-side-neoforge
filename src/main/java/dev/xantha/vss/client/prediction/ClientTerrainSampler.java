@@ -66,6 +66,8 @@ public class ClientTerrainSampler implements AutoCloseable {
     }
 
     private volatile Map<net.minecraft.resources.ResourceLocation, Integer> captureBiomeNames;
+    private volatile java.util.List<String> cachedBiomeNames;
+    private volatile Map<String,Integer> persistedBiomeIndices;
 
     int captureBiomeIndex(Holder<Biome> biome, int fallback) {
         if (biome == null) return fallback;
@@ -267,15 +269,88 @@ public class ClientTerrainSampler implements AutoCloseable {
     java.util.List<String> cacheBiomes() {
         ClientTerrainSampler context = decorationContext();
         if (context != this) return context.cacheBiomes();
+        var cached = cachedBiomeNames;
+        if (cached != null) return cached;
         String[] names = new String[biomeIndices.size()];
         biomeIndices.forEach((biome, index) -> names[index] = biome.unwrapKey()
                 .map(key -> key.location().toString()).orElse(""));
-        return java.util.List.of(names);
+        return cachedBiomeNames = java.util.List.of(names);
+    }
+
+    final Map<String,Integer> cacheBiomeIndices() {
+        var indices = persistedBiomeIndices;
+        if (indices == null) {
+            var names = cacheBiomes();
+            var prepared = new HashMap<String,Integer>();
+            for (int i=0;i<names.size();i++) if (!names.get(i).isEmpty()) prepared.put(names.get(i),i);
+            persistedBiomeIndices = indices = Map.copyOf(prepared);
+        }
+        return indices;
+    }
+
+    /** Batch hook in persisted-palette order; native samplers override climate selection. */
+    void sampleBiomeIndices(int[] quartPositions, int count, int[] indices) {
+        var palette = cacheBiomeIndices();
+        var context = decorationContext();
+        for (int i=0;i<count;i++) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            var biome = context.noiseBiome(quartPositions[i*3], quartPositions[i*3+1], quartPositions[i*3+2]);
+            var key = biome == null ? null : biome.unwrapKey().orElse(null);
+            indices[i] = key == null ? -1 : palette.getOrDefault(key.location().toString(), -1);
+        }
+    }
+
+    /** Resolve missing identity once before persistence, using the same exposed height as Voxy tinting. */
+    int resolveBiomeIndices(ClientColumnSample[] samples, int grid, int baseX, int baseZ, int step) {
+        var names = cacheBiomes();
+        if (names.isEmpty()) return 0;
+        boolean missing = false;
+        for (var sample : samples) {
+            int index=sample.biomeIndex();
+            if (index<0 || index>=names.size() || names.get(index).isEmpty()) { missing=true; break; }
+        }
+        if (!missing) return 0;
+        var slots = new HashMap<Long,Integer>();
+        int[] positions = new int[samples.length*3], sampleSlots = new int[samples.length];
+        java.util.Arrays.fill(sampleSlots, -1);
+        int count = 0;
+        for (int z=0;z<grid;z++) for (int x=0;x<grid;x++) {
+            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            int at=z*grid+x; var sample=samples[at];
+            int index=sample.biomeIndex();
+            if (index>=0 && index<names.size() && !names.get(index).isEmpty()) continue;
+            int qx=QuartPos.fromBlock(baseX+(x-1)*step), qz=QuartPos.fromBlock(baseZ+(z-1)*step);
+            int qy=QuartPos.fromBlock((sample.hasFluid()?sample.fluidY():sample.surfaceY())-1);
+            long key=net.minecraft.core.BlockPos.asLong(qx,qy,qz);
+            Integer slot=slots.get(key);
+            if (slot==null) {
+                slot=count++; slots.put(key,slot);
+                positions[slot*3]=qx; positions[slot*3+1]=qy; positions[slot*3+2]=qz;
+            }
+            sampleSlots[at]=slot;
+        }
+        if (count==0) return 0;
+        int[] indices = new int[count];
+        sampleBiomeIndices(positions, count, indices);
+        int changed = 0;
+        for (int at=0;at<sampleSlots.length;at++) {
+            int slot=sampleSlots[at];
+            if (slot>=0 && indices[slot]>=0) {
+                samples[at]=samples[at].withBiomeIndex(indices[slot]); changed++;
+            }
+        }
+        return changed;
     }
 
     /** Ceiling worlds need occupancy throughout the column, not an exterior heightfield. */
     boolean interiorTerrain() {
         return profile.dimension().equals(net.minecraft.world.level.Level.NETHER.location());
+    }
+
+    /** Floating islands need full columns even when their top is flat or very distant. */
+    boolean floatingTerrain() {
+        return profile.dimension().equals(net.minecraft.world.level.Level.END.location())
+                && generator != null && customSurface == null;
     }
 
     int interiorMinY() { return floorY; }
@@ -391,9 +466,12 @@ public class ClientTerrainSampler implements AutoCloseable {
         return biomeSource;
     }
 
+    /** Null only for height-only sources without a biome context. Subclasses may supply their own source. */
     Holder<Biome> noiseBiome(int quartX, int quartY, int quartZ) {
-        return biomeCache != null ? biomeCache.get(quartX, quartY, quartZ)
-                : biomeSourceContext().getNoiseBiome(quartX, quartY, quartZ, randomStateContext().sampler());
+        if (biomeCache != null) return biomeCache.get(quartX, quartY, quartZ);
+        var source = biomeSourceContext();
+        var state = randomStateContext();
+        return source == null || state == null ? null : source.getNoiseBiome(quartX, quartY, quartZ, state.sampler());
     }
 
     ClientTerrainSampler decorationContext() { return this; }

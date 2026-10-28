@@ -43,10 +43,10 @@ class PredictionViewRefinementTest {
             var camera = new net.minecraft.world.phys.Vec3(0, 80, 0);
             var direction = new net.minecraft.world.phys.Vec3(1, 0, 0);
             var model = new org.joml.Matrix4f().lookAlong(1, 0, 0, 0, 1, 0);
-            double base = VssLodProjection.selectionScale(PredictionZoomLodTest.projection(70), 256);
-            double enlarged = VssLodProjection.selectionScale(PredictionZoomLodTest.projection(8.75), 256);
-            var normal = PredictionWorkView.rendered(PredictionZoomLodTest.projection(70), model, camera, direction, base);
-            var zoom = PredictionWorkView.rendered(PredictionZoomLodTest.projection(8.75), model, camera, direction,
+            double base = VssLodProjection.selectionScale(PredictionVoxelFixtures.projection(70), 256);
+            double enlarged = VssLodProjection.selectionScale(PredictionVoxelFixtures.projection(8.75), 256);
+            var normal = PredictionWorkView.rendered(PredictionVoxelFixtures.projection(70), model, camera, direction, base);
+            var zoom = PredictionWorkView.rendered(PredictionVoxelFixtures.projection(8.75), model, camera, direction,
                     VssLodProjection.refinementScale(enlarged, base, true, true));
             f.manager.setRenderWorkView(normal);
             assertEquals(32, PredictionDemandTestSupport.ordinaryAxis(f.manager, far, 0D, 80D, 0D, base, null));
@@ -97,7 +97,7 @@ class PredictionViewRefinementTest {
             set(f.manager, "mediumCoveragePending", true);
             f.face(1);
             assertEquals(false, invoke(f.manager, "mediumCoverageWork", new Class<?>[]{PredictionTileKey.class}, far));
-            assertEquals(true, invoke(f.manager, "mediumWorkAllowed", new Class<?>[]{PredictionTileKey.class, boolean.class}, far, true));
+            assertEquals(true, invoke(f.manager, "localWorkAllowed", new Class<?>[]{PredictionTileKey.class, boolean.class}, far, true));
             set(f.manager, "terrainTargets", Map.of(far, 8));
             f.enqueue(far);
             f.awaitIdle();
@@ -106,7 +106,7 @@ class PredictionViewRefinementTest {
         }
     }
 
-    @Test void visibleLargeFarCellsOutrankNearCellsWithSmallerScreenError() throws Exception {
+    @Test void nearVisibleCellsOutrankDistantCellsWithLargerScreenError() throws Exception {
         try (var f = new Fixture()) {
             var far = new PredictionTileKey(PROFILE.levelKey(), 4, 0, 3);
             f.plan(FRONT, far);
@@ -115,7 +115,7 @@ class PredictionViewRefinementTest {
             set(f.manager, "schedulingPixels", 1000D);
             int nearPriority = (int) invoke(f.manager, "workPriority", new Class<?>[]{PredictionTileKey.class, boolean.class}, FRONT, false);
             int farPriority = (int) invoke(f.manager, "workPriority", new Class<?>[]{PredictionTileKey.class, boolean.class}, far, false);
-            assertTrue(farPriority < nearPriority, "the larger visible screen error must win despite being farther away");
+            assertTrue(nearPriority < farPriority, "screen error refines ordering within a distance band rather than reversing near-first loading");
         }
     }
 
@@ -211,8 +211,8 @@ class PredictionViewRefinementTest {
         } finally { release.countDown(); }
     }
 
-    @Test void visibleReadyRequiresMatchingGpuUploadAndIgnoresRearDebt() throws Exception {
-        try (var f = new Fixture()) {
+    @Test void visibleReadyRequiresVoxyUploadAndIgnoresRearDebt() throws Exception {
+        try (var f = new Fixture(); var nativeUpload = new PredictionVoxyUploadFixture()) {
             f.plan(FRONT, REAR);
             var complete = f.tile(FRONT, 64);
             f.ready().put(FRONT, complete);
@@ -227,11 +227,12 @@ class PredictionViewRefinementTest {
             assertEquals(1, progress.view().deferred());
             assertFalse(progress.ready(95));
             assertEquals("view-upload", progress.waitingFor(95));
-            f.manager.setDrawableSnapshot(new RenderSnapshot(PROFILE.levelKey(), f.manager.layout(),
-                    Map.of(FRONT, f.tile(FRONT, 64)), Map.of()));
-            assertFalse(f.progress(List.of(FRONT, REAR)).ready(95), "an obsolete same-key mesh cannot satisfy upload readiness");
-            f.manager.setDrawableSnapshot(new RenderSnapshot(PROFILE.levelKey(), f.manager.layout(),
-                    Map.of(FRONT, complete), Map.of()));
+            nativeUpload.upload(complete);
+            var position=dev.xantha.vss.compat.StrictVoxyNodeIndex.key(0,
+                    Math.floorDiv(complete.data().voxyTile.baseX(),32),2,Math.floorDiv(complete.data().voxyTile.baseZ(),32));
+            nativeUpload.pipeline.queued(position);
+            assertFalse(f.progress(List.of(FRONT,REAR)).ready(95),"resident nodes cannot finish a pending native mesh update");
+            nativeUpload.pipeline.started(position).uploaded();
             assertTrue(f.progress(List.of(FRONT, REAR)).ready(95), "rear target and vegetation debt must not hold pregen forever");
             f.face(-1);
             assertFalse(f.progress(List.of(FRONT, REAR)).ready(95), "turning must publish the new view's detail debt");
@@ -293,21 +294,28 @@ class PredictionViewRefinementTest {
         }
     }
 
-    @Test void optionalUpgradePreservesOrdinaryGpuReadinessUntilCaptureChanges() throws Exception {
-        try (var f = new Fixture()) {
+    @Test void optionalUpgradePreservesOrdinaryVoxyReadinessUntilCaptureChanges() throws Exception {
+        try (var f = new Fixture(); var nativeUpload = new PredictionVoxyUploadFixture()) {
             f.plan(FRONT, REAR);
             var ordinary = f.tile(FRONT, 64);
             f.ready().put(FRONT, ordinary);
             f.face(1);
-            f.manager.setDrawableSnapshot(new RenderSnapshot(PROFILE.levelKey(), f.manager.layout(),
-                    Map.of(FRONT, ordinary), Map.of()));
+            nativeUpload.upload(ordinary);
             assertTrue(f.progress(List.of(FRONT, REAR)).ready(95));
+            var position=dev.xantha.vss.compat.StrictVoxyNodeIndex.key(0,
+                    Math.floorDiv(ordinary.data().voxyTile.baseX(),32),2,Math.floorDiv(ordinary.data().voxyTile.baseZ(),32));
+            nativeUpload.pipeline.queued(position);
             set(f.manager, "idleTargets", Map.of(FRONT, 128));
             set(f.manager, "terrainTargets", Map.of(FRONT, 128, REAR, 64));
             f.ready().put(FRONT, f.tile(FRONT, 128));
             assertTrue(f.progress(List.of(FRONT, REAR)).ready(95),
                     "a pending optional GPU upgrade cannot reacquire the ordinary generation turn");
+            synchronized(dev.xantha.vss.compat.StrictLodVisibility.class) { nativeUpload.nodes.clear(); }
+            assertFalse(f.progress(List.of(FRONT,REAR)).ready(95),"actual Voxy node loss retracts the retained ordinary completion");
+            nativeUpload.pipeline.started(position).uploaded(); nativeUpload.upload(ordinary);
+            assertTrue(f.progress(List.of(FRONT,REAR)).ready(95));
             set(f.manager, "captureEpochs", new java.util.concurrent.ConcurrentHashMap<>(Map.of(FRONT, 1L)));
+            f.keys("dirtyTiles").add(FRONT);
             assertFalse(f.progress(List.of(FRONT, REAR)).ready(95),
                     "content invalidation must revoke the old ordinary GPU goal immediately");
         }
@@ -377,7 +385,7 @@ class PredictionViewRefinementTest {
 
     private static final class Fixture implements AutoCloseable {
         final AtomicInteger samples = new AtomicInteger();
-        final ClientColumnSample sample = PredictionSimpleVegetationTest.sample(64);
+        final ClientColumnSample sample = PredictionVoxelFixtures.sample(64);
         final PredictionCpuBudget cpu = PredictionCpuBudget.fixed(1);
         final PredictionTileManager manager = new PredictionTileManager(PROFILE.levelKey(),
                 new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
@@ -400,8 +408,7 @@ class PredictionViewRefinementTest {
             int[] heights = new int[(axis + 1) * (axis + 1)];
             Arrays.fill(heights, 64);
             var points = new ClientColumnSample[heights.length]; Arrays.fill(points, sample);
-            var mesh = new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
-                    new int[0], new boolean[axis * axis], 0, 0, axis * axis, null, null, null, null, axis, spacing);
+            var mesh = PredictionVoxelFixtures.flat(key,axis,spacing,64);
             return new PredictionTile(key, heights, heights, points, mesh, new PredictionDepthBound(64, 64),
                     0, axis, axis, spacing);
         }

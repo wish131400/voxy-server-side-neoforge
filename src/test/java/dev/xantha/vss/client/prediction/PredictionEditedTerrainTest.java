@@ -183,8 +183,7 @@ class PredictionEditedTerrainTest {
     @Test void productionBuildKeepsTheCapturedDepressionWhenRebuildingACoarseTile() throws Exception {
         var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
         int distance = config.predictionDistanceBlocks;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures;
-        config.predictionDistanceBlocks = 4096; config.predictionTrees = false; config.predictionStructures = false;
+        config.predictionDistanceBlocks = 4096;
         try (var manager = manager(sampler(new AtomicInteger()))) {
             assertTrue(manager.captureLocalColumn(1, 1, craterData(), true)); awaitCaptures(manager);
             var key = new PredictionTileManager.PredictionTileKey(Level.OVERWORLD, 0, 0, 5);
@@ -199,10 +198,10 @@ class PredictionEditedTerrainTest {
                 if (tile.spacingBlocks() <= 32)
                     assertTrue(tile.samples()[0].surfaceY() < 64, "the actual mesher input must contain the coarse depression");
                 if (stage == 3) assertEquals(32, tile.spacingBlocks());
-                assertTrue(tile.mesh().vertexCount() > 0);
+                assertTrue(Arrays.stream(tile.data().voxyTile.columns()).anyMatch(c -> !c.runs().isEmpty()));
             }
         } finally {
-            config.predictionDistanceBlocks = distance; config.predictionTrees = trees; config.predictionStructures = structures;
+            config.predictionDistanceBlocks = distance;
         }
     }
 

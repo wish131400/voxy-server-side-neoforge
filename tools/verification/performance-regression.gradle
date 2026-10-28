@@ -1,0 +1,19 @@
+// Current CPU observation regressions. Voxy owns GPU passes and their timings.
+allprojects {
+    afterEvaluate {
+        tasks.register('performanceRegressionTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            ['PredictionPerformanceAnalysisTest', 'PredictionPerformanceServiceTest',
+             'PredictionFramePaceTest', 'PredictionLoadingProgressTest',
+             'PredictionLoadingProgressIntegrationTest', 'VSSClientCommandsTest'].each {
+                include "**/${it}.class"
+            }
+            maxHeapSize = '2G'
+            forkEvery = 1
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

@@ -1,0 +1,15 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('nativeReleaseTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs=sourceSets.test.output.classesDirs
+            classpath=sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionVoxySourceTest.class', '**/PredictionVoxyLoadingIntegrationTest.class'
+            include '**/PredictionNativeDemandTest.class', '**/VoxyPredictionNotificationTest.class'
+            forkEvery=1
+            maxHeapSize='2G'
+            testLogging {events 'failed','skipped';exceptionFormat 'full'}
+        }
+    }
+}

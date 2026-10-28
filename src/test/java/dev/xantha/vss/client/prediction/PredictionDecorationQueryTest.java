@@ -35,7 +35,7 @@ class PredictionDecorationQueryTest {
     ClientTerrainSampler terrain() {
         return new ClientTerrainSampler(42, PROFILE) {
             @Override public ClientColumnSample sampleSurface(int x, int z) {
-                var s = PredictionSimpleVegetationTest.sample(100);
+                var s = PredictionVoxelFixtures.sample(100);
                 return new ClientColumnSample(s.surfaceY(), 104, 0, s.topBlockIndex(), 0, 0, 0, 0,
                         1, s.flags(), 0, s.underBlockIndex(), s.deepBlockIndex(),
                         s.surfaceBottom(), s.lowerTop(), s.lowerBottom(), s.spanFloor());

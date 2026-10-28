@@ -153,7 +153,7 @@ class PredictionRegionStorageTest {
     }
 
     @Test void largeMeshRegionIsDiscoveredAndCompactedAfterReopen() throws Exception {
-        var key = PredictionDiskCache.Key.mesh(PredictionDiskCache.Key.terrain(0, 0, 2));
+        var key = PredictionDiskCache.Key.terrain(0, 0, 2);
         byte[] bytes = payload(31, 9 * 1024 * 1024);
         Path region;
         long before;
@@ -174,9 +174,9 @@ class PredictionRegionStorageTest {
     }
 
     @Test void compactionWaitsUntilWasteJustifiesRewritingLiveMeshRecords() throws Exception {
-        var a = PredictionDiskCache.Key.mesh(PredictionDiskCache.Key.terrain(0, 0, 2));
-        var b = PredictionDiskCache.Key.mesh(PredictionDiskCache.Key.terrain(1, 0, 2));
-        var changed = PredictionDiskCache.Key.mesh(PredictionDiskCache.Key.terrain(2, 0, 2));
+        var a = PredictionDiskCache.Key.terrain(0, 0, 2);
+        var b = PredictionDiskCache.Key.terrain(1, 0, 2);
+        var changed = PredictionDiskCache.Key.terrain(2, 0, 2);
         byte[] large = payload(41, 8 * 1024 * 1024);
         byte[] small = payload(42, 4 * 1024 * 1024);
         try (var store = new PredictionRegionStorage(root)) {

@@ -28,7 +28,7 @@ class PredictionAsyncTerrainCacheTest {
 
     static PredictionDiskCache.TerrainData data() {
         var samples = new ClientColumnSample[66 * 66];
-        Arrays.fill(samples, PredictionSimpleVegetationTest.sample(120));
+        Arrays.fill(samples, PredictionVoxelFixtures.sample(120));
         return new PredictionDiskCache.TerrainData(samples, Long.MIN_VALUE, null, null, null);
     }
 

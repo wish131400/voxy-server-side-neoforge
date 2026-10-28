@@ -133,6 +133,11 @@ public final class VSSCommandHelp {
         alias(xaero, "开启", "enable"); alias(xaero, "关闭", "disable"); alias(xaero, "重载", "reload");
         CommandNode<CommandSourceStack> prediction = root.getChild("prediction");
         alias(prediction, "渲染采集", "rendercapture"); alias(prediction, "参考采集", "capture");
+        CommandNode<CommandSourceStack> perf = prediction.getChild("perf");
+        alias(perf, "状态", "status"); alias(perf, "开始", "start"); alias(perf, "停止", "stop");
+        alias(perf, "面板", "hud"); alias(perf, "标记", "mark"); alias(perf, "报告", "report");
+        alias(perf, "路径", "path");
+        alias(prediction, "性能", "perf");
         for (var entry : CLIENT_ALIASES.entrySet()) alias(root, entry.getKey(), entry.getValue());
     }
 }

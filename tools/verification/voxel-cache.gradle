@@ -1,0 +1,18 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('voxelCacheTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            ['PredictionVoxelCacheTest', 'PredictionVoxelCacheIntegrationTest',
+             'PredictionDiskCacheTest', 'PredictionDiskIntegrationTest', 'PredictionDeferredCacheWriteTest',
+             'PredictionPersistentMappingsTest', 'PredictionTemplateCacheIdentityTest',
+             'PredictionVoxyLoadingIntegrationTest', 'PredictionParentLodIntegrationTest',
+             'PredictionCaptureInvalidationBatchTest', 'PredictionSurfacePipelineTest'].each { include "**/${it}.class" }
+            forkEvery = 1
+            maxHeapSize = '2G'
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

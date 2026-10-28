@@ -10,9 +10,8 @@ import net.minecraft.world.level.block.state.BlockState;
  *  load-bearing — with the real semantics, calling prepare after the overlay
  *  loop wipes every overlay, so the overlay assertions pin the order for real
  *  (review MAJOR: an unfaithful no-op stub made the ordering pin vacuous). */
-public class MapBlock {
+public class MapBlock extends MapPixel {
     public int preparedBottomY = Integer.MIN_VALUE;
-    public BlockState state;
     public int height;
     public int topHeight;
     public ResourceKey<Biome> biome;
@@ -48,6 +47,10 @@ public class MapBlock {
     }
 
     public void addOverlay(Overlay overlay) { this.overlays.add(overlay); }
+    public int getHeight() { return height; }
+    public int getTopHeight() { return topHeight; }
+    public ResourceKey<Biome> getBiome() { return biome; }
+    public java.util.ArrayList<Overlay> getOverlays() { return new java.util.ArrayList<>(overlays); }
 }
 
 

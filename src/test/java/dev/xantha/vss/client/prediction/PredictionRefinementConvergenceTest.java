@@ -14,8 +14,7 @@ class PredictionRefinementConvergenceTest {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         var config=VSSClientConfig.CONFIG;
         int distance=config.predictionDistanceBlocks;
-        boolean trees=config.predictionTrees,structures=config.predictionStructures;
-        config.predictionDistanceBlocks=8192;config.predictionTrees=false;config.predictionStructures=false;
+        config.predictionDistanceBlocks=8192;
         var profile=new DimensionProfile(ResourceLocation.withDefaultNamespace("overworld"),42L,-64,384,"noise","minecraft:overworld",123L);
         var sample=new ClientColumnSample(64,64,0,ClientColumnSample.NO_BLOCK,0,0,0,0,0,
                 ClientColumnSample.FLAG_SURFACE_ONLY,0,ClientColumnSample.NO_BLOCK,ClientColumnSample.NO_BLOCK,
@@ -67,7 +66,7 @@ class PredictionRefinementConvergenceTest {
             for(int i=0;i<100;i++) enqueue.invoke(manager,child,0,0,false);
             assertEquals(completedSamples,sampledColumns.get(),"completed terrain must stop consuming sampling work");
             assertFalse(((Set<?>)get(manager,"pending")).contains(child));
-        } finally {config.predictionDistanceBlocks=distance;config.predictionTrees=trees;config.predictionStructures=structures;}
+        } finally {config.predictionDistanceBlocks=distance;}
     }
     private static Object get(Object target,String name) throws Exception {
         var f=target.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(target);

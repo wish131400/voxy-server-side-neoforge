@@ -92,14 +92,37 @@ class PredictionPlanningValidityTest {
         var residents = scheduling.residents();
         var bands = scheduling.bands();
         var loading = new PredictionLoadingPreparation.Input(scheduling, List.of(), Set.of(), Set.of(),
-                residents, Map.of(), Map.of(), 768, PredictionVisibilityFeedback.Snapshot.EMPTY, Map.of(), f.settings, 0);
-        assertTrue(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, residents, bands));
+                Map.of(), Map.of(), 768, PredictionVisibilityFeedback.Snapshot.EMPTY, f.settings, 0);
+        assertTrue(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, bands));
         var equivalent = new RenderSnapshot(Level.OVERWORLD, f.layout, Map.of(), Map.of());
-        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), equivalent, residents, bands));
-        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, equivalent, bands));
+        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), equivalent, bands));
         f.loadingVersion++;
-        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, residents, bands));
+        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, bands));
         f.loadingVersion--; f.paused = true;
-        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, residents, bands));
+        assertFalse(PredictionPlanningValidity.loading(loading, f.current(), scheduling.plan(), residents, bands));
+    }
+
+    @Test void displayMayObserveChurnButRejectsOldConfigTeleportAndStoppedOwners() {
+        var f = new Fixture();
+        var scheduling = PredictionPlanningPipelineTest.schedulingInput(f.input);
+        var loading = new PredictionLoadingPreparation.Input(scheduling, List.of(), Set.of(), Set.of(),
+                Map.of(), Map.of(), 768, PredictionVisibilityFeedback.Snapshot.EMPTY, f.settings, 0);
+        long now = scheduling.now() + 1;
+        f.loadingVersion++;
+        assertTrue(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
+        assertFalse(PredictionPlanningValidity.loading(loading,f.current(),scheduling.plan(),scheduling.residents(),
+                scheduling.bands()),"observation must not relax readiness");
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),scheduling.now()+1_000_000_001L));
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),scheduling.now()-1));
+        f.x += 129;
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
+        f.x -= 129; f.settings++;
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
+        f.settings--; f.paused = true;
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
+        f.paused = false; f.closed = true;
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
+        f.closed = false; f.y += 129;
+        assertFalse(PredictionPlanningValidity.loadingDisplay(loading,f.current(),scheduling.plan(),now));
     }
 }

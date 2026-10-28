@@ -26,6 +26,15 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     private final boolean signedSqrt;
     private final BlockState[] states;
     private final int[] blocks;
+    private final int[] nativeBiomeMapping;
+    private volatile boolean legacyBiomeIndices;
+    private final java.util.concurrent.atomic.LongAdder biomeNativeBatches = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder biomeNativePoints = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder biomeJavaFallbacks = new java.util.concurrent.atomic.LongAdder();
+    private final ThreadLocal<ByteBuffer> biomePositions = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(256 * 12).order(ByteOrder.LITTLE_ENDIAN));
+    private final ThreadLocal<ByteBuffer> biomeResults = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(256 * 4).order(ByteOrder.LITTLE_ENDIAN));
     private final String[][] featureOrder;
     private final Map<BlockState,Integer> stateIds = new IdentityHashMap<>();
     private final Map<String,Boolean> support = new ConcurrentHashMap<>();
@@ -50,7 +59,10 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     private final ThreadLocal<ByteBuffer> scratch = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(256 * 40).order(ByteOrder.LITTLE_ENDIAN));
     private final ThreadLocal<ByteBuffer> positions = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(64 * 8).order(ByteOrder.LITTLE_ENDIAN));
     private final ThreadLocal<int[]> missingScratch = ThreadLocal.withInitial(() -> new int[64]);
-    private final ThreadLocal<int[]> decodedScratch = ThreadLocal.withInitial(() -> new int[10]);
+    // Native ABI stays at ten ints; the Java cache appends the mapped biome identity.
+    private final ThreadLocal<int[]> decodedScratch = ThreadLocal.withInitial(() -> new int[11]);
+    private final ThreadLocal<int[]> surfaceBiomePositions = ThreadLocal.withInitial(() -> new int[64*3]);
+    private final ThreadLocal<int[]> surfaceBiomes = ThreadLocal.withInitial(() -> new int[64]);
     private final ThreadLocal<ByteBuffer> wallColumn = ThreadLocal.withInitial(() ->
             ByteBuffer.allocateDirect(16 + profile().height() * 4).order(ByteOrder.LITTLE_ENDIAN));
 
@@ -134,6 +146,13 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         String encoded = canonical == null ? RustWorldgenBackend.describe(world) : RustWorldgenBackend.describeCompact(world);
         timing.mark("nativeDescribe");
         JsonObject described = JsonParser.parseString(encoded).getAsJsonObject();
+        var biomeNames = described.getAsJsonArray("biome_names");
+        nativeBiomeMapping = biomeNames == null ? null : new int[biomeNames.size()];
+        if (biomeNames != null) {
+            var palette = cacheBiomeIndices();
+            for (int i=0;i<nativeBiomeMapping.length;i++)
+                nativeBiomeMapping[i] = palette.getOrDefault(biomeNames.get(i).getAsString(), -1);
+        }
         timing.mark("parse");
         this.signedSqrt = described.has("signed_sqrt") && described.get("signed_sqrt").getAsBoolean();
         // The native reports whether it actually replayed the TerraBlender
@@ -202,8 +221,12 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         for (int i=0;i<16;i++) input.putInt(x+i/4).putInt(z+i%4);
         if (RustWorldgenBackend.decorationPoints(id,input,output,16)!=16)
             throw new IllegalStateException("Incomplete display decoration page");
-        int[][] rows = new int[16][10];
+        int[][] rows = new int[16][11];
         for (int i=0;i<16;i++) for (int j=0;j<10;j++) rows[i][j]=output.getInt((i*10+j)*4);
+        int[] queries=surfaceBiomePositions.get(), indices=surfaceBiomes.get();
+        for (int i=0;i<16;i++) surfaceBiomePosition(queries,i,x+i/4,z+i%4,rows[i][0],rows[i][1],rows[i][2]);
+        surfaceBiomeIndices(queries,16,indices);
+        for (int i=0;i<16;i++) rows[i][10]=indices[i];
         return rows;
     }
     ClientColumnSample surfaceSample(int[] record) { return sampleRecord(record, 0); }
@@ -241,6 +264,54 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     }
     long tintGeneration() { return tints.generation(); }
     long tintNativeCalls() { return tintNativeCalls.sum(); }
+    private static void surfaceBiomePosition(int[] queries,int at,int x,int z,int floor,int water,int fluid) {
+        queries[at*3]=x>>2;
+        queries[at*3+1]=((fluid!=0?water:floor)-1)>>2;
+        queries[at*3+2]=z>>2;
+    }
+    private void surfaceBiomeIndices(int[] queries,int count,int[] indices) {
+        if (nativeBiomeMapping==null || legacyBiomeIndices) {
+            Arrays.fill(indices,0,count,-1); // Preserve deferred Java resolution for older libraries.
+        } else sampleBiomeIndices(queries,count,indices);
+    }
+    @Override void sampleBiomeIndices(int[] quartPositions, int count, int[] indices) {
+        handle();
+        if (nativeBiomeMapping == null || legacyBiomeIndices) {
+            biomeJavaFallbacks.add(count);
+            super.sampleBiomeIndices(quartPositions, count, indices);
+            return;
+        }
+        ByteBuffer input=biomePositions.get(), output=biomeResults.get();
+        for (int start=0;start<count;start+=256) {
+            int batch=Math.min(256,count-start);
+            input.clear();
+            for (int i=0;i<batch*3;i++) input.putInt(quartPositions[start*3+i]);
+            try {
+                if (RustWorldgenBackend.biomeIndices(handle(),input,output,batch)!=batch)
+                    throw new IllegalStateException("Incomplete native biome batch");
+            } catch (UnsatisfiedLinkError olderLibrary) {
+                legacyBiomeIndices=true;
+                biomeJavaFallbacks.add(count);
+                super.sampleBiomeIndices(quartPositions,count,indices);
+                return;
+            }
+            biomeNativeBatches.increment(); biomeNativePoints.add(batch);
+            for (int i=0;i<batch;i++) {
+                int nativeIndex=output.getInt(i*4);
+                if (nativeIndex<0 || nativeIndex>=nativeBiomeMapping.length)
+                    throw new IllegalStateException("Invalid native biome index");
+                indices[start+i]=nativeBiomeMapping[nativeIndex];
+            }
+        }
+        // A valid native biome may be absent from an external/legacy persisted palette.
+        // Resolve only those entries through the compatibility context.
+        for (int i=0;i<count;i++) if (indices[i]<0) {
+            int[] point={quartPositions[i*3],quartPositions[i*3+1],quartPositions[i*3+2]};
+            int[] fallback=new int[1];
+            biomeJavaFallbacks.increment();
+            super.sampleBiomeIndices(point,1,fallback); indices[i]=fallback[0];
+        }
+    }
     @Override long colorCacheFingerprint() { return colorFingerprint; }
     private static long colormapFingerprint(JsonObject maps) {
         return ((long) maps.get("grass_colormap").hashCode() << 32)
@@ -276,6 +347,8 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             +","+javaFeatureDiagnostics()
             +",tintCache={"+tints.diagnostics()+",nativeCalls="+tintNativeCalls.sum()+",seeded="+tintSeeded.sum()+"}"
             +",gridCacheHits="+gridCacheHits.sum()+",gridSubmittedPoints="+gridComputedPoints.sum()
+            +",biomeIdentity={nativeBatches="+biomeNativeBatches.sum()+",nativePoints="+biomeNativePoints.sum()
+            +",javaFallbacks="+biomeJavaFallbacks.sum()+"}"
             +","+RustVegetationStage.diagnostics()+","+featureDescriptors.diagnostics()+",groundQueries="+groundDiagnostics();}
     private String groundDiagnostics() {
         long id=world;
@@ -291,7 +364,10 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         ByteBuffer input = positions.get(), output = scratch.get();
         input.putInt(0,x).putInt(4,z);
         if (RustWorldgenBackend.surfacePoints(handle(),input,output,1) != 1) throw new IllegalStateException("Incomplete native point");
-        int[] data = new int[10]; for (int i=0;i<10;i++) data[i]=output.getInt(i*4);
+        int[] data = new int[11]; for (int i=0;i<10;i++) data[i]=output.getInt(i*4);
+        int[] queries=surfaceBiomePositions.get(), indices=surfaceBiomes.get();
+        surfaceBiomePosition(queries,0,x,z,data[0],data[1],data[2]);
+        surfaceBiomeIndices(queries,1,indices); data[10]=indices[0];
         rememberColors(x,z,data,tintGeneration);
         rememberPoint(key,data); return data;
     }
@@ -361,15 +437,37 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             input.putInt(xx).putInt(zz);
         }
         long tintGeneration = tints.generation();
-        int written=display ? RustWorldgenBackend.displayPoints(handle(),input,output,count)
+        boolean gridResult = false;
+        int written;
+        if (display && width == 8 && height == 8 && spacing <= 4 && count < 64
+                && count > (spacing >= 4 ? 36 : 32) && !legacyDisplayGrid) {
+            long mask = 0;
+            for (int n = 0; n < count; n++) mask |= 1L << missing[n];
+            try {
+                written = RustWorldgenBackend.displayGrid(handle(), x, z, spacing, mask, output);
+                if (written != 64) throw new IllegalStateException("Incomplete native display grid");
+                gridResult = true;
+            } catch (UnsatisfiedLinkError olderLibrary) {
+                legacyDisplayGrid = true;
+            }
+        }
+        written=gridResult ? count : display ? RustWorldgenBackend.displayPoints(handle(),input,output,count)
                 : preview ? RustWorldgenBackend.previewPoints(handle(),input,output,count)
                 : RustWorldgenBackend.surfacePoints(handle(),input,output,count);
         if(written!=count) throw new IllegalStateException("Incomplete native grid");
+        int[] queries=surfaceBiomePositions.get(), indices=surfaceBiomes.get();
+        for (int n=0;n<count;n++) {
+            int i=missing[n],record=(gridResult?i:n)*40;
+            surfaceBiomePosition(queries,n,x+i%width*spacing,z+i/width*spacing,
+                    output.getInt(record),output.getInt(record+4),output.getInt(record+8));
+        }
+        surfaceBiomeIndices(queries,count,indices);
         int[] decoded=decodedScratch.get();
         gridComputedPoints.add(count);
         for(int n=0;n<count;n++) {
             int i=missing[n];
-            for(int j=0;j<10;j++) decoded[j]=output.getInt((n*10+j)*4);
+            for(int j=0;j<10;j++) decoded[j]=output.getInt(((gridResult ? i : n)*10+j)*4);
+            decoded[10]=indices[n];
             int xx=x+i%width*spacing,zz=z+i/width*spacing;
             rememberColors(xx,zz,decoded,tintGeneration);
             boolean cache = !preview && (decoded[3] & ClientColumnSample.FLAG_APPROXIMATE)==0;
@@ -379,11 +477,12 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         }
         return result;
     }
+    private volatile boolean legacyDisplayGrid;
     @Override public ClientColumnSample sample(int x, int z) {
         return sampleRecord(point(x,z),0);
     }
     private ClientColumnSample sampleRecord(int[] data,int i) {
-        return new ClientColumnSample(data[i], data[i+1], -1, blocks[data[i+4]], 0, 0, 0, 0,
+        return new ClientColumnSample(data[i], data[i+1], data.length>i+10?data[i+10]:-1, blocks[data[i+4]], 0, 0, 0, 0,
                 data[i+2], data[i+3], 0, blocks[data[i+5]], blocks[data[i+6]],
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
@@ -499,6 +598,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     @Override public int foliageColor(int x, int y, int z) { return 0xff000000 | colors(x,y,z)[1]; }
     @Override public int waterTint(int x, int y, int z) { return 0xb2000000 | colors(x,y,z)[2]; }
     @Override public boolean exactWorldgen() { return true; }
+    @Override boolean floatingTerrain() { return context.floatingTerrain(); }
     @Override public int seaLevel() { return context.seaLevel(); }
     @Override public int fluidColor() { return context.fluidColor(); }
     @Override ClientTerrainSampler decorationContext() { return context; }

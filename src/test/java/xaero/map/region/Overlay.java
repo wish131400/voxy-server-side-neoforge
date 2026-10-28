@@ -3,8 +3,7 @@ package xaero.map.region;
 import net.minecraft.world.level.block.state.BlockState;
 
 /** Tier-1 stub. */
-public class Overlay {
-    public final BlockState state;
+public class Overlay extends MapPixel {
     public final byte light;
     public final boolean glowing;
     public int opacity;
@@ -18,6 +17,7 @@ public class Overlay {
     public void increaseOpacity(int toAdd) {
         this.opacity = Math.min(15, this.opacity + Math.min(15, toAdd));
     }
+    public int getOpacity() { return opacity; }
 }
 
 

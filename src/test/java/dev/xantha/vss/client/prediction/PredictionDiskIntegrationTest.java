@@ -29,8 +29,7 @@ class PredictionDiskIntegrationTest {
     @Test void reopenedManagerUsesStoredGroundWithoutTerrainSamplingAndDirtyRebuildsIt() throws Exception {
         var config = VSSClientConfig.CONFIG;
         int distance = config.predictionDistanceBlocks;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures;
-        config.predictionDistanceBlocks = 1024; config.predictionTrees = false; config.predictionStructures = false;
+        config.predictionDistanceBlocks = 1024;
         AtomicInteger calls = new AtomicInteger();
         int ready;
         try {
@@ -38,10 +37,10 @@ class PredictionDiskIntegrationTest {
                  var manager = manager(calls, cache)) {
                 replan(manager); await(manager);
                 ready = manager.readyCount();
-                assertTrue(ready > 0);
+                assertTrue(ready > 0,manager.surfaceDiagnostics());
                 assertTrue(calls.get() > 0, "cold fixture must calculate terrain");
                 assertEquals(0, manager.failedTileCount());
-                cache.flushMeshes(); cache.flush();
+                cache.flush();
             }
             PredictionCacheTestFiles.awaitBackgroundClose();
             int firstCalls = calls.getAndSet(0);
@@ -53,6 +52,7 @@ class PredictionDiskIntegrationTest {
                 assertTrue(cache.hits() >= ready);
                 var tile = manager.readyTiles().iterator().next();
                 manager.invalidate(tile.baseBlockX() >> 4, tile.baseBlockZ() >> 4);
+                manager.invalidateContent(); // This fixture explicitly requests a cold rebuild after the edit.
                 cache.flush();
                 replan(manager); await(manager);
                 assertTrue(calls.get() > 0, "dirty chunk must remove stale fine columns as well as tile files");
@@ -60,7 +60,7 @@ class PredictionDiskIntegrationTest {
             }
             System.out.println("Manager restart terrain calls: cold=" + firstCalls + ", warm=0; restoredTiles=" + ready);
         } finally {
-            config.predictionDistanceBlocks = distance; config.predictionTrees = trees; config.predictionStructures = structures;
+            config.predictionDistanceBlocks = distance;
         }
     }
 
@@ -70,12 +70,13 @@ class PredictionDiskIntegrationTest {
         var sample=sampler(new AtomicInteger(),PROFILE).sample(0,0);
         try(var cache=new PredictionDiskCache(directory,PROFILE.fingerprint());var manager=manager(new AtomicInteger(),cache)) {
             manager.captureExactColumn(0,0,empty);awaitCaptures(manager);cache.flush();
-            assertEquals(256,manager.persistentSampleCount());
+            assertEquals(256,capturedCount(manager,0,0));
+            assertEquals(0,manager.persistentSampleCount(),"captures use bounded region records, not the legacy heap store");
             try(var lease=cache.lease(key)){assertTrue(cache.writeTerrain(lease,new ClientColumnSample[]{sample}));}
         }
         finishBackgroundCloseBeforeTempCleanup();
         try(var cache=new PredictionDiskCache(directory,PROFILE.fingerprint());var manager=manager(new AtomicInteger(),cache)) {
-            assertEquals(256,manager.persistentSampleCount());
+            assertEquals(256,capturedCount(manager,0,0));
             manager.captureExactColumn(0,0,empty);awaitCaptures(manager);cache.flush();
             try(var lease=cache.lease(key)){assertNotNull(cache.readTerrain(lease,1),"unchanged reconnect traffic must not delete persisted terrain");}
             manager.invalidate(0,0);cache.flush();
@@ -139,9 +140,9 @@ class PredictionDiskIntegrationTest {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (!pending.isEmpty() && System.nanoTime() < deadline) Thread.sleep(10);
             assertTrue(pending.isEmpty());
-            assertEquals(replace ? 256 : 0, manager.persistentSampleCount(), "old in-flight captures must not undo dirty invalidation");
+            assertEquals(replace ? 256 : 0, capturedCount(manager,-3,4), "old in-flight captures must not undo dirty invalidation");
             manager.invalidate(-3, 4);
-            assertEquals(0, manager.persistentSampleCount(), "dirty must remove all 256 captured columns, including corners");
+            assertEquals(replace ? 256 : 0, capturedCount(manager,-3,4), "dirty retains the last real snapshot until its replacement arrives");
         } finally { release.countDown(); }
     }
 
@@ -175,7 +176,28 @@ class PredictionDiskIntegrationTest {
             }
         };
     }
-    private static void replan(PredictionTileManager manager) { for (int i = 0; i < 5; i++) manager.tick(2261, 123, 3901, .01, null); }
+    @SuppressWarnings("unchecked")
+    private static void replan(PredictionTileManager manager) throws Exception {
+        // Drive one real Voxy-owned tile deterministically; no GPU or native Voxy instance is created by this suite.
+        var key = new PredictionTileManager.PredictionTileKey(PROFILE.levelKey(),0,0,manager.layout().levelCount()-1);
+        var unified=PredictionTileManager.class.getDeclaredField("unifiedVoxy");unified.setAccessible(true);unified.setBoolean(manager,true);
+        for (String name : java.util.List.of("desiredKeys","terrainLeaves")) {
+            var field=PredictionTileManager.class.getDeclaredField(name);field.setAccessible(true);
+            ((Set<PredictionTileManager.PredictionTileKey>)field.get(manager)).add(key);
+        }
+        var targets=PredictionTileManager.class.getDeclaredField("terrainTargets");targets.setAccessible(true);
+        targets.set(manager,java.util.Map.of(key,32));
+        var ordinary=PredictionTileManager.class.getDeclaredField("ordinaryTargets");ordinary.setAccessible(true);
+        ordinary.set(manager,java.util.Map.of(key,32));
+        var enqueue=PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileManager.PredictionTileKey.class,int.class,int.class);
+        enqueue.setAccessible(true);enqueue.invoke(manager,key,0,0);
+    }
+    private static int capturedCount(PredictionTileManager manager,int chunkX,int chunkZ) throws Exception {
+        var field=PredictionTileManager.class.getDeclaredField("capturedTerrain");field.setAccessible(true);
+        var captures=(PredictionCapturedTerrain)field.get(manager);int count=0;
+        for(int z=0;z<16;z++)for(int x=0;x<16;x++)if(captures.exact(chunkX*16+x,chunkZ*16+z)!=null)count++;
+        return count;
+    }
     private static void await(PredictionTileManager manager) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (manager.pendingCount() > 0 && System.nanoTime() < deadline) Thread.sleep(10);

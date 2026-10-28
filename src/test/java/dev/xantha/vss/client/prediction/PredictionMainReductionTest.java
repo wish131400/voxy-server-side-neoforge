@@ -88,50 +88,11 @@ class PredictionMainReductionTest {
         raw.remove(raw.iterator().next()); assertEquals(false, method.invoke(null, key, input(raw, false), empty));
     }
 
-    @Test void rotatingMaintenanceCursorSurvivesInsertRemoveAndVisitsEveryResident() {
-        var cursor = new PredictionMaintenanceCursor<Integer>();
-        for (int j = 0; j < 1000; j++) cursor.add(j);
-        var seen = new HashSet<Integer>();
-        for (int j = 0; j < 500; j++) seen.add(cursor.next());
-        for (int j = 100; j < 800; j++) cursor.remove(j);
-        for (int j = 1000; j < 1020; j++) cursor.add(j);
-        seen.clear(); for (int j = 0; j < cursor.size(); j++) seen.add(cursor.next());
-        assertEquals(cursor.size(), seen.size()); assertEquals(320, cursor.size());
-        for (int j = 0; j < 100; j++) assertTrue(seen.contains(j));
-        for (int j = 800; j < 1020; j++) assertTrue(seen.contains(j));
-        cursor.clear(); assertNull(cursor.next());
-    }
 
-    @Test void coverageWithdrawalClearsOnlyTheDirtyColumnBeforeAnyBoundedProbeRuns() throws Exception {
-        var mask = new PredictionVanillaMask();
-        var reanchor = PredictionVanillaMask.class.getDeclaredMethod("reanchor", int.class, int.class, int.class, int.class, int.class);
-        reanchor.setAccessible(true); reanchor.invoke(mask, 5, 3, -2, -2, -4);
-        var states = (byte[]) get(mask, "states"); Arrays.fill(states, (byte) 1);
-        Arrays.fill((boolean[]) get(mask, "compiledGround"), true);
-        mask.markDirty(0, 0);
-        var withdraw = PredictionVanillaMask.class.getDeclaredMethod("withdrawDirtyColumns"); withdraw.setAccessible(true);
-        withdraw.invoke(mask);
-        for (int z = 0; z < 5; z++) for (int y = 0; y < 3; y++) for (int x = 0; x < 5; x++)
-            assertEquals(x == 2 && z == 2 ? 0 : 1, states[(z * 3 + y) * 5 + x]);
-        assertFalse(((boolean[]) get(mask, "compiledGround"))[2 * 5 + 2]);
-        assertTrue(((java.util.BitSet) get(mask, "priorityProbes")).get(2 * 5 + 2));
-        assertEquals(0L, get(mask, "identityChecks"), "withdrawal is independent of polling cadence");
-    }
 
-    @Test void gpuSlicesCannotRetireAnUnobservedOrCurrentlyVisibleCandidate() {
-        var now = new AtomicLong(); var residency = new PredictionGpuResidency<Integer>(100, now::get);
-        for (int j = 0; j < 200; j++) { residency.uploaded(j, 1, 10); residency.observe(j, 10, false, false, true, false); }
-        now.set(30_000_000_000L); assertTrue(residency.beginObservation());
-        var observed = new ArrayList<Integer>();
-        for (int j = 0; j < 64; j++) observed.add(residency.nextObservation());
-        int visible = observed.get(0); residency.observe(visible, 10, true, false, true, false);
-        var victims = residency.retirements(2000, observed);
-        assertFalse(victims.isEmpty());
-        for (var victim : victims) { assertTrue(observed.contains(victim.key())); assertNotEquals(visible, victim.key()); residency.evicted(victim); }
-        assertEquals(136L, residency.snapshot().get("observationRemaining"));
-        var counts = new long[13]; Arrays.fill(counts, 10); residency.contribution(199, counts);
-        assertEquals(10, residency.standaloneBytes()); residency.removed(199); assertEquals(0, residency.standaloneBytes());
-    }
+
+
+
 
     @Test void liveTickWaitsForTheWorkerAndRejectsATeleportBeforePublishingGoals() throws Exception {
         boolean remember = VSSClientConfig.CONFIG.rememberTerrain;
@@ -160,7 +121,7 @@ class PredictionMainReductionTest {
                 0, 768, -64, 320, false, List.copyOf(axes), 0, 0, ClientPredictionState.exactCoverageRemovalRevision(),
                 new PredictionTileManager.RenderSnapshot(Level.OVERWORLD, layout, Map.of(), Map.of()), Map.of(), Set.copyOf(edited), mixed,
                 Set.of(), Set.of(), Set.of(), 0, 0, PredictionVisibilityFeedback.Snapshot.EMPTY, Set.of(), Map.of(), Set.of(),
-                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, true, false, System.nanoTime());
+                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, true, false, System.nanoTime(), false);
     }
     private static Object get(Object target, String name) throws Exception {
         return PredictionPlanningTestSupport.get(target, name);

@@ -19,6 +19,8 @@ final class PredictionPlanningPipeline {
     final Lane<PredictionDemandPreparation.Input, PredictionDemandPreparation.Result> view;
     final Lane<PredictionSchedulePreparation.Input, PredictionSchedulePreparation.Result> schedule;
     final Lane<PredictionLoadingPreparation.Input, PredictionLoadingPreparation.Result> loading;
+    final Lane<PredictionVoxyWorkPreparation.Input, PredictionVoxyWorkPreparation.Result> details;
+    final PredictionPlanPreparation.Calculation planCalculation = new PredictionPlanPreparation.Calculation();
     final PredictionDemandPreparation viewCalculation = new PredictionDemandPreparation();
 
     PredictionPlanningPipeline(BiFunction<ResourceKey<Level>, Long, PredictionExactCoverageIndex.View> coverage) {
@@ -29,11 +31,12 @@ final class PredictionPlanningPipeline {
             BiFunction<ResourceKey<Level>, Long, PredictionExactCoverageIndex.View> coverage) {
         Objects.requireNonNull(coverage, "coverage");
         // 稀疏覆盖快照仍在后台获取。算法只接收快照，不查询全局客户端或 Voxy 活节点。
-        plan = new Lane<>(executor, input -> PredictionPlanPreparation.build(input,
+        plan = new Lane<>(executor, input -> planCalculation.build(input,
                 coverage.apply(input.dimension(), input.now())));
         view = new Lane<>(executor, viewCalculation::build);
         schedule = new Lane<>(executor, PredictionSchedulePreparation::build);
         loading = new Lane<>(executor, PredictionLoadingPreparation::build);
+        details = new Lane<>(executor, PredictionVoxyWorkPreparation::build);
     }
 
     /** 传送、暂停及关闭共用一个失效入口；不撤销已经发布的居民瓦片。 */
@@ -42,6 +45,7 @@ final class PredictionPlanningPipeline {
         view.clear();
         schedule.clear();
         loading.clear();
+        details.clear();
     }
 
     /** 单一异步状态机的规划适配；统计与任务槽位都仅在客户端线程更新。 */

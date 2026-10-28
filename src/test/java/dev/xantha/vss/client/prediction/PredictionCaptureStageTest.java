@@ -15,9 +15,7 @@ class PredictionCaptureStageTest {
     @Test void staleNativeOrJavaSamplingStopsBeforeColorDecorationAndPublicationAndCanRetry() throws Exception {
         var config = VSSClientConfig.CONFIG;
         int distance = config.predictionDistanceBlocks;
-        boolean trees = config.predictionTrees, structures = config.predictionStructures;
         config.predictionDistanceBlocks = 4096;
-        config.predictionTrees = false; config.predictionStructures = false;
         var sampled = new AtomicInteger();
         var colored = new AtomicInteger();
         var invalidated = new AtomicBoolean();
@@ -27,10 +25,10 @@ class PredictionCaptureStageTest {
             @Override public ClientColumnSample samplePreview(int x, int z, int step) {
                 sampled.incrementAndGet();
                 if (invalidated.compareAndSet(false, true)) current.get().capturedTerrainChanged(0, 0);
-                return PredictionSimpleVegetationTest.sample(120);
+                return PredictionVoxelFixtures.sample(120);
             }
             @Override public ClientColumnSample sampleSurface(int x, int z) {
-                sampled.incrementAndGet(); return PredictionSimpleVegetationTest.sample(120);
+                sampled.incrementAndGet(); return PredictionVoxelFixtures.sample(120);
             }
             @Override int surfaceColorForLod(int x, int y, int z, boolean preview) {
                 colored.incrementAndGet(); return 0xff669944;
@@ -57,21 +55,11 @@ class PredictionCaptureStageTest {
             assertEquals(0, manager.failedTileCount());
         } finally {
             config.predictionDistanceBlocks = distance;
-            config.predictionTrees = trees; config.predictionStructures = structures;
         }
         assertEquals(0, budget.usedBytes());
     }
 
-    @Test void meshCancellationIsCheckedInsideRowsAndDoesNotTriggerSimplificationRetries() {
-        var samples = new ClientColumnSample[66 * 66];
-        Arrays.fill(samples, PredictionSimpleVegetationTest.sample(120));
-        var checks = new AtomicInteger();
-        assertThrows(CancellationException.class, () -> PredictionMeshBuilder.build(
-                samples, null, 63, 0, 1, 66, null, null, 0, 0,
-                PredictionVegetation.Tile.EMPTY, PredictionSimpleVegetation.Result.EMPTY, null,
-                () -> checks.incrementAndGet() < 6));
-        assertEquals(6, checks.get());
-    }
+
 
     @Test void staleDecorationReleasesBeforeStartingAnyFeatureReplay() {
         var source = new ClientTerrainSampler(42, PredictionDecorationQueryTest.PROFILE);

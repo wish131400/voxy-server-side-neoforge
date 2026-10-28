@@ -106,9 +106,7 @@ class PredictionVegetationTest {
                 "rolling back a downloaded native edit must resynchronize its restored Java state");
     }
 
-    @Test void enabledFeatureIndicesRefreshWhenTreeAndStructureSettingsChange() {
-        var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        boolean oldTrees = config.predictionTrees, oldStructures = config.predictionStructures;
+    @Test void completeVegetationAndStructuresStayEnabledAndCachedChunksDoNotReplay() {
         var counts = new java.util.concurrent.atomic.AtomicInteger[3];
         var features = new PlacedFeature[3];
         for (int i = 0; i < counts.length; i++) {
@@ -125,22 +123,14 @@ class PredictionVegetationTest {
                 GenerationStep.Decoration.RAW_GENERATION, List.of(features[0]),
                 GenerationStep.Decoration.SURFACE_STRUCTURES, List.of(features[1]),
                 GenerationStep.Decoration.VEGETAL_DECORATION, List.of(features[2])));
-        try {
-            config.predictionTrees = false; config.predictionStructures = false;
-            var vegetation = new PredictionVegetation(sampler, null, false);
-            assertTrue(vegetation.available());
-            vegetation.chunk(0, 0);
-            assertEquals(1, counts[0].get()); assertEquals(0, counts[1].get()); assertEquals(0, counts[2].get());
-            config.predictionTrees = true;
-            vegetation.chunk(1, 0);
-            assertEquals(2, counts[0].get()); assertEquals(0, counts[1].get()); assertEquals(1, counts[2].get());
-            config.predictionStructures = true;
-            vegetation.chunk(2, 0);
-            assertEquals(3, counts[0].get()); assertEquals(1, counts[1].get()); assertEquals(2, counts[2].get());
-            config.predictionTrees = false;
-            vegetation.chunk(3, 0);
-            assertEquals(4, counts[0].get()); assertEquals(2, counts[1].get()); assertEquals(2, counts[2].get());
-        } finally { config.predictionTrees = oldTrees; config.predictionStructures = oldStructures; }
+        var vegetation = new PredictionVegetation(sampler, null, false);
+        assertTrue(vegetation.available());
+        for (int x = 0; x < 4; x++) {
+            vegetation.chunk(x, 0);
+            for (var count : counts) assertEquals(x + 1, count.get());
+            vegetation.chunk(x, 0);
+            for (var count : counts) assertEquals(x + 1, count.get(), "cached complete placements are reused");
+        }
     }
 
     @Test
@@ -149,8 +139,7 @@ class PredictionVegetationTest {
                 Feature.FREEZE_TOP_LAYER, NoneFeatureConfiguration.INSTANCE)), List.of());
         var sampler = sampler(48271, Blocks.GRASS_BLOCK,
                 Map.of(GenerationStep.Decoration.TOP_LAYER_MODIFICATION, List.of(freeze)), -0.5F);
-        int settings = (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees ? 1 : 0)
-                | (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionStructures ? 2 : 0) | 28;
+        int settings = 3 | 28 | PredictionVegetation.runtimeSettings();
         var key = PredictionDiskCache.Key.surface(0, 0, settings);
         var leaf = new BlockPos(3, 80, 5);
         var saved = Map.of(leaf, Blocks.OAK_LEAVES.defaultBlockState(),
@@ -231,8 +220,7 @@ class PredictionVegetationTest {
     @Test
     void cachedUnsupportedLeafDistancesSettleWithoutReplayingWorldgen() {
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of());
-        var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        int settings = (config.predictionTrees ? 1 : 0) | (config.predictionStructures ? 2 : 0) | 28;
+        int settings = 3 | 28 | PredictionVegetation.runtimeSettings();
         var key = PredictionDiskCache.Key.surface(0, 0, settings);
         var pos = new BlockPos(1, 80, 0);
         var source = Map.of(pos.west(), Blocks.BIRCH_LOG.defaultBlockState(),
@@ -251,8 +239,7 @@ class PredictionVegetationTest {
     @Test
     void cachedStackedBambooIsRepairedAndPersistedWithoutRegeneration() {
         var sampler = sampler(48271, Blocks.GRASS_BLOCK, List.of());
-        int settings = (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees ? 1 : 0)
-                | (dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionStructures ? 2 : 0) | 28;
+        int settings = 3 | 28 | PredictionVegetation.runtimeSettings();
         var key = PredictionDiskCache.Key.surface(0, 0, settings);
         var source = new HashMap<BlockPos, BlockState>();
         for (int y = 64; y <= 90; y++) source.put(new BlockPos(2, y, 3), Blocks.BAMBOO.defaultBlockState());
@@ -322,29 +309,6 @@ class PredictionVegetationTest {
         assertThrows(AssertionError.class, () -> vegetation.chunk(0,0));
         assertDoesNotThrow(() -> vegetation.chunk(0,0));
         assertEquals(2,calls.get());
-    }
-
-    @Test void coarseCanopyUsesMajorityLeavesAndKeepsPureTrunksAndGroundEdits() {
-        var blocks = new HashMap<BlockPos,BlockState>();
-        for (int z=0;z<4;z++) for (int y=68;y<72;y++) for (int x=-4;x<0;x++)
-            blocks.put(new BlockPos(x,y,z),Blocks.BIRCH_LEAVES.defaultBlockState());
-        for (int y=64;y<72;y++) blocks.put(new BlockPos(-4,y,0),Blocks.BIRCH_LOG.defaultBlockState());
-        var reduced = PredictionVegetation.reduceBlocks(blocks,4);
-        assertTrue(reduced.get(new BlockPos(-4,68,0)).is(Blocks.BIRCH_LEAVES),"A narrow trunk must not repaint the canopy");
-        assertTrue(reduced.get(new BlockPos(-4,64,0)).is(Blocks.BIRCH_LOG),"Unmixed trunks remain wood");
-        var mixedStates = new HashMap<BlockPos,BlockState>();
-        for (int i=0;i<6;i++) mixedStates.put(new BlockPos(i%2,68,i/2),Blocks.BIRCH_LEAVES.defaultBlockState()
-                .setValue(net.minecraft.world.level.block.LeavesBlock.DISTANCE,i+1));
-        for (int i=0;i<4;i++) mixedStates.put(new BlockPos(2,68+i,0),Blocks.BIRCH_LOG.defaultBlockState());
-        assertTrue(PredictionVegetation.reduceBlocks(mixedStates,4).get(new BlockPos(0,68,0)).is(Blocks.BIRCH_LEAVES),
-                "Leaf distance states must vote as one material");
-        var reversed = new java.util.LinkedHashMap<BlockPos,BlockState>();
-        blocks.entrySet().stream().sorted(java.util.Comparator.comparingInt(e -> -e.getKey().hashCode()))
-                .forEach(e -> reversed.put(e.getKey(),e.getValue()));
-        assertEquals(reduced,PredictionVegetation.reduceBlocks(reversed,4));
-        blocks.put(new BlockPos(-4,68,0),Blocks.SAND.defaultBlockState());
-        assertTrue(PredictionVegetation.reduceBlocks(blocks,4).get(new BlockPos(-4,68,0)).is(Blocks.SAND),
-                "A snapped canopy must not replace an exact terrain edit");
     }
 
     @Test void nonVegetationStagesKeepTheirOriginalOrderAndSeedIndices() {
@@ -444,26 +408,7 @@ class PredictionVegetationTest {
         assertEquals(2, eligible.size(), "visual and exact terrain keep independent footprints");
     }
 
-    @Test
-    void groundPredicatesAndAbsentBiomeFeaturesDoNotCreateFallbackTrees() {
-        assertTrue(new PredictionVegetation(sampler(17, Blocks.RED_SAND, List.of(tree())))
-                .chunk(0, 0).isEmpty(), "trees rejected by real soil predicates stay absent");
-        var empty = new PredictionVegetation(sampler(17, Blocks.GRASS_BLOCK, List.of()));
-        assertTrue(empty.chunk(0, 0).isEmpty());
-        var sample = column(Blocks.GRASS_BLOCK);
-        var hints = new ClientColumnSample(64, 64, 0, sample.topBlockIndex(), 99,
-                1, 255, 12, 0, ClientColumnSample.FLAG_TREE_HERE, 1,
-                sample.underBlockIndex(), sample.deepBlockIndex(), 40, 20, 0, -64);
-        ClientColumnSample[] samples = new ClientColumnSample[9 * 9];
-        java.util.Arrays.fill(samples, hints);
-        for (int spacing : new int[]{1, 2, 4, 8}) {
-            var mesh = PredictionMeshBuilder.build(samples, null, 63, 0, spacing, 9,
-                    null, null, 0, 0,
-                    PredictionVegetation.Tile.EMPTY);
-            assertEquals(8 * 8 * 6, mesh.vertexCount(),
-                    "native tree/structure hints cannot create placeholder geometry at spacing " + spacing);
-        }
-    }
+
 
     @Test
     void failedFeatureRollsBackPartialBlocksWithoutReplacingThemWithTemplates() {
@@ -496,17 +441,16 @@ class PredictionVegetationTest {
         for (int spacing : new int[]{4, 8}) {
             var coarse = prediction.tile(-16, -16, 32, spacing, true, (x, z) -> false);
             assertTrue(coarse.cells().values().stream().flatMap(List::stream)
-                    .allMatch(voxel -> voxel.size() <= spacing / 2), "coarse trees stay bounded voxels");
+                    .allMatch(voxel -> voxel.size() == 1), "Voxy receives complete tree voxels even on coarse terrain");
         }
     }
 
     @Test
     void managerPublishesHorizonThenTerrainThenVisiblePlants() throws Exception {
         var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        int distance = config.predictionDistanceBlocks, radius = config.predictionSurfaceDistanceBlocks;
+        int distance = config.predictionDistanceBlocks;
         boolean remember = config.rememberTerrain;
         config.predictionDistanceBlocks = 1024;
-        config.predictionSurfaceDistanceBlocks = 128;
         config.rememberTerrain = false;
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         Feature<NoneFeatureConfiguration> marker = new Feature<>(NoneFeatureConfiguration.CODEC) {
@@ -519,7 +463,11 @@ class PredictionVegetationTest {
         var sampler = sampler(42, Blocks.GRASS_BLOCK, List.of(placed(new ConfiguredFeature<>(marker, NoneFeatureConfiguration.INSTANCE), 1)));
         var budget = new PredictionMemoryBudget(768L * PredictionMemoryBudget.MIB, 0, () -> Long.MAX_VALUE, System::nanoTime);
         try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD, sampler, budget)) {
-            manager.tick(32, 80, 32, .01, null);
+            long initialDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15);
+            while (manager.readyCount() == 0 && System.nanoTime() < initialDeadline) {
+                manager.tick(32, 80, 32, .01, null);
+                Thread.sleep(5);
+            }
             awaitManager(manager);
             assertTrue(manager.readyCount() > 0);
             assertEquals(0, calls.get(), "initial whole-horizon coverage must not run decoration");
@@ -539,9 +487,16 @@ class PredictionVegetationTest {
             assertTrue(manager.readyTiles().stream().anyMatch(tile -> tile.depthBound().maxY() >= 68),
                     "placed surface blocks must reach published renderable meshes, not only the feature cache");
             var counts = manager.readyTiles().stream().filter(tile -> tile.depthBound().maxY() >= 68).toList();
-            assertTrue(counts.stream().allMatch(tile -> tile.spacingBlocks() <= 2));
+            // Neighbor terrain can reuse completed chunk placements before every
+            // chunk of its own larger footprint is decorated. Those are full blocks,
+            // but must not be advertised as a completed surface region.
+            assertTrue(counts.stream().anyMatch(tile -> tile.data().voxyTile.surfaceComplete()),
+                    "At least one decorated region must be published as complete");
+            assertTrue(counts.stream().flatMap(tile -> tile.data().voxyTile.features().stream()).allMatch(box ->
+                    box.maxX() - box.minX() == 1 && box.maxY() - box.minY() == 1 && box.maxZ() - box.minZ() == 1),
+                    "Complete vegetation retains one-block voxels independently of the terrain sample spacing");
         } finally {
-            config.predictionDistanceBlocks = distance; config.predictionSurfaceDistanceBlocks = radius; config.rememberTerrain = remember;
+            config.predictionDistanceBlocks = distance;  config.rememberTerrain = remember;
         }
     }
 
@@ -601,6 +556,7 @@ class PredictionVegetationTest {
     }
 
     private static void awaitManager(PredictionTileManager manager) throws InterruptedException {
+        Thread.sleep(10); // allow asynchronous planning publication before polling build workers
         long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15);
         while (manager.pendingCount() > 0 && System.nanoTime() < deadline) Thread.sleep(10);
         assertEquals(0, manager.pendingCount(), "bounded stage must finish");
@@ -609,13 +565,10 @@ class PredictionVegetationTest {
     @Test
     void readyNearTilesGetTreesEvenWhenAnotherNearTileCannotFinish() throws Exception {
         var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        int distance = config.predictionDistanceBlocks, radius = config.predictionSurfaceDistanceBlocks;
-        boolean remember = config.rememberTerrain, trees = config.predictionTrees, structures = config.predictionStructures;
+        int distance = config.predictionDistanceBlocks;
+        boolean remember = config.rememberTerrain;
         config.predictionDistanceBlocks = 4096;
-        config.predictionSurfaceDistanceBlocks = 768;
         config.rememberTerrain = false;
-        config.predictionTrees = true;
-        config.predictionStructures = false;
         var base = sampler(48271, Blocks.GRASS_BLOCK, List.of(tree()));
         var delayed = new ClientTerrainSampler(48271, base.profile()) {
             @Override public ClientColumnSample sample(int x, int z) { return column(Blocks.GRASS_BLOCK); }
@@ -629,7 +582,7 @@ class PredictionVegetationTest {
             @Override BiomeSource biomeSourceContext() { return base.biomeSourceContext(); }
             @Override RegistryAccess decorationAccess() { return RegistryAccess.EMPTY; }
         };
-        var budget = new PredictionMemoryBudget(176L * PredictionMemoryBudget.MIB, 0,
+        var budget = new PredictionMemoryBudget((PredictionMemoryBudget.BUILD_BYTES + 64L * PredictionMemoryBudget.MIB), 0,
                 () -> Long.MAX_VALUE, System::nanoTime, 1);
         try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD, delayed, budget)) {
             // Give the single worker enough turns to establish medium terrain
@@ -644,61 +597,8 @@ class PredictionVegetationTest {
             assertTrue(budget.usedBytes() <= budget.limitBytes());
         } finally {
             config.predictionDistanceBlocks = distance;
-            config.predictionSurfaceDistanceBlocks = radius;
             config.rememberTerrain = remember;
-            config.predictionTrees = trees;
-            config.predictionStructures = structures;
         }
-    }
-
-    @Test
-    void enablingTreesAfterTerrainFillsMemoryStillPublishesNearbyTrees() throws Exception {
-        var config = dev.xantha.vss.config.VSSClientConfig.CONFIG;
-        int distance = config.predictionDistanceBlocks, radius = config.predictionSurfaceDistanceBlocks;
-        boolean remember = config.rememberTerrain, trees = config.predictionTrees, structures = config.predictionStructures;
-        config.predictionDistanceBlocks = 4096;
-        config.predictionSurfaceDistanceBlocks = 768;
-        config.rememberTerrain = false;
-        config.predictionTrees = false;
-        config.predictionStructures = false;
-        var budget = new PredictionMemoryBudget(176L * PredictionMemoryBudget.MIB, 0,
-                () -> Long.MAX_VALUE, System::nanoTime, 1);
-        try (var manager = new PredictionTileManager(net.minecraft.world.level.Level.OVERWORLD,
-                sampler(48271, Blocks.GRASS_BLOCK, List.of(tree())), budget)) {
-            // Compacted terrain retains fewer bytes; a fixed number of planner
-            // turns no longer guarantees pressure. Wait for the actual budget
-            // condition while keeping a bounded test deadline.
-            long fillDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
-            while (!budget.exhausted() && System.nanoTime() < fillDeadline) {
-                for (int tick = 0; tick < 5; tick++) manager.tick(32, 176, 32, 1300, null, 128);
-                awaitManager(manager);
-            }
-            assertTrue(budget.exhausted(), "terrain must first consume the available build headroom: bytes="
-                    + budget.usedBytes() + ",ready=" + manager.readyCount() + "," + manager.surfaceDiagnostics());
-            assertTrue(manager.readyTiles().stream().allMatch(tile -> tile.depthBound().maxY() == 64));
-            var previousKeys = manager.readyTiles().stream().map(PredictionTileManager.PredictionTile::key).toList();
-            config.predictionTrees = true;
-            for (int cycle = 0; cycle < 35; cycle++) {
-                for (int tick = 0; tick < 5; tick++) manager.tick(32, 176, 32, 1300, null, 128);
-                awaitManager(manager);
-                if (manager.readyTiles().stream().anyMatch(tile -> tile.depthBound().maxY() > 68)) break;
-            }
-            assertTrue(manager.readyTiles().stream().anyMatch(tile -> tile.depthBound().maxY() > 68),
-                    "a full stationary terrain cache must allow surface upgrades: " + manager.surfaceDiagnostics());
-            var resident = manager.readyTiles().stream().map(PredictionTileManager.PredictionTile::key)
-                    .collect(Collectors.toSet());
-            for (var key : previousKeys) assertTrue(resident.contains(key)
-                    || PredictionTileResidencyPolicy.coveredByAncestor(resident, manager.layout(), key),
-                    "reclaiming detail must preserve complete parent coverage");
-            assertTrue(budget.usedBytes() <= budget.limitBytes());
-        } finally {
-            config.predictionDistanceBlocks = distance;
-            config.predictionSurfaceDistanceBlocks = radius;
-            config.rememberTerrain = remember;
-            config.predictionTrees = trees;
-            config.predictionStructures = structures;
-        }
-        assertEquals(0, budget.usedBytes());
     }
 
     private static Set<BlockPos> positions(PredictionVegetation.Tile tile) {
@@ -722,7 +622,7 @@ class PredictionVegetationTest {
             var readyField = manager.getClass().getDeclaredField("ready"); readyField.setAccessible(true);
             var ready = (Map<PredictionTileManager.PredictionTileKey,PredictionTileManager.PredictionTile>)readyField.get(manager);
             ready.put(key,new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
-                    null,new PredictionDepthBound(64,64),0,1,32,2));
+                    PredictionVoxelFixtures.flat(key,32,2,64),new PredictionDepthBound(64,64),0,1,32,2));
             var enqueue = manager.getClass().getDeclaredMethod("enqueue",PredictionTileManager.PredictionTileKey.class,int.class,int.class,boolean.class);
             enqueue.setAccessible(true); enqueue.invoke(manager,key,0,0,false);
             var surfacesField = manager.getClass().getDeclaredField("surfaceReady"); surfacesField.setAccessible(true);

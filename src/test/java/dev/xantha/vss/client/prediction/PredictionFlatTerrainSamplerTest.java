@@ -48,34 +48,8 @@ class PredictionFlatTerrainSamplerTest {
         var sample = sampler(0, 256, new int[]{10, 1}, Blocks.WATER, Blocks.STONE).sample(1, 2);
         assertEquals(11, sample.surfaceY()); assertEquals(11, sample.fluidY()); assertFalse(sample.hasFluid());
     }
-    @Test void floatingLayersAndBuriedFluidsKeepTheirCompleteOccupancy() {
-        var sampler = sampler(-64, 384, new int[]{4, 2, 5, 3, 1},
-                Blocks.AIR, Blocks.STONE, Blocks.AIR, Blocks.WATER, Blocks.DIRT);
-        var sample = sampler.sampleForLod(1000, -1000, 64);
-        var volume = sample.volume();
-        assertNotNull(volume); assertFalse(sample.surfaceOnly());
-        assertEquals(-49, sample.surfaceY()); assertFalse(sample.hasFluid());
-        assertFalse(volume.occupied(-64, false));
-        assertEquals(BuiltInRegistries.BLOCK.getId(Blocks.STONE), volume.blockAt(-60));
-        assertFalse(volume.occupied(-58, false));
-        assertEquals(BuiltInRegistries.BLOCK.getId(Blocks.WATER), volume.blockAt(-53));
-        assertFalse(volume.occupied(-53, true));
-        assertEquals(BuiltInRegistries.BLOCK.getId(Blocks.DIRT), volume.blockAt(-50));
-        assertSame(volume, sampler.samplePreview(-20000000, 20000000, 32).volume());
-        var samples = new ClientColumnSample[9]; java.util.Arrays.fill(samples, sample);
-        var mesh = PredictionMeshBuilder.build(samples, null, 63, 0xff3366ff, 8, 3, false);
-        for (int y : new int[]{-58, -49}) assertTrue(hasFace(mesh, y, 1), "solid top " + y);
-        for (int y : new int[]{-60, -50}) assertTrue(hasFace(mesh, y, -1), "solid bottom " + y);
-        assertEquals(0, mesh.waterVertexCount(), "the solid roof occludes this water surface");
-        var exposed = sampler(-64, 384, new int[]{4, 2, 5, 3}, Blocks.AIR, Blocks.STONE, Blocks.AIR, Blocks.WATER);
-        java.util.Arrays.fill(samples, exposed.sample(0, 0));
-        assertTrue(PredictionMeshBuilder.build(samples, null, 63, 0xff3366ff, 8, 3, false).waterVertexCount() > 0);
-    }
-    private static boolean hasFace(PredictionMesh mesh, int y, int normal) {
-        for (int vertex = 0; vertex < mesh.vertexCount(); vertex++)
-            if (mesh.y(vertex) == y && mesh.normalY(vertex) == normal) return true;
-        return false;
-    }
+
+
     @Test void layerHeightAndUnknownMaterialsFailInsteadOfChangingTheTerrain() {
         assertThrows(IllegalArgumentException.class, () -> sampler(0, 256, new int[]{-1}, Blocks.STONE));
         assertThrows(IllegalArgumentException.class, () -> sampler(0, 256, new int[]{4097}, Blocks.STONE));

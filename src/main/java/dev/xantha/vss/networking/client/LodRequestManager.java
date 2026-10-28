@@ -46,7 +46,7 @@ public final class LodRequestManager {
      * the marker with real section data.
      */
     private final java.util.Set<Long> strictUnavailableColumns =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+            new dev.xantha.vss.common.ConcurrentPositionSet();
     public boolean strictColumnReady(int cx, int cz) {
         if (filteredSession) return false;
         long packed = PositionUtil.packPosition(cx, cz);

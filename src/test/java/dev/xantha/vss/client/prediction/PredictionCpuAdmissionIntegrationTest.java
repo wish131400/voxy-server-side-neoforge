@@ -32,7 +32,6 @@ class PredictionCpuAdmissionIntegrationTest {
             42L, -64, 384, "noise", "minecraft:overworld", 123L);
     private String previousTier;
     private int previousDistance;
-    private boolean previousTrees, previousStructures;
 
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
@@ -40,12 +39,10 @@ class PredictionCpuAdmissionIntegrationTest {
         var config = VSSClientConfig.CONFIG;
         previousTier = config.performanceTier;
         previousDistance = config.predictionDistanceBlocks;
-        previousTrees = config.predictionTrees;
-        previousStructures = config.predictionStructures;
+
+
         config.performanceTier = "low";
         config.predictionDistanceBlocks = 8192;
-        config.predictionTrees = false;
-        config.predictionStructures = false;
         PredictionFramePace.resetForTesting();
     }
 
@@ -53,8 +50,6 @@ class PredictionCpuAdmissionIntegrationTest {
         var config = VSSClientConfig.CONFIG;
         config.performanceTier = previousTier;
         config.predictionDistanceBlocks = previousDistance;
-        config.predictionTrees = previousTrees;
-        config.predictionStructures = previousStructures;
         PredictionFramePace.resetForTesting();
     }
 
@@ -261,7 +256,7 @@ class PredictionCpuAdmissionIntegrationTest {
             if (release != null) awaitLatch(release);
         }
         @Override int initialTerrainCellAxis(int lod) { return 8; }
-        @Override public ClientColumnSample sample(int x, int z) { observe(); return PredictionSimpleVegetationTest.sample(64); }
+        @Override public ClientColumnSample sample(int x, int z) { observe(); return PredictionVoxelFixtures.sample(64); }
         @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return sample(x, z); }
         @Override public ClientColumnSample samplePreview(int x, int z, int step) { return sample(x, z); }
         @Override int surfaceColorForLod(int x, int y, int z, boolean preview) { observe(); return 0xff70aa30; }
@@ -305,9 +300,8 @@ class PredictionCpuAdmissionIntegrationTest {
         int[] heights = new int[(axis + 1) * (axis + 1)];
         Arrays.fill(heights, 64);
         var samples = new ClientColumnSample[heights.length];
-        Arrays.fill(samples, PredictionSimpleVegetationTest.sample(64));
-        var mesh = new PredictionMesh(new float[0], new float[0], new int[0], new float[0], new float[0],
-                new int[0], new boolean[axis * axis], 0, 0, axis * axis, null, null, null, null, axis, spacing);
+        Arrays.fill(samples, PredictionVoxelFixtures.sample(64));
+        var mesh = PredictionVoxelFixtures.flat(key,axis,spacing,64);
         residents(manager).put(key, new PredictionTile(key, heights, heights, samples, mesh,
                 new PredictionDepthBound(64, 64), 0, 0, axis, spacing, false));
     }

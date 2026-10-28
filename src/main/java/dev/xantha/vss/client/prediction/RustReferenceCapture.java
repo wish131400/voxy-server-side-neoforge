@@ -54,8 +54,6 @@ public final class RustReferenceCapture {
         manifest.addProperty("originX", originX);
         manifest.addProperty("originZ", originZ);
         manifest.addProperty("vegetationReference", "Minecraft placed features on VSS bounded predicted ground; not full generated chunks");
-        manifest.addProperty("predictionTrees", dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionTrees);
-        manifest.addProperty("predictionStructures", dev.xantha.vss.config.VSSClientConfig.CONFIG.predictionStructures);
         manifest.addProperty("densityReference", "Minecraft router point evaluation; base-column runs separately include generator interpolation/aquifer");
         {
             JsonArray grids = new JsonArray();

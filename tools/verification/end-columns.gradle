@@ -1,0 +1,19 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('endColumnsTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionEndColumnsTest.class', '**/PredictionEndSpikesTest.class'
+            include '**/PredictionParentLodTest.class', '**/PredictionJavaExteriorTest.class'
+            include '**/PredictionCacheStorageTest.class', '**/PredictionVoxelCacheTest.class'
+            include '**/PredictionVoxelCacheIntegrationTest.class', '**/PredictionVoxySourceTest.class'
+            include '**/PredictionLodBackendsTest.class'
+            forkEvery = 1
+            maxHeapSize = '2G'
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

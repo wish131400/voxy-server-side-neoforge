@@ -212,6 +212,20 @@ final class XaeroMapCompat {
         return bridge != null && !bridge.dead && bridge.enabled.getAsBoolean();
     }
 
+    static boolean acceptsPrediction() {
+        var b=instance;
+        return b!=null && !b.dead && b.enabled.getAsBoolean() && b.sessionActive.getAsBoolean();
+    }
+    static boolean predictionHasRoom() {
+        var b=instance; return b!=null && b.predictionHasRoomNow();
+    }
+    static void offerPrediction(XaeroPredictionBridge.Context context, XaeroTileExtractor.PreparedTile tile,
+                                XaeroPredictionBridge.Quality quality, BooleanSupplier current) {
+        var b=instance;
+        if (b!=null) b.offerPredicted(context.dimension,tile,quality,
+                () -> XaeroPredictionBridge.current(context) && current.getAsBoolean());
+    }
+
     /** Request-side flow control. Without this, a fast local/dedicated server can
      *  fill the bounded map queue and evict the first replay rings permanently. */
     static boolean shouldBackpressureInput() {
@@ -230,6 +244,7 @@ final class XaeroMapCompat {
         instance = null;
         resolveFailed = false;
     }
+    static void facadeForTest(XaeroMapCompat bridge) { instance=bridge; }
 
     // ---- instance ----
 
@@ -249,6 +264,11 @@ final class XaeroMapCompat {
     private final Object queueLock = new Object();
     /** Packed chunk pos → entry; insertion-ordered, latest tile wins in place. */
     private final LinkedHashMap<Long, Entry> queue = new LinkedHashMap<>();
+    static final int MAX_PREDICTIONS=128;
+    static final long MAX_PREDICTION_BYTES=2L*1024*1024;
+    private final LinkedHashMap<Long,Entry> predictions=new LinkedHashMap<>();
+    private long predictionBytes;
+    private final XaeroPredictionStore predictionStore=new XaeroPredictionStore();
     private long queuedBytes; // under queueLock
     private boolean intakeBackpressured; // main client thread, reset under queueLock
 
@@ -330,13 +350,19 @@ final class XaeroMapCompat {
         volatile XaeroTileExtractor.PreparedTile tile; // replaced under queueLock (latest wins)
         final Object dimension;
         int bytes; // under queueLock
+        final Prediction prediction;
 
         Entry(Object dimension, XaeroTileExtractor.PreparedTile tile, int bytes) {
+            this(dimension,tile,bytes,null);
+        }
+        Entry(Object dimension, XaeroTileExtractor.PreparedTile tile, int bytes, Prediction prediction) {
             this.dimension = dimension;
             this.tile = tile;
             this.bytes = bytes;
+            this.prediction=prediction;
         }
     }
+    private record Prediction(XaeroPredictionBridge.Quality quality,BooleanSupplier current) { }
 
     XaeroMapCompat(Handles h, LevelOps levelOps, BooleanSupplier enabled,
                    BooleanSupplier sessionActive,
@@ -372,6 +398,8 @@ final class XaeroMapCompat {
      * (a disabled bridge releases the capability bit here, never mid-session).
      */
     void onSessionEnd() {
+        XaeroPredictionBridge.reset();
+        predictionStore.clear();
         clearQueue();
         this.dead = false;
         this.consecutiveExtractFailures.set(0);
@@ -465,6 +493,8 @@ final class XaeroMapCompat {
         long key = ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
         int bytes = approxBytes(tile);
         synchronized (this.queueLock) {
+            Entry predicted=this.predictions.remove(key);
+            if (predicted!=null) predictionBytes-=predicted.bytes;
             var existing = this.queue.get(key);
             if (existing != null) {
                 if (existing.dimension == dimension) {
@@ -493,9 +523,32 @@ final class XaeroMapCompat {
 
     void clearQueue() {
         synchronized (this.queueLock) {
+            this.predictions.clear(); this.predictionBytes=0;
             this.queue.clear();
             this.queuedBytes = 0;
             this.intakeBackpressured = false;
+        }
+    }
+
+    boolean predictionHasRoomNow() {
+        synchronized(queueLock) {
+            return queue.isEmpty() && predictions.size()<MAX_PREDICTIONS
+                    && predictionBytes+100_000<=MAX_PREDICTION_BYTES;
+        }
+    }
+    void offerPredicted(Object dimension,XaeroTileExtractor.PreparedTile tile,
+                        XaeroPredictionBridge.Quality quality,BooleanSupplier current) {
+        if (dead || !enabled.getAsBoolean() || !sessionActive.getAsBoolean() || !current.getAsBoolean()) return;
+        long key=((long)tile.chunkX()<<32)|(tile.chunkZ()&0xffffffffL);
+        int bytes=approxBytes(tile);
+        synchronized(queueLock) {
+            if (queue.containsKey(key)) return;
+            Entry old=predictions.get(key);
+            if (old!=null && old.dimension==dimension && !quality.canReplace(old.prediction.quality)) return;
+            if (predictions.size()-(old==null?0:1)>=MAX_PREDICTIONS
+                    || predictionBytes-(old==null?0:old.bytes)+bytes>MAX_PREDICTION_BYTES) return;
+            predictionBytes+=bytes-(old==null?0:old.bytes);
+            predictions.put(key,new Entry(dimension,tile,bytes,new Prediction(quality,current)));
         }
     }
 
@@ -523,7 +576,7 @@ final class XaeroMapCompat {
 
     boolean hasPendingWorkNow() {
         synchronized (this.queueLock) {
-            return !this.queue.isEmpty() || !this.pendingUpdates.isEmpty();
+            return !this.queue.isEmpty() || !this.predictions.isEmpty() || !this.pendingUpdates.isEmpty();
         }
     }
 
@@ -535,6 +588,10 @@ final class XaeroMapCompat {
      */
     private void removeIfCurrent(Long key, Entry entry, XaeroTileExtractor.PreparedTile tile) {
         synchronized (this.queueLock) {
+            if (entry.prediction!=null) {
+                if (predictions.get(key)==entry) { predictions.remove(key); predictionBytes-=entry.bytes; }
+                return;
+            }
             var current = this.queue.get(key);
             if (current == entry && entry.tile == tile) {
                 this.queuedBytes -= entry.bytes;
@@ -571,6 +628,8 @@ final class XaeroMapCompat {
 
     long counterForTest(String name) {
         return switch (name) {
+            case "prediction_queued" -> { synchronized(queueLock) { yield predictions.size(); } }
+            case "prediction_bytes" -> { synchronized(queueLock) { yield predictionBytes; } }
             case "written" -> this.written.get();
             case "skipped_loaded" -> this.skippedLoaded.get();
             case "defer_events" -> this.deferEvents.get();
@@ -591,6 +650,8 @@ final class XaeroMapCompat {
         String state = this.dead ? "dead" : this.enabled.getAsBoolean() ? "active" : "disabled";
         long dropped = this.droppedOverflow.get() + this.droppedStale.get();
         return "XaeroMap: state=" + state + ", queued=" + queuedForTest()
+                + ", prediction_queued=" + counterForTest("prediction_queued")
+                + ", prediction_bytes=" + counterForTest("prediction_bytes")
                 + ", written=" + this.written.get()
                 + ", skipped_loaded=" + this.skippedLoaded.get()
                 + ", defer_events=" + this.deferEvents.get()
@@ -626,9 +687,10 @@ final class XaeroMapCompat {
         boolean commitsEnabled = this.enabled.getAsBoolean();
         if (!commitsEnabled) {
             clearQueue(); // the live toggle: flipping off drops the backlog immediately
+            XaeroPredictionBridge.reset();
         }
         synchronized (this.queueLock) {
-            if (this.queue.isEmpty() && this.pendingUpdates.isEmpty()) return;
+            if (this.queue.isEmpty() && this.predictions.isEmpty() && this.pendingUpdates.isEmpty()) return;
         }
         try {
             // No blanket failure-count reset here: commit failures are contained per
@@ -699,6 +761,9 @@ final class XaeroMapCompat {
             for (var queued : this.queue.entrySet()) {
                 snapshot.add(new Pending(queued.getKey(), queued.getValue(), queued.getValue().tile));
             }
+            // Real delivery drains first. Prediction never evicts or backpressures the wire queue.
+            if (snapshot.isEmpty()) for (var p:predictions.entrySet())
+                snapshot.add(new Pending(p.getKey(),p.getValue(),p.getValue().tile));
         }
         var buckets = new LinkedHashMap<Long, List<Pending>>();
         for (var pending : snapshot) {
@@ -727,7 +792,7 @@ final class XaeroMapCompat {
                 }
                 var entry = pending.entry();
                 var tile = pending.tile();
-                if (entry.dimension != dimensionId) {
+                if (entry.dimension != dimensionId || entry.prediction!=null && !entry.prediction.current.getAsBoolean()) {
                     removeIfCurrent(pending.key(), entry, tile);
                     this.droppedStale.incrementAndGet();
                     progressed = true;
@@ -735,6 +800,7 @@ final class XaeroMapCompat {
                 }
                 if (nativelyWritable(world, tile.chunkX(), tile.chunkZ())
                         && hasValidNativeMapTile(mp, tile)) {
+                    predictionStore.put(predictionRoot(mp),tile.chunkX(),tile.chunkZ(),null);
                     removeIfCurrent(pending.key(), entry, tile);
                     this.skippedLoaded.incrementAndGet();
                     progressed = true;
@@ -742,7 +808,7 @@ final class XaeroMapCompat {
                 }
 
                 progressed = true;
-                var outcome = commitEntry(mp, dimensionId, tile);
+                var outcome = commitEntry(mp, dimensionId, tile,entry.prediction);
                 switch (outcome) {
                     case COMMITTED -> {
                         removeIfCurrent(pending.key(), entry, tile);
@@ -768,6 +834,7 @@ final class XaeroMapCompat {
                         removeIfCurrent(pending.key(), entry, tile);
                         if (this.dead) return;
                     }
+                    case SKIPPED -> { removeIfCurrent(pending.key(),entry,tile); this.skippedLoaded.incrementAndGet(); }
                 }
             }
         }
@@ -821,7 +888,7 @@ final class XaeroMapCompat {
     }
 
     private enum Outcome {
-        COMMITTED, DEFERRED_REGION, DEFERRED_TILE,
+        COMMITTED, SKIPPED, DEFERRED_REGION, DEFERRED_TILE,
         AWAITING_REQUESTABLE, AWAITING_PARKED, AWAITING_IN_FLIGHT,
         FAILED
     }
@@ -835,7 +902,7 @@ final class XaeroMapCompat {
      * then the pixel commit. Region loads are granted after all buckets are probed.
      */
     private Outcome commitEntry(Object mp, Object dimensionId,
-                                XaeroTileExtractor.PreparedTile tile) {
+                                XaeroTileExtractor.PreparedTile tile, Prediction prediction) {
         try {
             int chunkX = tile.chunkX();
             int chunkZ = tile.chunkZ();
@@ -885,12 +952,33 @@ final class XaeroMapCompat {
                     return Outcome.DEFERRED_TILE;
                 }
                 Object leafTexture = this.h.getLeafTexture.invoke(tileChunk);
-                if ((boolean) this.h.shouldDownloadFromPBO.invoke(leafTexture)) {
+                // An outstanding upload belongs to the previous pixels. Its
+                // completion sets cachePrepared(true), so let it finish before
+                // invalidating the texture for a new, coalesced pixel change.
+                if ((boolean) this.h.shouldDownloadFromPBO.invoke(leafTexture)
+                        || (boolean) this.h.textureShouldUpload.invoke(leafTexture)) {
                     return Outcome.DEFERRED_TILE;
                 }
 
-                commitPixels(mp, dimensionId, region, tileChunk, createdTileChunk,
+                java.nio.file.Path provenance=predictionRoot(mp);
+                if (prediction!=null) {
+                    if (!predictionStore.ready(provenance,chunkX,chunkZ)) return Outcome.DEFERRED_TILE;
+                    if (!prediction.current.getAsBoolean()) return Outcome.SKIPPED;
+                    synchronized(queueLock) {
+                        if (queue.containsKey(((long)chunkX<<32)|(chunkZ&0xffffffffL))) return Outcome.SKIPPED;
+                    }
+                    Object existing=h.getTile.invoke(tileChunk,chunkX&3,chunkZ&3);
+                    var stamp=predictionStore.get(provenance,chunkX,chunkZ);
+                    if (existing!=null && (boolean)h.tileIsLoaded.invoke(existing)
+                            && (boolean)h.tileWasWrittenOnce.invoke(existing)) {
+                        if (stamp==null || stamp.hash()!=mapHash(existing)
+                                || !prediction.quality.canReplace(stamp.quality())) return Outcome.SKIPPED;
+                    }
+                }
+                Object result=commitPixels(mp, dimensionId, region, tileChunk, createdTileChunk,
                         localTcX, localTcZ, tile);
+                predictionStore.put(provenance,chunkX,chunkZ,prediction==null ? null
+                        : new XaeroPredictionStore.Stamp(mapHash(result),prediction.quality));
                 return Outcome.COMMITTED;
             }
         } catch (Throwable t) {
@@ -957,9 +1045,18 @@ final class XaeroMapCompat {
     }
 
     /** The decompiled per-tile commit sequence, verbatim order (plan §1). */
-    private void commitPixels(Object mp, Object dimensionId, Object region, Object tileChunk,
+    private Object commitPixels(Object mp, Object dimensionId, Object region, Object tileChunk,
                               boolean createdTileChunk, int localTcX, int localTcZ,
                               XaeroTileExtractor.PreparedTile tile) throws Throwable {
+        // New chunks can sit empty while provenance/PBO loading is deferred.
+        // Xaero may mark the region prepared during that gap. Revoke both flags
+        // before changing pixels or making this texture eligible for caching.
+        // The native renderer only sets allCachePrepared true; a later scan of
+        // an unprepared leaf does not clear an earlier true value for us.
+        synchronized (region) {
+            this.h.textureSetCachePrepared.invoke(this.h.getLeafTexture.invoke(tileChunk), false);
+            this.h.setAllCachePrepared.invoke(region, false);
+        }
         int insideX = tile.chunkX() & 3;
         int insideZ = tile.chunkZ() & 3;
         Object mapTile = this.h.getTile.invoke(tileChunk, insideX, insideZ);
@@ -1012,6 +1109,35 @@ final class XaeroMapCompat {
         // writer-pause/resting gates, coalesced per 4x4-chunk tile chunk.
         notePendingUpdate(mp, dimensionId, region, tileChunk, localTcX, localTcZ,
                 tile.chunkX() >> 2, tile.chunkZ() >> 2, insideX, insideZ);
+        return mapTile;
+    }
+
+    private java.nio.file.Path predictionRoot(Object mp) throws Throwable {
+        Object save=h.getMapSaveLoad.invoke(mp);
+        return (java.nio.file.Path)h.getMWSubFolder.invoke(save,h.getCurrentWorldId.invoke(mp),
+                h.getCurrentDimId.invoke(mp),h.getCurrentMWId.invoke(mp));
+    }
+    /** Stable across runs/registry ID remapping. Ignore slopes and derived lighting changed by texture rebuilds. */
+    private long mapHash(Object tile) throws Throwable {
+        long hash=0xcbf29ce484222325L;
+        for(int x=0;x<16;x++) for(int z=0;z<16;z++) {
+            Object block=h.getBlock.invoke(tile,x,z);
+            if(block==null) return Long.MIN_VALUE;
+            hash=mix(hash,h.pixelGetState.invoke(block));
+            hash=mix(hash,h.blockGetHeight.invoke(block)); hash=mix(hash,h.blockGetTopHeight.invoke(block));
+            hash=mix(hash,h.blockGetBiome.invoke(block));
+            var overlays=(List<?>)h.blockGetOverlays.invoke(block);
+            hash=(hash^(overlays==null?0:overlays.size()))*0x100000001b3L;
+            if(overlays!=null) for(Object overlay:overlays) {
+                hash=mix(hash,h.pixelGetState.invoke(overlay)); hash=mix(hash,h.overlayGetOpacity.invoke(overlay));
+            }
+        }
+        return hash;
+    }
+    private static long mix(long hash,Object value) {
+        String text=String.valueOf(value);
+        for(int i=0;i<text.length();i++) hash=(hash^text.charAt(i))*0x100000001b3L;
+        return (hash^0xff)*0x100000001b3L;
     }
 
     // ---- safe, coalesced texture rebuild phase ----
@@ -1361,6 +1487,8 @@ final class XaeroMapCompat {
         final MethodHandle setHasHadTerrain;
         final MethodHandle includeInSave;
         final MethodHandle getLeafTexture;
+        final MethodHandle textureShouldUpload;
+        final MethodHandle textureSetCachePrepared;
         final MethodHandle shouldDownloadFromPBO;
         final MethodHandle getTile;
         final MethodHandle tileIsLoaded;
@@ -1380,6 +1508,9 @@ final class XaeroMapCompat {
         final MethodHandle increaseOpacity;
         final MethodHandle getOriginal;
         final MethodHandle highlightsPrepare;
+        final MethodHandle getMWSubFolder, getCurrentDimId, getCurrentMWId;
+        final MethodHandle getBlock, pixelGetState, blockGetHeight, blockGetTopHeight, blockGetBiome;
+        final MethodHandle blockGetOverlays, overlayGetOpacity;
 
         static Handles resolve(ClassResolver resolver) throws ClassNotFoundException,
                 NoSuchMethodException, NoSuchFieldException, IllegalAccessException {
@@ -1397,6 +1528,7 @@ final class XaeroMapCompat {
             Class<?> tileChunkClass = resolver.resolve("xaero.map.region.MapTileChunk");
             Class<?> tileClass = resolver.resolve("xaero.map.region.MapTile");
             Class<?> blockClass = resolver.resolve("xaero.map.region.MapBlock");
+            Class<?> pixelClass = resolver.resolve("xaero.map.region.MapPixel");
             Class<?> overlayClass = resolver.resolve("xaero.map.region.Overlay");
             Class<?> overlayManagerClass = resolver.resolve("xaero.map.region.OverlayManager");
             Class<?> poolClass = resolver.resolve("xaero.map.pool.MapTilePool");
@@ -1429,6 +1561,19 @@ final class XaeroMapCompat {
                     MethodType.methodType(String.class), Object.class);
             this.getCurrentDimension = virtual(lookup, processorClass, "getCurrentDimension",
                     MethodType.methodType(String.class), String.class);
+            this.getCurrentDimId=methodByName(lookup,processorClass,"getCurrentDimId",0);
+            this.getCurrentMWId=methodByName(lookup,processorClass,"getCurrentMWId",0);
+            this.getMWSubFolder=lookup.findVirtual(saveLoadClass,"getMWSubFolder",
+                    MethodType.methodType(java.nio.file.Path.class,String.class,String.class,String.class))
+                    .asType(MethodType.methodType(Object.class,Object.class,Object.class,Object.class,Object.class));
+            this.getBlock=lookup.findVirtual(tileClass,"getBlock",MethodType.methodType(blockClass,int.class,int.class))
+                    .asType(MethodType.methodType(Object.class,Object.class,int.class,int.class));
+            this.pixelGetState=methodByName(lookup,pixelClass,"getState",0);
+            this.blockGetHeight=methodByName(lookup,blockClass,"getHeight",0);
+            this.blockGetTopHeight=methodByName(lookup,blockClass,"getTopHeight",0);
+            this.blockGetBiome=methodByName(lookup,blockClass,"getBiome",0);
+            this.blockGetOverlays=methodByName(lookup,blockClass,"getOverlays",0);
+            this.overlayGetOpacity=methodByName(lookup,overlayClass,"getOpacity",0);
             this.getWorld = methodByName(lookup, processorClass, "getWorld", 0);
             this.ignoreWorld = methodByName(lookup, processorClass, "ignoreWorld", 1);
             this.getMapWorld = virtual(lookup, processorClass, "getMapWorld",
@@ -1522,6 +1667,11 @@ final class XaeroMapCompat {
                     MethodType.methodType(leafTextureClass), Object.class);
             this.shouldDownloadFromPBO = virtual(lookup, leafTextureClass, "shouldDownloadFromPBO",
                     MethodType.methodType(boolean.class), boolean.class);
+            this.textureShouldUpload = virtual(lookup, leafTextureClass, "shouldUpload",
+                    MethodType.methodType(boolean.class), boolean.class);
+            this.textureSetCachePrepared = lookup.findVirtual(leafTextureClass, "setCachePrepared",
+                            MethodType.methodType(void.class, boolean.class))
+                    .asType(MethodType.methodType(void.class, Object.class, boolean.class));
             this.getTile = lookup.findVirtual(tileChunkClass, "getTile",
                             MethodType.methodType(tileClass, int.class, int.class))
                     .asType(MethodType.methodType(Object.class, Object.class, int.class, int.class));

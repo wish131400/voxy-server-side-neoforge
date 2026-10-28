@@ -75,7 +75,7 @@ final class PredictionParentLod {
         boolean sealedEdges = true;
         for (int i = 0; i < 4; i++) {
             var child = input.children()[i];
-            if (child.mesh().parentLod != null) inherited = Math.max(inherited, child.mesh().parentLod.error());
+            if (child.data().parentLod != null) inherited = Math.max(inherited, child.data().parentLod.error());
             int childGrid = child.cellAxis() + 1;
             for (int z = 0; z < childGrid; z++) for (int x = 0; x < childGrid; x++) {
                 int bx = (i & 1) * span / 2 + x * child.spacingBlocks();

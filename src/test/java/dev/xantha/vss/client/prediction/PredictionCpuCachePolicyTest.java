@@ -11,16 +11,14 @@ class PredictionCpuCachePolicyTest {
         assertEquals(15, policy.reclaim(90)); assertEquals(0, policy.reclaim(75));
         assertEquals(0, policy.reclaim(90), "a completed trim must not restart below high water");
     }
-    @Test void protectedGroundAndDecorationNeedDrawableReplacementBeforeEviction() {
+    @Test void activeGroundAndFeaturesNeedResidentSourceReplacementBeforeEviction() {
         long age = PredictionCpuCachePolicy.COLD_AGE_NANOS;
-        assertTrue(PredictionCpuCachePolicy.safe(false, false, false, false, true, true, true, true, true, true, age));
-        for (int protection = 0; protection < 9; protection++) {
-            boolean safe = PredictionCpuCachePolicy.safe(protection == 0, protection == 1, protection == 2,
-                    protection == 3, protection != 4, true, protection != 5, protection != 6,
-                    true, protection != 7, protection == 8 ? age - 1 : age);
-            assertFalse(safe, "protection " + protection);
+        assertTrue(PredictionCpuCachePolicy.safe(false,false,false,false,true,true,true,true,age));
+        for (int protection=0;protection<8;protection++) {
+            assertFalse(PredictionCpuCachePolicy.safe(protection==0,protection==1,protection==2,
+                    protection==3,protection!=4,protection!=5,true,protection!=6,protection==7?age-1:age));
         }
-        assertTrue(PredictionCpuCachePolicy.safe(false, false, false, false, true, false, true, false, true, false, age));
+        assertTrue(PredictionCpuCachePolicy.safe(false,false,false,false,true,true,false,false,age));
     }
     @Test void byteTargetsLeaveRoomForOtherHeapUsersAndReservationReaccountsColdStorage() {
         assertTrue(new PredictionCpuCachePolicy(12L << 30).highBytes <= 768L << 20);
@@ -32,7 +30,7 @@ class PredictionCpuCachePolicyTest {
         reservation.close(); assertEquals(0, budget.usedBytes()); reservation.accountResident(200); assertEquals(0, budget.usedBytes());
     }
 
-    @Test void managerRetiresStoredColdDetailOnlyAfterGroundAndFeatureFallbackUpload() throws Exception {
+    @Test void managerRetiresStoredColdDetailOnlyAfterGroundAndFeatureSourceFallback() throws Exception {
         var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), 42L, -64, 384,
                 "noise", "minecraft:overworld", 1L);
@@ -46,12 +44,15 @@ class PredictionCpuCachePolicyTest {
             @SuppressWarnings("unchecked") var ready = (java.util.Map<PredictionTileManager.PredictionTileKey, PredictionTileManager.PredictionTile>) field(manager, "ready").get(manager);
             @SuppressWarnings("unchecked") var stored = (java.util.Set<PredictionTileManager.PredictionTileKey>) field(manager, "storedTiles").get(manager);
             ready.put(child.key(), child); ready.put(parent.key(), parent); stored.add(child.key());
-            var noParentUploaded = new PredictionTileManager.RenderSnapshot(profile.levelKey(), layout, java.util.Map.of(child.key(), child), java.util.Map.of());
-            manager.setDrawableSnapshot(noParentUploaded); maintain(manager); assertSame(child, ready.get(child.key()));
-            manager.setDrawableSnapshot(new PredictionTileManager.RenderSnapshot(profile.levelKey(), layout, java.util.Map.copyOf(ready), java.util.Map.of()));
-            maintain(manager); assertSame(child, ready.get(child.key()), "ground fallback cannot remove the only feature coverage");
-            parent.mesh().surfaceReadyForRendering = true;
-            maintain(manager); assertFalse(ready.containsKey(child.key())); assertSame(parent, ready.get(parent.key()));
+            var eligible=PredictionTileManager.class.getDeclaredMethod("cacheEligible",PredictionTileManager.PredictionTile.class,long.class);
+            eligible.setAccessible(true);
+            assertEquals(false,eligible.invoke(manager,child,System.nanoTime()),"ground fallback cannot remove the only feature source");
+            maintain(manager); assertSame(child,ready.get(child.key()));
+            parent=tile(16,0,1,layout,true); ready.put(parent.key(),parent);
+            assertEquals(true,eligible.invoke(manager,child,System.nanoTime()));
+            long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            do { maintain(manager); } while(ready.containsKey(child.key()) && System.nanoTime()<deadline);
+            assertFalse(ready.containsKey(child.key())); assertSame(parent,ready.get(parent.key()));
             assertEquals(0, manager.renderSnapshot().tiles().containsKey(child.key()) ? 1 : 0);
             assertTrue(manager.surfaceDiagnostics().contains("evictions=1"));
         }
@@ -65,12 +66,14 @@ class PredictionCpuCachePolicyTest {
         var field = owner.getClass().getDeclaredField(name); field.setAccessible(true); return field;
     }
     private static PredictionTileManager.PredictionTile tile(int x, int z, int lod, VssLodLayout layout, boolean feature) {
-        int[] words = PredictionPreviewHandoffTest.quad(1, 1, 64, 2, 2, 0, false);
-        if (!feature) words[10] &= ~PredictionPackedMesh.FEATURE;
-        var payload = PredictionPackedMesh.seamRecords(words, 64);
-        var mesh = PredictionMesh.restored(6, 0, payload, null);
         var key = new PredictionTileManager.PredictionTileKey(net.minecraft.world.level.Level.OVERWORLD, x, z, lod);
+        var data=PredictionVoxelFixtures.flat(key,64,layout.sampleSpacing(lod),64);
+        var source=data.voxyTile;
+        var features=feature ? java.util.List.of(new PredictionVoxySource.Box(0,64,0,1,80,1,
+                net.minecraft.world.level.block.Blocks.OAK_LEAVES.defaultBlockState())) : java.util.List.<PredictionVoxySource.Box>of();
+        data=PredictionVoxelData.forVoxy(new PredictionVoxySource.Tile(key,source.baseX(),source.baseZ(),source.span(),
+                source.axis(),source.step(),source.columns(),features,source.bytes()+64));
         return new PredictionTileManager.PredictionTile(key, new int[0], new int[0], new ClientColumnSample[0],
-                mesh, new PredictionDepthBound(64, 80), System.nanoTime() - 60_000_000_000L, 1, 64, layout.sampleSpacing(lod));
+                data, new PredictionDepthBound(64, 80), System.nanoTime() - 60_000_000_000L, 1, 64, layout.sampleSpacing(lod));
     }
 }

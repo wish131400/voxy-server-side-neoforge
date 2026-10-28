@@ -506,6 +506,11 @@ public final class VSSClientNetworking {
         ClientConnectionIdentity.endSession();
     }
 
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onClientLevelUnload(net.neoforged.neoforge.event.level.LevelEvent.Unload event) {
+        if (event.getLevel() instanceof ClientLevel level) ClientPredictionState.onLevelUnload(level);
+    }
+
     @SubscribeEvent
     public static void onTagsUpdated(net.neoforged.neoforge.event.TagsUpdatedEvent event) {
         if (event.getUpdateCause() == net.neoforged.neoforge.event.TagsUpdatedEvent.UpdateCause.CLIENT_PACKET_RECEIVED)
@@ -540,6 +545,11 @@ public final class VSSClientNetworking {
         // PredictionRenderer is called through this registered subscriber.
         // Its per-frame budget and retired GPU resources need the same route.
         PredictionRenderer.onRenderFrame(event);
+    }
+
+    @SubscribeEvent
+    public static void onPerformanceHud(net.neoforged.neoforge.client.event.RenderGuiEvent.Post event) {
+        dev.xantha.vss.client.prediction.PredictionPerformanceMonitor.renderHud(event.getGuiGraphics());
     }
 
     @SubscribeEvent

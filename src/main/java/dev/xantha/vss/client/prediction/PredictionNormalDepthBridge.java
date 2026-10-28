@@ -36,26 +36,9 @@ public final class PredictionNormalDepthBridge {
         return source.replace("vec3 rev3d(vec3 clip)", """
                 uniform bool VssNormalDepthBridge;
                 uniform vec2 VssSourceDepthTransform;
-                uniform bool VssPredictionBeforeWater;
-                uniform sampler2D VssPredictionOpaqueDepth;
-                uniform sampler2D VssPredictionSeedDepth;
                 vec3 rev3d(vec3 clip)""")
                 .replace(unproject, "vec4(VssNormalDepthBridge ? vec3(clip.xy * 2.0 - 1.0, "
                         + "clip.z * VssSourceDepthTransform.x + VssSourceDepthTransform.y) : " + sourceClip + ", 1.0)")
-                .replace("depth = projDepth(point);", """
-                        if (VssPredictionBeforeWater) {
-                            float predicted = texelFetch(VssPredictionOpaqueDepth, ivec2(gl_FragCoord.xy), 0).r;
-                            float seed = texelFetch(VssPredictionSeedDepth, ivec2(gl_FragCoord.xy), 0).r;
-                            float distance = (projMat * vec4(point, 1.0)).w;
-                            // Reversed prediction depth retains precision past the vanilla far plane.
-                            // Equal-depth real geometry wins; a closer predicted foreground is kept.
-                            float realNear = 1.0 / max(distance - 0.02, 0.0001);
-                            // Seeded vanilla depth is quantized; it is not a newly drawn prediction.
-                            // Only pixels actually overwritten by prediction may reject this final blit.
-                            if (predicted > seed && predicted > realNear + max(2e-7, realNear * 2e-4)) discard;
-                        }
-                        depth = projDepth(point);
-                        """)
                 .replace(clamp, "if (!VssNormalDepthBridge) { " + clamp + " }")
                 .replace(project, """
                         // Normal Minecraft 1.21.1's destination projection is [-1,1],

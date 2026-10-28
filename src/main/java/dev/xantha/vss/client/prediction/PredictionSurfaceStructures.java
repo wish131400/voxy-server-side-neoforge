@@ -103,8 +103,7 @@ final class PredictionSurfaceStructures {
     }
 
     void place(PredictionDecorationLevel level, int chunkX, int chunkZ, long decorationSeed, int step) {
-        if (templates == null || !VSSClientConfig.CONFIG.predictionStructures
-                || step < 0 || step >= setsByStep.size()) return;
+        if (templates == null || step < 0 || step >= setsByStep.size()) return;
         List<StructureStart> touching = new ArrayList<>();
         for (var holder : setsByStep.get(step)) {
             var placement = (RandomSpreadStructurePlacement) holder.value().placement();

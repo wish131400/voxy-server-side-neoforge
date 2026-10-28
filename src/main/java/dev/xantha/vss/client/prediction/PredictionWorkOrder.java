@@ -4,6 +4,9 @@ import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 
 /** Camera-independent surface eligibility and bounded, near-first work bands. */
 final class PredictionWorkOrder {
+    // At most 18 x 18 placement chunks including the halo: below the shared
+    // 512-chunk cache. Larger terrain tiles subdivide before replaying plants.
+    static final int MAX_SURFACE_TILE_BLOCKS = 256;
     static final int SCOPED_RADIUS_BLOCKS = 64 * 16;
     static final int SCOPED_SURFACE_RADIUS_BLOCKS = 16 * 16;
     static final int INITIAL_CELL_AXIS = 16;
@@ -21,8 +24,14 @@ final class PredictionWorkOrder {
     }
 
     static int localRefinementPriority(double distanceSquared, int residentAxis, boolean surface) {
-        int band = Math.min(65535, (int) (Math.sqrt(distanceSquared) / WORK_BAND_BLOCKS));
-        return 100_000 + band * 3 + (surface ? 2 : residentAxis < PREVIEW_CELL_AXIS ? 0 : 1);
+        return nearPriority(distanceSquared, residentAxis, surface, 0);
+    }
+
+    /** Distance bands dominate stage and screen error; LOD is only a final tie breaker. */
+    static int nearPriority(double distanceSquared, int residentAxis, boolean surface, int screenPriority) {
+        int band = Math.min(16383, (int) (Math.sqrt(distanceSquared) / WORK_BAND_BLOCKS));
+        int stage = residentAxis == 0 ? 0 : surface ? 1 : residentAxis < PREVIEW_CELL_AXIS ? 2 : 3;
+        return 10_000 + band * 16 + stage * 4 + Math.min(3, Math.max(0, screenPriority / 1500));
     }
 
     static int initialCellAxis(int lod) {
@@ -87,13 +96,28 @@ final class PredictionWorkOrder {
 
     static boolean surfaceEligible(PredictionTileKey key, VssLodLayout layout,
                                    double x, double z, int radius, VssLodFocus focus) {
-        // Keep actual one-block plants; never rescale a blade of grass into a tree-sized voxel.
-        if (layout.sampleSpacing(key.lod()) > 2) return false;
+        // Plant voxels stay at spacing 1 independently of the resident terrain grid.
+        if (!surfaceTile(key, layout)) return false;
         if (distanceSquared(key, layout, x, z) <= (double) radius * radius) return true;
         int span = layout.tileBlocks(key.lod());
         focus = surfaceFocus(focus);
         return focus != null && focus.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
                 (key.tileX() + 1D) * span, (key.tileZ() + 1D) * span);
+    }
+
+    static boolean surfaceTile(PredictionTileKey key, VssLodLayout layout) {
+        return layout.tileBlocks(key.lod()) <= MAX_SURFACE_TILE_BLOCKS;
+    }
+
+    /** Ordinary planning and native Voxy requests share the same plant demand.
+     * A rendered view replaces the startup radius with visible feature size. */
+    static boolean surfaceEligible(PredictionTileKey key, VssLodLayout layout, PredictionWorkView view,
+                                   VssLodFocus focus, double x, double y, double z, int radius,
+                                   double pixels, double minY, double maxY) {
+        if (!layout.trees() || !surfaceTile(key, layout)) return false;
+        if (view == null || scoped(key, layout, focus))
+            return surfaceEligible(key, layout, x, z, radius, focus);
+        return PredictionScreenDetail.surfaceVisible(view, key, layout, x, y, z, pixels, minY, maxY);
     }
 
     static int priority(PredictionTileKey key, VssLodLayout layout, double distanceSquared,
@@ -103,8 +127,6 @@ final class PredictionWorkOrder {
 
     static int priority(PredictionTileKey key, VssLodLayout layout, double distanceSquared,
                         int residentAxis, boolean surface, VssLodFocus focus) {
-        // Medium terrain precedes final terrain and plants at every distance.
-        int band = Math.min(65535, (int) (Math.sqrt(distanceSquared) / WORK_BAND_BLOCKS));
         VssLodFocus patch = terrainFocus(focus);
         int span = layout.tileBlocks(key.lod());
         if (patch != null && patch.intersects(key.tileX() * (double) span, key.tileZ() * (double) span,
@@ -112,8 +134,7 @@ final class PredictionWorkOrder {
             int focusBand = (int) (Math.sqrt(distanceSquared(key, layout, patch.x(), patch.z())) / WORK_BAND_BLOCKS);
             return 1000 + focusBand * 3 + (surface ? 2 : residentAxis < 32 ? 0 : 1);
         }
-        int stage = surface ? 2 : residentAxis < PREVIEW_CELL_AXIS ? 0 : 1;
-        return 100_000 + stage * 100_000 + band;
+        return localRefinementPriority(distanceSquared, residentAxis, surface);
     }
 
     static double orderingDistance(PredictionTileKey key, VssLodLayout layout,

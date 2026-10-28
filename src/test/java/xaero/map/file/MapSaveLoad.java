@@ -5,6 +5,12 @@ import xaero.map.region.MapRegion;
 
 /** Tier-1 stub — records the load-request dance. */
 public class MapSaveLoad {
+    public final java.nio.file.Path root=createRoot();
+    private static java.nio.file.Path createRoot() {
+        try { return java.nio.file.Files.createTempDirectory("vss-xaero-test"); }
+        catch(java.io.IOException e) { throw new java.io.UncheckedIOException(e); }
+    }
+    public java.nio.file.Path getMWSubFolder(String world,String dim,String mw) { return root.resolve(world).resolve(dim).resolve(mw); }
     public boolean regionDetectionComplete = true;
     public LeveledRegion<?> nextToLoadByViewing;
     public final java.util.List<MapRegion> loadRequests = new java.util.ArrayList<>();

@@ -48,6 +48,8 @@ public class MapProcessor {
     public boolean isCurrentMultiworldWritable() { return this.multiworldWritable; }
 
     public String getCurrentWorldId() { return this.currentWorldId; }
+    public String getCurrentDimId() { return "overworld"; }
+    public String getCurrentMWId() { return "mw0"; }
 
     public String getCurrentDimension() { return "placeholder"; }
 

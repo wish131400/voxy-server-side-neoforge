@@ -25,7 +25,7 @@ class PredictionScopeFamiliesTest {
             assertEquals(pairScan(tiles), PredictionScopeFamilies.find(tiles));
         }
         tiles.replaceAll((key, tile) -> new PredictionTile(key, tile.heights(), tile.groundHeights(),
-                tile.samples(), tile.mesh(), tile.depthBound(), 0, 1, tile.cellAxis(), tile.spacingBlocks(), false));
+                tile.samples(), tile.data(), tile.depthBound(), 0, 1, tile.cellAxis(), tile.spacingBlocks(), false));
         assertEquals(Set.of(), PredictionScopeFamilies.find(tiles), "ordinary-only view has no scoped families");
     }
 
@@ -38,13 +38,17 @@ class PredictionScopeFamiliesTest {
                 source.put(tile.key(), tile);
             }
         Map<PredictionTileKey, PredictionTile> tiles = Map.copyOf(source);
+        var index = new PredictionScopeFamilies.Index();
+        tiles.values().forEach(tile -> index.put(tile.key(),tile.scopeOnly()));
+        var changed = tiles.values().stream().limit(64).toList();
         var previous = new ArrayList<Double>();
         var current = new ArrayList<Double>();
         for (int iteration = 0; iteration < 10; iteration++) {
             long start = System.nanoTime();
-            Set<PredictionTileKey> expected = pairScan(tiles);
+            Set<PredictionTileKey> expected = PredictionScopeFamilies.find(tiles);
             long middle = System.nanoTime();
-            Set<PredictionTileKey> actual = PredictionScopeFamilies.find(tiles);
+            for (var tile : changed) index.put(tile.key(),tile.scopeOnly());
+            Set<PredictionTileKey> actual = index.snapshot();
             long end = System.nanoTime();
             assertEquals(expected, actual);
             if (iteration >= 4) {
@@ -55,14 +59,14 @@ class PredictionScopeFamiliesTest {
         Collections.sort(previous); Collections.sort(current);
         long scoped = tiles.values().stream().filter(PredictionTile::scopeOnly).count();
         System.out.printf(Locale.ROOT,
-                "SCOPE_FAMILIES tiles=%d scoped=%d oldPairs=%d oldMedianMs=%.3f newMedianMs=%.3f (family index only; not FPS)%n",
-                tiles.size(), scoped, scoped * tiles.size(), previous.get(3), current.get(3));
+                "INCREMENTAL_FAMILIES tiles=%d scoped=%d contentPublications=%d fullDerivationMedianMs=%.3f incrementalMedianMs=%.3f (synthetic; not FPS)%n",
+                tiles.size(), scoped, changed.size(), previous.get(3), current.get(3));
     }
 
     private static PredictionTile tile(int x, int z, int lod, boolean scoped, boolean nether, VssLodLayout layout) {
         var base = PredictionCoverageWorkTest.tile(x, z, lod, layout);
         var key = new PredictionTileKey(nether ? Level.NETHER : Level.OVERWORLD, x, z, lod);
-        return new PredictionTile(key, base.heights(), base.groundHeights(), base.samples(), base.mesh(),
+        return new PredictionTile(key, base.heights(), base.groundHeights(), base.samples(), base.data(),
                 base.depthBound(), 0, 1, base.cellAxis(), base.spacingBlocks(), scoped);
     }
 

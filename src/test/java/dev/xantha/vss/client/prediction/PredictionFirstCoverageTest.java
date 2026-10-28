@@ -87,13 +87,7 @@ class PredictionFirstCoverageTest {
 
     @Test void livePlannerStartsOptionalWorkAfterCompletingOrdinaryTargets() throws Exception {
         int distance = VSSClientConfig.CONFIG.predictionDistanceBlocks;
-        int fine = VSSClientConfig.CONFIG.predictionFineDistanceBlocks;
-        boolean trees = VSSClientConfig.CONFIG.predictionTrees;
-        boolean structures = VSSClientConfig.CONFIG.predictionStructures;
         VSSClientConfig.CONFIG.predictionDistanceBlocks = 1024;
-        VSSClientConfig.CONFIG.predictionFineDistanceBlocks = 256;
-        VSSClientConfig.CONFIG.predictionTrees = false;
-        VSSClientConfig.CONFIG.predictionStructures = false;
         try (var manager = manager(sampler(new AtomicInteger(), null, null, 16), null)) {
             assertFalse(manager.loadingProgress().ready(95), "unplanned terrain must reserve the initial prediction turn");
             var optionalResidents = PredictionTileManager.class.getDeclaredField("idleResidents");
@@ -117,9 +111,6 @@ class PredictionFirstCoverageTest {
             assertTrue(manager.loadingProgress().ready(95), "optional refinement must not hold generation: " + manager.loadingProgress());
         } finally {
             VSSClientConfig.CONFIG.predictionDistanceBlocks = distance;
-            VSSClientConfig.CONFIG.predictionFineDistanceBlocks = fine;
-            VSSClientConfig.CONFIG.predictionTrees = trees;
-            VSSClientConfig.CONFIG.predictionStructures = structures;
             PredictionFramePace.resetForTesting();
         }
     }
@@ -423,7 +414,7 @@ class PredictionFirstCoverageTest {
             assertEquals(81, preview.samples().length);
             assertEquals(manager.layout().tileBlocks(root.lod()), preview.spanBlocks());
             assertEquals(-preview.spanBlocks(), preview.baseBlockX());
-            assertNotNull(preview.mesh().gpuPayload());
+            assertNotNull(preview.data().voxyTile);
             disk.flush();
             try (var lease = disk.lease(PredictionDiskCache.Key.terrain(-1, -1, root.lod()))) {
                 assertEquals(8, disk.readTerrainData(lease, 0).cellAxis(), "first preview must survive a restart");

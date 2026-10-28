@@ -31,42 +31,7 @@ class PredictionCoverageIndexTest {
         }
     }
 
-    @Test void chunkGroupsProduceTheSameMaskAsIndividualCells() throws Exception {
-        var layout = VssLodLayout.of(4096, 6, true, false);
-        var method = PredictionRenderer.class.getDeclaredMethod("resolveCoverage", PredictionTile.class,
-                int.class, int.class, double.class, RenderSnapshot.class, VssLodFocus.class);
-        method.setAccessible(true);
-        var tiles = new HashMap<PredictionTileKey, PredictionTile>();
-        for (int lod = 0; lod < layout.levelCount(); lod++) for (int x = -2; x <= 1; x++) for (int z = -2; z <= 1; z++) {
-            if ((x + z + lod) % 3 != 0) {
-                var tile = PredictionCoverageWorkTest.tile(x, z, lod, layout);
-                tiles.put(tile.key(), tile);
-            }
-        }
-        var snapshot = new RenderSnapshot(Level.OVERWORLD, layout, Map.copyOf(tiles), Map.of());
-        for (var focus : new VssLodFocus[]{null, new VssLodFocus(-128, 80, 1024, 8)}) {
-            double scale = focus == null ? 900 : 9000;
-            for (var tile : tiles.values()) {
-                var actual = (PredictionRenderer.TileCoverage) method.invoke(null, tile, -1, 2, scale, snapshot, focus);
-                boolean[] expected = new boolean[4096];
-                for (int z = 0; z < 64; z++) for (int x = 0; x < 64; x++) {
-                    int cx = Math.floorDiv(tile.baseBlockX() + x * tile.spacingBlocks() + tile.spacingBlocks() / 2, 16);
-                    int cz = Math.floorDiv(tile.baseBlockZ() + z * tile.spacingBlocks() + tile.spacingBlocks() / 2, 16);
-                    double distance = Math.max(64, Math.hypot(cx + 1, cz - 2) * 16);
-                    int desired = PredictionRenderer.lodForBlocks(distance, scale, PredictionRenderer.pixelsPerQuad());
-                    if (distance < PredictionDetailBands.fineRadius(layout.maxDistanceBlocks())) desired = 0;
-                    if (focus != null) {
-                        if (focus.contains(cx * 16 + 8, cz * 16 + 8)) desired = Math.min(desired,
-                                PredictionRenderer.lodForBlocks(distance, focus.selectionScale(scale), PredictionRenderer.pixelsPerQuad()));
-                        if (PredictionWorkOrder.terrainFocus(focus).intersects(cx * 16D, cz * 16D, (cx + 1D) * 16, (cz + 1D) * 16)) desired = 0;
-                    }
-                    var cover = snapshot.coveringTileAtDetail(cx, cz, desired);
-                    expected[z * 64 + x] = tile == cover || cover == null && desired >= tile.key().lod();
-                }
-                assertArrayEquals(expected, actual.allowed(), tile.key().toString());
-            }
-        }
-    }
+
 
     @Test void tileHashesDistributeRegularTerrainGrids() {
         for (int step : new int[]{1, 16, 256}) {

@@ -1,0 +1,84 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('voxyUnifiedTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+            include '**/PredictionNativeDemandTest.class'
+            include '**/PredictionVoxySourceTest.class', '**/VoxyPredictionBridgeTest.class', '**/VoxyPredictionMixinApplicationTest.class'
+            include '**/PredictionVoxyLoadingIntegrationTest.class', '**/PredictionSurfaceDemandTest.class'
+            include '**/PredictionViewRefinementTest.class', '**/PredictionDetailBandsTest.class', '**/PredictionScopeBudgetTest.class'
+            include '**/PredictionPlanningPipelineTest.class', '**/PredictionMainReductionTest.class', '**/PredictionViewSelectionTest.class'
+            include '**/PredictionVoxyBiomeTest.class'
+            include '**/VoxySectionDataTest.class', '**/VoxyPendingSectionsTest.class', '**/PredictionVoxyDetailQueueTest.class'
+            include '**/VoxyMergeLocalityTest.class', '**/VoxyRealAirAuthorityTest.class', '**/VoxyCompatLocalIndexLifecycleTest.class'
+            include '**/VoxyRenderPipelineMixinApplicationTest.class', '**/PredictionIrisHookTest.class', '**/PredictionNormalDepthBridgeTest.class'
+            include '**/PredictionGrowingGrassTest.class', '**/PredictionAquaticMeshTest.class', '**/PredictionLoadingProgressIntegrationTest.class'
+            include '**/PredictionCpuCachePolicyTest.class', '**/PredictionMemoryOptimizationTest.class'
+            include '**/PredictionFullVegetationTest.class', '**/PredictionVegetationSettingsTest.class'
+            include '**/PredictionSurfaceRetryTest.class', '**/PredictionVegetationTest.class', '**/PredictionVoxelCacheTest.class', '**/PredictionVoxelCacheIntegrationTest.class'
+            include '**/VoxyPredictionIngestHandoffTest.class'
+            include '**/VoxyPredictionNotificationTest.class'
+            include '**/VoxySubdivisionWaitersTest.class'
+            include '**/VoxyRenderAccessTest.class', '**/StrictVoxyPipelineTest.class', '**/StrictVoxyNodeIndexTest.class'
+            include '**/VoxyPredictionCapabilitiesTest.class'
+            include '**/VoxyIngestMixinApplicationTest.class'
+            include '**/VoxyNeighborVariantMixinTest.class'
+            include '**/PredictionVoxyPreparationTest.class', '**/VoxyNativeFaceContractTest.class'
+            include '**/StrictIngestCompletionTest.class', '**/VoxyCompatIngestHookTest.class', '**/VoxyIngestControlTest.class'
+            forkEvery = 1
+            maxHeapSize = '2G'
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+            testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+        }
+        if (providers.gradleProperty('vssUnsupportedVoxyJar').isPresent()) {
+            tasks.register('voxyUnsupportedBackendTest', Test) {
+                dependsOn tasks.named('testClasses')
+                testClassesDirs = sourceSets.test.output.classesDirs
+                classpath = sourceSets.test.runtimeClasspath
+                useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+                include '**/VoxyUnsupportedBackendTest.class'
+                systemProperty 'vss.voxyJar', providers.gradleProperty('vssUnsupportedVoxyJar').get()
+                maxHeapSize = '2G'
+                testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+            }
+        }
+        if (providers.gradleProperty('vssVoxySourceList').isPresent()) {
+            tasks.register('voxySourceContractTest', Test) {
+                dependsOn tasks.named('testClasses')
+                testClassesDirs = sourceSets.test.output.classesDirs
+                classpath = sourceSets.test.runtimeClasspath
+                useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+                include '**/VoxySourceContractTest.class'
+                systemProperty 'vss.voxySourceList', providers.gradleProperty('vssVoxySourceList').get()
+                maxHeapSize = '2G'
+                testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+            }
+        }
+        // Each backend runs in a fresh JVM: Sponge's service and prepared mixins are process-global.
+        def matrix = providers.gradleProperty('vssVoxyMatrix')
+        if (matrix.isPresent()) {
+            def inputs = new groovy.json.JsonSlurper().parse(project.file(matrix.get()))
+            def checks = inputs.collect { row ->
+                tasks.register('voxyCompat_' + row.id, Test) {
+                    dependsOn tasks.named('testClasses')
+                    testClassesDirs = sourceSets.test.output.classesDirs
+                    classpath = sourceSets.test.runtimeClasspath
+                    useJUnitPlatform()
+                    include "**/VoxyFluidSurfaceTest.class"
+                    include '**/VoxyPredictionMixinApplicationTest.class', '**/VoxyPredictionCapabilitiesTest.class', '**/VoxyIngestMixinApplicationTest.class'
+                    include '**/VoxyNativeFaceContractTest.class', '**/VoxyRenderPipelineMixinApplicationTest.class', '**/PredictionIrisHookTest.class'
+                    forkEvery = 1
+                    maxHeapSize = '2G'
+                    systemProperty 'vss.voxyJar', project.file(row.jar).absolutePath
+                    testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+                }
+            }
+            tasks.register('voxyCompatMatrix') { dependsOn checks }
+        }
+    }
+}

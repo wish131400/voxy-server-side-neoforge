@@ -18,9 +18,9 @@ final class PredictionCpuCachePolicy {
         return trimming ? Math.max(0, coldBytes - lowBytes) : 0;
     }
     static boolean safe(boolean desired, boolean near, boolean scoped, boolean pending,
-                        boolean stored, boolean drawable, boolean cpuFallback, boolean gpuFallback,
+                        boolean stored, boolean cpuFallback,
                         boolean features, boolean featureFallback, long ageNanos) {
         return !desired && !near && !scoped && !pending && stored && ageNanos >= COLD_AGE_NANOS
-                && cpuFallback && (!drawable || gpuFallback && (!features || featureFallback));
+                && cpuFallback && (!features || featureFallback);
     }
 }

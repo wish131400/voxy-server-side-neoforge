@@ -4,7 +4,7 @@ import java.util.ArrayDeque;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntPredicate;
 
-/** Local exterior occupancy. A coarse hole requires air across the entire cell footprint. */
+/** Full floating columns and local exterior overhang occupancy. */
 final class PredictionExteriorColumns {
     static final int CHECKED = 1 << 23;
     static final int MAX_SPACING = 4;
@@ -52,9 +52,37 @@ final class PredictionExteriorColumns {
         return withProfile(s, gap ? volume : null, floor);
     }
 
+    /** Sample one complete column per existing grid anchor at every LOD, including flat island tops.
+     * Unlike local cliff evidence, this preserves all air below and between islands. It does not
+     * scan the step*step footprint of distant cells or change the selected Rust/Java backend. */
+    private static int enrichFloating(ClientColumnSample[] samples, int grid, int step, int baseX, int baseZ,
+                                      ClientTerrainSampler sampler, BooleanSupplier valid) {
+        int changed = 0;
+        for (int i = 0; i < samples.length; i++) {
+            var s = samples[i];
+            if (s == null || s.captured() || s.floating() || interiorVolume(s)) continue;
+            if (Thread.currentThread().isInterrupted() || !valid.getAsBoolean())
+                throw new java.util.concurrent.CancellationException();
+            var full = sampler.sampleInterior(baseX + (i % grid - 1) * step,
+                    baseZ + (i / grid - 1) * step);
+            // Old partial cliff volumes are not full-height evidence. Preserve preview provenance
+            // while replacing geometry/materials with the complete column from the same backend.
+            int flags = (s.flags() & ~(ClientColumnSample.FLAG_SURFACE_ONLY
+                    | ClientColumnSample.FLAG_NO_SURFACE | CHECKED | SPACING_MASK)) | full.flags();
+            samples[i] = new ClientColumnSample(full.surfaceY(), full.fluidY(),
+                    s.surfaceY() == full.surfaceY() ? s.biomeIndex() : full.biomeIndex(),
+                    full.topBlockIndex(), s.structureIndex(), s.treeKind(), s.treeDensity(), s.treeHeight(),
+                    full.fluid(), flags, s.groundFeatureKind(), full.underBlockIndex(), full.deepBlockIndex(),
+                    full.surfaceBottom(), full.lowerTop(), full.lowerBottom(), full.spanFloor(), full.volume());
+            changed++;
+        }
+        return changed;
+    }
+
     /** Worker-only, cached with the terrain. Flood confirmed roofs so broad overhangs get undersides. */
     static int enrich(ClientColumnSample[] samples, int grid, int step, int baseX, int baseZ,
                       ClientTerrainSampler sampler, BooleanSupplier valid) {
+        if (sampler.floatingTerrain()) return enrichFloating(samples, grid, step, baseX, baseZ, sampler, valid);
         if (step > MAX_SPACING || sampler.interiorTerrain()) return 0;
         var queue = new ArrayDeque<Integer>();
         boolean[] queued = new boolean[samples.length];

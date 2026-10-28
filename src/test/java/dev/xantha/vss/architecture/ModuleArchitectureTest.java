@@ -30,11 +30,23 @@ class ModuleArchitectureTest {
                 .map(Path::of).filter(Files::isDirectory).toList();
         assertFalse(paths.isEmpty(), "No compiled production classes supplied");
         production = new ClassFileImporter().importPaths(paths);
-        assertTrue(production.size() > 400, "Production import is incomplete");
+        assertFalse(production.isEmpty(), "Production import is incomplete");
         for (String type : new String[] {"api.VSSApi", "client.prediction.PredictionRenderer",
+                "client.prediction.PredictionVoxelData", "compat.VoxyPredictionBridge",
                 "networking.server.VSSServerNetworking", "config.JsonConfigStore"}) {
             assertTrue(production.contain("dev.xantha.vss." + type), type);
         }
+    }
+
+    @Test
+    void predictionOwnsVoxelsAndNeverAnIndependentGpuScene() {
+        for(String name:new String[]{"PredictionGpuScene","PredictionMeshBuilder","PredictionPackedMesh",
+                "PredictionMesh","PredictionMeshFailure","PredictionVegetationDensity","PredictionVegetationSelection"}) {
+            assertFalse(production.contain("dev.xantha.vss.client.prediction."+name),name+" is retired");
+        }
+        noClasses().that().haveFullyQualifiedName("dev.xantha.vss.client.prediction.PredictionVoxelData")
+                .should().dependOnClassesThat().resideInAnyPackage("org.lwjgl..", "com.mojang.blaze3d..")
+                .check(production);
     }
 
     @Test

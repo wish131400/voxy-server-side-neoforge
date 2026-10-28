@@ -65,19 +65,12 @@ class PredictionMemoryOptimizationTest {
     private static ClientColumnSample sample(int height,int flags,int bottom) {
         return new ClientColumnSample(height,0,1,2,0,0,0,0,0,flags,0,3,4,bottom,30,10,-64);
     }
-    @Test void geometryLimitUnblocksOnlyWhenInputsChange() {
-        var failure=new PredictionMeshFailure(1,2,64,3);
-        assertTrue(failure.matches(1,2,64,3));
-        assertFalse(failure.matches(2,2,64,3));assertFalse(failure.matches(1,3,64,3));
-        assertFalse(failure.matches(1,2,128,3));assertFalse(failure.matches(1,2,64,4));
-    }
-
-    @Test @SuppressWarnings("unchecked") void managerDoesNotReplayUnchangedFailedWorkButResourceReloadRetries() throws Exception {
+    @Test @SuppressWarnings("unchecked") void managerBacksOffTransientFailuresButResourceReloadRetries() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"),42,-64,384,"noise","minecraft:overworld",1);
         var sampler = new ClientTerrainSampler(42,profile) {
-            @Override public ClientColumnSample sample(int x,int z) { throw new PredictionMemoryBudget.MeshLimitException(); }
+            @Override public ClientColumnSample sample(int x,int z) { throw new IllegalStateException("test sampler failure"); }
             @Override public ClientColumnSample sampleForLod(int x,int z,int step) { return sample(x,z); }
         };
         var budget = new PredictionMemoryBudget(256L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime);
@@ -95,7 +88,7 @@ class PredictionMemoryOptimizationTest {
             assertEquals(false,retry.invoke(manager,key));
             for(int i=0;i<10;i++)enqueue.invoke(manager,key,0,0,false);
             assertEquals(1,manager.failedTileCount());assertEquals(0,manager.pendingCount());
-            manager.invalidateAppearance();
+            manager.invalidateContent();
             assertEquals(true,retry.invoke(manager,key));
             enqueue.invoke(manager,key,0,0,false);
             deadline=System.nanoTime()+5_000_000_000L;

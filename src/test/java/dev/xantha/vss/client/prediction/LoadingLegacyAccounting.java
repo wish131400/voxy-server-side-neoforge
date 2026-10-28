@@ -10,7 +10,6 @@ final class LoadingLegacyAccounting {
         final Map<PredictionTileKey,PredictionTile> ready;
         final Set<PredictionTileKey> dirtyTiles, voxyOwnedTiles, terrainLeaves, surfaceDesired, surfaceReady;
         final Map<PredictionTileKey,Integer> ordinaryTargets;
-        final RenderSnapshot drawableSnapshot;
         final PredictionMediumCoverage mediumCoverage;
         final Map<PredictionTileKey,Long> captureEpochs;
         final Map<PredictionTileKey,PredictionLoadingPreparation.DisplayGoal> displayGoals;
@@ -20,7 +19,7 @@ final class LoadingLegacyAccounting {
             this.request=request;input=request.scheduling();layout=input.layout();workView=input.view();
             this.ready=ready;dirtyTiles=input.dirty();voxyOwnedTiles=request.owned();
             terrainLeaves=request.terrainLeaves();surfaceDesired=input.surfaceDesired();surfaceReady=input.surfaceReady();
-            ordinaryTargets=input.ordinary();drawableSnapshot=request.drawable();mediumCoverage=input.medium();
+            ordinaryTargets=input.ordinary();mediumCoverage=input.medium();
             captureEpochs=request.captureEpochs();displayGoals=new HashMap<>(request.goals());
             dimension=input.residents().dimension();
         }
@@ -90,21 +89,26 @@ final class LoadingLegacyAccounting {
                     visibleSurface++;
                     if (complete && surfaceReady.contains(key)) visibleSurfaceReady++;
                 }
-                var uploaded = drawableSnapshot == null ? null : drawableSnapshot.tiles().get(key);
                 // Optional upgrades preserve the ordinary goal; content changes require a new revision.
                 PredictionLoadingPreparation.DisplayGoal goal = displayGoals.get(key);
                 if (!complete || surface && !surfaceReady.contains(key)) displayGoals.remove(key);
                 else {
                     long epoch = captureEpochs.getOrDefault(key, 0L), revision = input.revision();
                     if (goal == null || goal.captureEpoch() != epoch || goal.meshRevision() != revision || goal.axis() != target) {
-                        boolean empty = tile.mesh() != null && tile.mesh().gpuPayload() != null
-                                && tile.mesh().gpuPayload().quadCount() == 0;
-                        goal = new PredictionLoadingPreparation.DisplayGoal(tile.revision(), epoch, revision, target, empty);
+                        boolean empty = tile.data() != null && tile.data().voxyTile != null
+                                && tile.data().voxyTile.features().isEmpty()
+                                && java.util.Arrays.stream(tile.data().voxyTile.columns()).allMatch(c -> c.runs().isEmpty());
+                        goal = new PredictionLoadingPreparation.DisplayGoal(tile.revision(), epoch, revision, target, empty, false);
                         displayGoals.put(key, goal);
                     }
-                    boolean uploadedGoal = uploaded != null && !uploaded.scopeOnly() && uploaded.cellAxis() >= target
-                            && uploaded.revision() >= goal.revision() && uploaded.revision() <= tile.revision()
-                            && (uploaded.revision() != tile.revision() || uploaded == tile);
+                    var source = tile.data().voxyTile;
+                    boolean uploadedGoal = goal.uploaded()
+                            ? dev.xantha.vss.compat.StrictLodVisibility.overlayResident(dimension,
+                                Math.floorDiv(source.baseX(),16),tile.depthBound().minY(),Math.floorDiv(source.baseZ(),16),
+                                Math.floorDiv(source.baseX()+source.span()-1,16),tile.depthBound().maxY(),Math.floorDiv(source.baseZ()+source.span()-1,16))
+                            : dev.xantha.vss.compat.StrictLodVisibility.overlayUploaded(dimension,
+                                Math.floorDiv(source.baseX(),16),tile.depthBound().minY(),Math.floorDiv(source.baseZ(),16),
+                                Math.floorDiv(source.baseX()+source.span()-1,16),tile.depthBound().maxY(),Math.floorDiv(source.baseZ()+source.span()-1,16));
                     if (goal.empty() || uploadedGoal) drawable++;
                 }
             } else if (tracking && viewBand(key) == PredictionWorkView.BACKGROUND

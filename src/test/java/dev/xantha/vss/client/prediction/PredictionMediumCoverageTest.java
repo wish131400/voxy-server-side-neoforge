@@ -60,16 +60,16 @@ class PredictionMediumCoverageTest {
             var ready = (Map<PredictionTileKey,PredictionTile>)get(manager,"ready");
             for (var key : List.of(near,localParent,localFront,far,farParent)) {
                 int axis = key.equals(far) ? 8 : 32;
-                ready.put(key,new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],null,
+                ready.put(key,new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],PredictionVoxelFixtures.flat(key,axis,manager.layout().tileBlocks(key.lod())/axis,64),
                         new PredictionDepthBound(64,64),0,1,axis,manager.layout().tileBlocks(key.lod())/axis));
             }
             refresh(manager,leaves);
             assertEquals(true,get(manager,"mediumCoveragePending"));
-            var allowed = PredictionTileManager.class.getDeclaredMethod("mediumWorkAllowed",PredictionTileKey.class,boolean.class);
+            var allowed = PredictionTileManager.class.getDeclaredMethod("localWorkAllowed",PredictionTileKey.class,boolean.class);
             allowed.setAccessible(true);
             var localCoverage = ready.remove(localFront);
-            assertEquals(false,allowed.invoke(manager,near,false),"initial local coverage still precedes detail");
-            assertEquals(false,allowed.invoke(manager,near,true));
+            assertEquals(true,allowed.invoke(manager,near,false),"the ready immediate parent is sufficient; medium quality is not another barrier");
+            assertEquals(true,allowed.invoke(manager,near,true));
             ready.put(localFront,localCoverage);
             assertEquals(true,allowed.invoke(manager,near,true),"local surface admission must not wait for a distant region");
             try {
@@ -142,13 +142,13 @@ class PredictionMediumCoverageTest {
             set(manager,"previewWorkPending",true);
             var ready = (Map<PredictionTileKey,PredictionTile>)get(manager,"ready");
             for (var key : List.of(near,frontier,far)) ready.put(key,new PredictionTile(key,new int[0],new int[0],
-                    new ClientColumnSample[0],null,new PredictionDepthBound(64,64),0,1,
+                    new ClientColumnSample[0],PredictionVoxelFixtures.flat(key,key.equals(near)?32:16,manager.layout().tileBlocks(key.lod())/(key.equals(near)?32:16),64),new PredictionDepthBound(64,64),0,1,
                     key.equals(near)?32:16,manager.layout().tileBlocks(key.lod())/(key.equals(near)?32:16)));
             var counter = (AtomicInteger)get(manager,"mediumSinceSurface");
             counter.set(15);
             var priority = manager.getClass().getDeclaredMethod("workPriority",PredictionTileKey.class,boolean.class);
             priority.setAccessible(true);
-            assertTrue((int)priority.invoke(manager,far,false)<(int)priority.invoke(manager,near,false));
+            assertTrue((int)priority.invoke(manager,near,false)<(int)priority.invoke(manager,far,false),"near detail precedes distant medium regardless of the old wave counter");
             enqueue(manager,frontier); idle(manager);
             assertEquals(32,ready.get(frontier).cellAxis());
             assertEquals(16,counter.get(),"frontier tiles must count even when not final terrain leaves");
@@ -159,7 +159,7 @@ class PredictionMediumCoverageTest {
             assertTrue((int)priority.invoke(manager,near,false)<promoted,"explicit telescope remains ahead of periodic local turns");
             set(manager,"buildFocus",null);
             counter.set(0);
-            assertTrue((int)priority.invoke(manager,far,false)<(int)priority.invoke(manager,near,false),"consuming a turn restores coverage priority");
+            assertTrue((int)priority.invoke(manager,near,false)<(int)priority.invoke(manager,far,false),"finishing plants does not restore a global coarse-first barrier");
         }
     }
 
@@ -196,7 +196,7 @@ class PredictionMediumCoverageTest {
             for (var key = target; key.lod() < layout.levelCount(); key =
                     new PredictionTileKey(key.dimension(),key.tileX()>>1,key.tileZ()>>1,key.lod()+1)) {
                 int axis = key.equals(target) ? 8 : 32;
-                ready.put(key, new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],null,
+                ready.put(key, new PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],PredictionVoxelFixtures.flat(key,axis,layout.tileBlocks(key.lod())/axis,64),
                         new PredictionDepthBound(64,64),0,1,axis,layout.tileBlocks(key.lod())/axis));
             }
             refresh(manager, leaves);

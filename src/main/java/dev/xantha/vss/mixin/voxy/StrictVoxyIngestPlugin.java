@@ -33,13 +33,11 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             if (insn instanceof FieldInsnNode field && field.getOpcode() == Opcodes.GETFIELD
                     && field.owner.equals(task) && field.name.equals("section")) section = field;
         }
-        if (section == null) return false;
-
         boolean pending = type.desc.equals(node.name + "$IngestNode");
         MethodNode enqueue;
         if (pending) {
             enqueue = method(node, "enqueueJob", "(Lme/cortex/voxy/common/world/WorldEngine;L" + task + ";)Z");
-            if (enqueue == null || !hasField(node, "pending", "L" + MAP + ";")
+            if (section == null || enqueue == null || !hasField(node, "pending", "L" + MAP + ";")
                     || calls(worker, MAP, "remove", REMOVE).size() != 1
                     || calls(enqueue, MAP, "put", PUT).size() != 1
                     || calls(enqueue, MAP, "remove", REMOVE).size() != 2
@@ -59,9 +57,15 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
         // (..., receiver, [key,] task) -> (..., receiver, [key,] task, task, section).
         // submitted consumes only the last two values, leaving the native call's stack intact.
         bind.add(new InsnNode(Opcodes.DUP));
-        bind.add(new InsnNode(Opcodes.DUP));
-        bind.add(new FieldInsnNode(Opcodes.GETFIELD, task, section.name, section.desc));
-        bind.add(call("submitted", "(" + OBJECT + OBJECT + ")V"));
+        if (pending) {
+            bind.add(new InsnNode(Opcodes.DUP));
+            bind.add(new FieldInsnNode(Opcodes.GETFIELD, task, section.name, section.desc));
+            bind.add(call("submitted", "(" + OBJECT + OBJECT + ")V"));
+        } else {
+            // rawIngest0's single publication belongs to the active VSS raw scope,
+            // including ports that snapshot the section or delegate processing.
+            bind.add(call("submittedSnapshot", "(" + OBJECT + ")V"));
+        }
         enqueue.instructions.insertBefore(publish, bind);
         if (pending) {
             after(enqueue, publish, "discarded");
@@ -152,7 +156,23 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             VSSLogger.warn("Unsupported Voxy ingest queue layout; task completion tracking disabled, using mesh/GPU readiness");
     }
 
-    @Override public boolean shouldApplyMixin(String target, String mixin) { return true; }
+    private Boolean rendererPresent;
+    @Override public boolean shouldApplyMixin(String target, String mixin) {
+        // Ingest is independent of the renderer. Incomplete server/data-only ports must
+        // not receive half of the mutually dependent mesh/batch/upload tracking group.
+        if (mixin.endsWith(".StrictVoxyIngestMixin")) return true;
+        if (rendererPresent == null) {
+            try {
+                var provider = org.spongepowered.asm.service.MixinService.getService().getBytecodeProvider();
+                for (String name : List.of("building.RenderGenerationService", "building.BuiltSection",
+                        "hierachical.AsyncNodeManager", "hierachical.AsyncNodeManager$SyncResults"))
+                    provider.getClassNode("me.cortex.voxy.client.core.rendering." + name);
+                provider.getClassNode("me.cortex.voxy.client.core.VoxyRenderSystem");
+                rendererPresent = true;
+            } catch (Exception absent) { rendererPresent = false; }
+        }
+        return rendererPresent;
+    }
     @Override public void onLoad(String mixinPackage) { }
     @Override public String getRefMapperConfig() { return null; }
     @Override public void acceptTargets(Set<String> mine, Set<String> others) { }
