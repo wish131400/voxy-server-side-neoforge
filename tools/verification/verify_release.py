@@ -27,6 +27,10 @@ def verify(jar, platform, build_id, source):
         metadata = "META-INF/neoforge.mods.toml" if platform == "neoforge" else "META-INF/mods.toml"
         require(re.search(r'(?m)^version\s*=\s*"' + re.escape(version) + r'"', archive.read(metadata).decode()) is not None,
                 "Wrong mod metadata version")
+        for locale in ("en_us", "zh_cn"):
+            language = "assets/vss/lang/" + locale + ".json"
+            require(archive.read(language) == (source / "src/main/resources" / language).read_bytes(),
+                    "Packaged language differs from source: " + language)
         major = 65 if platform == "neoforge" else 61
 
         def check_class(name, *symbols):
@@ -39,10 +43,41 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionClimateSampler", "FabricBiomeCompat", "copyClimateContext")
         check_class("client/prediction/FabricBiomeCompat", "net.fabricmc.fabric.impl.biome.MultiNoiseSamplerHooks", "fabric_getSeed", "fabric_setSeed")
         check_class("client/prediction/PredictionBiomeCache", "LookupFailure", "sample")
-        check_class("client/prediction/PredictionBiomeCache$Page", "AtomicReferenceArray", "matches")
-        check_class("client/prediction/PredictionBiomeCache$Local", "pages", "last")
-        check_class("client/prediction/PredictionBiomeCache$Stripe", "retainSparse", "RetiredPoints")
-        check_class("client/prediction/PredictionBiomeCache$RetiredPoints", "get", "put")
+        check_class("client/prediction/PredictionBiomeCache$Points", "xs", "ys", "zs", "values")
+        check_class("client/prediction/PredictionBiomeCache$Local", "PredictionBiomeCache$Points")
+        check_class("client/prediction/PredictionBiomeCache$Stripe", "referenced", "next", "get", "put")
+        check_class("compat/VoxySurfaceHeights", "NATIVE_INSET_ALIAS", "LEGACY_FLUID_INSET")
+        check_class("compat/VoxyPendingSections", "poll", "promote", "priority", "view")
+        check_class("compat/VoxyPredictionBridge", "newSingleThreadScheduledExecutor", "updateBatches", "emptyWithdrawals")
+        check_class("compat/VoxyPredictionBridge$Context", "nextNotification", "meshBacklog", "mayHavePrediction")
+        check_class("compat/VoxyRenderAccess", "meshBacklog")
+        check_class("client/prediction/PredictionRetirementQueue", "submit", "drain", "Command")
+        check_class("client/prediction/PredictionVoxySource", "removeLater", "mayHavePrediction", "pendingRetirements")
+        check_class("client/prediction/PredictionTileManager", "removeLater", "reclaimAdmissionTarget")
+        check_class("config/VSSServerConfig", "singleplayerGenerationConcurrencyLimit", "effectiveGenerationConcurrencyLimitPerPlayer")
+        check_class("networking/server/generation/ChunkGenerationService", "effectiveGenerationConcurrencyLimitPerPlayer")
+        check_class("networking/server/session/PlayerSessionManager", "effectiveGenerationConcurrencyLimitPerPlayer")
+        check_class("compat/ModCompat", "replayRealXaeroColumn")
+        check_class("compat/XaeroMapCompat", "replayRealColumn", "tryOfferReplay")
+        check_class("networking/client/IntegratedPregenImporter", "replayRealXaeroColumn")
+        check_class("networking/server/generation/ChunkyGenerationService", "retryImport")
+        check_class("networking/server/session/WorldgenCodecSnapshot", "registry_tags", "preferred_biomes", "vss_terrablender_end")
+        check_class("client/prediction/ClientWorldgenRegistries", "bindSnapshotTags", "snapshotRegistries")
+        check_class("client/prediction/PredictionLodSampler", ":capture-palette-r2:")
+        check_class("client/prediction/ClientWorldgenProfileDecoder", "Required TerraBlender region routing unavailable", "vss_terrablender_end")
+        check_class("client/prediction/RustTerrainSampler", "Native library lacks required TerraBlender routing", "terrablenderRouting")
+        check_class("compat/VoxySectionData", "contentIdentity", "faceIdentity")
+        check_class("compat/VoxySectionSignature", "compact")
+        check_class("compat/VoxySectionSignature", "face", "EMPTY_FACE")
+        check_class("compat/VoxyPredictionBridge$Delivered", "realFaces")
+        check_class("compat/VoxyPredictionBridge$Context", "realFaces", "face")
+        check_class("client/prediction/PredictionVoxySource", "protectedBytes", "trimProtected", "retainedBytes")
+        check_class("client/prediction/PredictionVegetation", "restoreForRendering")
+        check_class("client/prediction/PredictionVegetation$CachedTile", "complete", "tile")
+        check_class("client/prediction/PredictionTileManager", "surfaceCacheAttempts", "restoreForRendering")
+        bridge_context=check_class("compat/VoxyPredictionBridge$Context", "notificationIdentity", "earlyUnchangedNotifications", "revokeInput", "revokeNeighborInputs")
+        require(b"realRevision" not in bridge_context, "Global native revision still invalidates unrelated reuse")
+        check_class("client/prediction/PredictionVoxySource", "notificationIdentity", "cachedNotificationView", "NOT_CACHED", "readFace")
         check_class("client/prediction/PredictionTerrainChange", "compare", "ordered", "LiquidBlock")
         check_class("client/prediction/PredictionVoxySource", "PredictionTerrainChange", "sameFeatureBiomes", "terrainRangeReductions")
         check_class("client/prediction/PredictionVegetation", "END_CLIMATE_SETTINGS_VERSION", "LookupFailure")
@@ -62,6 +97,13 @@ def verify(jar, platform, build_id, source):
         require(b"VoxySurfaceHeights" not in bridge, "Native mesh is still post-processed")
         check_class("mixin/voxy/PredictionVoxyTraversalShaderMixin", "VoxySurfaceHeights", "patchShader")
         check_class("client/prediction/ClientPredictionState", "LEVEL_GENERATION", "levelUnloaded")
+        check_class("client/prediction/ClientPredictionState", "retireUnusedSampler", "VSS prediction cache ready:", "VSS prediction generation ready:")
+        check_class("client/prediction/PredictionCacheSampler", "Cache context cannot generate terrain", "cacheBiomes", "templates", "floating")
+        check_class("client/prediction/PredictionCacheStorage", "openExisting")
+        check_class("client/prediction/ClientWorldgenProfileDecoder$Session", "PredictionCacheSampler", "cacheContext")
+        check_class("client/prediction/PredictionTileManager", "generationReady", "acceptsGeneration", "enableGeneration")
+        check_class("client/prediction/PredictionResources", "retireUnusedSampler")
+        check_class("client/prediction/PredictionVoxelCache", "java/security/DigestInputStream", "voxel record has trailing data")
         check_class("networking/client/VSSClientNetworking", "onClientLevelUnload")
         check_class("compat/VoxyCompat$LocalSectionIndex", "settledRegions")
         check_class("compat/VoxyIngestTracker", "realColumnSettled")
@@ -196,7 +238,13 @@ def verify(jar, platform, build_id, source):
                     and b"submitGeometryResult" in archive.read(n) and b"empty" in archive.read(n) for n in names),
                 "Missing native empty geometry adapter")
         check_class("client/prediction/ClientPredictionState", "updatePredictionState")
-        check_class("client/prediction/PredictionCpuBudget", "generationWaiting", "generationWaitAt")
+        cpu_budget = check_class("client/prediction/PredictionCpuBudget", "generationWaiting", "generationWaitAt", "mode=configured", "detailLimit")
+        require(not any(marker in cpu_budget for marker in (b"getCpuLoad", b"getProcessCpuLoad", b"METRIC_SAMPLER", b"DETAIL_TRICKLE_NANOS", b"RECOVERY_NANOS", b"pressure")),
+                "Machine-wide CPU throttling still packaged")
+        require("dev/xantha/vss/client/prediction/PredictionCpuBudget$ThrottleLevel.class" not in names,
+                "Stale CPU throttle class packaged")
+        require("dev/xantha/vss/client/prediction/PredictionCpuBudget$MetricSample.class" not in names,
+                "Stale CPU metric sample class packaged")
         priority = check_class("networking/client/PredictionGenerationPriority", "shared-", "detail-ready")
         require(b"exclusive" not in priority and b"STALL" not in priority, "Exclusive prediction generation gate packaged")
         requests = check_class("networking/client/LodRequestManager", "reserveLocalGeneration")
@@ -242,10 +290,23 @@ def verify(jar, platform, build_id, source):
                         "Native library differs from source: " + name)
                 natives[name] = hashlib.sha256(archive.read(name)).hexdigest()
         require(len(natives) == 5, "Expected all five native libraries")
+        native_build = json.loads(archive.read("META-INF/vss-native-build.json"))
+        digest = hashlib.sha256()
+        core = source / "tools/rust/vss-native-core"
+        inputs = [p for p in (core / "src").rglob("*.rs")]
+        inputs += [core / name for name in ("Cargo.toml", "Cargo.lock", "build.rs") if (core / name).is_file()]
+        for path in sorted(inputs, key=lambda p: p.relative_to(source).as_posix()):
+            digest.update(path.relative_to(source).as_posix().encode() + b"\0"
+                          + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+        require(native_build["sourceSha256"] == digest.hexdigest(), "Native build differs from production Rust source")
+        for name, value in natives.items():
+            require(native_build["libraries"][name.removeprefix("META-INF/vss-natives/")] == value,
+                    "Native build metadata checksum mismatch: " + name)
+            require(b"vss_terrablender_end" in archive.read(name), "Native End routing absent: " + name)
     return {"jar": jar.name, "platform": platform, "buildId": build_id,
             "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
             "bytes": jar.stat().st_size, "nativeSha256": natives,
-            "integratedFixes": ["terrain-interval-publication", "shared-quart-neighborhoods", "persistent-fair-generation-turn", "horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
+            "integratedFixes": ["view-priority-background-notifications", "asynchronous-budgeted-retirement", "off-lock-snapshot-disposal", "native-empty-fast-withdrawal", "steady-state-lock-bypass", "configured-shared-cpu-admission", "two-stage-warm-cache-startup", "in-place-native-backend-promotion", "streamed-voxel-content-digest", "stale-prepared-backend-retirement", "native-border-consumer-evidence", "byte-bounded-section-admission", "independent-partial-surface-cache-restore", "early-identical-input-notification", "answer-budget-biome-cache", "terrain-interval-publication", "shared-quart-neighborhoods", "persistent-fair-generation-turn", "horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
                                 "layout-plan-domain-reset", "partial-vegetation-retention", "terrain-only-parent-proof",
                                 "retained-deferred-detail-demand", "view-priority-readmission", "completion-driven-detail-refill", "dimension-write-bounds", "reverse-coarse-column-coverage", "second-chance-column-cache", "incremental-candidate-union", "exact-display-biome-reuse", "prediction-display-withdrawal", "warm-toggle-reactivation", "concurrent-real-generation", "atomic-generation-admission", "auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
                                 "end-floating-columns", "empty-node-sample-readmission",

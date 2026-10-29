@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class GenerationToggleTest {
     @org.junit.jupiter.api.BeforeAll
     static void initializeConfigDirectory() {
+        dev.xantha.vss.testutil.MinecraftTestBootstrap.initialize();
         if (net.neoforged.fml.loading.FMLPaths.GAMEDIR.get() == null) {
             net.neoforged.fml.loading.FMLPaths.loadAbsolutePaths(
                     java.nio.file.Path.of("build", "tmp", "generation-tests"));
@@ -20,6 +21,10 @@ class GenerationToggleTest {
         config.generationConcurrencyLimitPerPlayer = 1;
         config.generationConcurrencyLimitGlobal = 1;
         ChunkGenerationService service = new ChunkGenerationService(config);
+        var level=org.mockito.Mockito.mock(net.minecraft.server.level.ServerLevel.class);
+        var server=org.mockito.Mockito.mock(net.minecraft.server.MinecraftServer.class);
+        org.mockito.Mockito.when(level.getServer()).thenReturn(server);
+        org.mockito.Mockito.when(server.isDedicatedServer()).thenReturn(true);
         UUID background = UUID.randomUUID();
         UUID player = UUID.randomUUID();
         var activeField = ChunkGenerationService.class.getDeclaredField("active");
@@ -40,8 +45,8 @@ class GenerationToggleTest {
             var constructor = pendingType.getDeclaredConstructor(net.minecraft.world.level.ChunkPos.class,
                     net.minecraft.server.level.ServerLevel.class, long.class);
             constructor.setAccessible(true);
-            Object backgroundWork = constructor.newInstance(null, null, 0L);
-            Object playerWork = constructor.newInstance(null, null, 0L);
+            Object backgroundWork = constructor.newInstance(null, level, 0L);
+            Object playerWork = constructor.newInstance(null, level, 0L);
             var callbacksField = pendingType.getDeclaredField("callbacks");
             callbacksField.setAccessible(true);
             @SuppressWarnings("unchecked")
@@ -63,10 +68,10 @@ class GenerationToggleTest {
             var queuedCounts = (java.util.Map<UUID, Integer>) queuedCountField.get(service);
             queuedCounts.put(background, Integer.MAX_VALUE);
             queuedCounts.put(player, 1);
-            var canQueue = ChunkGenerationService.class.getDeclaredMethod("canQueue", UUID.class);
+            var canQueue = ChunkGenerationService.class.getDeclaredMethod("canQueue", UUID.class, net.minecraft.server.level.ServerLevel.class);
             canQueue.setAccessible(true);
-            assertTrue((boolean) canQueue.invoke(service, background));
-            assertFalse((boolean) canQueue.invoke(service, player));
+            assertTrue((boolean) canQueue.invoke(service, background, level));
+            assertFalse((boolean) canQueue.invoke(service, player, level));
 
             service.removeBackgroundOwner(background);
             assertFalse((boolean) canStart.invoke(service, backgroundWork));

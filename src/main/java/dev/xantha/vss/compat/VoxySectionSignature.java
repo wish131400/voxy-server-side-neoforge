@@ -8,6 +8,7 @@ import java.security.NoSuchAlgorithmException;
 final class VoxySectionSignature {
     record Value(long a,long b,long c,long d) { }
     private static final ThreadLocal<VoxySectionSignature> WORKER=ThreadLocal.withInitial(VoxySectionSignature::new);
+    private static final Value EMPTY_FACE=faces(new long[][]{new long[1024]});
     private final MessageDigest digest;
     private final ByteBuffer buffer=ByteBuffer.allocate(8192);
     private final java.nio.LongBuffer longs=buffer.asLongBuffer();
@@ -28,6 +29,23 @@ final class VoxySectionSignature {
     static Value faces(long[][] faces) {
         var worker=WORKER.get();worker.begin();
         for(var face:faces)worker.add(face);
+        return worker.end();
+    }
+    /** Native input of the single plane consumed by the adjacent section. Missing means air. */
+    static Value face(VoxyRenderAccess.Voxels data,int face) {
+        if(data==null || data.data()==null && data.uniform()==0)return EMPTY_FACE;
+        var worker=WORKER.get();worker.begin();
+        for(int i=0;i<1024;i++)worker.longs.put(data==null?0:data.get(VoxyFaceData.index(face,i)));
+        return worker.end();
+    }
+    /** Canonical compact storage: include run ends as well as values. */
+    static Value compact(long[] values,int[] ends) {
+        var worker=WORKER.get();worker.begin();
+        worker.longs.put(ends==null?0:1).put(values.length);
+        worker.add(values);
+        if(ends!=null)for(int end:ends) {
+            worker.longs.put(end);if(!worker.longs.hasRemaining())worker.flush();
+        }
         return worker.end();
     }
     private void begin() {digest.reset();buffer.clear();longs.clear();}

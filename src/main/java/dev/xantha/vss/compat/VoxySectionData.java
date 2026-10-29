@@ -12,6 +12,9 @@ public final class VoxySectionData {
     private final long[] values;
     private final int[] ends;
     private WeakReference<long[]> expanded;
+    private volatile VoxySectionSignature.Value contentIdentity;
+    private Object[] faceIdentities;
+    private static final ThreadLocal<long[]> FACE_BUFFER=ThreadLocal.withInitial(()->new long[1024]);
 
     private VoxySectionData(long[] values, int[] ends, long[] original) {
         this.values = values; this.ends = ends;
@@ -65,7 +68,27 @@ public final class VoxySectionData {
         return new VoxySectionData(values, ends, copy ? null : data);
     }
 
-    public long bytes() { return 80L + values.length * 8L + (ends == null ? 0 : 16L + ends.length * 4L); }
+    // Reserve the maximum lazy identity storage too, before the cache takes its lease.
+    public long bytes() {
+        int size=ends==null?values.length:ends[ends.length-1];
+        long overhead=size==1024?144L:464L;
+        return overhead + values.length * 8L + (ends == null ? 0 : 16L + ends.length * 4L);
+    }
+
+    /** Small immutable evidence; no expansion or retention of a native array. */
+    public Object contentIdentity() {
+        var identity=contentIdentity;
+        if(identity==null)contentIdentity=identity=VoxySectionSignature.compact(values,ends);
+        return identity;
+    }
+    public synchronized Object faceIdentity(int face) {
+        if(faceIdentities==null)faceIdentities=new Object[6];
+        if(faceIdentities[face]==null) {
+            long[] buffer=FACE_BUFFER.get();copyFace(face,buffer);
+            faceIdentities[face]=compactFaceCopy(buffer).contentIdentity();
+        }
+        return faceIdentities[face];
+    }
 
     public void copyTo(long[] target) {
         if (ends == null) { System.arraycopy(values, 0, target, 0, values.length); return; }

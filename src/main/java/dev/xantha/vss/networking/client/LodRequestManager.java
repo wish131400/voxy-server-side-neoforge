@@ -457,10 +457,18 @@ public final class LodRequestManager {
      * obeys the active dimension, dirty watermark and monotonic column version. */
     synchronized boolean processLocalPregenColumn(ResourceKey<Level> dimension, int cx, int cz,
             long version, int[] sections, BooleanSupplier processor) {
+        return processLocalPregenColumn(dimension, cx, cz, version, sections, processor, () -> true);
+    }
+
+    /** Replaying a known real column may repair an optional map without re-ingesting Voxy. */
+    synchronized boolean processLocalPregenColumn(ResourceKey<Level> dimension, int cx, int cz,
+            long version, int[] sections, BooleanSupplier processor, BooleanSupplier sameVersionReplay) {
         if (sessionConfig == null || !sessionConfig.enabled() || !isActiveDimension(dimension)) return false;
         long packed = PositionUtil.packPosition(cx, cz);
         if (version <= 0 || version < dirtyColumnTimestamps.get(packed)) return false;
-        if (columnTimestamps.get(packed) >= version) return true;
+        long currentVersion = columnTimestamps.get(packed);
+        if (currentVersion > version) return true;
+        if (currentVersion == version) return sameVersionReplay.getAsBoolean();
         if (filteredSession) presenceReporter.removeKnownColumn(dimension, packed);
         if (!processor.getAsBoolean()) return false;
         requestTracker.cancel(packed);

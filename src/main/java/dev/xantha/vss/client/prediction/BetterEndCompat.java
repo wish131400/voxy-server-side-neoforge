@@ -60,7 +60,7 @@ final class BetterEndCompat {
         }
     }
 
-    private static boolean isBetterEndSource(BiomeSource source) {
+    static boolean isBetterEndSource(BiomeSource source) {
         Object configSource = source;
         for (int depth = 0; depth < 8 && configSource != null; depth++) {
             if (isWoverEndSource(configSource)) {

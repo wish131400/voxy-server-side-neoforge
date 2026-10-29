@@ -128,6 +128,13 @@ final class PredictionVoxelCache {
                 || !Arrays.equals(identity, in.readNBytes(32))) throw new IOException("voxel content identity changed");
         byte[] storedCatalog = in.readBoolean() ? in.readNBytes(32) : null;
         if (!Arrays.equals(catalog, storedCatalog)) throw new IOException("voxel template catalog changed");
+        // Hash the canonical body while decoding it. Settings, world identity and catalog
+        // are separate write namespaces, so their canonical prefix contains zeroes.
+        MessageDigest digest;
+        try { digest = MessageDigest.getInstance("SHA-256"); }
+        catch (java.security.NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+        digest.update(java.nio.ByteBuffer.allocate(41).putInt(axis).array());
+        in = new DataInputStream(new BufferedInputStream(new java.security.DigestInputStream(in, digest),32*1024));
         int span = in.readInt(), expected = VssLodLayout.BASE_TILE_BLOCKS << key.lod();
         if (span != expected || span % axis != 0) throw new IOException("voxel layout changed");
         boolean complete = in.readBoolean(); int cities = in.readInt();
@@ -178,7 +185,15 @@ final class PredictionVoxelCache {
         var samples = disk.decodeTerrain(in,sampleVersion,size).samples();
         var tile = new PredictionVoxySource.Tile(key,key.tileX()*span,key.tileZ()*span,span,axis,span/axis,
                 columns,boxes.build(),palette.bytes(columns.length),complete,cities);
-        return new Data(tile,heights,ground,samples,bounds);
+        var data = new Data(tile,heights,ground,samples,bounds);
+        if (in.read() != -1) throw new IOException("voxel record has trailing data");
+        int canonicalSampleVersion = disk.mappings() != null ? 6
+                : Arrays.stream(samples).anyMatch(sample -> sample.volume() != null) ? 3 : 2;
+        // Version 10 and legacy numeric palettes need normalization once. Modern
+        // records already contain the canonical bytes; no second object traversal.
+        byte[] content = version >= 11 && sampleVersion == canonicalSampleVersion ? digest.digest()
+                : contentIdentity(data, 0, new byte[32], null, disk);
+        return new Data(tile,heights,ground,samples,bounds,content);
     }
 
     private static int count(int value, int max) throws IOException {

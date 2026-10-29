@@ -241,10 +241,6 @@ final class PredictionDiskCache implements AutoCloseable {
         VoxelWrite observed;
         synchronized(shared){observed=voxelWrites.get(lease.key);}
         var data = read(lease, (input, version) -> PredictionVoxelCache.read(input,key,settings,identity,templateIdentity,this,version));
-        if(data!=null) {
-            var digest=PredictionVoxelCache.contentIdentity(data,0,new byte[32],null,this);
-            data=new PredictionVoxelCache.Data(data.voxels(),data.heights(),data.groundHeights(),data.samples(),data.bounds(),digest);
-        }
         synchronized (shared) {
             if(!lease.valid())return null;
             if (data != null) {
@@ -1017,16 +1013,19 @@ final class PredictionDiskCache implements AutoCloseable {
                 keys.add(Key.surface(x, z, settings | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
                 keys.add(Key.surface(x, z, settings | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
                 // New pool/dimension semantics must still respond to world edits.
-                int runtime = settings | PredictionVegetation.STRUCTURE_RUNTIME_SETTINGS_VERSION;
-                keys.add(Key.surface(x, z, runtime));
-                keys.add(Key.surface(x, z, runtime | 96));
-                keys.add(Key.surface(x, z, runtime | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
-                keys.add(Key.surface(x, z, runtime | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
-                int end = runtime | PredictionVegetation.END_CLIMATE_SETTINGS_VERSION;
-                keys.add(Key.surface(x, z, end));
-                keys.add(Key.surface(x, z, end | 96));
-                keys.add(Key.surface(x, z, end | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
-                keys.add(Key.surface(x, z, end | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                for (int generation = 0; generation < 2; generation++) {
+                    int context = generation == 0 ? 0 : PredictionVegetation.REGISTRY_CONTEXT_SETTINGS_VERSION;
+                    int runtime = settings | PredictionVegetation.STRUCTURE_RUNTIME_SETTINGS_VERSION | context;
+                    keys.add(Key.surface(x, z, runtime));
+                    keys.add(Key.surface(x, z, runtime | 96));
+                    keys.add(Key.surface(x, z, runtime | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                    keys.add(Key.surface(x, z, runtime | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                    int end = runtime | PredictionVegetation.END_CLIMATE_SETTINGS_VERSION;
+                    keys.add(Key.surface(x, z, end));
+                    keys.add(Key.surface(x, z, end | 96));
+                    keys.add(Key.surface(x, z, end | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                    keys.add(Key.surface(x, z, end | 96 | PredictionVegetation.PREDICATE_SETTINGS_VERSION));
+                }
             }
         }
         return keys;

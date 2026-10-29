@@ -74,7 +74,7 @@ final class PredictionDemandTestSupport {
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 i.ownershipCandidates(), i.previousOwned(), uploaded, voxyRadius, i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
+                i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
     }
 
     static boolean fullyAuthoritative(PredictionTileManager manager, PredictionTileKey key) throws Exception {
@@ -98,7 +98,7 @@ final class PredictionDemandTestSupport {
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 Set.copyOf(candidates), i.previousOwned(), i.uploaded(), i.voxyRadius(), i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
+                i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
         var preparation = new PredictionClientPreparation<PredictionPlanPreparation.Input, PredictionPlanPreparation.Result>(
                 Runnable::run, source -> {
                     var result = PredictionPlanningTestSupport.buildPlan(source);
@@ -135,7 +135,7 @@ final class PredictionDemandTestSupport {
                 i.settings(), i.revision(), i.removalRevision(), i.residents(), i.relief(), i.edited(), i.mixedEdits(),
                 i.ownershipCandidates(), i.previousOwned(), uploaded, i.voxyRadius(), i.mediumBias(), i.visibility(), i.dirty(),
                 i.viewBands(), i.viewDependencies(), i.failed(), i.deferred(), i.idle(), i.ordinaryBusy(),
-                i.cpuReady(), i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
+                i.memoryReady(), i.idlePending(), i.now(), i.nativeDemand());
     }
 
     static boolean hiddenChanged(PredictionTileManager manager, long now) throws Exception {

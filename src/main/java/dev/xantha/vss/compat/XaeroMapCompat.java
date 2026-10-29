@@ -233,6 +233,24 @@ final class XaeroMapCompat {
         return bridge != null && bridge.shouldBackpressureInputNow();
     }
 
+    /** Same-version real replay is bounded independently of the primary Voxy import. */
+    static boolean replayRealColumn(ClientLevel level, ResourceKey<Level> dimension,
+                                    int chunkX, int chunkZ, VoxelColumnData data) {
+        var bridge = instance;
+        if (bridge == null || bridge.dead || !bridge.enabled.getAsBoolean()
+                || !bridge.sessionActive.getAsBoolean()) return true;
+        if (bridge.shouldBackpressureInputNow()) return false;
+        try {
+            var tile = XaeroTileExtractor.extract(chunkX, chunkZ,
+                    level.getMinBuildHeight(), level.getMaxBuildHeight(), data);
+            bridge.consecutiveExtractFailures.set(0);
+            return bridge.tryOfferReplay(dimension, tile);
+        } catch (Throwable failure) {
+            bridge.noteExtractionFailure(failure);
+            return true;
+        }
+    }
+
     /** True until both pixel commits and their coalesced texture rebuilds finish. */
     static boolean hasPendingWork() {
         var bridge = instance;
@@ -437,25 +455,29 @@ final class XaeroMapCompat {
                         level.getMinBuildHeight(), level.getMaxBuildHeight(), columnData);
                 this.consecutiveExtractFailures.set(0);
             } catch (Throwable t) {
-                // Swallow EVERYTHING, Errors included: VSSApi.dispatchColumn converts
-                // any escape into reportIngestFailure — a re-serve loop for a map
-                // problem (review MAJOR). A VM-fatal Error will resurface on a frame
-                // that can afford it; here it would cost LOD correctness.
-                long n = EXTRACT_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
-                if (n > 0) {
-                    VSSLogger.warn("Xaero map bridge: tile extraction failed (" + n
-                            + " failure(s) since the last report)", t);
-                }
-                if (this.consecutiveExtractFailures.incrementAndGet() >= THROW_LATCH
-                        && !this.dead) {
-                    this.dead = true;
-                    clearQueue();
-                    VSSLogger.error("Xaero map bridge: " + THROW_LATCH + " consecutive"
-                            + " extraction failures — disabling the bridge for this session"
-                            + " (LODs are unaffected)", t);
-                }
+                noteExtractionFailure(t);
             }
         };
+    }
+
+    private void noteExtractionFailure(Throwable t) {
+        // Swallow EVERYTHING, Errors included: VSSApi.dispatchColumn converts
+        // any escape into reportIngestFailure — a re-serve loop for a map
+        // problem (review MAJOR). A VM-fatal Error will resurface on a frame
+        // that can afford it; here it would cost LOD correctness.
+        long n = EXTRACT_FAIL_WARN.recordAndTryAcquire(System.nanoTime() / 1_000_000);
+        if (n > 0) {
+            VSSLogger.warn("Xaero map bridge: tile extraction failed (" + n
+                    + " failure(s) since the last report)", t);
+        }
+        if (this.consecutiveExtractFailures.incrementAndGet() >= THROW_LATCH
+                && !this.dead) {
+            this.dead = true;
+            clearQueue();
+            VSSLogger.error("Xaero map bridge: " + THROW_LATCH + " consecutive"
+                    + " extraction failures — disabling the bridge for this session"
+                    + " (LODs are unaffected)", t);
+        }
     }
 
     /** Decode-thread entry: extract + enqueue (latest-wins, bounded, oldest drops). */
@@ -518,6 +540,22 @@ final class XaeroMapCompat {
             }
             this.queuedBytes += bytes;
             this.queue.put(key, new Entry(dimension, tile, bytes));
+        }
+    }
+
+    /** Reject replay under pressure without evicting accepted real columns. */
+    boolean tryOfferReplay(Object dimension, XaeroTileExtractor.PreparedTile tile) {
+        synchronized (this.queueLock) {
+            if (this.dead || !this.enabled.getAsBoolean() || !this.sessionActive.getAsBoolean()) return true;
+            int bytes = approxBytes(tile);
+            long key = ((long) tile.chunkX() << 32) | (tile.chunkZ() & 0xFFFFFFFFL);
+            Entry existing = this.queue.get(key);
+            long previousBytes = existing != null ? existing.bytes : 0;
+            if (shouldBackpressureInputNow()
+                    || (existing == null && this.queue.size() >= MAX_QUEUE)
+                    || this.queuedBytes - previousBytes + bytes > MAX_QUEUE_BYTES) return false;
+            offerPrepared(dimension, tile);
+            return true;
         }
     }
 

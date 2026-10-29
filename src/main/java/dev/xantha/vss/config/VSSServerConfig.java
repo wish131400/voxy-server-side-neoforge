@@ -105,6 +105,8 @@ public class VSSServerConfig extends JsonConfig {
     public int midSyncRateLimitPerTick = DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK;
     public int farSyncRateLimitPerTick = DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK;
     public int distantSyncRateLimitPerTick = DEFAULT_DISTANT_SYNC_RATE_LIMIT_PER_TICK;
+    /** Integrated-server real chunk generation; prediction keeps its own budget. */
+    public int singleplayerGenerationConcurrencyLimit = 2;
     public int generationConcurrencyLimitPerPlayer = 4;
     public int generationConcurrencyLimitGlobal = 32;
     /** Optional automatic-work admission limits; explicit chunky jobs are exempt. */
@@ -177,7 +179,8 @@ public class VSSServerConfig extends JsonConfig {
         help.put("midSyncRateLimitPerTick", "33-64 区块已有 LOD 请求数；默认 8；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");
         help.put("farSyncRateLimitPerTick", "65-128 区块已有 LOD 请求数；默认 4；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");
         help.put("distantSyncRateLimitPerTick", "129 区块外已有 LOD 请求数；默认 2；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");
-        help.put("generationConcurrencyLimitPerPlayer", "每名玩家在途生成任务数，不是线程数；默认 4；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER + "。");
+        help.put("singleplayerGenerationConcurrencyLimit", "单人游戏（含开放局域网）每名玩家在途真实区块生成任务数，不是预测线程数；默认 2；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER + "。不影响独立服务器或 /vss chunky。");
+        help.put("generationConcurrencyLimitPerPlayer", "独立服务器每名玩家在途真实区块生成任务数，不是线程数；默认 4；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER + "。");
         help.put("generationConcurrencyLimitGlobal", "全服在途生成任务数，不是线程数，也是自动后台调度的上界；默认 32；范围 1-" + MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL + "。");
         help.put("generationSnapshotsPerTickLimit", "每 tick 自动快照数量上限；默认 0 不额外限制。已加载区块与自动新生成区块共享预算并公平交接；/vss chunky 豁免。");
         help.put("generationSnapshotBudgetMillis", "每 tick 自动快照软时间预算，单位毫秒；默认 0 关闭，不能中断单个快照。为可交接生成结果保留部分余量；/vss chunky 豁免。");
@@ -225,6 +228,10 @@ public class VSSServerConfig extends JsonConfig {
         return AutomaticGenerationSettings.packingThreads(availableProcessors(), generationConcurrencyLimitGlobal);
     }
 
+    public int effectiveGenerationConcurrencyLimitPerPlayer(boolean integrated) {
+        return integrated ? singleplayerGenerationConcurrencyLimit : generationConcurrencyLimitPerPlayer;
+    }
+
     public int automaticGenerationStartsPerTick() {
         return AutomaticGenerationSettings.startsPerTick(availableProcessors(), generationConcurrencyLimitGlobal);
     }
@@ -264,6 +271,7 @@ public class VSSServerConfig extends JsonConfig {
         midSyncRateLimitPerTick = clamp(midSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         farSyncRateLimitPerTick = clamp(farSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
         distantSyncRateLimitPerTick = clamp(distantSyncRateLimitPerTick, MIN_SYNC_RATE_LIMIT_PER_TICK, MAX_SYNC_RATE_LIMIT_PER_TICK);
+        singleplayerGenerationConcurrencyLimit = clamp(singleplayerGenerationConcurrencyLimit, MIN_GENERATION_LIMIT, MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER);
         generationConcurrencyLimitPerPlayer = clamp(generationConcurrencyLimitPerPlayer, MIN_GENERATION_LIMIT, MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER);
         generationConcurrencyLimitGlobal = clamp(generationConcurrencyLimitGlobal, MIN_GENERATION_LIMIT, MAX_GENERATION_CONCURRENCY_LIMIT_GLOBAL);
         generationSnapshotsPerTickLimit = clamp(generationSnapshotsPerTickLimit, 0, 128);

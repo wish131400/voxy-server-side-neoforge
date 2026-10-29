@@ -9,6 +9,27 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class PredictionVoxySourceTest {
+    @Test void deferredRemovalDoesNotBlockTheCallerOrDeleteReactivatedTiles() throws Exception {
+        try(var source=new PredictionVoxySource()) {
+            var tile=tile(0,0,0,32,1,8);source.put(tile);
+            var current=new java.util.concurrent.atomic.AtomicBoolean(true);
+            var cancelled=new java.util.concurrent.CountDownLatch(1);
+            synchronized(source) {
+                assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),
+                        ()->source.removeLater(tile.key(),current::get,cancelled::countDown));
+                current.set(false);
+            }
+            assertTrue(cancelled.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            long pos=VoxyPredictionBridge.position(0,0,0,0);
+            assertNotNull(source.section(pos,MAPPER));
+            assertTrue(source.mayHavePrediction(pos,MAPPER));
+            assertFalse(source.mayHavePrediction(VoxyPredictionBridge.position(0,0,100,0),MAPPER));
+            var removed=new java.util.concurrent.CountDownLatch(1);
+            source.removeLater(tile.key(),()->true,removed::countDown);
+            assertTrue(removed.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            assertNull(source.section(pos,MAPPER));assertFalse(source.mayHavePrediction(pos,MAPPER));
+        }
+    }
     @Test void detailLoadingControlDoesNotWaitForTheMeshWorkerSourceMonitor() {
         try(var source=new PredictionVoxySource()) {
             // The mesh worker may own this monitor while the render thread updates the switch.

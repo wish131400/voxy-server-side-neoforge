@@ -9,6 +9,24 @@ import java.lang.invoke.MethodType;
 public final class VoxyRenderAccess {
     private VoxyRenderAccess() { }
 
+    private record Backlog(java.lang.reflect.Field service, Method count) { }
+    private static final ClassValue<java.util.Optional<Backlog>> BACKLOGS = new ClassValue<>() {
+        @Override protected java.util.Optional<Backlog> computeValue(Class<?> renderer) {
+            try {
+                var service = renderer.getDeclaredField("renderGen"); service.setAccessible(true);
+                return java.util.Optional.of(new Backlog(service, service.getType().getMethod("getTaskCount")));
+            } catch (ReflectiveOperationException | RuntimeException unavailable) { return java.util.Optional.empty(); }
+        }
+    };
+    /** Optional telemetry only: community renderers without this accessor keep ordinary delivery. */
+    static int meshBacklog(Object renderer) {
+        if (renderer == null) return -1;
+        var binding = BACKLOGS.get(renderer.getClass());
+        if (binding.isEmpty()) return -1;
+        try { return ((Number) binding.get().count.invoke(binding.get().service.get(renderer))).intValue(); }
+        catch (ReflectiveOperationException | RuntimeException unavailable) { return -1; }
+    }
+
     /** Voxy distance is in 512-block sections; VSS requests use 16-block chunks. */
     static float renderDistance(float configuredSections, int serverChunks, int predictionBlocks) {
         return Math.max(configuredSections, Math.max((float) Math.ceil(Math.max(0, serverChunks) / 32.0),

@@ -74,6 +74,22 @@ record PredictionCacheStorage(Path base, Path legacyBase) {
         }
     }
 
+    /** Early display may adopt an initialized world, but cannot create or migrate one. */
+    PredictionDiskCache openExisting(ClientTerrainSampler sampler) {
+        if (!VSSClientConfig.CONFIG.rememberTerrain) return null;
+        Path target = directory(sampler);
+        try {
+            synchronized (WORLD_LOCK) {
+                if (!Files.isRegularFile(target.resolve(WORLD_MARKER), LinkOption.NOFOLLOW_LINKS)) return null;
+                return openWorld(sampler, target);
+            }
+        } catch (IOException | RuntimeException failure) {
+            if (VSSClientConfig.CONFIG.debugLogging)
+                VSSLogger.debug("VSS early cache unavailable: " + target + ": " + failure);
+            return null;
+        }
+    }
+
     private PredictionDiskCache openWorld(ClientTerrainSampler sampler, Path target) throws IOException {
         if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
             var source = sampler.predictionCacheNamespace() == null ? PredictionCacheMigration.find(base, legacyBase, sampler) : null;

@@ -136,4 +136,81 @@ class PredictionLodBackendsTest {
         assertThrows(IllegalArgumentException.class, () -> PredictionLodBackends.open(context(generator(1, 90))));
         assertEquals(2, closes.get());
     }
+
+    private static net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome(
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.biome.Biome> key) {
+        return TerrainPredictionFixtures.access().registryOrThrow(
+                net.minecraft.core.registries.Registries.BIOME).getHolderOrThrow(key);
+    }
+    private static PredictionLodContext noiseContext(JsonObject root) {
+        var access = TerrainPredictionFixtures.access();
+        var noise = TerrainPredictionFixtures.noise();
+        var ops = net.minecraft.resources.RegistryOps.create(com.mojang.serialization.JsonOps.INSTANCE, access);
+        // VanillaRegistries values embed holders owned by their datagen lookup.
+        // Encode the original settings against that owner; the client below then
+        // reconstructs the same JSON into its isolated runtime registries.
+        var sourceLookup = net.minecraft.data.registries.VanillaRegistries.createLookup();
+        var sourceSettings = sourceLookup.lookupOrThrow(net.minecraft.core.registries.Registries.NOISE_SETTINGS)
+                .getOrThrow(net.minecraft.world.level.levelgen.NoiseGeneratorSettings.OVERWORLD).value();
+        var sourceOps = sourceLookup.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+        root.add("settings", net.minecraft.world.level.levelgen.NoiseGeneratorSettings.DIRECT_CODEC
+                .encodeStart(sourceOps, sourceSettings).getOrThrow());
+        root.add("biome_source", net.minecraft.world.level.biome.BiomeSource.CODEC
+                .encodeStart(ops, noise.getBiomeSource()).result().orElseThrow());
+        var snapshot = TerrainPredictionFixtures.emptyRegistries();
+        TerrainPredictionFixtures.access().registryOrThrow(net.minecraft.core.registries.Registries.NOISE)
+                .holders().forEach(holder -> snapshot.getAsJsonObject("noises").add(holder.key().location().toString(),
+                        net.minecraft.world.level.levelgen.synth.NormalNoise.NoiseParameters.DIRECT_CODEC
+                                .encodeStart(ops, holder.value()).result().orElseThrow()));
+        return new PredictionLodContext(profile(root), TerrainPredictionPlan.read(root), root,
+                ClientWorldgenRegistries.decode(snapshot, access), access);
+    }
+    @Test void capturesUseTheProviderPaletteEvenWhenNoiseUsesAnotherOrder() {
+        var plains = biome(net.minecraft.world.level.biome.Biomes.PLAINS);
+        var desert = biome(net.minecraft.world.level.biome.Biomes.DESERT);
+        var actualPlains = TerrainPredictionFixtures.noise().getBiomeSource().possibleBiomes().iterator().next();
+        for (boolean withNoise : List.of(false, true)) {
+            PredictionLodBackends.register("example:lod", 1, 1, context -> {
+                if (withNoise) assertNotNull(context.noiseContext());
+                return new PredictionLodSource() {
+                    public ClientColumnSample sample(int x, int z, int step) { return PredictionLodBackendsTest.sample(120); }
+                    public List<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> biomes() { return List.of(desert, plains); }
+                };
+            });
+            var root = generator(1, 90);
+            try (var sampler = PredictionLodBackends.open(withNoise ? noiseContext(root) : context(root))) {
+                assertEquals(List.of("minecraft:desert", "minecraft:plains"), sampler.cacheBiomes());
+                assertEquals(1, sampler.captureBiomeIndex(actualPlains, 0));
+                assertEquals(0, sampler.captureBiomeIndex(desert, 1));
+                assertEquals(7, sampler.captureBiomeIndex(biome(net.minecraft.world.level.biome.Biomes.FOREST), 7));
+                assertEquals(9, sampler.captureBiomeIndex(null, 9));
+            }
+        }
+    }
+    @Test void emptyProviderPaletteKeepsTheNoisePaletteContract() {
+        PredictionLodBackends.register("example:lod", 1, 1, context -> {
+            context.noiseContext();
+            return (x, z, step) -> sample(120);
+        });
+        try (var sampler = PredictionLodBackends.open(noiseContext(generator(1, 90)))) {
+            assertEquals(List.of("minecraft:plains"), sampler.cacheBiomes());
+            assertEquals(0, sampler.captureBiomeIndex(biome(net.minecraft.world.level.biome.Biomes.PLAINS), 7));
+        }
+    }
+    @Test void changedPaletteCannotRestoreMeshesWithTheOldBiomeIndices() {
+        var plains = biome(net.minecraft.world.level.biome.Biomes.PLAINS);
+        var desert = biome(net.minecraft.world.level.biome.Biomes.DESERT);
+        var storage = new PredictionCacheStorage(cache, null);
+        var directories = new java.util.ArrayList<Path>();
+        for (var palette : List.of(List.of(plains, desert), List.of(desert, plains))) {
+            PredictionLodBackends.register("example:lod", 1, 1, context -> new PredictionLodSource() {
+                public ClientColumnSample sample(int x, int z, int step) { return PredictionLodBackendsTest.sample(120); }
+                public List<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> biomes() { return palette; }
+            });
+            try (var sampler = PredictionLodBackends.open(context(generator(1, 90)))) {
+                directories.add(storage.directory(sampler));
+            }
+        }
+        assertNotEquals(directories.get(0), directories.get(1));
+    }
 }

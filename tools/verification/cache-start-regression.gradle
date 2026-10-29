@@ -1,0 +1,20 @@
+allprojects { afterEvaluate {
+    tasks.register('cacheStartupRegressionTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionCacheWorkerLifecycleTest.class','**/PredictionMemoryLifecycleTest.class'
+        include '**/PredictionReclaimWorkerAdmissionTest.class'
+        include '**/PredictionCpuLeaseLifecycleTest.class','**/PredictionNewWorldLoadingTest.class'
+        include '**/PredictionVoxyPreparationTest.class','**/PredictionPlanningValidityTest.class'
+        include '**/PredictionPlanningPipelineTest.class','**/PredictionVoxySourceTest.class'
+        include '**/PredictionSurfaceDemandTest.class','**/PredictionDemandLifecycleTest.class'
+        include '**/PredictionDiskCacheTest.class','**/PredictionRegionStorageTest.class'
+        include '**/PredictionLodBackendsTest.class','**/PredictionTerrainBackendsTest.class'
+        include '**/PredictionVoxyLoadingIntegrationTest.class','**/PredictionNativeDemandTest.class'
+        include '**/PredictionVegetationTest.class','**/PredictionSurfaceRetryTest.class'
+        forkEvery=1;maxHeapSize='2G';maxParallelForks=1
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

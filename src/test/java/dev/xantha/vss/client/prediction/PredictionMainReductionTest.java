@@ -121,7 +121,7 @@ class PredictionMainReductionTest {
                 0, 768, -64, 320, false, List.copyOf(axes), 0, 0, ClientPredictionState.exactCoverageRemovalRevision(),
                 new PredictionTileManager.RenderSnapshot(Level.OVERWORLD, layout, Map.of(), Map.of()), Map.of(), Set.copyOf(edited), mixed,
                 Set.of(), Set.of(), Set.of(), 0, 0, PredictionVisibilityFeedback.Snapshot.EMPTY, Set.of(), Map.of(), Set.of(),
-                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, true, false, System.nanoTime(), false);
+                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, false, System.nanoTime(), false);
     }
     private static Object get(Object target, String name) throws Exception {
         return PredictionPlanningTestSupport.get(target, name);

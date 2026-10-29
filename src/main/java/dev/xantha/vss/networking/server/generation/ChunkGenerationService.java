@@ -168,7 +168,7 @@ public final class ChunkGenerationService {
         PendingGeneration existing = active.get(key);
         if (existing != null) {
             if (!backgroundOwners.contains(playerUuid)
-                    && (perPlayerActiveCount.getOrDefault(playerUuid, 0) >= config.generationConcurrencyLimitPerPlayer
+                    && (perPlayerActiveCount.getOrDefault(playerUuid, 0) >= generationConcurrencyLimitPerPlayer(level)
                     || (!hasRegularCallback(existing) && regularActiveCount() >= config.generationConcurrencyLimitGlobal))) {
                 totalQueueRejected++;
                 return false;
@@ -183,7 +183,7 @@ public final class ChunkGenerationService {
         PendingGeneration queuedGeneration = queued.get(key);
         if (queuedGeneration != null) {
             if (!backgroundOwners.contains(playerUuid)
-                    && (callbackCountForPlayer(queuedGeneration, playerUuid) >= config.generationConcurrencyLimitPerPlayer
+                    && (callbackCountForPlayer(queuedGeneration, playerUuid) >= generationConcurrencyLimitPerPlayer(level)
                     || !ensureQueueCapacityFor(playerUuid, queuedGeneration))) {
                 totalQueueRejected++;
                 return false;
@@ -664,7 +664,7 @@ public final class ChunkGenerationService {
             return false;
         return GenerationSchedulingPolicy.hasPerPlayerCapacity(perPlayerActiveCount,
                 generation.callbacks.stream().map(GenerationCallback::playerUuid).toList(),
-                config.generationConcurrencyLimitPerPlayer, backgroundOwners);
+                generationConcurrencyLimitPerPlayer(generation.level), backgroundOwners);
     }
 
     private boolean hasBackgroundCallback(PendingGeneration generation) {
@@ -686,9 +686,13 @@ public final class ChunkGenerationService {
         return count;
     }
 
-    private boolean canQueue(UUID playerUuid) {
+    private int generationConcurrencyLimitPerPlayer(ServerLevel level) {
+        return config.effectiveGenerationConcurrencyLimitPerPlayer(!level.getServer().isDedicatedServer());
+    }
+
+    private boolean canQueue(UUID playerUuid, ServerLevel level) {
         return backgroundOwners.contains(playerUuid)
-                || perPlayerQueuedCount.getOrDefault(playerUuid, 0) < Math.max(1, config.generationConcurrencyLimitPerPlayer);
+                || perPlayerQueuedCount.getOrDefault(playerUuid, 0) < generationConcurrencyLimitPerPlayer(level);
     }
 
     private static int callbackCountForPlayer(PendingGeneration generation, UUID playerUuid) {
@@ -702,7 +706,7 @@ public final class ChunkGenerationService {
     }
 
     private boolean ensureQueueCapacityFor(UUID playerUuid, PendingGeneration incomingGeneration) {
-        if (canQueue(playerUuid)) {
+        if (canQueue(playerUuid, incomingGeneration.level)) {
             return true;
         }
         return evictFarthestQueuedRequestFor(playerUuid, incomingGeneration);

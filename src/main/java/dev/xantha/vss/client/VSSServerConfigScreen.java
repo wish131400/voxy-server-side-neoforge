@@ -131,6 +131,11 @@ final class VSSServerConfigScreen extends Screen {
                 value -> config.farPlayerSyncIntervalTicks = value, left, inputX, inputWidth, y);
         y += rowHeight;
 
+        addField("vss.config.server.singleplayer_generation_concurrency", config.singleplayerGenerationConcurrencyLimit,
+                VSSServerConfig.MIN_GENERATION_LIMIT, VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER,
+                value -> config.singleplayerGenerationConcurrencyLimit = value, left, inputX, inputWidth, y);
+        y += rowHeight;
+
         addField("vss.config.server.generation_player_concurrency", config.generationConcurrencyLimitPerPlayer,
                 VSSServerConfig.MIN_GENERATION_LIMIT, VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER,
                 value -> config.generationConcurrencyLimitPerPlayer = value, left, inputX, inputWidth, y);

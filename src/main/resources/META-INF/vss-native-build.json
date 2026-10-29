@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "commit": "c0e86dab556f0a13840ffae7cd939c68fb7d3f86",
+  "workflowUrl": "https://github.com/wish131400/voxy-server-side-neoforge/actions/runs/40905560969",
+  "sourceSha256": "ae6e955001db791f7e6845260f131fc5ecc163cc8694f3afc7b4ca31def02553",
+  "libraries": {
+    "windows-x86_64/vss_native_core.dll": "622ddfca8a419650504ce3a0d055d8476133a074ccfa5da4f9c0e99952e27c6b",
+    "linux-x86_64/libvss_native_core.so": "a3f5cd56c28c09595022aee6f6a09496453531ba38d62c625efbbe368c98a1a0",
+    "linux-aarch64/libvss_native_core.so": "90bcee297a843c02c88942650761e832ed3661fd8de8a6ba3d81b3f425dd7cab",
+    "macos-x86_64/libvss_native_core.dylib": "068ffc63556c6a08d60f21ca7243fdb8a723d7c3e173af4e1a7d64c4eb53b6b1",
+    "macos-aarch64/libvss_native_core.dylib": "d835684126de3e74f3ea94a7b54ce2686ad2aac9369252d8f84631b5d5e13264"
+  }
+}

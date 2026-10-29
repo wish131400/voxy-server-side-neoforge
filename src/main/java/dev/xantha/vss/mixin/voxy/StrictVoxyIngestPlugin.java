@@ -44,10 +44,26 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
                     || calls(enqueue, DEQUE, "add", "(" + OBJECT + ")Z").size() != 1) return false;
         } else {
             if (!type.desc.equals(task) || !calls(worker, MAP, "remove", REMOVE).isEmpty()) return false;
+            String submitDescriptor = "(L" + task + ";)Z";
+            // Some ports forward one raw overload to another. Select the actual
+            // publication, not the number of entry methods. Direct publication
+            // and one verified submit(task) delegation share the worker proof.
             List<MethodNode> raw = node.methods.stream().filter(m -> m.name.equals("rawIngest0")
-                    && calls(m, DEQUE, "add", "(" + OBJECT + ")Z").size() == 1).toList();
+                    && calls(m, DEQUE, "add", "(" + OBJECT + ")Z").size()
+                        + calls(m, node.name, "submit", submitDescriptor).size() == 1).toList();
             if (raw.size() != 1) return false;
             enqueue = raw.get(0);
+            if (calls(enqueue, DEQUE, "add", "(" + OBJECT + ")Z").isEmpty()) {
+                // The water-fix fork serializes shutdown against a shared submit(task).
+                // Bind at that publication while the caller's raw scope is still active;
+                // ordinary native submissions have no raw scope and remain untracked.
+                String descriptor = "(L" + task + ";)Z";
+                var delegates = calls(enqueue, node.name, "submit", descriptor);
+                if (delegates.size() != 1) return false;
+                enqueue = method(node, "submit", descriptor);
+                if (enqueue == null || (enqueue.access & Opcodes.ACC_STATIC) != 0) return false;
+            }
+            if (calls(enqueue, DEQUE, "add", "(" + OBJECT + ")Z").size() != 1) return false;
         }
 
         // All shape checks precede mutation. Unknown ports receive no readiness marker.
@@ -62,7 +78,7 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             bind.add(new FieldInsnNode(Opcodes.GETFIELD, task, section.name, section.desc));
             bind.add(call("submitted", "(" + OBJECT + OBJECT + ")V"));
         } else {
-            // rawIngest0's single publication belongs to the active VSS raw scope,
+            // The single publication belongs to the active VSS raw scope,
             // including ports that snapshot the section or delegate processing.
             bind.add(call("submittedSnapshot", "(" + OBJECT + ")V"));
         }

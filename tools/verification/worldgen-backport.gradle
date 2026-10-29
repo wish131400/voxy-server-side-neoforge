@@ -1,0 +1,30 @@
+allprojects { afterEvaluate {
+    if (providers.gradleProperty('vssTerraBlenderJar').isPresent()) {
+        def sourceJar = file(providers.gradleProperty('vssTerraBlenderJar').get())
+        def nested = layout.buildDirectory.dir('worldgen-test-dependencies/terrablender')
+        def extract = tasks.register('extractTerraBlenderBackportDependencies', Sync) {
+            from(zipTree(sourceJar)) { include 'META-INF/jars/*.jar', 'META-INF/jarjar/*.jar' }
+            into nested
+        }
+        dependencies.add('testRuntimeOnly', files({fileTree(nested.get().asFile) { include '**/*.jar' }}).builtBy(extract))
+    }
+    tasks.register('worldgenBackportTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        ['WorldgenRegistryTagsTest','ClientWorldgenRegistriesTest','ClientWorldgenStaticRegistriesTest',
+         'WorldgenRegistryDependenciesTest','PredictionRegistryContextCacheTest',
+         'PredictionLodBackendsTest','PredictionBackendSelectionTest','TerraBlenderRequiredRoutingTest',
+         'TerraBlenderEndRoutingTest','TerraBlenderEndBiomeSourceTest','TerraBlenderEndSnapshotTest',
+         'TerrablenderUniquenessTest','TerrainGeneratorSnapshotTest','RustBiomeIdentityTest',
+         'RustDimensionBoundsTest','PredictionCacheStartupTest','PredictionCacheDecodeTest',
+         'PredictionCachePublicationRepairTest'].each { include '**/' + it + '.class' }
+        if (providers.gradleProperty('vssTerraBlenderJar').isPresent())
+            systemProperty 'vss.terrablenderJar', providers.gradleProperty('vssTerraBlenderJar').get()
+        maxHeapSize = '3G'
+        maxParallelForks = 1
+        forkEvery = 1
+        testLogging {events 'failed','skipped';exceptionFormat 'full'}
+    }
+}}

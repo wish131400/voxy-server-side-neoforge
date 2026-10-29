@@ -48,7 +48,7 @@ class PredictionSurfaceDemandTest {
                 new PredictionTileManager.RenderSnapshot(Level.OVERWORLD, layout, Map.of(), Map.of()),
                 Map.of(), Set.of(), false, Set.of(), Set.of(), Set.of(), 0, 0,
                 PredictionVisibilityFeedback.Snapshot.EMPTY, Set.of(), Map.of(), Set.of(), Map.of(), Map.of(),
-                new PredictionIdleRefinement(), true, true, true, false, System.nanoTime(), false);
+                new PredictionIdleRefinement(), true, true, false, System.nanoTime(), false);
         var result = PredictionPlanningTestSupport.buildPlan(input);
         assertFalse(result.surfaces().isEmpty());
         int partial = 0;

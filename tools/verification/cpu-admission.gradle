@@ -1,0 +1,31 @@
+// Shared concurrency, handoff and queue regressions; no graphics context required.
+allprojects { afterEvaluate {
+    [cpuAdmissionTest: ['PredictionCpuBudgetTest', 'PredictionCpuAdmissionIntegrationTest',
+         'PredictionNearFirstSchedulingTest', 'PredictionVoxyLoadingIntegrationTest',
+         'PredictionVoxelCacheIntegrationTest', 'PredictionLivePipelineTest',
+         'PredictionIdleRefinementTest', 'PredictionGenerationPriorityTest',
+         'PredictionFramePaceTest', 'PredictionPerformanceProfileTest'],
+     cpuPlanningTest: ['PredictionPlanningPipelineTest', 'PredictionMainReductionTest',
+         'PredictionNativeDemandTest', 'PredictionSurfaceDemandTest', 'PredictionDemandProfileTest']].each { taskName, classes ->
+    tasks.register(taskName, Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        classes.each {
+            include "**/${it}.class"
+        }
+        maxHeapSize = '2G'
+        maxParallelForks = 1
+        forkEvery = 1
+        if (taskName == 'cpuPlanningTest') {
+            doFirst {
+                temporaryDir.mkdirs()
+                systemProperty 'vss.detailProfileDirectory', java.nio.file.Files.createTempDirectory(
+                        temporaryDir.toPath(), 'profile-').toFile().absolutePath
+            }
+        }
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    }
+    }
+} }

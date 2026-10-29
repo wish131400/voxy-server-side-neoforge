@@ -91,6 +91,7 @@ final class WorldgenCodecSnapshot {
                 net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool.DIRECT_CODEC));
         if (resources != null) root.add("structure_templates", encodeTemplates(resources));
         root.add("custom_registries", dependencies.encode());
+        root.add("registry_tags", dependencies.encodeTags());
         if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging) {
             var parts = new java.util.ArrayList<String>();
             for (String key : root.keySet().stream().sorted().toList())
@@ -458,6 +459,13 @@ final class WorldgenCodecSnapshot {
         if (value instanceof Structure structure) {
             encoded.getAsJsonObject().add("biomes", structureBiomeIds(structure.biomes().stream()));
         }
+        if (value instanceof StructureSet set && set.placement() instanceof
+                net.minecraft.world.level.levelgen.structure.placement.ConcentricRingsStructurePlacement rings) {
+            // The client snapshot owns new biome holders but not the server's
+            // dynamic biome tags. Preserve the actual preferred-biome set.
+            encoded.getAsJsonObject().getAsJsonObject("placement")
+                    .add("preferred_biomes", structureBiomeIds(rings.preferredBiomes().stream()));
+        }
         return encoded;
     }
 
@@ -552,6 +560,34 @@ final class WorldgenCodecSnapshot {
             return exceedsHeadroom(encoded) ? unavailableSnapshot("Dimension type metadata exceeds snapshot budget") : encoded;
         } catch (java.io.IOException failure) {
             throw new IllegalStateException("Cannot append prediction dimension type", failure);
+        }
+    }
+
+    /** Capture hidden server biome routing after the ordinary codec snapshot, before publication. */
+    static Encoded withRuntimeBiomeSource(Encoded generator, BiomeSource source, long seed) {
+        if (generator.bytes().length == 0) return generator;
+        try {
+            byte[] raw = LodByteCompression.decompress(generator.bytes(), generator.compression(), generator.rawSize(),
+                    dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.MAX_GENERATOR_RAW_BYTES);
+            JsonObject root = com.google.gson.JsonParser.parseString(new String(raw,
+                    java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+            TerrainPredictionPlan plan = TerrainPredictionPlan.read(root);
+            if (plan.kind() != TerrainPredictionPlan.Kind.NOISE_GRAPH || !plan.backend().equals("vss:noise_graph")) return generator;
+            try {
+                JsonObject end = TerraBlenderEndSnapshot.capture(source, seed);
+                if (end == null) return generator;
+                root.add(TerraBlenderEndSnapshot.FIELD, end);
+            } catch (java.util.concurrent.CancellationException cancelled) { throw cancelled; }
+            catch (RuntimeException | LinkageError failure) {
+                String reason = "Required TerraBlender End routing could not be captured: " + failure;
+                root.addProperty("vss_unsupported_reason", reason);
+                root.add(TerrainPredictionPlan.FIELD, TerrainPredictionPlan.unavailable(reason).encode());
+                VSSLogger.warn(reason);
+            }
+            Encoded encoded = compress(root);
+            return exceedsHeadroom(encoded) ? unavailableSnapshot("TerraBlender End routing exceeds snapshot budget") : encoded;
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("Cannot append server biome routing", failure);
         }
     }
 

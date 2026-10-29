@@ -51,6 +51,28 @@ class XaeroMapCompatQueueTest {
     }
 
     @Test
+    void realReplayRejectsTheSoftLimitWithoutEvictingAcceptedColumns() {
+        var bridge = bridge(new AtomicBoolean(true), new ArrayList<>());
+        for (int i = 0; i < XaeroMapCompat.INTAKE_QUEUE_HIGH_WATERMARK; i++)
+            bridge.offerPrepared("dimension", tile(i, 0));
+        assertFalse(bridge.tryOfferReplay("dimension", tile(100_000, 0)));
+        assertTrue(bridge.hasQueuedForTest(0, 0));
+        assertFalse(bridge.hasQueuedForTest(100_000, 0));
+        assertEquals(0, bridge.counterForTest("dropped_overflow"));
+        bridge.clearQueue();
+        assertTrue(bridge.tryOfferReplay("dimension", tile(100_000, 0)));
+        assertTrue(bridge.hasQueuedForTest(100_000, 0));
+    }
+
+    @Test
+    void disabledReplayDoesNotLeaveAWaitingPregenJob() {
+        var enabled = new AtomicBoolean(false);
+        var bridge = bridge(enabled, new ArrayList<>());
+        assertTrue(bridge.tryOfferReplay("dimension", tile(1, 2)));
+        assertEquals(0, bridge.queuedForTest());
+    }
+
+    @Test
     void disconnectClearsQueueAndDisabledBridgeDeregisters() {
         var enabled = new AtomicBoolean(true);
         var registered = new ArrayList<VoxelColumnConsumer>();

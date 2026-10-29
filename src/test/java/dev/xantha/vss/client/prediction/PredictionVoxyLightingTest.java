@@ -80,6 +80,27 @@ class PredictionVoxyLightingTest {
             assertEquals(15,light(source.section(VoxyPredictionBridge.position(0,0,1,0),NETHER),16,0,16));
         }
     }
+    @Test void notificationEvidenceNeverConstructsOrWaitsForDarkWorldLighting() {
+        try(var source=new PredictionVoxySource()) {
+            source.put(tile(0,List.of(lamp(16,32,16))));
+            long pos=VoxyPredictionBridge.position(0,0,0,0);
+            source.section(pos,NETHER);
+            long builds=(long)source.diagnostics().get("sectionBuilds"),lighting=(long)source.diagnostics().get("lightingBuilds");
+            assertNull(source.notificationIdentity(pos,NETHER),"The missing upper halo must fall back to ordinary preparation");
+            assertEquals(builds,source.diagnostics().get("sectionBuilds"));
+            assertEquals(lighting,source.diagnostics().get("lightingBuilds"));
+            int sx=VoxyPredictionBridge.x(pos),sy=VoxyPredictionBridge.y(pos),sz=VoxyPredictionBridge.z(pos);
+            for(int face=0;face<6;face++)source.face(VoxyPredictionBridge.position(0,
+                    sx+(face==0?-1:face==1?1:0),sy+(face==2?-1:face==3?1:0),sz+(face==4?-1:face==5?1:0)),NETHER,face^1);
+            Object evidence=source.notificationIdentity(pos,NETHER);assertNotNull(evidence);
+            builds=(long)source.diagnostics().get("sectionBuilds");lighting=(long)source.diagnostics().get("lightingBuilds");
+            assertEquals(evidence,source.notificationIdentity(pos,NETHER));
+            assertEquals(builds,source.diagnostics().get("sectionBuilds"));
+            assertEquals(lighting,source.diagnostics().get("lightingBuilds"));
+            source.put(tile(0,List.of(lamp(17,32,16))));
+            assertNull(source.notificationIdentity(pos,NETHER),"Moving a nearby light revokes existing cached evidence");
+        }
+    }
     @Test void coarseCellsAttenuateByWorldDistanceAndKeepNativeVoxelOccupancy() {
         for(int lod=1;lod<=4;lod++)try(var source=new PredictionVoxySource()) {
             int step=1<<lod;

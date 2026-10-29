@@ -47,17 +47,34 @@ class VoxySectionDataTest {
     @Test void denseNoiseUsesAnArrayInsteadOfExpandingRunMetadata() {
         long[] data=new Random(42).longs(32768).toArray();
         var compact=VoxySectionData.compact(data);
-        assertTrue(compact.bytes()<data.length*8L+128);
+        assertTrue(compact.bytes()<data.length*8L+512);
         long[] target=new long[32768]; compact.copyTo(target);
         assertArrayEquals(data,target); assertSame(data,compact.array());
     }
 
     @Test void constantAirAndTheLastVoxelSurviveRoundTrip() {
         long[] data=new long[32768];Arrays.fill(data,15L<<56);
-        var air=VoxySectionData.compact(data);assertTrue(air.bytes()<128);
+        var air=VoxySectionData.compact(data);assertTrue(air.bytes()<512);
         data=data.clone();data[32767]=Long.MIN_VALUE;
         long[] target=new long[32768];VoxySectionData.compact(data).copyTo(target);
         assertArrayEquals(data,target);
         assertThrows(IllegalArgumentException.class,()->VoxySectionData.compact(new long[0]));
+    }
+    @Test void compactIdentityIncludesRunEndsLightBiomesAndEveryNeighborPlane() {
+        var data=new long[32768];Arrays.fill(data,15L<<56);
+        data[0]=3L<<27;data[1500]=5L<<47;
+        var first=VoxySectionData.compactCopy(data);
+        assertEquals(first.contentIdentity(),VoxySectionData.compactCopy(data).contentIdentity());
+        assertSame(first.contentIdentity(),first.contentIdentity());
+        for(int face=0;face<6;face++) {
+            var border=new long[1024];first.copyFace(face,border);
+            assertEquals(first.faceIdentity(face),VoxySectionData.compactFaceCopy(border).contentIdentity());
+        }
+        var changed=data.clone();changed[1499]=changed[1500];changed[1500]=15L<<56;
+        assertNotEquals(first.contentIdentity(),VoxySectionData.compactCopy(changed).contentIdentity(),"Equal run values with different ends are distinct");
+        changed=data.clone();changed[32767]^=1L<<56;
+        assertNotEquals(first.contentIdentity(),VoxySectionData.compactCopy(changed).contentIdentity());
+        var dense=new Random(33).longs(32768).toArray();
+        assertEquals(VoxySectionData.compactCopy(dense).contentIdentity(),VoxySectionData.compactCopy(dense).contentIdentity());
     }
 }

@@ -33,9 +33,13 @@ class GenerationBudgetConfigTest {
         assertEquals(6, config.generationSnapshotsPerTickLimit);
         assertEquals(3, config.generationSnapshotBudgetMillis);
         assertEquals(45, config.generationPauseAboveMspt);
-        var serialize = JsonConfig.class.getDeclaredMethod("configWithHelp");
+        var storeClass = Class.forName("dev.xantha.vss.config.JsonConfigStore");
+        var constructor = storeClass.getDeclaredConstructor(java.nio.file.Path.class);
+        constructor.setAccessible(true);
+        var store = constructor.newInstance(java.nio.file.Path.of("build", "tmp", "generation-tests"));
+        var serialize = storeClass.getDeclaredMethod("configWithHelp", JsonConfig.class);
         serialize.setAccessible(true);
-        var saved = (JsonObject) serialize.invoke(config);
+        var saved = (JsonObject) serialize.invoke(store, config);
         assertFalse(saved.has("generationStartsPerTickLimit"));
         assertFalse(saved.getAsJsonObject("_help").has("generationStartsPerTickLimit"));
         assertEquals(6, saved.get("generationSnapshotsPerTickLimit").getAsInt());

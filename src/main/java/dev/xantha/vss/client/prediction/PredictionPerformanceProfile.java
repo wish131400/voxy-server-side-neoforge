@@ -5,7 +5,7 @@ import dev.xantha.vss.config.VSSClientConfig;
 /**
  * Coarse resource presets for the prediction workers. The tiers only change
  * how many worker threads the prediction pool may occupy.
- * All tiers share CPU-load admission with local
+ * All tiers share a bounded concurrency budget with local
  * generation; terrain distance, mesh detail and quality toggles
  * stay shared so a tier never produces a coarser world than a higher one.
  */
@@ -34,7 +34,7 @@ public enum PredictionPerformanceProfile {
             return Math.max(1, Math.min(6, poolSize(logicalProcessors)));
         }
     },
-    /** Every logical core but two; shared CPU-load admission still applies. */
+    /** Every logical core but two; shared concurrency admission still applies. */
     HIGH {
         @Override
         public int poolSize(int logicalProcessors) {

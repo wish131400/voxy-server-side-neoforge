@@ -20,12 +20,12 @@ final class IntegratedPregenBridge {
     }
 
     static boolean offer(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData data,
-            BooleanSupplier valid, Consumer<Boolean> completed) {
+            BooleanSupplier valid, Consumer<Boolean> completed, Runnable retry) {
         if (server.isDedicatedServer()) return false;
         try {
             return Boolean.TRUE.equals(Class.forName(CLIENT).getMethod("tryImportLocalPregen",
-                    MinecraftServer.class, ResourceKey.class, EncodedColumnData.class, BooleanSupplier.class, Consumer.class)
-                    .invoke(null, server, dimension, data, valid, completed));
+                    MinecraftServer.class, ResourceKey.class, EncodedColumnData.class, BooleanSupplier.class, Consumer.class, Runnable.class)
+                    .invoke(null, server, dimension, data, valid, completed, retry));
         } catch (ReflectiveOperationException e) {
             VSSLogger.warn("Local pregen bridge unavailable; using disk cache: " + e.getMessage());
             return false;

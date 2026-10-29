@@ -52,6 +52,13 @@ public final class ModCompat {
         return XaeroMapCompat.shouldBackpressureInput();
     }
 
+    /** Optional real-map replay; does not enter Voxy's voxel consumer. */
+    public static boolean replayRealXaeroColumn(net.minecraft.client.multiplayer.ClientLevel level,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+            int chunkX, int chunkZ, dev.xantha.vss.api.VoxelColumnData data) {
+        return XaeroMapCompat.replayRealColumn(level, dimension, chunkX, chunkZ, data);
+    }
+
     public static boolean hasPendingXaeroMapWork() {
         return XaeroMapCompat.hasPendingWork();
     }

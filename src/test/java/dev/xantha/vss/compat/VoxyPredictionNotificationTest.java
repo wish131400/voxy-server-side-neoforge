@@ -411,6 +411,131 @@ class VoxyPredictionNotificationTest {
         VoxyPredictionBridge.changed((VoxyPredictionBridge.Source)get("source"),-16,-16,48,48);
         flush();drainUpdates();
     }
+    @Test void identicalPredictionInputsSkipCompositionButNativeEventsAndRealAirRevokeEvidence() throws Exception {
+        var data=new long[32768];data[0]=1L<<27;
+        var revision=new AtomicLong();var centers=new AtomicInteger();var faces=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){centers.incrementAndGet();return data.clone();}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m){return revision.get();}
+            public boolean compareNotificationFaces(){return true;}
+            public boolean copyFace(long p,VoxyPredictionBridge.Mapper m,int f,long[] target){faces.incrementAndGet();Arrays.fill(target,0);return true;}
+        });
+        versions().put(pos,new AtomicLong(1));
+        publishNotification();
+        int nativeReads=engine.acquires;
+        for(int i=0;i<24;i++)publishNotification();
+        assertEquals(1,centers.get());assertEquals(6,faces.get());assertEquals(nativeReads,engine.acquires);
+        assertEquals(1,engine.events.get());
+        data[0]=2L<<27;revision.incrementAndGet();publishNotification();
+        assertEquals(2,centers.get());assertEquals(2,engine.events.get());
+        var real=new Section(pos);real.data[0]=7L<<27;engine.real=real;
+        VoxyPredictionBridge.forwardEvent(engine,new Router(0),real,3);
+        publishNotification();assertEquals(7L<<27,engine.lastEvent.data[0]);assertEquals(3,engine.events.get());
+        var settled=context.getClass().getDeclaredMethod("revokeInput",long.class);settled.setAccessible(true);settled.invoke(context,pos);
+        publishNotification();assertEquals(4,centers.get(),"Real-column authority changes require fresh composition even with identical prediction");
+    }
+    @Test void nativeEventDuringEvidenceReadCannotSkipAnUpdateUsingAnOldIdentity() throws Exception {
+        var race=new AtomicBoolean();var centers=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){centers.incrementAndGet();return new long[32768];}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m) {
+                if(race.compareAndSet(true,false))try {
+                    VoxyPredictionBridge.forwardEvent(engine,new Router(0),new Section(pos),1);
+                }
+                catch(Exception e){throw new AssertionError(e);}
+                return 1;
+            }
+        });
+        versions().put(pos,new AtomicLong(1));publishNotification();
+        race.set(true);publishNotification();
+        flush();drainUpdates();
+        assertEquals(2,centers.get());
+    }
+    @Test void continuousUnrelatedNativeEventsDoNotHoldPredictionDeliveryBehindAGlobalQuietPeriod() throws Exception {
+        var data=new long[32768];data[0]=1L<<27;
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){return data.clone();}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m) {
+                VoxyPredictionBridge.forwardEvent(engine,new Router(0),new Section(VoxyPredictionBridge.position(2,100,0,100)),1);
+                return data[0];
+            }
+        });
+        versions().put(pos,new AtomicLong(1));
+        for(int i=1;i<=8;i++) {
+            data[0]=(long)i<<27;publishNotification();
+            assertEquals(i,engine.events.get());
+        }
+    }
+    @Test void distantNativeEventsPreserveReuseButEachNeighborRevokesIt() throws Exception {
+        var centers=new AtomicInteger();var probes=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){centers.incrementAndGet();return new long[32768];}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m){probes.incrementAndGet();return 1;}
+        });
+        versions().put(pos,new AtomicLong(1));publishNotification();
+        assertEquals(1,probes.get(),"First publication only records evidence after composition");
+        for(int i=0;i<10;i++) {
+            VoxyPredictionBridge.forwardEvent(engine,new Router(0),new Section(VoxyPredictionBridge.position(2,100+i,0,100)),1);
+            publishNotification();
+        }
+        assertEquals(1,centers.get(),"Unrelated native ingest must preserve reuse");
+        assertEquals(1,versions().size(),"Distant ingest must not retain unobserved sections");
+        int lod=VoxyPredictionBridge.level(pos),sx=VoxyPredictionBridge.x(pos),sy=VoxyPredictionBridge.y(pos),sz=VoxyPredictionBridge.z(pos);
+        VoxyPredictionBridge.forwardEvent(engine,new Router(0),new Section(VoxyPredictionBridge.position(lod,sx+1,sy,sz)),2);
+        publishNotification();assertEquals(1,centers.get(),"Neighbor child occupancy cannot change the center's border voxels");
+        for(int face=0;face<6;face++) {
+            long neighbor=VoxyPredictionBridge.position(lod,sx+(face==0?-1:face==1?1:0),
+                    sy+(face==2?-1:face==3?1:0),sz+(face==4?-1:face==5?1:0));
+            VoxyPredictionBridge.forwardEvent(engine,new Router(0),new Section(neighbor),1);
+            flush();drainUpdates();
+            assertEquals(face+2,centers.get(),"Every changed neighbor must revoke the center's reuse");
+            publishNotification();assertEquals(face+2,centers.get());
+        }
+    }
+    @Test void nativeInteriorChangesKeepNeighborEvidenceButEachChangedBorderRevokesIt() throws Exception {
+        var centers=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){centers.incrementAndGet();return new long[32768];}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m){return 1;}
+            public boolean compareNotificationFaces(){return true;}
+            public boolean copyFace(long p,VoxyPredictionBridge.Mapper m,int f,long[] target){Arrays.fill(target,0);return true;}
+        });
+        versions().put(pos,new AtomicLong(1));publishNotification();
+        for(int face=0;face<6;face++) {
+            int sx=face==0?-1:face==1?1:0,sy=face==2?-1:face==3?1:0,sz=face==4?-1:face==5?1:0;
+            var real=new Section(VoxyPredictionBridge.position(2,sx,sy,sz));
+            int baseline=centers.get();long version=versions().get(pos).get();
+            for(int i=0;i<20;i++) {
+                real.data[16<<10|16<<5|16]=(long)(i+1)<<27;
+                VoxyPredictionBridge.forwardEvent(engine,new Router(0),real,1);flush();drainUpdates();
+            }
+            assertEquals(baseline,centers.get());assertEquals(version,versions().get(pos).get());
+            real.data[VoxyFaceData.index(face^1,10)]=2L<<27;
+            VoxyPredictionBridge.forwardEvent(engine,new Router(0),real,1);flush();drainUpdates();
+            assertEquals(baseline+1,centers.get(),"Changed border must invalidate its consumer: face "+face);
+            assertTrue(versions().get(pos).get()!=version);
+            // Fixture raw reads return air, so another border change must be tested again.
+        }
+        System.out.println("NEIGHBOR_REPAIR_REPLAY unchangedNativeEvents=120 extraCompositions=0 changedFaces=6 compositions=6");
+    }
+    @Test void realColumnSettlementRevokesOnlyIntersectingEvidence() throws Exception {
+        var centers=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m){centers.incrementAndGet();return new long[32768];}
+            public Object notificationIdentity(long p,VoxyPredictionBridge.Mapper m){return 1;}
+        });
+        versions().put(pos,new AtomicLong(1));publishNotification();
+        try(var compat=mockStatic(VoxyCompat.class)) {
+            compat.when(()->VoxyCompat.confirmedPredictionColumn(engine,100,100)).thenReturn(true);
+            VoxyPredictionBridge.realColumnSettled(100,100);
+        }
+        publishNotification();assertEquals(1,centers.get());
+        try(var compat=mockStatic(VoxyCompat.class)) {
+            compat.when(()->VoxyCompat.confirmedPredictionColumn(engine,0,0)).thenReturn(true);
+            VoxyPredictionBridge.realColumnSettled(0,0);
+        }
+        flush();drainUpdates();assertEquals(2,centers.get(),"Authoritative real air requires fresh local composition");
+    }
     @Test void maskedPublicationsKeepCoveredVersionsAndStillInvalidateContributingSections() throws Exception {
         long adjacent=VoxyPredictionBridge.position(0,1,0,0);
         versions().put(pos,new AtomicLong(1));versions().put(adjacent,new AtomicLong(1));
@@ -523,6 +648,75 @@ class VoxyPredictionNotificationTest {
             first.release();second.release();assertEquals(0,first.references);
         }finally{resume.countDown();workers.shutdownNow();}
     }
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints={2,512})
+    void aFullSharedBudgetStillAllowsTheSnapshotWorkingSetToMove(int capacity) throws Exception {
+        var leases=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m) {reads.incrementAndGet();return new long[32768];}
+            public VoxyPredictionBridge.Retention retainSection(long bytes) {
+                if(leases.get()>=capacity)return null;leases.incrementAndGet();return leases::decrementAndGet;
+            }
+        });
+        for(int i=0;i<capacity;i++)((Section)VoxyPredictionBridge.compose(engine,pos+i*16,null)).release();
+        assertEquals(capacity,leases.get());
+        var first=(Section)VoxyPredictionBridge.compose(engine,pos+capacity*16,null);
+        var repeat=(Section)VoxyPredictionBridge.compose(engine,pos+capacity*16,null);
+        assertSame(first,repeat);assertEquals(capacity+1,reads.get());assertEquals(capacity,leases.get());
+        first.release();repeat.release();
+        var clear=context.getClass().getDeclaredMethod("clearCached");clear.setAccessible(true);clear.invoke(context);
+        assertEquals(0,leases.get());
+    }
+    @Test void nativeIngestAfterTheWithdrawalProbeCancelsThatObsoleteEmptyResult() throws Exception {
+        nonemptySource(new AtomicInteger());((Section)VoxyPredictionBridge.compose(engine,pos,null)).release();
+        var nativeData=new Section(pos);nativeData.data[0]=11L<<27;
+        engine.beforeAcquireReturn=()->{
+            engine.real=nativeData;
+            VoxyPredictionBridge.forwardEvent(engine,new Router(3),nativeData,1);
+        };
+        VSSClientConfig.CONFIG.enablePrediction=false;VoxyPredictionBridge.updatePredictionState();drainUpdates();
+        assertTrue(engine.withdrawn.isEmpty());assertSame(nativeData,engine.lastEvent);
+        assertEquals(1,nativeData.references);assertTrue((boolean)get("supported"));
+    }
+
+    @Test void slowRetentionReleaseCannotHoldTheSnapshotMapLock() throws Exception {
+        var entered=new CountDownLatch(1);var resume=new CountDownLatch(1);var releases=new AtomicInteger();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m) {return new long[32768];}
+            public VoxyPredictionBridge.Retention retainSection(long bytes) {return ()->{releases.incrementAndGet();entered.countDown();awaitLatch(resume);};}
+        });
+        var section=(Section)VoxyPredictionBridge.compose(engine,pos,null);section.release();
+        var invalidate=context.getClass().getDeclaredMethod("invalidateCached",long.class);invalidate.setAccessible(true);
+        var count=context.getClass().getDeclaredMethod("cachedCount");count.setAccessible(true);
+        var pool=Executors.newSingleThreadExecutor();
+        try {
+            var removal=pool.submit(()->{try {invalidate.invoke(context,pos);}catch(Exception e){throw new RuntimeException(e);}});
+            assertTrue(entered.await(5,TimeUnit.SECONDS));
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),()->assertEquals(0,count.invoke(context)));
+            resume.countDown();removal.get(5,TimeUnit.SECONDS);
+            assertEquals(1,releases.get());assertEquals(0,section.references);
+        } finally {resume.countDown();pool.shutdownNow();}
+    }
+    @Test void steadyDisplayStateAndAlreadyScheduledWorkDoNotWaitForNotificationDelivery() throws Exception {
+        set("scheduled",new AtomicBoolean(true));
+        synchronized(context) {
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),VoxyPredictionBridge::updatePredictionState);
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),this::flush);
+        }
+        set("scheduled",new AtomicBoolean(false));
+    }
+    @Test void emptyRetiredPredictionWithdrawsWithoutReadingPredictionButPreservesNativeBlocks() throws Exception {
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long p,VoxyPredictionBridge.Mapper m) {reads.incrementAndGet();return null;}
+            public boolean mayHavePrediction(long p,VoxyPredictionBridge.Mapper m) {return false;}
+        });
+        versions().put(pos,new AtomicLong(1));publishNotification();
+        assertEquals(List.of(pos),engine.withdrawn);assertEquals(0,reads.get());
+        var nativeData=new Section(pos);nativeData.data[0]=9L<<27;engine.real=nativeData;
+        publishNotification();assertEquals(1,engine.withdrawn.size());assertEquals(9L<<27,engine.lastEvent.data[0]);
+        assertEquals(1,nativeData.references);assertTrue((boolean)get("supported"));
+    }
+
     @Test void snapshotCacheDoesNotWaitForTheWorldNotificationMonitor() throws Exception {
         var entered=new CountDownLatch(1);var workers=Executors.newSingleThreadExecutor();
         set("source",new VoxyPredictionBridge.Source(){
@@ -588,14 +782,10 @@ class VoxyPredictionNotificationTest {
         assertEquals(1,engine.worldReleases);assertFalse(((VoxyPredictionBridge.Mapper)context).isOpen());
     }
 
-    @Test void sourceRemovalRestoresNativeDataInFrameBatchesWithoutAnAutonomousDrainLoop() throws Exception {
+    @Test void sourceRemovalRestoresAllNativeDataAfterOneFrameStartsTheBackgroundDrain() throws Exception {
         for(int x=0;x<150;x++)versions().put(VoxyPredictionBridge.position(0,x,0,0),new AtomicLong(1));
         VoxyPredictionBridge.detach((VoxyPredictionBridge.Source)get("source"));
-        drainUpdates();assertEquals(0,engine.events.get(),"Detach only queues restoration until a frame can consume it");
-        flush();drainUpdates();assertEquals(64,engine.events.get());
-        assertEquals(86,((Set<?>)get("dirty")).size());assertFalse(((AtomicBoolean)get("scheduled")).get());
-        drainUpdates();assertEquals(64,engine.events.get(),"A completed batch must wait for the next frame");
-        flush();drainUpdates();assertEquals(128,engine.events.get());
+        drainUpdates();assertEquals(0,engine.events.get());
         flush();drainUpdates();assertEquals(150,engine.events.get());
         assertEquals(0,reads.get());assertTrue(((Set<?>)get("dirty")).isEmpty());
     }
@@ -607,15 +797,17 @@ class VoxyPredictionNotificationTest {
         assertEquals(0,reads.get());assertEquals(1,real.references,"engine retains its own reference");
     }
 
-    @Test void activePredictionPublicationsAlsoUseBoundedBatchesAndEventuallyDeliverEverySection() throws Exception {
+    @Test void activePredictionPublicationsYieldBetweenSlicesAndFinishWithoutMoreFrames() throws Exception {
+        set("renderSystem",new BusyRenderer());
         for(int x=0;x<150;x++)versions().put(VoxyPredictionBridge.position(0,x,0,0),new AtomicLong(1));
         VoxyPredictionBridge.changed((VoxyPredictionBridge.Source)get("source"),Integer.MIN_VALUE,Integer.MIN_VALUE,Integer.MAX_VALUE,Integer.MAX_VALUE);
-        flush();drainUpdates();assertEquals(64,engine.events.get());
-        assertEquals(86,((Set<?>)get("dirty")).size());
-        flush();drainUpdates();assertEquals(128,engine.events.get());
-        flush();drainUpdates();assertEquals(150,engine.events.get());
-        assertTrue(((Set<?>)get("dirty")).isEmpty());
+        var marker=new CountDownLatch(1);var atYield=new AtomicInteger();
+        flush();updates().execute(()->{atYield.set(engine.events.get());marker.countDown();});
+        assertTrue(marker.await(5,TimeUnit.SECONDS));assertTrue(atYield.get()<150,"A busy native mesh queue must get time between slices");
+        drainUpdates();assertEquals(150,engine.events.get());assertTrue(((Set<?>)get("dirty")).isEmpty());
     }
+    public static final class BusyRenderer { private final Tasks renderGen=new Tasks(); }
+    public static final class Tasks { public int getTaskCount() { return 600; } }
 
     @Test void continuousPublicationsCannotStarveSectionsBehindTheFirstBatch() throws Exception {
         set("dirty",new ConcurrentSkipListSet<Long>());
@@ -744,7 +936,15 @@ class VoxyPredictionNotificationTest {
         var field=VoxyPredictionBridge.class.getDeclaredField("UPDATES");field.setAccessible(true);
         return (ExecutorService)field.get(null);
     }
-    private static void drainUpdates() throws Exception {updates().submit(()->{}).get(5,TimeUnit.SECONDS);}
+    private void drainUpdates() throws Exception {
+        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+        do {
+            updates().submit(()->{}).get(5,TimeUnit.SECONDS);
+            Thread.sleep(2);
+            if(!((AtomicBoolean)get("scheduled")).get()) return;
+        } while(System.nanoTime()<until);
+        fail("Notification slices did not settle");
+    }
     private void flush() throws Exception {
         var method=context.getClass().getDeclaredMethod("flushUpdates");method.setAccessible(true);method.invoke(context);
     }
@@ -798,7 +998,11 @@ class VoxyPredictionNotificationTest {
         final AtomicInteger events=new AtomicInteger(); final Set<Long> delivered=ConcurrentHashMap.newKeySet(); volatile Section real,lastEvent;
         public void releaseRef() { worldReleases++; }
         final CountDownLatch event=new CountDownLatch(1);
-        public Section acquireIfExists(long position) { acquires++;var section=real;if(section!=null)section.acquire();return section; }
+        volatile Runnable beforeAcquireReturn;
+        public Section acquireIfExists(long position) {
+            acquires++;var section=real;if(section!=null)section.acquire();
+            var callback=beforeAcquireReturn;beforeAcquireReturn=null;if(callback!=null)callback.run();return section;
+        }
         public void worldEvent(Section section,int flags,int neighbors) {
             this.flags=flags;
             events.incrementAndGet();delivered.add(section.key);lastEvent=section;neighborMask=neighbors;

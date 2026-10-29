@@ -30,9 +30,13 @@ class ChunkyQueueLimitConfigTest {
         validate.setAccessible(true);
         validate.invoke(config);
         assertEquals(32, config.chunkyQueueLimit);
-        var serialize = JsonConfig.class.getDeclaredMethod("configWithHelp");
+        var storeClass = Class.forName("dev.xantha.vss.config.JsonConfigStore");
+        var constructor = storeClass.getDeclaredConstructor(java.nio.file.Path.class);
+        constructor.setAccessible(true);
+        var store = constructor.newInstance(java.nio.file.Path.of("build", "tmp", "generation-tests"));
+        var serialize = storeClass.getDeclaredMethod("configWithHelp", JsonConfig.class);
         serialize.setAccessible(true);
-        var saved = (JsonObject) serialize.invoke(config);
+        var saved = (JsonObject) serialize.invoke(store, config);
         assertEquals(32, saved.get("chunkyQueueLimit").getAsInt());
         assertTrue(saved.getAsJsonObject("_help").get("chunkyQueueLimit").getAsString().contains("默认 0"));
         assertEquals(32, new Gson().fromJson(saved, VSSServerConfig.class).chunkyQueueLimit);

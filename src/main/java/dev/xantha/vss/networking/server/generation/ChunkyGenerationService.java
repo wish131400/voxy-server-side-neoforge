@@ -339,6 +339,7 @@ public final class ChunkyGenerationService {
                 retryGeneration(current, work);
             } else {
                 work.stage = ChunkyWorkQueue.Stage.PERSIST;
+                if (completion.retryImport) work.localAttempted = false;
                 current.ready.addLast(work);
             }
         } else if (work.stage == ChunkyWorkQueue.Stage.WRITING) {
@@ -361,7 +362,8 @@ public final class ChunkyGenerationService {
         long epoch = lifecycle.currentEpoch();
         boolean accepted = IntegratedPregenBridge.offer(current.level.getServer(), current.level.dimension(), work.columnData,
                 () -> !current.stopped && !lifecycle.isStale(epoch),
-                imported -> completions.add(new Completion(current.id, work.requestId, null, imported)));
+                imported -> completions.add(new Completion(current.id, work.requestId, null, imported)),
+                () -> completions.add(new Completion(current.id, work.requestId, null, false, true)));
         if (!accepted) {
             work.stage = ChunkyWorkQueue.Stage.PERSIST;
             // A full local import queue is transient. Keep this work ready for
@@ -445,7 +447,12 @@ public final class ChunkyGenerationService {
         return 0;
     }
 
-    private record Completion(UUID jobId, int requestId, EncodedColumnData columnData, boolean saved) { }
+    private record Completion(UUID jobId, int requestId, EncodedColumnData columnData,
+                              boolean saved, boolean retryImport) {
+        Completion(UUID jobId, int requestId, EncodedColumnData columnData, boolean saved) {
+            this(jobId, requestId, columnData, saved, false);
+        }
+    }
 
     private static final class Job {
         final UUID id = UUID.randomUUID();

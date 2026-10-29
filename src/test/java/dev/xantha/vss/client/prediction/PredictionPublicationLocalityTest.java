@@ -20,6 +20,87 @@ class PredictionPublicationLocalityTest {
         return new Tile(new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,-1,-1,0),
                 -64,-64,64,64,1,columns,features,4096,true,0);
     }
+    private static Object preparedIdentity(PredictionVoxySource source,long pos,VoxyPredictionBridge.Mapper mapper) {
+        source.mappedSection(pos,mapper,false);
+        int lod=VoxyPredictionBridge.level(pos),sx=VoxyPredictionBridge.x(pos),sy=VoxyPredictionBridge.y(pos),sz=VoxyPredictionBridge.z(pos);
+        for(int face=0;face<6;face++)source.face(VoxyPredictionBridge.position(lod,
+                sx+(face==0?-1:face==1?1:0),sy+(face==2?-1:face==3?1:0),sz+(face==4?-1:face==5?1:0)),mapper,face^1);
+        return source.notificationIdentity(pos,mapper);
+    }
+    @Test void notificationEvidenceUsesPreparedInputsAndDetectsNeighborsAndMapperReplacement() {
+        var columns=new Column[4096];Arrays.fill(columns,column(32));
+        try(var source=new PredictionVoxySource()) {
+            source.put(tile(columns,List.of()));
+            long pos=VoxyPredictionBridge.position(0,-2,0,-2);
+            assertNull(source.notificationIdentity(pos,MAPPER));
+            assertEquals(0L,source.diagnostics().get("sectionBuilds"));
+            assertEquals(0L,source.diagnostics().get("faceBuilds"));
+            Object first=preparedIdentity(source,pos,MAPPER);
+            assertNotNull(first);assertEquals(first,source.notificationIdentity(pos,MAPPER));
+            var changed=columns.clone();changed[0]=column(33);
+            source.put(tile(changed,List.of()));
+            assertNotEquals(first,preparedIdentity(source,pos,MAPPER),"Top neighbor plane changes even if center remains solid");
+            Object current=source.notificationIdentity(pos,MAPPER);
+            source.releaseMapper(MAPPER);
+            assertNull(source.notificationIdentity(pos,MAPPER),"A missing cache must not trigger preparation");
+            assertEquals(current,preparedIdentity(source,pos,MAPPER),"Rebuilt equal compact data keeps its content identity");
+            VoxyPredictionBridge.Mapper other=(state,biome)->MAPPER.map(state,biome)^1L<<47;
+            assertNull(source.notificationIdentity(pos,other));
+            assertNotEquals(current,preparedIdentity(source,pos,other));
+        }
+    }
+    @Test void notificationProbeNeverRasterizesEvictedInputsOrPromotesOneShotSections() {
+        var columns=new Column[4096];Arrays.fill(columns,column(32));
+        try(var source=new PredictionVoxySource(2)) {
+            source.put(tile(columns,List.of()));
+            long pos=VoxyPredictionBridge.position(0,-2,0,-2);
+            assertNotNull(preparedIdentity(source,pos,MAPPER));
+            long builds=(long)source.diagnostics().get("sectionBuilds"),faces=(long)source.diagnostics().get("faceBuilds");
+            for(int i=0;i<25;i++)assertNotNull(source.notificationIdentity(pos,MAPPER));
+            assertEquals(builds,source.diagnostics().get("sectionBuilds"));
+            assertEquals(faces,source.diagnostics().get("faceBuilds"));
+            assertEquals(0,source.diagnostics().get("protectedSections"));
+            source.section(VoxyPredictionBridge.position(0,-1,0,-2),MAPPER);
+            source.section(VoxyPredictionBridge.position(0,-2,0,-1),MAPPER);
+            builds=(long)source.diagnostics().get("sectionBuilds");
+            faces=(long)source.diagnostics().get("faceBuilds");
+            assertNull(source.notificationIdentity(pos,MAPPER));
+            assertEquals(builds,source.diagnostics().get("sectionBuilds"));
+            assertEquals(faces,source.diagnostics().get("faceBuilds"));
+        }
+    }
+    @Test void distantPublicationKeepsPreparedLocalEvidence() {
+        var columns=new Column[4096];Arrays.fill(columns,column(32));
+        try(var source=new PredictionVoxySource()) {
+            source.put(tile(columns,List.of()));
+            long pos=VoxyPredictionBridge.position(0,-2,0,-2);
+            Object first=preparedIdentity(source,pos,MAPPER);assertNotNull(first);
+            source.put(new Tile(new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,100,100,0),
+                    6400,6400,64,64,1,columns,List.of(),4096,true,0));
+            assertEquals(first,source.notificationIdentity(pos,MAPPER));
+        }
+    }
+    @Test void notificationProbeDoesNotWaitForAnInflightSection() throws Exception {
+        var columns=new Column[4096];Arrays.fill(columns,column(32));
+        var entered=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
+        VoxyPredictionBridge.Mapper blocked=(state,biome)->{
+            entered.countDown();
+            try {assertTrue(release.await(5,java.util.concurrent.TimeUnit.SECONDS));}
+            catch(InterruptedException e){throw new AssertionError(e);}
+            return MAPPER.map(state,biome);
+        };
+        var worker=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try(var source=new PredictionVoxySource()) {
+            source.put(tile(columns,List.of()));
+            long pos=VoxyPredictionBridge.position(0,-2,0,-2);
+            var build=worker.submit(()->source.section(pos,blocked));
+            try {
+                assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),()->assertNull(source.notificationIdentity(pos,blocked)));
+            } finally {release.countDown();}
+            assertNotNull(build.get(5,java.util.concurrent.TimeUnit.SECONDS));
+        } finally {release.countDown();worker.shutdownNow();}
+    }
     @Test void surfaceEditRetainsDeepSectionsAndFacesBeforeAnyComposition() {
         var columns=new Column[4096]; Arrays.fill(columns,column(130));
         var changed=columns.clone(); changed[0]=column(131);

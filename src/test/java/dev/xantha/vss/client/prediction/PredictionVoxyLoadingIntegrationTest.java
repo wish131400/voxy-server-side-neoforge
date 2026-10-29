@@ -14,6 +14,17 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
 class PredictionVoxyLoadingIntegrationTest {
+    @Test void unchangedPauseStateDoesNotWaitForABusyManager() {
+        try(var manager=manager(sampler(new AtomicInteger()),null)) {
+            synchronized(manager) {
+                assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),()->manager.setPaused(false));
+            }
+            manager.setPaused(true);
+            synchronized(manager) {
+                assertTimeoutPreemptively(java.time.Duration.ofSeconds(1),()->manager.setPaused(true));
+            }
+        }
+    }
     private static final DimensionProfile PROFILE = new DimensionProfile(ResourceLocation.tryParse("minecraft:overworld"),
             42L,-64,384,"noise","minecraft:overworld",123L);
     @TempDir Path directory;
@@ -36,7 +47,7 @@ class PredictionVoxyLoadingIntegrationTest {
         });
         try (var cache = new PredictionDiskCache(directory,PROFILE.fingerprint());
              var manager = new PredictionTileManager(PROFILE.levelKey(),sampler,budget,cache,
-                     new PredictionCpuBudget(()->8,()->.1,()->.1,System::nanoTime,false))) {
+                     new PredictionCpuBudget(()->8, System::nanoTime))) {
             var key = new PredictionTileKey(PROFILE.levelKey(),-1,-1,manager.layout().levelCount()-1);
             setup(manager,key); enqueue(manager,key,false);
             assertTrue(entered.await(10,TimeUnit.SECONDS));
@@ -63,7 +74,7 @@ class PredictionVoxyLoadingIntegrationTest {
         try {
             for(int entry=0;entry<2;entry++) {
                 var load=new AtomicInteger(10);var clock=new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
-                var cpu=new PredictionCpuBudget(()->1,()->load.get()/100D,()->load.get()/100D,clock::get,false);
+                var cpu=new PredictionCpuBudget(()->1, clock::get);
                 try(var cache=new PredictionDiskCache(directory,PROFILE.fingerprint());
                     var manager=new PredictionTileManager(PROFILE.levelKey(),sampler(calls),
                         new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1),cache,cpu)) {
@@ -72,7 +83,7 @@ class PredictionVoxyLoadingIntegrationTest {
                     var originalParent=manager.renderSnapshot().tiles().get(parent);
                     assertNotNull(originalParent);
                     load.set(99);clock.addAndGet(TimeUnit.SECONDS.toNanos(1));
-                    assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE,cpu.currentThrottle());
+
                     assertFalse(source.requestDetail(position,(x,z)->false));
                     // Neither the immediate parent nor medium coverage exists locally.
                     field("mediumCoveragePending").setBoolean(manager,true);
@@ -223,9 +234,9 @@ class PredictionVoxyLoadingIntegrationTest {
     }
 
     @Test @SuppressWarnings("unchecked")
-    void currentVoxySurfaceCompletesDuringSustainedCpuPressureWithoutWaitingForTheDetailTrickle() throws Exception {
+    void currentVoxySurfaceCompletesWithoutAFrameRateOrCpuPressureDelay() throws Exception {
         var calls=new AtomicInteger();var clock=new java.util.concurrent.atomic.AtomicLong(1_000_000_000L);
-        var cpu=new PredictionCpuBudget(()->1,()->.99,()->.99,clock::get,false);
+        var cpu=new PredictionCpuBudget(()->1, clock::get);
         var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
         try(var cache=new PredictionDiskCache(directory,PROFILE.fingerprint());
             var manager=new PredictionTileManager(PROFILE.levelKey(),vegetatedSampler(calls),
@@ -235,8 +246,7 @@ class PredictionVoxyLoadingIntegrationTest {
             var preview=new ClientColumnSample[100];Arrays.fill(preview,PredictionVoxelFixtures.sample(64));
             source.put(PredictionVoxySource.build(key,preview,10,16,manager.sampler(),PredictionVegetation.Tile.EMPTY,null));
             assertFalse(source.requestDetail(VoxyPredictionBridge.position(2,-1,0,-1),(x,z)->false));
-            assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE,cpu.currentThrottle());
-            assertFalse(cpu.allowsDetail(),"The fake clock leaves the ordinary detail trickle closed throughout this test");
+
             var surfaces=(Set<PredictionTileKey>)field("surfaceReady").get(manager);
             long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
             while(!surfaces.contains(key)&&System.nanoTime()<deadline){
@@ -245,7 +255,7 @@ class PredictionVoxyLoadingIntegrationTest {
             }
             await(manager);assertTrue(surfaces.contains(key),manager.surfaceDiagnostics());
             assertTrue(manager.renderSnapshot().tiles().get(key).data().voxyTile.surfaceComplete());assertTrue(calls.get()>0);
-            assertFalse(cpu.allowsDetail(),"Visible completion must not open the unrelated ordinary-detail lane");
+
         } finally {}
     }
 
@@ -265,6 +275,14 @@ class PredictionVoxyLoadingIntegrationTest {
             }));
             assertTrue(entered.await(5,TimeUnit.SECONDS));
             invoke(manager,"enqueue",new Class[]{PredictionTileKey.class,int.class,int.class,boolean.class,boolean.class},key,0,0,true,false);
+            // Surface admission first probes the independent cache workers. Observe
+            // the resulting generation queue after that bounded miss handoff.
+            long queueDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while(executor.getQueue().isEmpty() && System.nanoTime()<queueDeadline) {
+                synchronized(manager) { invoke(manager,"serviceGenerationWork",new Class[]{int.class,int.class,long.class},
+                        0,0,System.nanoTime()+1_000_000L); }
+                Thread.sleep(2);
+            }
             var queued=(PredictionTileManager.PredictionTask)executor.getQueue().peek();
             assertNotNull(queued);var far=new PredictionTileKey(PROFILE.levelKey(),40,40,1);
             var terrain=new PredictionTileManager.PredictionTask(far,
@@ -285,7 +303,7 @@ class PredictionVoxyLoadingIntegrationTest {
             for(int slots:List.of(1,2)) {
                 var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
                 var calls=new AtomicInteger();
-                var cpu=new PredictionCpuBudget(()->slots*4,()->.99,()->.99,System::nanoTime,false);
+                var cpu=new PredictionCpuBudget(()->slots, System::nanoTime);
                 var leases=new ArrayList<PredictionCpuBudget.Lease>();
                 try(var cache=new PredictionDiskCache(directory.resolve("warm-"+slots),PROFILE.fingerprint());
                     var manager=new PredictionTileManager(PROFILE.levelKey(),sampler(calls),
@@ -322,7 +340,7 @@ class PredictionVoxyLoadingIntegrationTest {
             for(int slots:List.of(1,2)) {
                 var blocked=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
                 var once=new java.util.concurrent.atomic.AtomicBoolean();var calls=new AtomicInteger();
-                var cpu=new PredictionCpuBudget(()->slots*4,()->.99,()->.99,System::nanoTime,false);
+                var cpu=new PredictionCpuBudget(()->slots, System::nanoTime);
                 try(var cache=new PredictionDiskCache(directory.resolve("fair-"+slots),PROFILE.fingerprint());
                     var manager=new PredictionTileManager(PROFILE.levelKey(),sampler(calls,()->{
                         if(once.compareAndSet(false,true)) {blocked.countDown();
@@ -355,7 +373,7 @@ class PredictionVoxyLoadingIntegrationTest {
                     assertTrue(manager.renderSnapshot().tiles().containsKey(outer),manager.surfaceDiagnostics());
                     long finishedNodes=manager.renderSnapshot().tiles().keySet().stream().filter(k->k.lod()==1).count();
                     assertTrue(finishedNodes<8,"Outer coverage must complete before all continuous node work drains");
-                    assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE,cpu.currentThrottle());
+
                     await(manager);
                 } finally {release.countDown();}
             }
@@ -507,7 +525,17 @@ class PredictionVoxyLoadingIntegrationTest {
                     "The scheduler must admit plants on a voxel tile before its terrain grid reaches 64");
             int terrainCalls=sampled.get();
             var method=PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileKey.class,int.class,int.class,boolean.class,boolean.class);
-            method.setAccessible(true); method.invoke(manager,key,0,0,true,false); await(manager);
+            method.setAccessible(true); method.invoke(manager,key,0,0,true,false);
+            // pending can briefly reach zero between a partial cache publication
+            // and generation admission. The requested surface is the completion boundary.
+            long surfaceDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
+            while(!surfaces.contains(key) && System.nanoTime()<surfaceDeadline) {
+                // A rejected permit is retried by game ticks, not a busy worker.
+                synchronized(manager) { invoke(manager,"serviceGenerationWork",new Class[]{int.class,int.class,long.class},
+                        0,0,System.nanoTime()+1_000_000L); }
+                Thread.sleep(5);
+            }
+            await(manager);
             assertTrue(surfaces.contains(key),manager.surfaceDiagnostics());
             var surface=manager.readyTiles().iterator().next();
             assertSame(before.samples(),surface.samples()); assertSame(before.data().voxyTile.columns(),surface.data().voxyTile.columns());
@@ -580,7 +608,18 @@ class PredictionVoxyLoadingIntegrationTest {
                     ((ArrayDeque<?>)field("voxyDetailWork").get(manager)).clear();
                     assertEquals(true,invoke(manager,"serviceVisibleSurfaces",new Class[]{int.class,int.class,long.class},
                             0,0,System.nanoTime()+TimeUnit.SECONDS.toNanos(1)));
-                    await(manager);
+                    // The terrain worker releases its pending claim before it
+                    // submits the surface continuation. Wait for the actual
+                    // published surface, including that asynchronous handoff.
+                    long surfaceDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
+                    while(!manager.renderSnapshot().tiles().get(key).data().voxyTile.surfaceComplete()
+                            && System.nanoTime()<surfaceDeadline) {
+                        // Retry bounded admission on later game ticks, including
+                        // a cache miss whose worker exhausted its 1 ms refill slice.
+                        synchronized(manager) { invoke(manager,"serviceGenerationWork",new Class[]{int.class,int.class,long.class},
+                                0,0,System.nanoTime()+1_000_000L); }
+                        Thread.sleep(5);
+                    }
                     var completed=manager.renderSnapshot().tiles().get(key);
                     assertTrue(completed.data().voxyTile.surfaceComplete(),manager.surfaceDiagnostics());
                     assertEquals(axis,completed.cellAxis());assertEquals(step,completed.spacingBlocks());
@@ -662,7 +701,10 @@ class PredictionVoxyLoadingIntegrationTest {
                 assertTrue(tile.data().voxyTile.surfaceComplete());assertEquals(0,manager.pendingCount());
             }
             ClientPredictionState.tagsChanged();
-            assertFalse(manager.hasReadyTiles());assertNull(source.section(pos,mapper));
+            assertFalse(manager.hasReadyTiles());
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while((int)source.diagnostics().get("voxelTiles")!=0 && System.nanoTime()<until)Thread.sleep(1);
+            assertEquals(0,source.diagnostics().get("voxelTiles"));assertNull(source.section(pos,mapper));
         } finally {managers.remove(PROFILE.levelKey());}
     }
 
@@ -697,7 +739,7 @@ class PredictionVoxyLoadingIntegrationTest {
                 executor,PredictionPlanningTestSupport::buildPlan);
         try(var manager=new PredictionTileManager(dimension,sampler(calls),
                 new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1),null,
-                new PredictionCpuBudget(()->8,()->.1,()->.1,System::nanoTime,false))) {
+                new PredictionCpuBudget(()->8, System::nanoTime))) {
             field("unifiedVoxy").setBoolean(manager,true);
             PredictionPlanningTestSupport.set(manager,"planPreparation",planning);
             var source=(PredictionVoxySource)field("voxySource").get(manager);
@@ -715,7 +757,10 @@ class PredictionVoxyLoadingIntegrationTest {
                 manager.setRenderWorkView(observation.view());
                 manager.tick(-32,80,-32,4000,null,0);
                 var tile=manager.renderSnapshot().tiles().get(key);
-                if(tile!=null && tile.cellAxis()==64)break;
+                // Manager residency precedes the out-of-lock source publication.
+                // Wait for both observable boundaries of this target, without
+                // waiting for unrelated terrain or plant jobs to become idle.
+                if(tile!=null && tile.cellAxis()==64 && source.requestDetail(node,(x,z)->false))break;
                 Thread.sleep(3);
             }
             // Publication can immediately admit neighboring terrain/plants.
@@ -868,7 +913,7 @@ class PredictionVoxyLoadingIntegrationTest {
     private static PredictionTileManager manager(ClientTerrainSampler sampler,PredictionDiskCache cache) {
         return new PredictionTileManager(PROFILE.levelKey(),sampler,new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,
                 0,()->Long.MAX_VALUE,System::nanoTime,1),cache,
-                new PredictionCpuBudget(()->8,()->.1,()->.1,System::nanoTime,false));
+                new PredictionCpuBudget(()->8, System::nanoTime));
     }
     @SuppressWarnings("unchecked") private static void setup(PredictionTileManager manager,PredictionTileKey key) throws Exception {
         field("unifiedVoxy").setBoolean(manager,true);

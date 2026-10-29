@@ -18,7 +18,7 @@ final class PredictionPlanPreparation {
                  Set<PredictionTileKey> dirty, Map<PredictionTileKey, Integer> viewBands,
                  Set<PredictionTileKey> viewDependencies, Map<PredictionTileKey, Long> failed,
                  Map<PredictionTileKey, Long> deferred, PredictionIdleRefinement idle,
-                 boolean ordinaryBusy, boolean cpuReady, boolean memoryReady, boolean idlePending, long now, boolean nativeDemand) { }
+                 boolean ordinaryBusy, boolean memoryReady, boolean idlePending, long now, boolean nativeDemand) { }
     record Result(Input input, List<PredictionTileKey> leaves, List<PredictionTileKey> plan,
                   Set<PredictionTileKey> surfaces, Set<PredictionTileKey> owned, int surfaceRadius,
                   Map<PredictionTileKey, Integer> ordinary, Map<PredictionTileKey, Integer> terrain,
@@ -65,9 +65,9 @@ final class PredictionPlanPreparation {
                     Set.copyOf(owned), surfaceRadius, Map.copyOf(ordinary), Map.copyOf(targets), Map.of(), medium,
                     Map.of(), i.idle(), false, "voxy-demand");
             var idle = i.idle();
-            boolean available = !i.ordinaryBusy() && i.cpuReady() && i.memoryReady();
+            boolean available = !i.ordinaryBusy() && i.memoryReady();
             boolean idleAllowed = idle.settled(i.now(), available, i.x(), i.z());
-            String idleState = i.ordinaryBusy() ? "ordinary-work" : !i.cpuReady() ? "cpu-budget"
+            String idleState = i.ordinaryBusy() ? "ordinary-work"
                     : !i.memoryReady() ? "memory-budget" : "settling";
             double fine = PredictionDetailBands.fineRadius(i.layout().maxDistanceBlocks(), i.dimension());
             var idleTargets = idle.update(Set.copyOf(leaves), targets, axes, i.layout(),

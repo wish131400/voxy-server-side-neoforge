@@ -7,6 +7,25 @@ import dev.xantha.vss.common.VSSConstants;
 import org.junit.jupiter.api.Test;
 
 class PlayerSessionManagerTest {
+    @org.junit.jupiter.api.BeforeAll static void bootstrap() {dev.xantha.vss.testutil.MinecraftTestBootstrap.initialize();}
+    @Test void advertisedConcurrencyMatchesTheHostingServer() throws Exception {
+        var config=dev.xantha.vss.config.VSSServerConfig.CONFIG;
+        int local=config.singleplayerGenerationConcurrencyLimit, dedicated=config.generationConcurrencyLimitPerPlayer;
+        try {
+            config.singleplayerGenerationConcurrencyLimit=2;config.generationConcurrencyLimitPerPlayer=4;
+            var manager=new PlayerSessionManager(null,null,()->{},new dev.xantha.vss.networking.server.runtime.ServerLifecycleGuard());
+            var server=org.mockito.Mockito.mock(net.minecraft.server.MinecraftServer.class);
+            var create=PlayerSessionManager.class.getDeclaredMethod("createSessionConfig",net.minecraft.server.MinecraftServer.class,boolean.class);
+            create.setAccessible(true);
+            org.mockito.Mockito.when(server.isDedicatedServer()).thenReturn(false);
+            var payload=(dev.xantha.vss.networking.payloads.SessionConfigS2CPayload)create.invoke(manager,server,true);
+            org.junit.jupiter.api.Assertions.assertEquals(2,payload.generationConcurrencyLimitPerPlayer());
+            org.mockito.Mockito.when(server.isDedicatedServer()).thenReturn(true);
+            payload=(dev.xantha.vss.networking.payloads.SessionConfigS2CPayload)create.invoke(manager,server,true);
+            org.junit.jupiter.api.Assertions.assertEquals(4,payload.generationConcurrencyLimitPerPlayer());
+        } finally {config.singleplayerGenerationConcurrencyLimit=local;config.generationConcurrencyLimitPerPlayer=dedicated;}
+    }
+
 
     @Test
     void voxelColumnClientWithCurrentProtocolIsCompatible() {

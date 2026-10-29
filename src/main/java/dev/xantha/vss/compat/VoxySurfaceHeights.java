@@ -7,9 +7,28 @@ public final class VoxySurfaceHeights {
     private VoxySurfaceHeights() { }
     private static final Pattern BASE_POINT = Pattern.compile(
             "quad\\.basePoint\\s*=\\s*\\(quadStart\\s*\\*\\s*lodScale\\)\\s*\\+\\s*vec3\\(baseSection\\s*<<\\s*5\\)\\s*;");
+    private static final Pattern LEGACY_FLUID_INSET = Pattern.compile(
+            "if\\s*\\(\\s*face\\s*==\\s*1u\\s*&&\\s*modelIsFluid\\(model\\)\\s*&&\\s*lodLevel\\s*!=\\s*0u\\s*\\)"
+            + "\\s*\\{\\s*depthOffset\\s*=\\s*\\(depthOffset\\s*\\+\\s*1\\.0\\)\\s*/\\s*lodScale\\s*;\\s*\\}");
+    private static final Pattern NATIVE_INSET_ALIAS = Pattern.compile(
+            "float\\s+faceIndentation\\s*=\\s*extractFaceIndentation\\(faceData\\)\\s*;"
+            + "\\s*float\\s+depthOffset\\s*=\\s*faceIndentation\\s*/\\s*lodScale\\s*;");
 
     public static String patchShader(String path, String source) {
-        return patchFluid(patchInset(source));
+        return patchFluid(patchInset(normalizeLegacyFluidInset(source)));
+    }
+
+    private static String normalizeLegacyFluidInset(String source) {
+        // The old water-fix fork normalizes tops and adds one block before VSS
+        // applies its own inset/remainder. Transfer only this exact overlapping
+        // transform to the shared path; retain its tint, fog and other geometry.
+        if (!source.contains("void setupQuad(") || source.contains("resolveFluidTopIndentation(")) return source;
+        var match = LEGACY_FLUID_INSET.matcher(source);
+        if (!match.find()) return source;
+        int start = match.start(), end = match.end();
+        if (match.find() || !BASE_POINT.matcher(source).find()) return source;
+        return source.substring(0, start) + "\n// VSS legacy fluid inset uses the shared world-space correction.\n"
+                + source.substring(end);
     }
 
     private static String patchInset(String source) {
@@ -17,7 +36,8 @@ public final class VoxySurfaceHeights {
         if (!source.contains("void setupQuad(") || source.contains("// VSS world-space model inset")) return source;
         // Maintained forks own their fluid datum or already normalize model indentation.
         if (source.contains("resolveFluidTopIndentation(")
-                || source.matches("(?s).*extractFaceIndentation\\(faceData\\)\\s*/\\s*lodScale.*")) return source;
+                || source.matches("(?s).*extractFaceIndentation\\(faceData\\)\\s*/\\s*lodScale.*")
+                || NATIVE_INSET_ALIAS.matcher(source).find()) return source;
         var match = BASE_POINT.matcher(source);
         if (!match.find()) return source;
         int end = match.end();

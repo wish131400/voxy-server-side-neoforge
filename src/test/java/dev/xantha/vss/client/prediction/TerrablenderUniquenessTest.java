@@ -16,17 +16,17 @@ class TerrablenderUniquenessTest {
 
     static TerrablenderUniqueness.Tree uncached(long seed, int size,
                                                List<TerrablenderUniqueness.Region> regions) throws Exception {
-        var initial = Class.forName(TerrablenderUniqueness.class.getName() + "$Initial")
+        var initial = Class.forName(dev.xantha.vss.common.worldgen.TerraBlenderGrid.class.getName() + "$Initial")
                 .getDeclaredConstructor(long.class, long.class, List.class);
-        var zoom = Class.forName(TerrablenderUniqueness.class.getName() + "$Zoom")
-                .getDeclaredConstructor(TerrablenderUniqueness.Tree.class, long.class, long.class, boolean.class);
+        var zoom = Class.forName(dev.xantha.vss.common.worldgen.TerraBlenderGrid.class.getName() + "$Zoom")
+                .getDeclaredConstructor(dev.xantha.vss.common.worldgen.TerraBlenderGrid.Tree.class, long.class, long.class, boolean.class);
         initial.setAccessible(true);
         zoom.setAccessible(true);
-        var tree = (TerrablenderUniqueness.Tree)initial.newInstance(seed, 1L, regions);
-        tree = (TerrablenderUniqueness.Tree)zoom.newInstance(tree, seed, 2000L, true);
-        for (int i = 0; i < 3; i++) tree = (TerrablenderUniqueness.Tree)zoom.newInstance(tree, seed, 2001L + i, false);
-        for (int i = 0; i < size; i++) tree = (TerrablenderUniqueness.Tree)zoom.newInstance(tree, seed, 1001L + i, false);
-        return tree;
+        var tree = (dev.xantha.vss.common.worldgen.TerraBlenderGrid.Tree)initial.newInstance(seed, 1L, regions.stream().map(r -> new dev.xantha.vss.common.worldgen.TerraBlenderGrid.Region(r.index(), r.weight())).toList());
+        tree = (dev.xantha.vss.common.worldgen.TerraBlenderGrid.Tree)zoom.newInstance(tree, seed, 2000L, true);
+        for (int i = 0; i < 3; i++) tree = (dev.xantha.vss.common.worldgen.TerraBlenderGrid.Tree)zoom.newInstance(tree, seed, 2001L + i, false);
+        for (int i = 0; i < size; i++) tree = (dev.xantha.vss.common.worldgen.TerraBlenderGrid.Tree)zoom.newInstance(tree, seed, 1001L + i, false);
+        return tree::get;
     }
 
     @Test void cacheCollisionsAndNegativeCoordinatesPreserveTheUncachedZoomAlgorithm() throws Exception {

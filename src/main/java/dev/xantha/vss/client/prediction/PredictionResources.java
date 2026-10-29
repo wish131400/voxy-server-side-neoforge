@@ -43,5 +43,10 @@ final class PredictionResources {
         sampler.close();
     }
 
+    /** A prepared backend rejected before attachment has no workers; dispose off the client thread. */
+    static void retireUnusedSampler(ClientTerrainSampler sampler) {
+        DISPOSER.execute(() -> releaseSampler(sampler));
+    }
+
     private PredictionResources() { }
 }

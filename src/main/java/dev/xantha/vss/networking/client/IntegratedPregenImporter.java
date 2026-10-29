@@ -27,10 +27,16 @@ final class IntegratedPregenImporter {
 
     static boolean offer(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData data,
             LodRequestManager manager, BooleanSupplier valid, Consumer<Boolean> completed) {
+        return offer(server, dimension, data, manager, valid, completed, () -> completed.accept(false));
+    }
+
+    static boolean offer(MinecraftServer server, ResourceKey<Level> dimension, EncodedColumnData data,
+            LodRequestManager manager, BooleanSupplier valid, Consumer<Boolean> completed, Runnable retry) {
         var level = Minecraft.getInstance().level;
         if (!supports(server) || manager == null || level == null || !level.dimension().equals(dimension)
                 || !data.isDeliverable() || !data.hasBody()
                 || !data.coverage().filterKey().equals(ClientConnectionIdentity.columnFilterKey())) return false;
+        var retryMap = new java.util.concurrent.atomic.AtomicBoolean();
         return TASKS.offer(data.encodedSize(), () -> {
             if (!valid.getAsBoolean() || !supports(server) || Minecraft.getInstance().level != level
                     || VSSClientNetworking.currentPregenManager() != manager) return false;
@@ -53,7 +59,16 @@ final class IntegratedPregenImporter {
                             }
                         }
                         return accepted;
+                    }, () -> {
+                        if (!valid.getAsBoolean() || Minecraft.getInstance().level != level) return false;
+                        boolean accepted = ModCompat.replayRealXaeroColumn(level, dimension,
+                                data.chunkX(), data.chunkZ(), decoded);
+                        if (!accepted) retryMap.set(true);
+                        return accepted;
                     });
-        }, completed);
+        }, accepted -> {
+            if (retryMap.get()) retry.run();
+            else completed.accept(accepted);
+        });
     }
 }

@@ -61,7 +61,7 @@ class PredictionDimensionLifecycleTest {
             if(calls.incrementAndGet()==1){oldActive.set(active);oldStarted.countDown();await(oldResume);}
             else {assertTrue(active.getAsBoolean());newStarted.countDown();await(newResume);}
             return null;
-        }).when(decoder).decode(any(),any(),any());
+        }).when(decoder).decode(any(),any(),any(),any());
         try {
             request(minecraft);assertTrue(oldStarted.await(5,TimeUnit.SECONDS));
             unload(minecraft.level);assertFalse(oldActive.get().getAsBoolean());
@@ -82,7 +82,7 @@ class PredictionDimensionLifecycleTest {
             ready.accept(Level.OVERWORLD,new ClientTerrainSampler(42,PROFILE){
                 @Override public void close(){super.close();closed.incrementAndGet();}
             });return null;
-        }).when(decoder).decode(any(),any(),any());
+        }).when(decoder).decode(any(),any(),any(),any());
         request(minecraft);drainDecoder();assertTrue(clientTasks.size()>=2);
         unload(minecraft.level);minecraft.level=level(Level.OVERWORLD);
         runClientTasks();PredictionResources.awaitRetired();
@@ -93,15 +93,76 @@ class PredictionDimensionLifecycleTest {
         unload(minecraft.level);PredictionResources.awaitRetired();assertEquals(2,closed.get());
     }
 
+    @Test void cacheInstallRunsWhileGenerationIsBlockedAndAnOldVisitCannotPromoteOnReturn(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        VSSClientConfig.CONFIG.rememberTerrain=true;
+        var storage=new PredictionCacheStorage(directory,null);
+        try(var disk=storage.open(new ClientTerrainSampler(42,PROFILE))) {assertNotNull(disk);}
+        var minecraft=minecraft(level(Level.OVERWORLD));var decoder=prepare(storage);
+        var cacheReady=new CountDownLatch(1);var resume=new CountDownLatch(1);var fullClosed=new AtomicInteger();
+        doAnswer(call->{
+            BiConsumer<ResourceKey<Level>,ClientTerrainSampler> cached=call.getArgument(3);
+            cached.accept(Level.OVERWORLD,PredictionCacheStartupTest.cacheSampler(PROFILE));cacheReady.countDown();await(resume);
+            BiConsumer<ResourceKey<Level>,ClientTerrainSampler> ready=call.getArgument(2);
+            ready.accept(Level.OVERWORLD,new ClientTerrainSampler(42,PROFILE) {
+                @Override public void close(){super.close();fullClosed.incrementAndGet();}
+            });return null;
+        }).when(decoder).decode(any(),any(),any(),any());
+        try {
+            request(minecraft);assertTrue(cacheReady.await(5,TimeUnit.SECONDS));runClientTasks();
+            var early=managers().get(Level.OVERWORLD);assertNotNull(early);assertFalse(early.generationReady());
+            assertEquals(true,get("profileReady"),"Cache display must not wait for full generation initialization");
+            unload(minecraft.level);minecraft.level=level(Level.OVERWORLD);
+            resume.countDown();drainDecoder();runClientTasks();drainDecoder();PredictionResources.awaitRetired();
+            assertTrue(managers().isEmpty(),"A completed old sampler cannot attach to a new visit to the same dimension");
+            assertEquals(1,fullClosed.get());assertFalse(early.generationReady());
+        } finally {resume.countDown();drainDecoder();}
+    }
+
+    @Test void completedBackendPromotesTheInstalledCacheManagerInPlace(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        VSSClientConfig.CONFIG.rememberTerrain=true;
+        var storage=new PredictionCacheStorage(directory,null);
+        try(var disk=storage.open(new ClientTerrainSampler(42,PROFILE))) {assertNotNull(disk);}
+        var minecraft=minecraft(level(Level.OVERWORLD));var decoder=prepare(storage);
+        var cacheReady=new CountDownLatch(1);var resume=new CountDownLatch(1);var fullClosed=new AtomicInteger();
+        var full=new ClientTerrainSampler(42,PROFILE) {
+            @Override public void close(){super.close();fullClosed.incrementAndGet();}
+        };
+        doAnswer(call->{
+            BiConsumer<ResourceKey<Level>,ClientTerrainSampler> cached=call.getArgument(3);
+            cached.accept(Level.OVERWORLD,PredictionCacheStartupTest.cacheSampler(PROFILE));
+            cacheReady.countDown();await(resume);
+            BiConsumer<ResourceKey<Level>,ClientTerrainSampler> ready=call.getArgument(2);
+            ready.accept(Level.OVERWORLD,full);return null;
+        }).when(decoder).decode(any(),any(),any(),any());
+        try {
+            request(minecraft);assertTrue(cacheReady.await(5,TimeUnit.SECONDS));runClientTasks();
+            var early=managers().get(Level.OVERWORLD);assertNotNull(early);assertFalse(early.generationReady());
+            var disk=early.diskCache();long fingerprint=early.sampler().cacheFingerprint();
+            resume.countDown();drainDecoder();
+            assertFalse(early.generationReady(),"Only the client installation callback can promote the manager");
+            runClientTasks();
+            assertSame(early,managers().get(Level.OVERWORLD));assertTrue(early.generationReady());
+            assertSame(full,early.sampler());assertSame(disk,early.diskCache());
+            assertEquals(fingerprint,full.cacheFingerprint());assertEquals(0,fullClosed.get());
+            assertEquals(false,get("dimensionInitializing"));
+            unload(minecraft.level);PredictionResources.awaitRetired();assertEquals(1,fullClosed.get());
+        } finally {resume.countDown();drainDecoder();}
+    }
+
     private static WorldgenProfileS2CPayload profile(){
         return new WorldgenProfileS2CPayload(WorldgenProfileS2CPayload.FORMAT_VERSION,42,1,0,1,new byte[]{1},
                 List.of(PROFILE,new DimensionProfile(Level.NETHER.location(),42,0,256,"noise","minecraft:nether",1)));
     }
     private ClientWorldgenProfileDecoder.Session prepare() throws Exception {
+        return prepare(null);
+    }
+    private ClientWorldgenProfileDecoder.Session prepare(PredictionCacheStorage storage) throws Exception {
         var decoder=mock(ClientWorldgenProfileDecoder.Session.class);
         Class<?> type=Class.forName(ClientPredictionState.class.getName()+"$PreparedProfile");
         var constructor=type.getDeclaredConstructors()[0];constructor.setAccessible(true);
-        set("preparedProfile",constructor.newInstance(decoder,((AtomicLong)get("DECODE_GENERATION")).get(),null));
+        set("preparedProfile",constructor.newInstance(decoder,((AtomicLong)get("DECODE_GENERATION")).get(),storage));
         set("acceptedProfile",profile());return decoder;
     }
     private Minecraft minecraft(ClientLevel level){

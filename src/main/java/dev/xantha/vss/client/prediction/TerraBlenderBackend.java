@@ -89,17 +89,21 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
                     WorldgenProfileS2CPayload.MAX_GENERATOR_RAW_BYTES);
             JsonObject generatorRoot = GSON.fromJson(
                     new String(generatorJson, StandardCharsets.UTF_8), JsonObject.class);
-            if (generatorRoot == null || !generatorRoot.has("vss_terrablender")) {
+            if (generatorRoot == null || (!generatorRoot.has("vss_terrablender") && !generatorRoot.has("vss_terrablender_end"))) {
                 return Optional.empty();
             }
             String rejection = PredictionWorldgenCapabilities.rejection(generatorRoot);
             if (rejection != null) {
                 return Optional.empty();
             }
+            if (generatorRoot.has("vss_terrablender_end") && !"minecraft:the_end".equals(
+                    generatorRoot.getAsJsonObject("biome_source").get("type").getAsString()))
+                throw new IllegalArgumentException("TerraBlender End routing requires the End biome source");
             BiomeSource base = BiomeSource.CODEC
                     .parse(worldgen.ops(), generatorRoot.get("biome_source")).getOrThrow();
-            BiomeSource routing = buildRoutingSource(
-                    generatorRoot.getAsJsonObject("vss_terrablender"), base, seed, worldgen);
+            BiomeSource routing = generatorRoot.has("vss_terrablender_end")
+                    ? new TerraBlenderEndBiomeSource(generatorRoot.getAsJsonObject("vss_terrablender_end"), seed, worldgen)
+                    : buildRoutingSource(generatorRoot.getAsJsonObject("vss_terrablender"), base, seed, worldgen);
             if (routing == null) {
                 return Optional.empty();
             }
@@ -116,27 +120,23 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
                         profile, generatorRoot, worldgen.snapshotRoot(), sampler,
                         inputs);
                 if (nativeTerrain != null) {
-                    if (nativeTerrain instanceof RustTerrainSampler rust
-                            && rust.terrablenderRouting()) {
-                        // The native sampler owns the Java context and closes
-                        // it when released; publish the native handle only.
-                        sampler = nativeTerrain;
-                        terrain = "rust";
-                    } else {
-                        PredictionResources.releaseSampler(nativeTerrain);
-                        terrain = "java (native lacks region routing)";
-                    }
+                    // open() verifies every required routing capability before transferring context ownership.
+                    sampler = nativeTerrain;
+                    terrain = "rust";
                 }
             } else {
                 terrain = "java (" + terrainRejection + ")";
             }
             VSSLogger.info("VSS TerraBlender positional-region backend active for "
-                    + profile.dimension() + ": regions=" + ((RoutingSource) routing).regionCount()
+                    + profile.dimension() + ": regions=" + (routing instanceof RoutingSource regions ? regions.regionCount() : "end areas")
                     + ", terrain=" + terrain + ", base=" + base.getClass().getSimpleName());
             return Optional.of(sampler);
+        } catch (java.util.concurrent.CancellationException cancelled) {
+            if (sampler != null) PredictionResources.releaseSampler(sampler);
+            throw cancelled;
         } catch (IOException | RuntimeException failure) {
             VSSLogger.warn("VSS TerraBlender region layout could not be reconstructed for "
-                    + profile.dimension() + "; keeping the vanilla snapshot biomes", failure);
+                    + profile.dimension() + "; required routing remains unavailable", failure);
             if (sampler != null) PredictionResources.releaseSampler(sampler);
             return Optional.empty();
         }
@@ -240,7 +240,7 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
         protected MapCodec<? extends BiomeSource> codec() {
             // The routing source only exists in memory; VSS never serializes
             // a reconstructed generator.
-            return Codec.unit(this).fieldOf("vss_terrablender");
+            return com.mojang.serialization.MapCodec.unit(this);
         }
 
         @Override

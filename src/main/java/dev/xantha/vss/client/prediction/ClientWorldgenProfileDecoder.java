@@ -120,6 +120,11 @@ final class ClientWorldgenProfileDecoder {
         }
         void decode(ResourceKey<Level> dimension, java.util.function.BooleanSupplier active,
                 java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> ready) throws IOException {
+            decode(dimension, active, ready, null);
+        }
+        void decode(ResourceKey<Level> dimension, java.util.function.BooleanSupplier active,
+                java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> ready,
+                java.util.function.BiConsumer<ResourceKey<Level>, ClientTerrainSampler> cacheReady) throws IOException {
             if (closed) throw new java.util.concurrent.CancellationException("Closed profile session");
             for (DimensionProfile profile : payload.dimensions().stream().filter(p -> p.levelKey().equals(dimension)).toList()) {
                 checkActive(active);
@@ -167,7 +172,22 @@ final class ClientWorldgenProfileDecoder {
                     }
                     ClientTerrainSampler javaSampler = null;
                     try {
-                        javaSampler = decodeJavaSampler(profile, generatorRoot, registries, clientRegistries);
+                        BiomeSource biomeSource = decodeBiomeSource(profile, generatorRoot, registries);
+                        if (cacheReady != null) {
+                            var cacheSampler = new PredictionCacheSampler(profile, biomeSource, registries.templates());
+                            try {
+                                publish(profile, cacheSampler, generatorRoot, registryRoot, legacyIdentity, active, cacheReady);
+                            } catch (java.util.concurrent.CancellationException cancelled) { throw cancelled; }
+                            catch (RuntimeException failure) {
+                                VSSLogger.warn("VSS early cache display unavailable for " + profile.dimension()
+                                        + "; continuing generation initialization", failure);
+                            }
+                            dimensionTiming.mark("cacheContext");
+                        }
+                        checkActive(active);
+                        javaSampler = decodeJavaSampler(profile, generatorRoot, registries, clientRegistries, biomeSource);
+                    } catch (java.util.concurrent.CancellationException cancelled) {
+                        throw cancelled;
                     } catch (RuntimeException exception) {
                         VSSLogger.warn("VSS Java biome/feature context unavailable for "
                                 + profile.dimension(), exception);
@@ -194,9 +214,18 @@ final class ClientWorldgenProfileDecoder {
                     }
                     // Keep Java registry/structure context for codecs which a
                     // terrain or feature extension implements outside vanilla.
-                    String nativeRejection = PredictionWorldgenCapabilities.nativeTerrainRejection(generatorRoot, registryRoot);
-                    ClientTerrainSampler rustSampler = javaSampler != null && nativeRejection == null
-                            ? RustTerrainSampler.open(profile, generatorRoot, registryRoot, javaSampler, shared) : null;
+                    String nativeRejection;
+                    ClientTerrainSampler rustSampler;
+                    try {
+                        nativeRejection = PredictionWorldgenCapabilities.nativeTerrainRejection(generatorRoot, registryRoot);
+                        rustSampler = javaSampler != null && nativeRejection == null
+                                ? RustTerrainSampler.open(profile, generatorRoot, registryRoot, javaSampler, shared) : null;
+                    } catch (RuntimeException | Error failure) {
+                        // open() transfers context ownership only when it returns a sampler.
+                        // Cancellation during native construction still leaves this Java context here.
+                        if (javaSampler != null) PredictionResources.releaseSampler(javaSampler);
+                        throw failure;
+                    }
                     if (rustSampler != null) {
                         publish(profile, rustSampler, generatorRoot, registryRoot, legacyIdentity, active, ready);
                         dimensionTiming.mark("nativeAndPublish");
@@ -262,12 +291,30 @@ final class ClientWorldgenProfileDecoder {
 
     static ClientTerrainSampler decodeJavaSampler(DimensionProfile profile,
             JsonObject generatorRoot, ClientWorldgenRegistries registries, RegistryAccess clientRegistries) {
+        return decodeJavaSampler(profile, generatorRoot, registries, clientRegistries,
+                decodeBiomeSource(profile, generatorRoot, registries));
+    }
+
+    private static BiomeSource decodeBiomeSource(DimensionProfile profile,
+            JsonObject generatorRoot, ClientWorldgenRegistries registries) {
         BiomeSource biomeSource = generatorRoot.has("vss_blueprint")
                 ? BlueprintBiomeCompat.decode(generatorRoot.getAsJsonObject("vss_blueprint"), profile.seed(), registries)
                 : BiomeSource.CODEC
                 .parse(registries.ops(), generatorRoot.get("biome_source"))
                 .getOrThrow();
-        return decodeJavaSampler(profile, generatorRoot, registries, clientRegistries, biomeSource);
+        // Required server routing also applies to the early finished-cache context.
+        if (generatorRoot.has("vss_terrablender")) {
+            biomeSource = TerraBlenderBackend.buildRoutingSource(generatorRoot.getAsJsonObject("vss_terrablender"),
+                    biomeSource, profile.seed(), registries);
+            if (biomeSource == null) throw new IllegalArgumentException("Required TerraBlender region routing unavailable");
+        }
+        if (generatorRoot.has("vss_terrablender_end")) {
+            if (!generatorRoot.getAsJsonObject("biome_source").get("type").getAsString().equals("minecraft:the_end"))
+                throw new IllegalArgumentException("TerraBlender End routing requires the End biome source");
+            biomeSource = new TerraBlenderEndBiomeSource(generatorRoot.getAsJsonObject("vss_terrablender_end"),
+                    profile.seed(), registries);
+        }
+        return biomeSource;
     }
 
     /** Assembles the sampler around a caller-supplied biome source (backend adapters). */

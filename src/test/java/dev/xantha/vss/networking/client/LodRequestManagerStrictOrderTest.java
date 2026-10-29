@@ -365,6 +365,25 @@ class LodRequestManagerStrictOrderTest {
         assertEquals(1, calls[0]);
         assertFalse(tracker.contains(PositionUtil.packPosition(4096,4096)));
     }
+    @Test void repeatedPregenReplaysOnlyTheCurrentVersionToTheOptionalMap() {
+        int[] voxels = {0}, maps = {0};
+        java.util.function.BooleanSupplier primary = () -> { voxels[0]++; return true; };
+        java.util.function.BooleanSupplier replay = () -> { maps[0]++; return true; };
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 200, new int[0], primary, replay));
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 200, new int[0], primary, replay));
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 199, new int[0], primary, replay));
+        assertEquals(1, voxels[0]);
+        assertEquals(1, maps[0], "an old version must not overwrite the current map");
+    }
+    @Test void mapReplayBackpressureDoesNotLoseTheKnownVersionOrReimportVoxy() {
+        int[] primaryCalls = {0};
+        java.util.function.BooleanSupplier primary = () -> { primaryCalls[0]++; return true; };
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 200, new int[0], primary, () -> false));
+        assertFalse(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 200, new int[0], primary, () -> false));
+        assertEquals(200, manager.requestTimestampFor(PositionUtil.packPosition(5, 5)));
+        assertTrue(manager.processLocalPregenColumn(Level.OVERWORLD, 5, 5, 200, new int[0], primary, () -> true));
+        assertEquals(1, primaryCalls[0]);
+    }
     @Test void localPregenRejectsWrongDimensionAndStaleVersionWithoutDispatch() {
         long position = PositionUtil.packPosition(5,5);
         manager.onDirtyColumns(new long[]{position},new long[]{100});

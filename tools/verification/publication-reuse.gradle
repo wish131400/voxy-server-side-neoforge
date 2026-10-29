@@ -1,0 +1,22 @@
+allprojects { afterEvaluate {
+ tasks.register('publicationReuseTest', Test) {
+  dependsOn tasks.named('testClasses');testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+  useJUnitPlatform()
+  include '**/PredictionBiomeCacheTest.class','**/PredictionPublicationLocalityTest.class','**/PredictionPublicationReplayTest.class'
+  include '**/VoxySectionDataTest.class','**/VoxySectionSignatureTest.class','**/VoxyPredictionNotificationTest.class'
+  forkEvery=1;maxHeapSize='2G';testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+ }
+ def replayClasses=layout.buildDirectory.dir('notification-replay-classes')
+ tasks.register('compileNotificationReplay', JavaCompile) {
+  dependsOn tasks.named('testClasses')
+  source=project.fileTree(new File(project.projectDir,'tools/verification/publication-replay')) {include '**/*.java'}
+  classpath=sourceSets.test.runtimeClasspath;destinationDirectory=replayClasses;options.encoding='UTF-8'
+ }
+ tasks.register('notificationReplayTest', Test) {
+  dependsOn tasks.named('compileNotificationReplay');testClassesDirs=files(replayClasses)
+  classpath=files(replayClasses)+sourceSets.test.runtimeClasspath
+  useJUnitPlatform();maxHeapSize='2G';testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+  systemProperty 'vss.replayBaseline',providers.gradleProperty('vssReplayBaseline').getOrElse('false')
+ }
+
+} }

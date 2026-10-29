@@ -25,7 +25,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises the production queue and its final CPU lease, including CPU saturation and capped frame rates. */
+/** Exercises the production queue and its final CPU lease, including shared capacity, immediate handoff and capped frame rates. */
 class PredictionCpuAdmissionIntegrationTest {
     private static final long SECOND = 1_000_000_000L;
     private static final DimensionProfile PROFILE = new DimensionProfile(ResourceLocation.tryParse("minecraft:overworld"),
@@ -53,7 +53,7 @@ class PredictionCpuAdmissionIntegrationTest {
         PredictionFramePace.resetForTesting();
     }
 
-    @Test void cpuSaturationCompletesCurrentTerrainWithTwoSecondsBetweenStarts() throws Exception {
+    @Test void detailBuildsPublishBackToBackWithoutAdvancingTheClock() throws Exception {
         framePace(40_000_000L);
         var clock = new AtomicLong();
         var budget = budget(clock);
@@ -63,35 +63,21 @@ class PredictionCpuAdmissionIntegrationTest {
             var second = root(manager, 1);
             plan(manager, first, 8, 16);
             plan(manager, second, 8, 16);
-            assertTrue(budget.diagnostics().contains("pressure=2"));
-            enqueue(manager, first, false);
-            assertEquals(0, manager.pendingCount(), "entering saturation starts a two-second detail delay");
-            assertEquals(0, sampler.work.get());
-
-            clock.set(2 * SECOND);
             enqueue(manager, first, false);
             awaitIdle(manager);
             assertEquals(16, residents(manager).get(first).cellAxis());
-            assertTrue(sampler.work.get() > 0, "the actual production build must run and publish");
-            assertTrue(budget.diagnostics().contains("active=0,detail=0"));
             int work = sampler.work.get();
-
-            enqueue(manager, second, false);
-            clock.set(4 * SECOND - 1);
-            enqueue(manager, second, false);
-            assertEquals(0, manager.pendingCount());
-            assertEquals(work, sampler.work.get(), "short builds cannot admit the next task immediately");
-            assertEquals(8, residents(manager).get(second).cellAxis());
-
-            clock.incrementAndGet();
+            assertTrue(work > 0);
             enqueue(manager, second, false);
             awaitIdle(manager);
             assertEquals(16, residents(manager).get(second).cellAxis());
             assertTrue(sampler.work.get() > work);
+            assertEquals(0, clock.get(), "completing a build must not add a time gate");
+            assertTrue(budget.diagnostics().contains("active=0,detail=0"));
         }
     }
 
-    @Test void cpuSaturationDefersUnseenSurfaceThenCompletesItAfterTurning() throws Exception {
+    @Test void offscreenSurfaceKeepsViewPriorityAndCompletesAfterTurning() throws Exception {
         framePace(40_000_000L);
         var clock = new AtomicLong();
         var budget = budget(clock);
@@ -104,13 +90,13 @@ class PredictionCpuAdmissionIntegrationTest {
             manager.setWorkView(PredictionWorkView.of(0, 80, 0, -1, 0, 0, 70, 1));
             var background = PredictionTileManager.class.getDeclaredMethod("backgroundWork", PredictionTileKey.class);
             background.setAccessible(true);
-            assertEquals(true, background.invoke(manager, key), "this must exercise the paused background gate too");
+            assertEquals(true, background.invoke(manager, key), "exercise ordinary background admission");
             budget.diagnostics();
             clock.set(2 * SECOND);
 
             enqueue(manager, key, true);
             awaitIdle(manager);
-            assertFalse(keys(manager, "surfaceReady").contains(key), "an invisible surface must wait even when the visible view has finished");
+            assertFalse(keys(manager, "surfaceReady").contains(key), "offscreen surfaces retain their view priority");
             assertEquals(0, sampler.work.get());
             manager.setWorkView(PredictionWorkView.of(0, 80, 0, 1, 0, 0, 70, 1));
             enqueue(manager, key, true);
@@ -122,7 +108,7 @@ class PredictionCpuAdmissionIntegrationTest {
         }
     }
 
-    @Test void cpuPressureOneReducesConcurrencyWithoutTheSaturationDelay() throws Exception {
+    @Test void configuredConcurrencyPublishesCurrentTerrainWithoutDelay() throws Exception {
         framePace(33_333_333L);
         var clock = new AtomicLong();
         var budget = budget(clock, .90);
@@ -130,7 +116,7 @@ class PredictionCpuAdmissionIntegrationTest {
         try (var manager = manager(sampler, budget)) {
             var key = root(manager, 0);
             plan(manager, key, 8, 16);
-            assertEquals(PredictionCpuBudget.ThrottleLevel.REDUCE, budget.currentThrottle());
+            assertTrue(budget.diagnostics().contains("limit=8"));
             enqueue(manager, key, false);
             awaitIdle(manager);
             assertEquals(16, residents(manager).get(key).cellAxis());
@@ -150,8 +136,6 @@ class PredictionCpuAdmissionIntegrationTest {
         try (var manager = manager(sampler, budget)) {
             var key = root(manager, 0);
             plan(manager, key, 8, 16);
-            assertEquals(PredictionCpuBudget.ThrottleLevel.NONE, budget.currentThrottle());
-            assertTrue(budget.allowsIdleRefinement());
             enqueue(manager, key, false);
             awaitIdle(manager);
             assertEquals(16, residents(manager).get(key).cellAxis());
@@ -174,7 +158,7 @@ class PredictionCpuAdmissionIntegrationTest {
         }
     }
 
-    @Test void idleUpgradeCannotUseTheCurrentTargetTrickleLane() throws Exception {
+    @Test void idleUpgradeProgressesWhenForegroundAndMemoryAllow() throws Exception {
         framePace(40_000_000L);
         var clock = new AtomicLong();
         var budget = budget(clock);
@@ -185,21 +169,20 @@ class PredictionCpuAdmissionIntegrationTest {
             field("terrainTargets").set(manager, Map.of(key, 16));
             field("idleTargets").set(manager, Map.of(key, 16));
             field("idleAllowed").setBoolean(manager, true);
-            budget.diagnostics();
-            clock.set(2 * SECOND);
+            field("foregroundWorkPending").setBoolean(manager, false);
             enqueue(manager, key, false);
-            assertEquals(0, manager.pendingCount());
-            assertEquals(0, sampler.work.get());
-            assertEquals(8, residents(manager).get(key).cellAxis());
+            awaitIdle(manager);
+            assertTrue(sampler.work.get() > 0);
+            assertEquals(16, residents(manager).get(key).cellAxis());
         }
     }
 
     @ParameterizedTest
     @ValueSource(longs = {25_000_000L, 40_000_000L})
-    void queuedManagersShareOneRealDetailLeaseAndDelayIsMeasuredFromStart(long frameGap) throws Exception {
+    void queuedManagersShareConfiguredCapacityAndReleaseWakesTheNextBuild(long frameGap) throws Exception {
         framePace(frameGap);
         var clock = new AtomicLong();
-        var budget = budget(clock);
+        var budget = new PredictionCpuBudget(() -> 1, clock::get);
         var releaseBuild = new CountDownLatch(1);
         var firstSampler = new Sampler(releaseBuild);
         var secondSampler = new Sampler(null);
@@ -225,7 +208,7 @@ class PredictionCpuAdmissionIntegrationTest {
                 clock.set(4 * SECOND);
                 releaseSecondWorker.countDown();
                 awaitIdle(second);
-                assertEquals(0, secondSampler.work.get(), "the worker must reject a second actual detail lease even after two seconds");
+                assertEquals(0, secondSampler.work.get(), "a second manager must respect the shared one-worker capacity");
                 assertEquals(8, residents(second).get(secondKey).cellAxis());
 
                 releaseBuild.countDown();
@@ -234,7 +217,7 @@ class PredictionCpuAdmissionIntegrationTest {
                 enqueue(second, secondKey, false);
                 awaitIdle(second);
                 assertEquals(16, residents(second).get(secondKey).cellAxis(),
-                        "a long build already waited two seconds since its start; finishing must not restart the delay");
+                        "release must wake the second manager immediately");
                 assertTrue(secondSampler.work.get() > 0);
                 assertTrue(budget.diagnostics().contains("active=0,detail=0"));
             } finally {
@@ -251,6 +234,8 @@ class PredictionCpuAdmissionIntegrationTest {
         private final CountDownLatch release;
         Sampler(CountDownLatch release) { super(PROFILE.seed(), PROFILE); this.release = release; }
         private void observe() {
+            assertTrue(Thread.currentThread().getPriority() < Thread.NORM_PRIORITY,
+                    "prediction workers must leave game threads at higher priority");
             work.incrementAndGet();
             entered.countDown();
             if (release != null) awaitLatch(release);
@@ -270,11 +255,11 @@ class PredictionCpuAdmissionIntegrationTest {
     }
 
     private static PredictionCpuBudget budget(AtomicLong clock) {
-        return budget(clock, .98);
+        return new PredictionCpuBudget(() -> 8, clock::get);
     }
 
     private static PredictionCpuBudget budget(AtomicLong clock, double cpuLoad) {
-        return new PredictionCpuBudget(() -> 8, () -> cpuLoad, () -> .4, clock::get, false);
+        return new PredictionCpuBudget(() -> 8, clock::get);
     }
 
     private static PredictionTileManager manager(ClientTerrainSampler sampler, PredictionCpuBudget budget) {

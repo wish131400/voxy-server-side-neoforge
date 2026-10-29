@@ -507,6 +507,20 @@ public final class VSSVoxyOptionsIntegration {
                     "vss.voxy_options.group.generation",
                     sodium08IntOption(
                             configBuilder,
+                            "singleplayer_generation_concurrency",
+                            "vss.voxy_options.singleplayer_generation_concurrency",
+                            "vss.voxy_options.singleplayer_generation_concurrency.tooltip",
+                            "HIGH",
+                            2,
+                            VSSServerConfig.MIN_GENERATION_LIMIT,
+                            VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER,
+                            1,
+                            value -> VSSServerConfig.CONFIG.singleplayerGenerationConcurrencyLimit = value,
+                            () -> VSSServerConfig.CONFIG.singleplayerGenerationConcurrencyLimit,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            VSSVoxyOptionsIntegration::saveServerConfig),
+                    sodium08IntOption(
+                            configBuilder,
                             "generation_player_concurrency",
                             "vss.voxy_options.generation_player_concurrency",
                             "vss.voxy_options.generation_player_concurrency.tooltip",
@@ -848,6 +862,17 @@ public final class VSSVoxyOptionsIntegration {
                             config -> config.diskReaderThreads)));
 
             groups.add(oldGroup(
+                    oldIntOption(
+                            serverStorage,
+                            "vss.voxy_options.singleplayer_generation_concurrency",
+                            "vss.voxy_options.singleplayer_generation_concurrency.tooltip",
+                            "HIGH",
+                            VSSServerConfig.MIN_GENERATION_LIMIT,
+                            VSSServerConfig.MAX_GENERATION_CONCURRENCY_LIMIT_PER_PLAYER,
+                            1,
+                            VSSVoxyOptionsIntegration::formatColumns,
+                            (VSSServerConfig config, Integer value) -> config.singleplayerGenerationConcurrencyLimit = value,
+                            config -> config.singleplayerGenerationConcurrencyLimit),
                     oldIntOption(
                             serverStorage,
                             "vss.voxy_options.generation_player_concurrency",

@@ -108,16 +108,19 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             handle = RustWorldgenBackend.create(profile.seed(), BiomeManager.obfuscateSeed(profile.seed()), serialized);
             timing.mark("nativeCreate");
             RustTerrainSampler sampler = new RustTerrainSampler(handle, profile, context, shared.canonicalStates());
-            if (generator.has("vss_blueprint")
-                    && generator.getAsJsonObject("vss_blueprint").has("original_terrablender")
+            if ((generator.has("vss_terrablender") || generator.has("vss_terrablender_end")
+                    || generator.has("vss_blueprint")
+                    && generator.getAsJsonObject("vss_blueprint").has("original_terrablender"))
                     && !sampler.terrablenderRouting())
-                throw new IllegalStateException("Native library lacks wrapped TerraBlender routing");
+                throw new IllegalStateException("Native library lacks required TerraBlender routing");
             timing.mark("stateMapping");
             sampler.colorFingerprint = colormapFingerprint(document);
             handle = 0;
             timing.finish();
             if (VSSClientConfig.CONFIG.debugLogging) VSSLogger.debug("VSS prediction backend=" + ALGORITHM + ", dimension=" + profile.dimension());
             return sampler;
+        } catch (java.util.concurrent.CancellationException cancelled) {
+            throw cancelled;
         } catch (Exception | LinkageError failure) {
             VSSLogger.warn("VSS native terrain snapshot rejected for " + profile.dimension()
                     + "; prediction keeps the Java sampler: " + failure);

@@ -280,6 +280,13 @@ public final class VSSClientNetworking {
         return IntegratedPregenImporter.offer(server, dimension, data, requestManager, valid, completed);
     }
 
+    public static boolean tryImportLocalPregen(net.minecraft.server.MinecraftServer server,
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+            dev.xantha.vss.common.processing.EncodedColumnData data,
+            java.util.function.BooleanSupplier valid, java.util.function.Consumer<Boolean> completed, Runnable retry) {
+        return IntegratedPregenImporter.offer(server, dimension, data, requestManager, valid, completed, retry);
+    }
+
     public static void handleDirtyColumns(DirtyColumnsS2CPayload payload) {
         if (!serverEnabled || !isClientWorldReady()) {
             return;

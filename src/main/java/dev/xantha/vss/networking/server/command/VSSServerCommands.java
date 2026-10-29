@@ -609,7 +609,7 @@ public final class VSSServerCommands {
                         config.enableChunkGeneration
                                 ? Component.translatable("vss.command.enabled")
                                 : Component.translatable("vss.command.disabled"),
-                        config.generationConcurrencyLimitPerPlayer,
+                        config.effectiveGenerationConcurrencyLimitPerPlayer(!source.getServer().isDedicatedServer()),
                         config.generationConcurrencyLimitGlobal,
                         config.automaticGenerationStartsPerTick(),
                         config.automaticGenerationCompletionsPerTick(),
@@ -640,7 +640,11 @@ public final class VSSServerCommands {
     }
 
     private static int setGenerationPlayerConcurrency(CommandSourceStack source, int limit) {
-        VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer = limit;
+        if (source.getServer().isDedicatedServer()) {
+            VSSServerConfig.CONFIG.generationConcurrencyLimitPerPlayer = limit;
+        } else {
+            VSSServerConfig.CONFIG.singleplayerGenerationConcurrencyLimit = limit;
+        }
         VSSServerConfig.CONFIG.normalizeAndSave();
         return reportGenerationUpdated(source);
     }
@@ -659,7 +663,7 @@ public final class VSSServerCommands {
                 .withStyle(ChatFormatting.YELLOW)
                 .append(Component.translatable(
                         "vss.command.generation.saved.details",
-                        config.generationConcurrencyLimitPerPlayer,
+                        config.effectiveGenerationConcurrencyLimitPerPlayer(!source.getServer().isDedicatedServer()),
                         config.generationConcurrencyLimitGlobal,
                         config.automaticGenerationStartsPerTick(),
                         config.automaticGenerationCompletionsPerTick(),

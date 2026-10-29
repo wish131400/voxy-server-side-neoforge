@@ -66,7 +66,7 @@ class PredictionNativeDemandTest {
                 i.vanillaRadius(),i.surfaceExtension(),i.minY(),i.maxY(),true,i.initialAxes(),i.settings(),i.revision(),
                 i.removalRevision(),i.residents(),i.relief(),i.edited(),i.mixedEdits(),i.ownershipCandidates(),
                 i.previousOwned(),i.uploaded(),i.voxyRadius(),i.mediumBias(),i.visibility(),i.dirty(),i.viewBands(),
-                i.viewDependencies(),i.failed(),i.deferred(),i.idle(),i.ordinaryBusy(),i.cpuReady(),i.memoryReady(),
+                i.viewDependencies(),i.failed(),i.deferred(),i.idle(),i.ordinaryBusy(),i.memoryReady(),
                 i.idlePending(),i.now(),true);
     }
 }

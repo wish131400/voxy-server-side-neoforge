@@ -68,6 +68,24 @@ class PredictionVoxelCacheTest {
         }
     }
 
+    @Test void modernReadHashesDecodedBytesWithoutReencodingAndKeepsDigestStableAcrossBiomeMappings() throws Exception {
+        var before=new PredictionCacheMappings(List.of("minecraft:plains","minecraft:forest"),List.of(),List.of());
+        var after=new PredictionCacheMappings(List.of("minecraft:forest","minecraft:plains"),List.of(),List.of());
+        for(boolean mapped:new boolean[]{false,true}) {
+            Path path=directory.resolve(mapped?"mapped":"numeric");
+            try(var disk=new PredictionDiskCache(path,77,mapped?before:null);var lease=disk.lease(diskKey())) {
+                assertTrue(disk.writeVoxelsLater(lease,tile(key,32,true),3,identity).get(5,TimeUnit.SECONDS));
+            }
+            try(var disk=new PredictionDiskCache(path,77,mapped?after:null);var lease=disk.lease(diskKey())) {
+                var data=disk.readVoxels(lease,key,3,identity);assertNotNull(data);
+                var field=PredictionDiskCache.class.getDeclaredField("encodedStates");field.setAccessible(true);
+                assertTrue(((Map<?,?>)field.get(disk)).isEmpty(),"A modern read must not reencode the block palette for its digest");
+                assertArrayEquals(PredictionVoxelCache.contentIdentity(data,0,new byte[32],null,disk),data.cacheIdentity(),
+                        "The streamed digest must have the same write-deduplication semantics");
+            }
+        }
+    }
+
     @Test void emptyAndPartialFinalFeaturePagesRoundTrip() throws Exception {
         for(int count:new int[]{0,PredictionVoxelCache.FEATURE_PAGE_SIZE,PredictionVoxelCache.FEATURE_PAGE_SIZE+1}) {
             var original=tile(key,8,true);var base=original.data().voxyTile;var builder=new PredictionVoxyBoxes.Builder();

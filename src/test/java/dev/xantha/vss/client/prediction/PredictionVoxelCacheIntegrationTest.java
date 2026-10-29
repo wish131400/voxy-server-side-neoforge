@@ -31,7 +31,7 @@ class PredictionVoxelCacheIntegrationTest {
         }
         var budget=new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1);
         try(var cache=new PredictionDiskCache(directory,77);var manager=new PredictionTileManager(PROFILE.levelKey(),sampler,budget,cache,
-                new PredictionCpuBudget(()->1,()->.99,()->.99,System::nanoTime,false))) {
+                new PredictionCpuBudget(()->1, System::nanoTime))) {
             setup(manager,key,32);
             cache.probeTerrain(List.of(PredictionDiskCache.Key.terrain(-1,-1,1)));cache.flush();
             enqueue(manager,key,true);await(manager);
@@ -57,7 +57,7 @@ class PredictionVoxelCacheIntegrationTest {
         }
         try(var cache=new PredictionDiskCache(directory,77);var manager=new PredictionTileManager(PROFILE.levelKey(),sampler,
                 new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1),cache,
-                new PredictionCpuBudget(()->8,()->.1,()->.1,System::nanoTime,false))) {
+                new PredictionCpuBudget(()->8, System::nanoTime))) {
             setup(manager,key,32);cache.probeTerrain(List.of(PredictionDiskCache.Key.terrain(-1,-1,1)));cache.flush();
             enqueue(manager,key,true);await(manager);assertEquals(16,manager.readyTiles().iterator().next().cellAxis());
             assertEquals(0,calls.get());assertFalse(((Set<?>)field("surfaceReady").get(manager)).contains(key));
@@ -70,6 +70,32 @@ class PredictionVoxelCacheIntegrationTest {
                 assertEquals(32,saved.voxels().axis());assertEquals(refined.data().voxyTile.features(),saved.voxels().features());
             }
         }
+    }
+
+    @Test void surfaceRequestRestoresCompletedVoxelsAtTheSameTerrainAxisBeforeCpuAdmission() throws Exception {
+        var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
+        var original=PredictionVoxelCacheTest.tile(key,32,true);
+        var calls=new AtomicInteger();var sampler=sampler(calls);
+        int settings=3|PredictionVegetation.runtimeSettings(PROFILE.dimension());
+        try(var cache=new PredictionDiskCache(directory,77);var lease=cache.lease(PredictionDiskCache.Key.voxels(-1,-1,1))) {
+            assertTrue(cache.writeVoxelsLater(lease,original,settings,PredictionVoxelCache.identity(sampler)).get(5,TimeUnit.SECONDS));
+        }
+        var budget=new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1);
+        try(var cache=new PredictionDiskCache(directory,77);var manager=new PredictionTileManager(PROFILE.levelKey(),sampler,budget,cache,
+                new PredictionCpuBudget(()->1, System::nanoTime))) {
+            setup(manager,key,32);
+            @SuppressWarnings("unchecked")var ready=(Map<PredictionTileKey,PredictionTile>)field("ready").get(manager);
+            ready.put(key,PredictionVoxelCacheTest.tile(key,32,false));
+            @SuppressWarnings("unchecked")var wanted=(Set<PredictionTileKey>)field("surfaceDesired").get(manager);wanted.add(key);
+            var method=PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileKey.class,int.class,int.class,boolean.class,boolean.class);
+            method.setAccessible(true);method.invoke(manager,key,0,0,true,false);await(manager);
+            var restored=ready.get(key);
+            assertTrue(restored.data().voxyTile.surfaceComplete());assertEquals(32,restored.cellAxis());
+            assertEquals(original.data().voxyTile.features(),restored.data().voxyTile.features());
+            assertEquals(0,calls.get());assertTrue(((Set<?>)field("surfaceReady").get(manager)).contains(key));
+            assertEquals(1,((java.util.concurrent.atomic.LongAdder)field("voxelRestores").get(manager)).sum());
+        }
+        assertEquals(0,budget.usedBytes());assertEquals(0,budget.activeBuildCount());
     }
 
     private static ClientTerrainSampler sampler(AtomicInteger calls) {

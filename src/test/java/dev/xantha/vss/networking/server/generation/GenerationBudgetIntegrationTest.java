@@ -184,6 +184,48 @@ class GenerationBudgetIntegrationTest {
         }
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void automaticActiveAndQueuedCapsSelectIntegratedOrDedicatedSettings() throws Exception {
+        try(Fixture f=new Fixture()) {
+            var activeCounts=(Map<UUID,Integer>)field("perPlayerActiveCount").get(f.service);
+            var queuedCounts=(Map<UUID,Integer>)field("perPlayerQueuedCount").get(f.service);
+            var work=f.pending(false,10,false);
+            activeCounts.put(f.regular,2);queuedCounts.put(f.regular,2);
+            when(f.server.isDedicatedServer()).thenReturn(false);
+            assertFalse((boolean)method("canStart",nested("PendingGeneration")).invoke(f.service,work));
+            assertFalse((boolean)method("canQueue",UUID.class,ServerLevel.class).invoke(f.service,f.regular,f.level));
+            when(f.server.isDedicatedServer()).thenReturn(true);
+            assertTrue((boolean)method("canStart",nested("PendingGeneration")).invoke(f.service,work));
+            assertTrue((boolean)method("canQueue",UUID.class,ServerLevel.class).invoke(f.service,f.regular,f.level));
+            activeCounts.put(f.regular,4);queuedCounts.put(f.regular,4);
+            assertFalse((boolean)method("canStart",nested("PendingGeneration")).invoke(f.service,work));
+            assertFalse((boolean)method("canQueue",UUID.class,ServerLevel.class).invoke(f.service,f.regular,f.level));
+            f.config.singleplayerGenerationConcurrencyLimit=5;
+            when(f.server.isDedicatedServer()).thenReturn(false);
+            assertTrue((boolean)method("canStart",nested("PendingGeneration")).invoke(f.service,work));
+            assertTrue((boolean)method("canQueue",UUID.class,ServerLevel.class).invoke(f.service,f.regular,f.level));
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void attachingToActiveGenerationUsesTheSameLocalLimitAndKeepsChunkyExempt() throws Exception {
+        try(Fixture f=new Fixture()) {
+            f.addReady(false);
+            var counts=(Map<UUID,Integer>)field("perPlayerActiveCount").get(f.service);
+            counts.put(f.regular,2);
+            when(f.server.isDedicatedServer()).thenReturn(false);
+            assertFalse(f.service.submitGeneration(f.regular,null,31,f.level,10,20,0));
+            when(f.server.isDedicatedServer()).thenReturn(true);
+            assertTrue(f.service.submitGeneration(f.regular,null,32,f.level,10,20,0));
+            assertEquals(3,counts.get(f.regular));
+            when(f.server.isDedicatedServer()).thenReturn(false);
+            counts.put(f.chunky,100);
+            assertTrue(f.service.submitGeneration(f.chunky,null,33,f.level,10,20,0));
+        }
+    }
+
     private static Class<?> nested(String name) {
         return Arrays.stream(ChunkGenerationService.class.getDeclaredClasses())
                 .filter(type -> type.getSimpleName().equals(name)).findFirst().orElseThrow();
@@ -221,6 +263,10 @@ class GenerationBudgetIntegrationTest {
             when(server.getAverageTickTimeNanos()).thenReturn(10_000_000L);
             when(server.getPlayerList()).thenReturn(mock(PlayerList.class));
             when(level.getServer()).thenReturn(server);
+            var registries = mock(net.minecraft.core.RegistryAccess.class);
+            when(level.registryAccess()).thenReturn(registries);
+            when(registries.registryOrThrow(net.minecraft.core.registries.Registries.BIOME))
+                    .thenReturn(mock(net.minecraft.core.Registry.class));
             when(level.dimension()).thenReturn(Level.OVERWORLD);
             when(level.getChunkSource()).thenReturn(chunks);
             when(level.dimensionType()).thenReturn(mock(DimensionType.class));

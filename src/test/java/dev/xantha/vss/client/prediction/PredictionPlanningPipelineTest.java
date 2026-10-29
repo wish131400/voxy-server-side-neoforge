@@ -156,7 +156,7 @@ class PredictionPlanningPipelineTest {
                 0, 768, -64, 320, false, List.copyOf(axes), 5, 7, 11,
                 new PredictionTileManager.RenderSnapshot(Level.OVERWORLD, layout, Map.of(), Map.of()), Map.of(), Set.of(), false,
                 Set.of(), Set.of(), Set.of(), 0, 0, PredictionVisibilityFeedback.Snapshot.EMPTY, Set.of(), Map.of(), Set.of(),
-                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, true, false, System.nanoTime(), false);
+                Map.of(), Map.of(), new PredictionIdleRefinement(), true, true, false, System.nanoTime(), false);
     }
 
     static PredictionSchedulePreparation.Input schedulingInput(PredictionPlanPreparation.Input i) {

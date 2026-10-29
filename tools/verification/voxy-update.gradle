@@ -1,0 +1,15 @@
+// Concurrent renderer handoff, teleport priority and source lifetime regressions.
+allprojects { afterEvaluate {
+ tasks.register('voxyUpdateTest', Test) {
+  dependsOn tasks.named('testClasses');testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+  useJUnitPlatform()
+  systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+  include '**/VoxyPredictionNotificationTest.class','**/VoxyPendingSectionsTest.class','**/VoxySectionPrunerTest.class'
+  include '**/VoxyIngestPublicationTest.class','**/VoxySurfaceHeightsTest.class'
+  include '**/VoxySectionVersionsTest.class','**/VoxyRenderAccessTest.class','**/PredictionRetirementQueueTest.class'
+  include '**/PredictionVoxySourceTest.class','**/PredictionPublicationLocalityTest.class'
+  include '**/PredictionDimensionLifecycleTest.class','**/PredictionVoxyLoadingIntegrationTest.class'
+  forkEvery=1;maxParallelForks=1;maxHeapSize='2G'
+  testLogging {events 'failed','skipped';exceptionFormat 'full'}
+ }
+} }

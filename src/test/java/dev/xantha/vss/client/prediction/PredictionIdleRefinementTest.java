@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import dev.xantha.vss.client.prediction.PredictionTileManager.PredictionTileKey;
 
 class PredictionIdleRefinementTest {
+    @org.junit.jupiter.api.BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void offscreenPromotionCannotBlockNewViewOrConsumeItsTargetBudget() {
         var policy = new PredictionIdleRefinement();
         var front = new PredictionTileKey(Level.OVERWORLD, 4, 0, 4);

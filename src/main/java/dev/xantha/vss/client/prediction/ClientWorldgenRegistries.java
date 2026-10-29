@@ -54,6 +54,7 @@ final class ClientWorldgenRegistries {
     private JsonObject templates = new JsonObject();
     private final Map<ResourceKey<? extends Registry<?>>, RegistryOps.RegistryInfo<?>> custom = new HashMap<>();
     private final Map<ResourceKey<? extends Registry<?>>, MappedRegistry<?>> extraRegistries = new java.util.LinkedHashMap<>();
+    private final Map<ResourceKey<? extends Registry<?>>, MappedRegistry<?>> snapshotValues = new HashMap<>();
     /**
      * Registry keys present in the server snapshot.  A registry must be
      * exposed through the snapshot lookup while it is being populated: a
@@ -69,7 +70,13 @@ final class ClientWorldgenRegistries {
     private JsonObject snapshotRoot = new JsonObject();
 
     private ClientWorldgenRegistries(RegistryAccess fallback) {
-        this.fallback = fallback;
+        // A connection exposes the network registry layer, not static block,
+        // fluid or entity registries. Codecs need those holders while decoding,
+        // before access() publishes the reconstructed decoration context.
+        Map<ResourceKey<? extends Registry<?>>, Registry<?>> merged = new java.util.LinkedHashMap<>();
+        net.minecraft.core.registries.BuiltInRegistries.REGISTRY.forEach(registry -> merged.put(registry.key(), registry));
+        fallback.registries().forEach(entry -> merged.put(entry.key(), entry.value()));
+        this.fallback = new RegistryAccess.ImmutableRegistryAccess(List.copyOf(merged.values()));
         registerInfo(noises);
         registerInfo(densityFunctions);
         registerInfo(configuredCarvers);
@@ -114,6 +121,7 @@ final class ClientWorldgenRegistries {
             }
             registries.declareExtra(data);
         }
+        if (root.has("registry_tags")) registries.bindSnapshotTags(root.getAsJsonObject("registry_tags"));
         registries.registerAll(
                 registries.noises,
                 root.getAsJsonObject("noises"),
@@ -166,9 +174,21 @@ final class ClientWorldgenRegistries {
         registerAll((MappedRegistry<T>) extraRegistries.get(data.key()), values, data.elementCodec());
     }
 
+    private void bindSnapshotTags(JsonObject tags) {
+        for (var entry : tags.entrySet()) {
+            var key = ResourceKey.createRegistryKey(ResourceLocation.parse(entry.getKey()));
+            var registry = snapshotValues.get(key);
+            // Never mutate fallback registries (including the live client's static
+            // block tags). Only registries whose values belong to this snapshot.
+            if (registry != null && snapshotRegistries.contains(key))
+                dev.xantha.vss.common.worldgen.WorldgenRegistryTags.bind(registry, entry.getValue().getAsJsonObject());
+        }
+    }
+
     private void declareSnapshot(JsonObject root, String field, ResourceKey<? extends Registry<?>> key) {
         JsonElement value = root.get(field);
-        if (value != null && value.isJsonObject() && !value.getAsJsonObject().entrySet().isEmpty()) {
+        if (value != null && value.isJsonObject() && (!value.getAsJsonObject().entrySet().isEmpty()
+                || root.has("registry_tags") && root.getAsJsonObject("registry_tags").has(key.location().toString()))) {
             snapshotRegistries.add(key);
         }
     }
@@ -198,7 +218,6 @@ final class ClientWorldgenRegistries {
     /** Use the same holder instances for decoding, biome predicates and feature placement. */
     RegistryAccess access() {
         Map<ResourceKey<? extends Registry<?>>, Registry<?>> merged = new java.util.LinkedHashMap<>();
-        net.minecraft.core.registries.BuiltInRegistries.REGISTRY.forEach(registry -> merged.put(registry.key(), registry));
         fallback.registries().forEach(entry -> merged.put(entry.key(), entry.value()));
         merged.putAll(extraRegistries);
         for (Registry<?> registry : List.of(noises, densityFunctions, configuredCarvers, configuredFeatures,
@@ -222,6 +241,7 @@ final class ClientWorldgenRegistries {
     }
 
     private <T> void registerInfo(MappedRegistry<T> registry) {
+        snapshotValues.put(registry.key(), registry);
         custom.put(registry.key(), new RegistryOps.RegistryInfo<>(
                 registry.holderOwner(),
                 registry.createRegistrationLookup(),
@@ -278,8 +298,7 @@ final class ClientWorldgenRegistries {
                 // RegistryOps fall back to the client's own registry.
                 disabledCustom.add(registry.key());
                 snapshotRegistries.remove(registry.key());
-                if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
-                    dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry disabled: " + registry.key() + ": " + exception);
+                dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry disabled: " + registry.key(), exception);
             }
         }
     }
@@ -298,8 +317,7 @@ final class ClientWorldgenRegistries {
                 // unbound even when this registry's own values decoded successfully.
                 disabledCustom.add(registry.key());
                 snapshotRegistries.remove(registry.key());
-                if (dev.xantha.vss.config.VSSClientConfig.CONFIG.debugLogging)
-                    dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry has unresolved references: " + registry.key() + ": " + exception);
+                dev.xantha.vss.common.VSSLogger.warn("VSS optional worldgen registry has unresolved references: " + registry.key(), exception);
             }
         }
     }

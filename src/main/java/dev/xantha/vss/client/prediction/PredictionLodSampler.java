@@ -1,6 +1,8 @@
 package dev.xantha.vss.client.prediction;
 
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.core.Holder;
 import net.minecraft.world.level.biome.Biome;
@@ -9,16 +11,24 @@ import net.minecraft.world.level.biome.Biome;
 final class PredictionLodSampler extends ClientTerrainSampler {
     private final PredictionLodSource source;
     private final List<Holder<Biome>> sourceBiomes;
+    private final List<String> sourceBiomeNames;
+    private final Map<net.minecraft.resources.ResourceLocation, Integer> sourceBiomeIndices;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     PredictionLodSampler(PredictionLodContext context, PredictionLodSource source) {
         super(base(context), null);
         this.source = source;
         sourceBiomes = List.copyOf(source.biomes());
+        sourceBiomeNames = sourceBiomes.stream()
+                .map(b -> b.unwrapKey().map(k -> k.location().toString()).orElseThrow()).toList();
+        var indices = new HashMap<net.minecraft.resources.ResourceLocation, Integer>();
+        for (int i = 0; i < sourceBiomes.size(); i++)
+            indices.putIfAbsent(sourceBiomes.get(i).unwrapKey().orElseThrow().location(), i);
+        sourceBiomeIndices = Map.copyOf(indices);
         bindPredictionBackend("kind=LOD_SOURCE,backend=" + context.plan().backend() + ",revision="
                 + context.plan().revision() + ",executor=source,clientRevision=" + source.cacheRevision(),
                 context.plan().backend() + ':' + context.plan().revision() + ':' + source.cacheRevision()
-                        + ':' + context.cacheIdentity());
+                        + ":capture-palette-r2:" + String.join(",", sourceBiomeNames) + ':' + context.cacheIdentity());
     }
     private static ClientTerrainSampler base(PredictionLodContext context) {
         ClientTerrainSampler initialized = context.initializedNoiseContext();
@@ -48,8 +58,13 @@ final class PredictionLodSampler extends ClientTerrainSampler {
         return result != null ? result : super.noiseBiome(x, y, z);
     }
     @Override List<String> cacheBiomes() {
-        return sourceBiomes.isEmpty() ? super.cacheBiomes() : sourceBiomes.stream()
-                .map(b -> b.unwrapKey().map(k -> k.location().toString()).orElseThrow()).toList();
+        return sourceBiomes.isEmpty() ? super.cacheBiomes() : sourceBiomeNames;
+    }
+    @Override int captureBiomeIndex(Holder<Biome> biome, int fallback) {
+        if (sourceBiomes.isEmpty()) return super.captureBiomeIndex(biome, fallback);
+        if (biome == null) return fallback;
+        var key = biome.unwrapKey().orElse(null);
+        return key == null ? fallback : sourceBiomeIndices.getOrDefault(key.location(), fallback);
     }
     @Override public int waterTint(int x, int y, int z) {
         int result = source.waterTint(x, y, z);

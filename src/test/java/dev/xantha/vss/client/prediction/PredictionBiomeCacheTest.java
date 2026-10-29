@@ -9,6 +9,29 @@ import net.minecraft.world.level.biome.Climate;
 import org.junit.jupiter.api.Test;
 
 class PredictionBiomeCacheTest {
+    @Test void dispersedPopulatedPagesShareTheActualAnswerBudgetAcrossJobs() throws Exception {
+        var source=mock(BiomeSource.class);var climate=mock(Climate.Sampler.class);
+        var even=Holder.direct(mock(Biome.class));var odd=Holder.direct(mock(Biome.class));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        when(source.getNoiseBiome(anyInt(),anyInt(),anyInt(),same(climate))).thenAnswer(call->{
+            calls.incrementAndGet();return (((int)call.getArgument(0)^(int)call.getArgument(1)^(int)call.getArgument(2))&1)==0?even:odd;
+        });
+        var cache=new PredictionBiomeCache(source,climate);
+        // 256 dispersed neighborhoods, 80 answers each: pages are populated
+        // enough to bypass sparse retirement, yet waste most of a 512-slot page.
+        var points=new java.util.ArrayList<int[]>();
+        for(int page=0;page<256;page++)for(int y=0;y<5;y++)for(int z=0;z<4;z++)for(int x=0;x<4;x++)
+            points.add(new int[]{page*104729*8+x,-2048+y,-page*8191*8+z});
+        for(var p:points)cache.get(p[0],p[1],p[2]);
+        int cold=calls.get();
+        var worker=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {worker.submit(()->{
+            for(var p:points)assertSame(((p[0]^p[1]^p[2])&1)==0?even:odd,cache.get(p[0],p[1],p[2]));
+        }).get(15,java.util.concurrent.TimeUnit.SECONDS);}finally{worker.shutdownNow();}
+        int repeated=calls.get()-cold;
+        System.out.println("BIOME_DISPERSED reads="+points.size()*2+" cold="+cold+" repeated="+repeated+" "+cache.diagnostics());
+        assertTrue(repeated<points.size()/50,"Cached working sets should survive job handoff without page waste: "+repeated);
+    }
     @org.junit.jupiter.api.BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
     @Test void failedLookupKeepsItsCauseAndRetriesInsteadOfRememberingEmptyBiome() {
         var source = mock(BiomeSource.class);

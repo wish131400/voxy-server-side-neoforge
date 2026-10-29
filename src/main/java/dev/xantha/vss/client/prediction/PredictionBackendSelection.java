@@ -11,7 +11,7 @@ final class PredictionBackendSelection {
         if (sampler instanceof PredictionLodSampler) return;
         TerrainPredictionPlan plan = generator == null ? TerrainPredictionPlan.noise("vss:legacy", 1, false)
                 : TerrainPredictionPlan.read(generator);
-        String executor = sampler instanceof RustTerrainSampler ? "rust"
+        String executor = sampler instanceof PredictionCacheSampler ? "cache" : sampler instanceof RustTerrainSampler ? "rust"
                 : sampler instanceof PredictionFlatTerrainSampler ? "constant-layers" : "java";
         String identity = null;
         String override = sampler.terrainBackendOverride();
@@ -23,6 +23,11 @@ final class PredictionBackendSelection {
                     + ':' + WorldgenJson.sha256(registries);
         boolean explicitOverride = override != null && plan.kind() == TerrainPredictionPlan.Kind.UNAVAILABLE;
         if (explicitOverride) identity = override + ':' + WorldgenJson.sha256(generator) + ':' + WorldgenJson.sha256(registries);
+        // Previously completed samples lack server tags/End routing semantics.
+        if ((registries != null && registries.has("registry_tags"))
+                || (generator != null && generator.has("vss_terrablender_end")))
+            identity = "worldgen-compat-r2:" + WorldgenJson.sha256(generator == null ? new JsonObject() : generator)
+                    + ':' + WorldgenJson.sha256(registries == null ? new JsonObject() : registries);
         sampler.bindPredictionBackend("kind=" + (explicitOverride ? "BACKEND_OVERRIDE,snapshotKind=" + plan.kind() : plan.kind())
                 + ",backend=" + plan.backend() + (override == null ? "" : ",selectedBackend=" + override)
                 + ",revision=" + plan.revision() + ",executor=" + executor

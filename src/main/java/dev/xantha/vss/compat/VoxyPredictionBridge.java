@@ -59,10 +59,17 @@ public final class VoxyPredictionBridge {
         default void releaseMapper(Mapper mapper) { }
         /** Full prediction sources provide cheap face reads for final composed-content comparison. */
         default boolean compareNotificationFaces() { return false; }
+        /** False proves the section and its lighting halo have no prediction coverage. */
+        default boolean mayHavePrediction(long position, Mapper mapper) { return true; }
+        /** Cache-only immutable input evidence, or null to use final composition.
+         * Covers center and six neighbor planes, including light and biome.
+         * Must not construct missing voxels or wait for an in-flight build. */
+        default Object notificationIdentity(long position,Mapper mapper) { return null; }
     }
     private static final Map<Object, Context> WORLDS = Collections.synchronizedMap(new IdentityHashMap<>());
-    private static final ExecutorService UPDATES = Executors.newSingleThreadExecutor(r -> {
-        var t = new Thread(r, "vss-voxy-overlay-updates"); t.setDaemon(true); return t;
+    private static final ScheduledExecutorService UPDATES = Executors.newSingleThreadScheduledExecutor(r -> {
+        var t = new Thread(r, "vss-voxy-overlay-updates"); t.setDaemon(true);
+        t.setPriority(Thread.NORM_PRIORITY - 1); return t;
     });
     private static volatile Context current;
     private static volatile java.lang.ref.WeakReference<net.minecraft.client.multiplayer.ClientLevel> unloadedLevel =
@@ -74,11 +81,17 @@ public final class VoxyPredictionBridge {
     private static volatile String status = "waiting-for-voxy";
     private static final LongAdder composed = new LongAdder(), notified = new LongAdder(),
             cacheHits = new LongAdder(), acquisitions = new LongAdder(), faceReads=new LongAdder(),faceSnapshotHits=new LongAdder(),
-            unchangedNotifications=new LongAdder(),blockNotifications=new LongAdder(),childNotifications=new LongAdder();
+            unchangedNotifications=new LongAdder(),blockNotifications=new LongAdder(),childNotifications=new LongAdder(),
+            earlyUnchangedNotifications=new LongAdder(), updateBatches=new LongAdder(),
+            updateNanos=new LongAdder(), emptyWithdrawals=new LongAdder();
     private static final int MAX_SNAPSHOTS = 512;
-    private static final int NOTIFICATIONS_PER_FRAME = 64;
+    private static final int NOTIFICATIONS_PER_BATCH = 256;
+    private static final long UPDATE_SLICE_NANOS = 4_000_000L;
+    private record Maintenance(double x, double z, int radius) { }
     private record CachedSection(Source source, long version, Object section, Retention retention) { }
-    private record Delivered(VoxySectionSignature.Value blocks,byte children,VoxySectionSignature.Value faces) {
+    private record NotificationInput(Source source,Object prediction) { }
+    private record Delivered(VoxySectionSignature.Value blocks,byte children,VoxySectionSignature.Value faces,
+                             VoxySectionSignature.Value[] realFaces,NotificationInput input) {
         int changes(Delivered previous) {
             if(previous==null)return 3;
             int flags=children==previous.children?0:2;
@@ -173,6 +186,7 @@ public final class VoxyPredictionBridge {
             if(ctx!=null && !ctx.closed && ctx.supported && source!=null && enabled()) {
                 ctx.requested.computeIfAbsent(pos,ignored->new java.util.concurrent.atomic.AtomicLong(EPOCH.incrementAndGet()));
                 long version=ctx.version(pos);
+                if (ctx.dirty instanceof VoxyPendingSections indexed) indexed.promote(pos);
                 source.requestMeshDetail(pos,ctx);
                 ACQUIRED.set(new BuildStamp(ctx,pos,version));
             }
@@ -428,6 +442,7 @@ public final class VoxyPredictionBridge {
                 boolean composedEvent = stamp != null && stamp.context == ctx || NOTIFICATION_SECTION.get() == borrowed;
                 int watched = ((Number) invoke(router.getClass().getMethod("get", long.class), router, pos)).intValue();
                 if (!composedEvent) {
+                    if((flags&1)!=0)ctx.revokeNeighborInputs(pos,ctx.voxels.read(borrowed));
                     ctx.delivered.remove(pos);
                     // A cached border can be requested without being directly watched by the node router.
                     // Real ingest must revoke it even when only a neighboring mesh observes this event.
@@ -499,8 +514,13 @@ public final class VoxyPredictionBridge {
                 ctx.setDistance.set(renderSystem, desired);
                 ctx.distance = desired; ctx.renderSystem = renderSystem;
             }
-            if (mc.player != null) ctx.prune(mc.player.getX(), mc.player.getZ(),
-                    Math.max(distance, (int) Math.ceil(desired * 512)) + 1024);
+            if (mc.player != null) {
+                var look = mc.player.getLookAngle();
+                ctx.view = new Maintenance(mc.player.getX(), mc.player.getZ(),
+                        Math.max(distance, (int) Math.ceil(desired * 512)) + 1024);
+                if (ctx.dirty instanceof VoxyPendingSections indexed)
+                    indexed.view(mc.player.getX(), mc.player.getZ(), look.x, look.z);
+            }
             ctx.flushUpdates();
         } catch (ReflectiveOperationException failure) {
             status = "unsupported:" + failure.getClass().getSimpleName();
@@ -557,27 +577,30 @@ public final class VoxyPredictionBridge {
     /** A display toggle changes native residency, not the lifetime of reusable prediction samples. */
     public static void updatePredictionState() {
         boolean enabled = enabled();
-        for (Context ctx : contexts()) synchronized (ctx) {
+        for (Context ctx : contexts()) {
             if (ctx.closed || ctx.predictionEnabled == enabled) continue;
-            ctx.predictionEnabled = enabled;
-            ctx.delivered.clear();
-            ctx.withdrawals.clear();
-            if (ctx.source == null) continue;
-            // Revoke builds already running with the previous display state. Keep the
-            // source/mapper and its reduced columns warm for a subsequent enable.
-            ctx.requested.values().forEach(v -> v.set(EPOCH.incrementAndGet()));
-            ctx.clearCached();
-            ctx.notificationCursor = null;
-            if (!enabled) {
-                // A last composition can be empty while an older predicted mesh is
-                // still resident. Check every observed position against current real data.
-                var positions = new ArrayList<>(ctx.requested.keySet());
-                // Removing an empty native parent also retires its predicted descendants.
-                positions.sort(Comparator.comparingInt(VoxyPredictionBridge::level).reversed());
-                ctx.withdrawals.addAll(positions);
+            synchronized (ctx) {
+                if (ctx.closed || ctx.predictionEnabled == enabled) continue;
+                ctx.predictionEnabled = enabled;
+                ctx.delivered.clear();
+                ctx.withdrawals.clear();
+                if (ctx.source == null) continue;
+                // Revoke builds already running with the previous display state. Keep the
+                // source/mapper and its reduced columns warm for a subsequent enable.
+                ctx.requested.values().forEach(v -> v.set(EPOCH.incrementAndGet()));
+                ctx.clearCached();
+                ctx.notificationCursor = null;
+                if (!enabled) {
+                    // A last composition can be empty while an older predicted mesh is
+                    // still resident. Check every observed position against current real data.
+                    var positions = new ArrayList<>(ctx.requested.keySet());
+                    // Removing an empty native parent also retires its predicted descendants.
+                    positions.sort(Comparator.comparingInt(VoxyPredictionBridge::level).reversed());
+                    ctx.withdrawals.addAll(positions);
+                }
+                ctx.dirty.addAll(ctx.requested.keySet());
+                ctx.flushUpdates();
             }
-            ctx.dirty.addAll(ctx.requested.keySet());
-            ctx.flushUpdates();
         }
     }
 
@@ -733,16 +756,20 @@ public final class VoxyPredictionBridge {
     }
     public static void changed(Source source, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
                                java.util.function.LongPredicate affects) {
-            for (Context ctx : contexts()) if (ctx.source == source) {
-                for (var entry : ctx.requested.intersect(minX,minY,minZ,maxX,maxY,maxZ)) {
-                    long pos = entry.getKey();
-                    if(!affects.test(pos))continue;
-                    entry.getValue().set(EPOCH.incrementAndGet());
-                    ctx.invalidateCached(pos); ctx.dirty.add(pos);
-                }
-                // Versions are invalidated immediately; the next rendered frame flushes
-                // one notification per position after all publications in that frame.
-            }
+            for (Context ctx : contexts()) if (ctx.source == source)
+                changed(ctx,minX,minY,minZ,maxX,maxY,maxZ,affects,false);
+    }
+    private static void changed(Context ctx,int minX,int minY,int minZ,int maxX,int maxY,int maxZ,
+                                java.util.function.LongPredicate affects,boolean real) {
+        for (var entry : ctx.requested.intersect(minX,minY,minZ,maxX,maxY,maxZ)) {
+            long pos = entry.getKey();
+            if(!affects.test(pos))continue;
+            entry.getValue().set(EPOCH.incrementAndGet());
+            if(real)ctx.revokeInput(pos);
+            ctx.invalidateCached(pos); ctx.dirty.add(pos);
+        }
+        // Versions are invalidated immediately; the next rendered frame flushes
+        // one notification per position after all publications in that frame.
     }
     /** A source update is pending before Voxy has even queued its mesh task. */
     static boolean notificationsPending(ResourceKey<Level> dimension, int minX, int minZ, int maxX, int maxZ) {
@@ -765,8 +792,8 @@ public final class VoxyPredictionBridge {
         VoxyCompat.settlePredictionColumn(chunkX, chunkZ);
         for (Context ctx : contexts()) if (ctx.source != null && !ctx.closed && ctx.supported
                 && VoxyCompat.confirmedPredictionColumn(ctx.engine, chunkX, chunkZ)) {
-            changed(ctx.source, chunkX * 16 - 16, chunkZ * 16 - 16,
-                    chunkX * 16 + 32, chunkZ * 16 + 32);
+            changed(ctx,chunkX*16-16,Integer.MIN_VALUE,chunkZ*16-16,
+                    chunkX*16+32,Integer.MAX_VALUE,chunkZ*16+32,pos->true,true);
         }
     }
     public static void detach(Source source) {
@@ -794,12 +821,16 @@ public final class VoxyPredictionBridge {
                 Map.entry("requestedSections", ctx == null ? 0 : ctx.requested.size()), Map.entry("sectionAcquisitions", acquisitions.sum()),
                 Map.entry("snapshotCacheHits", cacheHits.sum()), Map.entry("cachedSnapshots", ctx == null ? 0 : ctx.cachedCount()),
                 Map.entry("unchangedNotifications",unchangedNotifications.sum()),Map.entry("blockNotifications",blockNotifications.sum()),
+                Map.entry("earlyUnchangedNotifications",earlyUnchangedNotifications.sum()),
                 Map.entry("childNotifications",childNotifications.sum()),
                 Map.entry("neighborFaceReads",faceReads.sum()),Map.entry("neighborFaceSnapshotHits",faceSnapshotHits.sum()),
                 Map.entry("cachedSnapshotBytes", ctx == null ? 0L : ctx.cachedCount() * 262160L),
                 Map.entry("subdivisionWaiters", ctx == null ? 0 : ctx.subdivisionWaiters.size()),
                 Map.entry("pendingNotifications", ctx == null ? 0 : ctx.dirty.size()),
                 Map.entry("pendingWithdrawals", ctx == null ? 0 : ctx.withdrawals.size()),
+                Map.entry("updateBatches", updateBatches.sum()), Map.entry("updateNanos", updateNanos.sum()),
+                Map.entry("emptyWithdrawals", emptyWithdrawals.sum()),
+                Map.entry("nativeMeshBacklog", ctx == null ? -1 : ctx.nativeMeshBacklog),
                 Map.entry("traversalCapacity", ctx == null || ctx.capacity == null ? Map.of() : ctx.capacity.snapshot()));
     }
 
@@ -812,10 +843,13 @@ public final class VoxyPredictionBridge {
         volatile ResourceKey<Level> dimension;
         volatile Source source;
         volatile boolean supported = true, closed;
-        boolean predictionEnabled = enabled();
+        volatile boolean predictionEnabled = enabled();
         final java.util.concurrent.ConcurrentLinkedQueue<Long> withdrawals = new java.util.concurrent.ConcurrentLinkedQueue<>();
         float distance = Float.NaN;
-        Object renderSystem;
+        volatile Object renderSystem;
+        volatile Maintenance view;
+        volatile long nextMaintenance;
+        volatile int nativeMeshBacklog = -1;
         VoxyTraversalCapacity capacity;
         VoxySectionPruner pruner = new VoxySectionPruner();
         final VoxyRenderAccess.Sections voxels;
@@ -865,7 +899,7 @@ public final class VoxyPredictionBridge {
             if (previous != null) previous.releaseMapper(this);
             dirty.clear(); withdrawals.clear(); notificationCursor = null; requested.clear(); predictionOnly.clear();
             delivered.clear();
-            pruner.reset();
+            synchronized (pruner) { pruner.reset(); }
             subdivisionWaiters.clear();
             clearCached();
             if (!scheduled.get()) releaseWorld();
@@ -899,24 +933,53 @@ public final class VoxyPredictionBridge {
         // Cache readers already own a per-position token: never acquire that lifecycle monitor here.
         int cachedCount() { synchronized (cachedSections) { return cachedSections.size(); } }
         Object cached(Source owner, long pos, long version) throws ReflectiveOperationException {
+            CachedSection stale;
             synchronized (cachedSections) {
                 CachedSection entry = cachedSections.get(pos);
                 if (entry == null) return null;
-                if (entry.source != owner || entry.version != version || closed) { invalidateCached(pos); return null; }
-                acquire.invoke(entry.section); return entry.section;
+                if (entry.source == owner && entry.version == version && !closed) {
+                    // Keep reference acquisition atomic with removal from the cache.
+                    acquire.invoke(entry.section); return entry.section;
+                }
+                stale = cachedSections.remove(pos);
             }
+            releaseCached(stale); return null;
         }
         void cache(Source owner, long pos, long version, Object section) throws ReflectiveOperationException {
+            if (closed || source != owner || version != version(pos)) return;
+            // Make room before reserving the replacement: a full shared budget
+            // must still allow the cache working set to follow a teleport.
+            CachedSection displaced;
             synchronized (cachedSections) {
-                if (closed || source != owner || version != version(pos)) return;
-                while (cachedSections.size() >= MAX_SNAPSHOTS) invalidateCached(cachedSections.keySet().iterator().next());
-                Retention lease = owner.retainSection(262160L);
-                if (lease == null) return;
-                try { acquire.invoke(section); }
-                catch (ReflectiveOperationException failure) { lease.close(); throw failure; }
-                CachedSection previous = cachedSections.put(pos, new CachedSection(owner, version, section, lease));
-                releaseCached(previous);
+                displaced = cachedSections.remove(pos);
+                if (displaced == null && cachedSections.size() >= MAX_SNAPSHOTS)
+                    displaced = cachedSections.remove(cachedSections.keySet().iterator().next());
             }
+            releaseCached(displaced);
+            Retention lease = owner.retainSection(262160L);
+            if (lease == null) {
+                synchronized (cachedSections) {
+                    displaced = cachedSections.isEmpty() ? null
+                            : cachedSections.remove(cachedSections.keySet().iterator().next());
+                }
+                if (displaced == null) return;
+                releaseCached(displaced); lease = owner.retainSection(262160L);
+                if (lease == null) return;
+            }
+            try { acquire.invoke(section); }
+            catch (ReflectiveOperationException | RuntimeException failure) { lease.close(); throw failure; }
+            var entry = new CachedSection(owner, version, section, lease);
+            var retired = new ArrayList<CachedSection>(2);
+            synchronized (cachedSections) {
+                if (closed || source != owner || version != version(pos)) retired.add(entry);
+                else {
+                    CachedSection previous = cachedSections.put(pos, entry);
+                    if (previous != null) retired.add(previous);
+                    while (cachedSections.size() > MAX_SNAPSHOTS)
+                        retired.add(cachedSections.remove(cachedSections.keySet().iterator().next()));
+                }
+            }
+            retired.forEach(this::releaseCached);
         }
         private void releaseCached(CachedSection entry) {
             if (entry == null) return;
@@ -924,19 +987,29 @@ public final class VoxyPredictionBridge {
             catch (ReflectiveOperationException failure) { throw new IllegalStateException("Voxy snapshot release", failure); }
             finally { entry.retention.close(); }
         }
-        void invalidateCached(long pos) { synchronized (cachedSections) { releaseCached(cachedSections.remove(pos)); } }
+        void invalidateCached(long pos) {
+            CachedSection retired;
+            synchronized (cachedSections) { retired = cachedSections.remove(pos); }
+            releaseCached(retired);
+        }
         void clearCached() {
-            synchronized (cachedSections) { cachedSections.values().forEach(this::releaseCached); cachedSections.clear(); }
+            List<CachedSection> retired;
+            synchronized (cachedSections) { retired = new ArrayList<>(cachedSections.values()); cachedSections.clear(); }
+            retired.forEach(this::releaseCached);
         }
         private int number(Method method, Object value) {
             try { return ((Number) method.invoke(mapper, value)).intValue(); }
             catch (ReflectiveOperationException failure) { throw new IllegalStateException("Voxy mapper call", failure); }
         }
-        void flushUpdates() { if (!dirty.isEmpty() || !withdrawals.isEmpty()) schedule(); }
-        Delivered notificationContent(long pos,Object section) throws ReflectiveOperationException {
+        void flushUpdates() {
+            if (!dirty.isEmpty() || !withdrawals.isEmpty() || view != null && System.nanoTime() >= nextMaintenance) schedule();
+        }
+        Delivered notificationContent(long pos,Object section,NotificationInput input) throws ReflectiveOperationException {
             Source owner=source;
             VoxySectionSignature.Value faces=null;
+            VoxySectionSignature.Value[] realFaces=null;
             if(owner!=null && enabled() && owner.compareNotificationFaces()) {
+                realFaces=new VoxySectionSignature.Value[6];
                 try(var scratch=VoxyNotificationScratch.borrow()) {
                 long[][] border=scratch.faces;
                 int lod=level(pos),sx=x(pos),sy=y(pos),sz=z(pos);
@@ -947,6 +1020,7 @@ public final class VoxyPredictionBridge {
                     Object real=acquireReal.invoke(engine,neighbor);
                     try {
                         var raw=real==null?null:voxels.read(real);
+                        realFaces[direction]=VoxySectionSignature.face(raw,face);
                         if(owner.copyFace(neighbor,this,face,border[direction]))
                             mergeRealFace(border[direction],raw,face,lod,nx,nz,VoxyCompat.confirmedPredictionColumns(engine),(long)skyLight<<56);
                         else for(int i=0;i<1024;i++)border[direction][i]=raw==null?0:raw.get(VoxyFaceData.index(face,i));
@@ -955,42 +1029,110 @@ public final class VoxyPredictionBridge {
                 faces=VoxySectionSignature.faces(border);
                 }
             }
-            return new Delivered(VoxySectionSignature.section(voxels.read(section)),(byte)children.invoke(section),faces);
+            return new Delivered(VoxySectionSignature.section(voxels.read(section)),(byte)children.invoke(section),faces,realFaces,input);
         }
-        synchronized void schedule() {
-            if (!closed && (supported || source == null) && scheduled.compareAndSet(false, true)) UPDATES.execute(() -> {
+        void revokeInput(long pos) {
+            delivered.computeIfPresent(pos,(key,previous)->previous.input==null?previous:
+                    new Delivered(previous.blocks,previous.children,previous.faces,previous.realFaces,null));
+        }
+        void revokeNeighborInputs(long pos,VoxyRenderAccess.Voxels real) {
+            int lod=level(pos),sx=x(pos),sy=y(pos),sz=z(pos);
+            for(int face=0;face<6;face++) {
+                long neighbor=position(lod,sx+(face==0?-1:face==1?1:0),
+                        sy+(face==2?-1:face==3?1:0),sz+(face==4?-1:face==5?1:0));
+                var token=requested.get(neighbor);
+                if(token==null)continue;
+                var previous=delivered.get(neighbor);
+                // Evidence belongs to this consumer's last delivered output. A global
+                // native-face cache could let another reader hide its stale border.
+                if(previous!=null && previous.realFaces!=null
+                        && previous.realFaces[face^1].equals(VoxySectionSignature.face(real,face)))continue;
+                token.set(EPOCH.incrementAndGet());revokeInput(neighbor);
+                invalidateCached(neighbor);dirty.add(neighbor);
+            }
+        }
+        void notifySection(Object section,int flags) throws ReflectiveOperationException {
+            NOTIFICATION_SECTION.set(section);
+            try {worldEvent.invoke(nodes,section,flags,0);} finally {NOTIFICATION_SECTION.remove();}
+        }
+        void schedule() { schedule(0); }
+        private void schedule(long delayMillis) {
+            if (closed || !(supported || source == null) || !scheduled.compareAndSet(false, true)) return;
+            synchronized (this) {
+                if (closed) { scheduled.set(false); releaseWorld(); return; }
+            }
+            UPDATES.schedule(() -> {
+                long started = System.nanoTime();
+                int backlog = nativeMeshBacklog = VoxyRenderAccess.meshBacklog(renderSystem);
+                int limit = backlog >= 512 ? 8 : backlog >= 128 ? 64 : NOTIFICATIONS_PER_BATCH;
+                long until = started + UPDATE_SLICE_NANOS;
                 try {
+                    Maintenance camera = view;
+                    if (camera != null && started >= nextMaintenance) {
+                        prune(camera.x, camera.z, camera.radius);
+                        nextMaintenance = System.nanoTime() + 50_000_000L;
+                    }
                     // Empty prediction meshes need no model baking or expensive meshing.
                     // Use the native result queue so its node thread owns every removal.
-                    for (int i = 0; i < 1024 && !closed && !enabled(); i++) {
+                    for (int i = 0; i < NOTIFICATIONS_PER_BATCH && !closed && !enabled() && System.nanoTime() < until; i++) {
                         Long position = withdrawals.poll();
                         if (position == null) break;
+                        long version = version(position);
                         Object real = acquireReal.invoke(engine, position);
                         try {
                             if (real != null && ((byte) children.invoke(real) != 0 || hasBlocks(voxels.read(real)))) continue;
                             Object section = real == null ? empty(position) : real;
                             try { synchronized (this) {
                                 if (closed || enabled()) break;
+                                if (version != version(position)) { dirty.add(position); continue; }
                                 dirty.remove(position);
                                 // Clear Voxy's geometry cache and child occupancy first,
                                 // then retire resident geometry on its native node thread.
-                                worldEvent.invoke(nodes, section, 3, 0);
+                                notifySection(section,3);
                                 notified.increment();
                                 VoxyRenderAccess.withdraw(nodes, position);
                             } } finally { if (real == null) release.invoke(section); }
                         } finally { if (real != null) release.invoke(real); }
                     }
-                    // Bound both transient section memory and downstream Voxy update pressure.
-                    // Iterate the live queue without copying the entire old scene into another list.
-                    // Continue across frames so frequently changed early entries cannot starve later sections.
-                    var pending = notificationCursor;
-                    if (pending == null || !pending.hasNext()) notificationCursor = pending = dirty.iterator();
-                    for (int count = 0; count < NOTIFICATIONS_PER_FRAME && !closed && pending.hasNext(); count++) {
-                        long pos = pending.next();
-                        notifying = pos;
-                        if (!dirty.remove(pos)) continue;
+                    // Continue independently of render FPS, without outrunning native mesh generation.
+                    for (int count = 0; count < limit && !closed && System.nanoTime() < until; count++) {
+                        Long next = nextNotification();
+                        if (next == null) break;
+                        long pos = next;
                         long version=version(pos);
+                        Source owner=enabled()?source:null;
+                        Delivered previous=delivered.get(pos);
+                        // First publication and revoked evidence go straight to the
+                        // direct-write path. The optional probe never builds missing data.
+                        Object prediction=owner==null || previous==null || previous.input==null
+                                ? null : owner.notificationIdentity(pos,this);
+                        NotificationInput input=prediction==null?null:new NotificationInput(owner,prediction);
+                        synchronized(this) {
+                            if(closed)break;
+                            if(version!=version(pos) || owner!=(enabled()?source:null)) {
+                                dirty.add(pos);continue;
+                            }
+                            previous=delivered.get(pos);
+                            if(input!=null && previous!=null && input.equals(previous.input)) {
+                                earlyUnchangedNotifications.increment();unchangedNotifications.increment();
+                                notifying=null;continue;
+                            }
+                        }
+                        boolean retired = owner != null && !owner.mayHavePrediction(pos, this);
                         Object real = acquireReal.invoke(engine, pos);
+                        if (retired
+                                && (real == null || (byte) children.invoke(real) == 0 && !hasBlocks(voxels.read(real)))) {
+                            try {
+                                Object empty = real == null ? empty(pos) : real;
+                                try { synchronized (this) {
+                                    if (closed) break;
+                                    if (version != version(pos) || owner != (enabled() ? source : null)) { dirty.add(pos); continue; }
+                                    notifySection(empty, 3); VoxyRenderAccess.withdraw(nodes, pos);
+                                    notified.increment(); emptyWithdrawals.increment(); predictionOnly.remove(pos); delivered.remove(pos);
+                                } } finally { if (real == null) release.invoke(empty); }
+                            } finally { if (real != null) release.invoke(real); notifying = null; }
+                            continue;
+                        }
                         Object section = compose(engine, pos, real, false);
                         if (section == null) {
                             section = create.invoke(null, level(pos), x(pos), y(pos), z(pos)); acquire.invoke(section);
@@ -1000,13 +1142,20 @@ public final class VoxyPredictionBridge {
                         // changed() already includes the voxel-border halo at every native LOD.
                         // All affected requested neighbors are in dirty; broadcasting again rebuilds them repeatedly.
                         try {
-                            var content=notificationContent(pos,section);
+                            var content=notificationContent(pos,section,input);
+                            // Reuse the data just prepared by composition and its
+                            // face comparison. Cache eviction simply disables reuse;
+                            // it cannot cause another rasterization for this check.
+                            if(input==null && owner!=null) {
+                                prediction=owner.notificationIdentity(pos,this);
+                                if(prediction!=null)content=new Delivered(content.blocks,content.children,content.faces,content.realFaces,
+                                        new NotificationInput(owner,prediction));
+                            }
                             synchronized(this) {if(!closed) {
-                                if(version!=version(pos)) {dirty.add(pos);continue;}
+                                if(version!=version(pos) || owner!=(enabled()?source:null)) {dirty.add(pos);continue;}
                                 int flags=content.changes(delivered.get(pos));
                                 if(flags!=0) {
-                                    NOTIFICATION_SECTION.set(section);
-                                    try {worldEvent.invoke(nodes,section,flags,0);} finally {NOTIFICATION_SECTION.remove();}
+                                    notifySection(section,flags);
                                     notified.increment();
                                     if((flags&1)!=0)blockNotifications.increment();
                                     if((flags&2)!=0)childNotifications.increment();
@@ -1018,21 +1167,37 @@ public final class VoxyPredictionBridge {
                     }
                 } catch (ReflectiveOperationException | RuntimeException failure) {
                     supported = false; status = "notification-failed";
-                    dirty.clear();
+                    dirty.clear(); withdrawals.clear();
                     VSSLogger.error("VSS Voxy prediction notification failed", failure);
                 } finally {
+                    updateBatches.increment(); updateNanos.add(System.nanoTime() - started);
                     synchronized (this) {
                         notifying = null;
                         scheduled.set(false);
                         if (closed) { notificationCursor = null; releaseWorld(); }
                     }
+                    if (!closed && (!dirty.isEmpty() || !enabled() && !withdrawals.isEmpty()))
+                        schedule(backlog >= 128 ? 4 : 1);
                 }
-            });
+            }, delayMillis, TimeUnit.MILLISECONDS);
+        }
+        private Long nextNotification() {
+            if (dirty instanceof VoxyPendingSections indexed) return indexed.poll(pos -> notifying = pos);
+            // Legacy set adapters retain a cursor so continuous publication cannot starve the tail.
+            if (notificationCursor == null || !notificationCursor.hasNext()) notificationCursor = dirty.iterator();
+            while (notificationCursor.hasNext()) {
+                long pos = notificationCursor.next(); notifying = pos;
+                if (dirty.remove(pos)) return pos;
+            }
+            notifying = null; return null;
         }
         void prune(double cameraX, double cameraZ, int radius) {
-            pruner.prune(requested, cameraX, cameraZ, radius, System.nanoTime(), pos -> {
-                invalidateCached(pos); dirty.remove(pos); predictionOnly.remove(pos);delivered.remove(pos);
-            });
+            synchronized (pruner) {
+                if (closed) return;
+                pruner.prune(requested, cameraX, cameraZ, radius, System.nanoTime(), pos -> {
+                    invalidateCached(pos); dirty.remove(pos); predictionOnly.remove(pos);delivered.remove(pos);
+                });
+            }
         }
         long version(long pos) { var v = requested.get(pos); return v == null ? -1 : v.get(); }
         Object empty(long pos) throws ReflectiveOperationException {

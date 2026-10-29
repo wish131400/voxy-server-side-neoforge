@@ -68,7 +68,7 @@ class PredictionLivePipelineTest {
             var sampler=new ClientTerrainSampler(profile.seed(),profile);
             try(var manager=new PredictionTileManager(Level.OVERWORLD,sampler,
                     new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1),null,
-                    new PredictionCpuBudget(()->4,()->.99,()->.99,System::nanoTime,false))) {
+                    new PredictionCpuBudget(()->4, System::nanoTime))) {
                 var tile=PredictionVoxelFixtures.tile(0,0,0,manager.layout());
                 ((Set<PredictionTileKey>)get(manager,"desiredKeys")).add(tile.key());
                 var ready=(Map<PredictionTileKey,PredictionTile>)get(manager,"ready");

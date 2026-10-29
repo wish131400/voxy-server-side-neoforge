@@ -19,13 +19,31 @@ class VoxySurfaceHeightsTest {
     }
     @Test void nativeInsetAndFluidDatumBranchesArePreserved() {
         String base="void setupQuad() { quad.basePoint = (quadStart*lodScale)+vec3(baseSection<<5); quad.uvCorner = faceSize.xz; }";
-        for(String nativeHelper:new String[]{"resolveFluidTopIndentation(","extractFaceIndentation(faceData) / lodScale"}) {
+        for(String nativeHelper:new String[]{"resolveFluidTopIndentation(","extractFaceIndentation(faceData) / lodScale",
+                "float faceIndentation = extractFaceIndentation(faceData); float depthOffset = faceIndentation/lodScale;"}) {
             String nativeShader=nativeHelper+base;
             String patched=VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",nativeShader);
             assertTrue(patched.contains(nativeHelper));
             assertEquals(!nativeHelper.startsWith("resolveFluid"),patched.contains("// VSS liquid surface remainder"));
             assertFalse(patched.contains("// VSS world-space model inset"));
         }
+    }
+    @Test void legacyWaterTopNormalizationIsReplacedExactlyOnceWithoutChangingOtherForkFeatures() {
+        String branch="if (face == 1u && modelIsFluid(model) && lodLevel != 0u) { depthOffset = (depthOffset + 1.0) / lodScale; }";
+        String base="void setupQuad() { float depthOffset = extractFaceIndentation(faceData); " + branch
+                + " quad.basePoint = (quadStart*lodScale)+vec3(baseSection<<5); quad.uvCorner = faceSize.xz; }";
+        String source="// fork tint and fog retained\n"+base;
+        String patched=VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",source);
+        assertFalse(patched.contains(branch));
+        assertTrue(patched.contains("// fork tint and fog retained"));
+        assertTrue(patched.contains("// VSS legacy fluid inset"));
+        assertEquals(1,patched.split("// VSS world-space model inset",-1).length-1);
+        assertEquals(1,patched.split("// VSS liquid surface remainder",-1).length-1);
+        assertSame(patched,VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",patched));
+        String unrelated=source.replace("depthOffset + 1.0","depthOffset + 0.5");
+        assertTrue(VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",unrelated).contains("depthOffset + 0.5"));
+        String modern="resolveFluidTopIndentation("+source;
+        assertEquals(modern,VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",modern));
     }
     @Test void actualBackendShaderCompilesAndExecutesBothQuadRepresentations() throws Exception {
         String jar=System.getProperty("vss.voxyJar");assertNotNull(jar);
@@ -39,7 +57,8 @@ class VoxySurfaceHeightsTest {
         }
         String patched=VoxySurfaceHeights.patchShader("voxy:lod/gl46/quads3.vert",format+"\n"+source);
         assertTrue(patched.contains("// VSS world-space model inset") || source.contains("resolveFluidTopIndentation(")
-                || source.matches("(?s).*extractFaceIndentation\\(faceData\\)\\s*/\\s*lodScale.*"));
+                || source.matches("(?s).*extractFaceIndentation\\(faceData\\)\\s*/\\s*lodScale.*")
+                || source.contains("depthOffset = faceIndentation/lodScale"));
         assertSame(patched,VoxySurfaceHeights.patchShader("voxy:lod/quad_util.glsl",patched));
         if(source.contains("resolveFluidTopIndentation("))assertEquals(format+"\n"+source,patched,"Native fluid shapes and blend payloads remain intact");
         assertFalse(patched.contains("vssSurfaceDrop"));
@@ -96,7 +115,7 @@ class VoxySurfaceHeightsTest {
             struct BlockModel {uint faceData[6];};
             BlockModel modelData[1];
             struct QuadData {uvec4 attributeData;float lodScale;uint axis;vec3 basePoint;vec2 quadSizeAddin;vec2 uvCorner;};
-            uint testLod;int testSectionY;ivec3 baseSectionPos=ivec3(0);float fluidDatumY;float testInset;
+            uint testLod;int testSectionY;ivec3 baseSectionPos=ivec3(0);float fluidDatumY;float fluidSurfaceY;float testInset;
             uint getLoDLevel(uvec2 p){return testLod;}
             ivec3 getLoDPosition(uvec2 p){return ivec3(0,testSectionY,0);}
             uint extractDetail(uvec2 p){return testLod;}
@@ -104,6 +123,7 @@ class VoxySurfaceHeightsTest {
             uint makeQuadFlags(uint a,uint b,ivec2 c,BlockModel d,uint e){return 0u;}
             uvec3 makeRemainingAttributes(BlockModel a,Quad b,uint c,uint d){return uvec3(0);}
             bool modelUsesBalancedLeafCutout(BlockModel m){return false;}
+            bool modelIsFluid(BlockModel m){return TEST_SOLID==0;}
             uint makeBalancedLeafSeed(Quad q,ivec3 p,uint l,uint f){return 0u;}
             float resolveFluidTopIndentation(BlockModel m,uint f,float b,float y,float s,ivec3 p,uint l){
                 if(TEST_SOLID!=0 || l==0u || f!=1u)return b;
@@ -120,7 +140,7 @@ class VoxySurfaceHeightsTest {
                 for(uint f=0u;f<6u;f++)modelData[0].faceData[f]=f;
                 const int caps[13]=int[13](48,49,55,63,64,65,79,80,-64,-63,-1,0,1);
                 for(int c=0;c<13;c++) {
-                int cap=caps[c];fluidDatumY=float(cap)-testInset;
+                int cap=caps[c];fluidDatumY=float(cap)-testInset;fluidSurfaceY=float(cap);
                 for(uint i=0u;i<5u;i++){
                     testLod=i;int step=1<<i;testSectionY=(cap-1)>>(5u+i);
                     uint y=uint((cap-1)>>i)&31u;
@@ -160,8 +180,9 @@ class VoxySurfaceHeightsTest {
             // Full cubes must retain Voxy's integer occupancy boundary after face culling.
             // Existing fork fluid datums remain native; older Voxy only normalizes model indentation.
             boolean nativeFluid=setup.contains("resolveFluidTopIndentation(");
+            boolean nativeSurface=setup.contains("fluidSurfaceY") && setup.contains("modelIsFluid(model)");
             boolean patchedInset=setup.contains("// VSS world-space model inset");
-            double expected=solid ? rounded : !nativeFluid && ((-caps[c])&((1<<lod)-1))!=0 ? caps[c]-7.0/64 : face==1 ? (nativeFluid ? caps[c] : rounded)-7.0/64
+            double expected=solid ? rounded : !nativeFluid && ((-caps[c])&((1<<lod)-1))!=0 ? caps[c]-7.0/64 : face==1 ? (nativeFluid || nativeSurface ? caps[c] : rounded)-7.0/64
                     : rounded-7.0/64*(patchedInset ? 1 : 1<<lod);
             assertEquals(expected,actual[c*25+lod*5+face-1],1e-5,
                     "GPU cap="+caps[c]+" LOD="+lod+" face="+face+" wide="+wide+" single="+single+" solid="+solid);

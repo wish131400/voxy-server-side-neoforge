@@ -70,15 +70,19 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         }
 
         Tile withVegetation(PredictionVegetation.Tile plants, dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) {
+            return withVegetation(plants,cities,true);
+        }
+        Tile withVegetation(PredictionVegetation.Tile plants, dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities,boolean complete) {
             var builder = new PredictionVoxyBoxes.Builder();
             builder.addRange(features,0,cityFeatures);
             vegetation(builder, plants, cities, baseX, baseZ);
             var completed=builder.build();
             return new Tile(key, baseX, baseZ, span, axis, step, columns, completed,
-                    terrainBytes, true, cityFeatures);
+                    terrainBytes, complete, cityFeatures);
         }
     }
     private final Map<PredictionTileKey, Tile> tiles = new HashMap<>();
+    private final PredictionRetirementQueue<PredictionTileKey> retirements = new PredictionRetirementQueue<>();
     @Override public boolean compareNotificationFaces() { return true; }
     private final Map<Integer, Map<Long, Tile>> spatial = new HashMap<>();
     private long mapRevision;
@@ -302,6 +306,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     // center and border sections. Both segments share the existing byte limit.
     private final LinkedHashMap<Long, SectionBuild> probation = new LinkedHashMap<>();
     private final LinkedHashMap<Long, SectionBuild> protectedMapped = new LinkedHashMap<>(64,.75f,true);
+    private long protectedBytes;
     private final int mappedLimit;
     private final long sectionLimit,columnLimit,faceLimit;
     PredictionVoxySource() {this(MAX_MAPPED);}
@@ -315,18 +320,36 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     private void touchMapped(long pos,SectionBuild build) {
         if(protectedMapped.get(pos)!=null)return;
         probation.remove(pos);protectedMapped.put(pos,build);
-        if(protectedMapped.size()>mappedLimit/2) {
+        protectedBytes+=retainedBytes(build);trimProtected();
+    }
+    private static long retainedBytes(SectionBuild build) {return build.retention==null?0:build.bytes;}
+    private void trimProtected() {
+        while(protectedMapped.size()>mappedLimit/2 || protectedBytes>sectionLimit*3/4) {
             var iterator=protectedMapped.entrySet().iterator();var oldest=iterator.next();iterator.remove();
+            protectedBytes-=retainedBytes(oldest.getValue());
             probation.put(oldest.getKey(),oldest.getValue());
         }
     }
-    private void evictMapped() {
-        var segment=probation.isEmpty()?protectedMapped:probation;
-        var iterator=segment.entrySet().iterator();var oldest=iterator.next();iterator.remove();
-        mapped.remove(oldest.getKey());cachedPositions.remove(oldest.getKey());mappedEvictions++;releaseMapped(oldest.getValue());
+    private void evictMapped() {evictMapped(null);}
+    private void evictMapped(SectionBuild admitting) {
+        if(!evictMapped(probation,admitting) && !evictMapped(protectedMapped,admitting))
+            throw new IllegalStateException("No section cache victim");
+    }
+    private boolean evictMapped(LinkedHashMap<Long,SectionBuild> segment,SectionBuild admitting) {
+        var iterator=segment.entrySet().iterator();
+        while(iterator.hasNext()) {
+            var oldest=iterator.next();if(oldest.getValue()==admitting)continue;
+            iterator.remove();
+            if(segment==protectedMapped)protectedBytes-=retainedBytes(oldest.getValue());
+            mapped.remove(oldest.getKey());cachedPositions.remove(oldest.getKey());mappedEvictions++;releaseMapped(oldest.getValue());
+            return true;
+        }
+        return false;
     }
     private void removeMapped(long pos) {
-        probation.remove(pos);protectedMapped.remove(pos);var build=mapped.remove(pos);
+        probation.remove(pos);var protectedBuild=protectedMapped.remove(pos);
+        if(protectedBuild!=null)protectedBytes-=retainedBytes(protectedBuild);
+        var build=mapped.remove(pos);
         if(build!=null) {cachedPositions.remove(pos);releaseMapped(build);}
     }
     private record Extent(int terrainMin, int terrainMax, int featureMin, int featureMax, int lightMin, int lightMax) {
@@ -792,9 +815,20 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         }
     }
     void remove(PredictionTileKey key) {
+        remove(key, () -> true);
+    }
+    void removeLater(PredictionTileKey key, java.util.function.BooleanSupplier current) {
+        retirements.submit(key, () -> remove(key, current));
+    }
+    boolean retiring() { return retirements.active(); }
+    void removeLater(PredictionTileKey key, java.util.function.BooleanSupplier current, Runnable released) {
+        retirements.submit(key, () -> remove(key, current), released);
+    }
+    private void remove(PredictionTileKey key, java.util.function.BooleanSupplier current) {
         for(;;) {
         Tile old;int[] height;ChangeInput input;
         synchronized (this) {
+            if (closed || !current.getAsBoolean()) return;
             old = tiles.get(key); if (old == null) return;
             height = changeHeight(old, extents.get(key), null, false);
             input=changeInput(old,Footprint.of(old),height);
@@ -802,6 +836,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         var change=publicationChange(old,null,true,input);
         var invalidation=prepareInvalidation(input,change);
         synchronized(this) {
+            if (closed || !current.getAsBoolean()) return;
             if(tiles.get(key)!=old || !changeCurrent(input,old))continue;
             retireColumns(old);
             tiles.remove(key); tileBytes -= old.bytes();
@@ -856,6 +891,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     synchronized long bytes() { return tileBytes + mappedBytes + columnBytes + faceBytes; }
     synchronized Map<String, Object> diagnostics() {
         return Map.ofEntries(Map.entry("voxelTiles",tiles.size()),Map.entry("terrainBytes",tileBytes-featureBytes-featureIndexBytes),
+                Map.entry("pendingRetirements",retirements.size()),
                 Map.entry("featureBytes",featureBytes),Map.entry("featureIndexBytes",featureIndexBytes),Map.entry("featureCount",featureCount),
                 Map.entry("terrainRangeReductions",terrainRangeReductions),
                 Map.entry("cachedSections", mapped.size()), Map.entry("cacheHits", cacheHits.sum()), Map.entry("sectionBuilds", sectionBuilds.sum()), Map.entry("lightingBuilds", lightingBuilds.sum()),
@@ -878,7 +914,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
                 Map.entry("detailDeferred", details.deferred()), Map.entry("detailPending",details.pending()),
                 Map.entry("viewDemandBuilds",viewDemandBuilds),Map.entry("viewDemandTargets",viewDemandTargets),
                 Map.entry("detailWaiting",details.waiting()),
-                Map.entry("detailResidents",details.residents()),Map.entry("detailDormant",details.dormant()),Map.entry("protectedSections",protectedMapped.size()),
+                Map.entry("detailResidents",details.residents()),Map.entry("detailDormant",details.dormant()),Map.entry("protectedSections",protectedMapped.size()),Map.entry("protectedBytes",protectedBytes),
                 Map.entry("meshDetailChecks",meshDetailChecks),Map.entry("meshDetailMisses",meshDetailMisses),
                 Map.entry("meshDetailPending",meshDetails.size()));
     }
@@ -907,6 +943,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     private void releaseMapped(SectionBuild build) { if (build != null && build.retention != null) {
         mappedBytes -= build.bytes; build.retention.close(); build.retention = null; } }
     private void clearMapped() { mapped.values().forEach(this::releaseMapped); mapped.clear(); probation.clear(); protectedMapped.clear();
+        protectedBytes=0;
         mappedFaces.values().forEach(this::releaseFace);mappedFaces.clear();cachedPositions.clear();
         while(columnClock!=null)removeColumn(columnClock.key); }
     private void releaseFace(FaceBuild face) {
@@ -1063,6 +1100,20 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         return result;
     }
 
+    @Override public synchronized boolean mayHavePrediction(long pos, VoxyPredictionBridge.Mapper mapper) {
+        if (closed) return false;
+        int span = 32 << VoxyPredictionBridge.level(pos);
+        long bx = (long)VoxyPredictionBridge.x(pos)*span, by = (long)VoxyPredictionBridge.y(pos)*span,
+                bz = (long)VoxyPredictionBridge.z(pos)*span;
+        int reach = mapper.hasSkyLight() ? 0 : PredictionVoxyLighting.REACH;
+        for (Tile tile : intersect(bx-reach,bz-reach,span+2*reach)) {
+            Extent e = extents.get(tile.key());
+            if (by < (long)e.max()+reach && by+span > (long)e.min()-reach) return true;
+            if (reach != 0 && by < (long)e.lightMax()+reach && by+span > (long)e.lightMin()-reach) return true;
+        }
+        return false;
+    }
+
     public long[] section(long pos, VoxyPredictionBridge.Mapper mapper) {
         var data = mappedSection(pos, mapper); return data == null ? null : data.array();
     }
@@ -1120,14 +1171,20 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
                 // Only a local invalidation or mapper replacement can revoke this build.
                 if (mapped.get(pos) == build) {
                     build.bytes = result.bytes();
+                    if(build.bytes>sectionLimit)removeMapped(pos);
                     while (mappedBytes + build.bytes > sectionLimit) {
-                        evictMapped();
                         if(mapped.get(pos)!=build)break;
+                        // A new section must be able to replace old protected data.
+                        // Evicting the admitting entry here makes every next read rebuild it.
+                        evictMapped(build);
                     }
                     if(mapped.get(pos)==build) {
                         build.retention = retainSection(build.bytes);
                         if (build.retention == null) removeMapped(pos);
-                        else mappedBytes += build.bytes;
+                        else {
+                            mappedBytes += build.bytes;
+                            if(protectedMapped.containsKey(pos)) {protectedBytes+=build.bytes;trimProtected();}
+                        }
                     }
                 }
             }
@@ -1158,16 +1215,75 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         long[] target=new long[1024];return copyFace(pos,mapper,face,target)?target:null;
     }
     @Override public boolean copyFace(long pos,VoxyPredictionBridge.Mapper mapper,int face,long[] target) {
+        var view=readFace(pos,mapper,face);if(view==null)return false;
+        view.copyTo(target);return true;
+    }
+    private record FaceView(dev.xantha.vss.compat.VoxySectionData data,int face) {
+        void copyTo(long[] target) {if(face<0)data.copyTo(target);else data.copyFace(face,target);}
+        Object identity() {return face<0?data.contentIdentity():data.faceIdentity(face);}
+    }
+    private record NotificationIdentity(Object center,Object x0,Object x1,Object y0,Object y1,Object z0,Object z1) { }
+    private static final FaceView NOT_CACHED=new FaceView(null,-1);
+    @Override public Object notificationIdentity(long pos,VoxyPredictionBridge.Mapper mapper) {
+        FaceView[] inputs=new FaceView[7];
+        synchronized(this) {
+            if(closed || lastMapper!=mapper || !mapper.isOpen())return null;
+            inputs[0]=cachedNotificationView(pos,mapper,-1);
+            if(inputs[0]==NOT_CACHED)return null;
+            int lod=VoxyPredictionBridge.level(pos),sx=VoxyPredictionBridge.x(pos),sy=VoxyPredictionBridge.y(pos),sz=VoxyPredictionBridge.z(pos);
+            for(int direction=0;direction<6;direction++) {
+                long neighbor=VoxyPredictionBridge.position(lod,sx+(direction==0?-1:direction==1?1:0),
+                        sy+(direction==2?-1:direction==3?1:0),sz+(direction==4?-1:direction==5?1:0));
+                inputs[direction+1]=cachedNotificationView(neighbor,mapper,direction^1);
+                if(inputs[direction+1]==NOT_CACHED)return null;
+            }
+        }
+        // Hash only immutable, already prepared inputs, outside the source monitor.
+        // The bridge validates this section's change token; distant publications
+        // must not discard evidence or make this read construct another volume.
+        Object[] identities=new Object[7];
+        for(int i=0;i<inputs.length;i++)identities[i]=inputs[i]==null?null:inputs[i].identity();
+        return new NotificationIdentity(identities[0],identities[1],identities[2],identities[3],identities[4],identities[5],identities[6]);
+    }
+    /** Cache-only probe. Never waits for a build, maps materials or promotes a section. */
+    private FaceView cachedNotificationView(long pos,VoxyPredictionBridge.Mapper mapper,int face) {
+        var section=mapped.get(pos);
+        if(section!=null) {
+            if(!section.result.isDone() || section.result.isCompletedExceptionally())return NOT_CACHED;
+            return new FaceView(section.result.getNow(null),face);
+        }
+        if(face>=0 && mapper.hasSkyLight()) {
+            var plane=mappedFaces.get(new FaceKey(pos,face));
+            if(plane!=null) {
+                if(!plane.result.isDone() || plane.result.isCompletedExceptionally())return NOT_CACHED;
+                return new FaceView(plane.result.getNow(null),-1);
+            }
+        }
+        // Empty reads intentionally have no volume-cache entry. Their extents
+        // can prove absence cheaply, including the block-light halo in dark worlds.
+        int span=32<<VoxyPredictionBridge.level(pos),reach=mapper.hasSkyLight()?0:PredictionVoxyLighting.REACH;
+        long bx=(long)VoxyPredictionBridge.x(pos)*span,by=(long)VoxyPredictionBridge.y(pos)*span,
+                bz=(long)VoxyPredictionBridge.z(pos)*span;
+        var peers=intersect(bx-reach,bz-reach,span+2*reach);
+        if(peers.isEmpty() || reach!=0 && intersect(bx,bz,span).isEmpty())return null;
+        long minY=by-reach,maxY=by+span+reach;
+        if(reach==0 && face>=0 && face>>1==1) {minY=by+(long)(face&1)*31*(span/32);maxY=minY+span/32;}
+        for(var tile:peers) {
+            var extent=extents.get(tile.key());
+            if(minY<extent.max() && maxY>extent.min())return NOT_CACHED;
+        }
+        return new FaceView(mapper.hasSkyLight()?EMPTY:DARK_EMPTY,face);
+    }
+    private FaceView readFace(long pos,VoxyPredictionBridge.Mapper mapper,int face) {
         if(face<0 || face>=6)throw new IllegalArgumentException("face");
         // Block-light propagation needs its complete halo; retain the proven volume path there.
         if(!mapper.hasSkyLight()) {
-            var data=VoxyPredictionBridge.Source.super.face(pos,mapper,face);if(data==null)return false;
-            System.arraycopy(data,0,target,0,1024);return true;
+            var data=mappedSection(pos,mapper,false);return data==null?null:new FaceView(data,face);
         }
         List<Tile> snapshot=null;SectionBuild cached;FaceBuild faceBuild=null;boolean owner=false;
         var key=new FaceKey(pos,face);
         synchronized(this) {
-            if(closed || !mapper.isOpen())return false;
+            if(closed || !mapper.isOpen())return null;
             if(lastMapper!=mapper) {if(lastMapper!=null)mapperRetirements++;clearMapped();lastMapper=mapper;}
             cached=mapped.get(pos);
             if(cached!=null)touchMapped(pos,cached);
@@ -1177,20 +1293,20 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
                 else {
                 int span=32<<VoxyPredictionBridge.level(pos);
                 snapshot=intersect((long)VoxyPredictionBridge.x(pos)*span,(long)VoxyPredictionBridge.z(pos)*span,span);
-                if(snapshot.isEmpty())return false;
+                if(snapshot.isEmpty())return null;
                 long minY=(long)VoxyPredictionBridge.y(pos)*span,maxY=minY+span;
                 if(face>>1==1) {minY+=(long)(face&1)*31*(span/32);maxY=minY+span/32;}
                 boolean occupied=false;
                 for(Tile tile:snapshot) {var extent=extents.get(tile.key());
                     if(minY<extent.max() && maxY>extent.min()) {occupied=true;break;} }
-                if(!occupied) {emptyReads.increment();Arrays.fill(target,15L<<56);return true;}
+                if(!occupied) {emptyReads.increment();return new FaceView(EMPTY,face);}
                 while(mappedFaces.size()>=MAX_FACES)evictFace();
                 faceBuild=new FaceBuild();mappedFaces.put(key,faceBuild);cachedPositions.add(pos);owner=true;
                 }
             }
         }
-        if(cached!=null) {awaitSection(cached).copyFace(face,target);cacheHits.increment();return true;}
-        if(!owner) {faceBuild.result.join().copyTo(target);return true;}
+        if(cached!=null) {cacheHits.increment();return new FaceView(awaitSection(cached),face);}
+        if(!owner) return new FaceView(faceBuild.result.join(),-1);
         long[] result=FACE_BUFFERS.poll();if(result==null)result=new long[1024];
         int lod=VoxyPredictionBridge.level(pos),span=32<<lod;
         long started=System.nanoTime();
@@ -1209,7 +1325,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
                 else {faceBuild.bytes=bytes;faceBytes+=bytes;}
             }
         }
-        faceBuild.result.complete(compact);System.arraycopy(result,0,target,0,1024);return true;
+        faceBuild.result.complete(compact);return new FaceView(compact,-1);
         } catch(Throwable failure) {
             synchronized(this) {if(mappedFaces.get(key)==faceBuild)removeFace(key);}
             faceBuild.result.completeExceptionally(failure);throw failure;
@@ -1373,6 +1489,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         synchronized (this) { closed = true; tiles.clear(); tileBytes = 0;featureBytes=0;featureIndexBytes=0;featureCount=0; spatial.clear(); extents.clear(); details.clear(); meshDetails.clear();
             detailSnapshot = Set.of(); detailChanged = false; clearMapped(); lastMapper = null;
             mapVersions.clear(); ++mapRevision; }
+        retirements.close();
         VoxyPredictionBridge.detach(this);
         XaeroPredictionBridge.detach(this);
     }

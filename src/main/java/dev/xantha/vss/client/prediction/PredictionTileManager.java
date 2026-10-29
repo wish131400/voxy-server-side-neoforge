@@ -51,7 +51,8 @@ public final class PredictionTileManager implements AutoCloseable {
      */
     private static final int MAX_PENDING = 512;
     private final ResourceKey<Level> dimension;
-    private final ClientTerrainSampler sampler;
+    private volatile ClientTerrainSampler sampler;
+    private volatile boolean generationReady;
     private volatile PredictionVegetation vegetation;
     private final LostCityHints cityHints;
     private int surfaceSettings;
@@ -110,6 +111,8 @@ public final class PredictionTileManager implements AutoCloseable {
     private final ThreadPoolExecutor cacheExecutor;
     private final PredictionTileStates<PredictionTileKey> tileStates = new PredictionTileStates<>(11,5);
     private final Map<PredictionTileKey, Long> cacheMissUntil = tileStates.values(0);
+    private record SurfaceCacheAttempt(long epoch,long revision,int settings) { }
+    private final Map<PredictionTileKey,SurfaceCacheAttempt> surfaceCacheAttempts=new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.LongAdder cacheFastMisses = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder voxelRestores = new java.util.concurrent.atomic.LongAdder();
     private record VoxelIdentity(long tags, byte[] bytes) { }
@@ -303,10 +306,11 @@ public final class PredictionTileManager implements AutoCloseable {
             };
             if (admitted) {
                 generationAdmissionLane=(lane+1)%3;
-                if (generationEnqueues != before) {
+                // A surface request can progress through the independent cache lane.
+                // Rotate its fair lane too, without spending a generation burst turn.
+                if (fair) fairGenerationLane=(lane+1)%3;
+                if (generationEnqueues != before)
                     nearGenerationAdmissions = fair ? 0 : nearGenerationAdmissions+1;
-                    if (fair) fairGenerationLane=(lane+1)%3;
-                }
                 return true;
             }
         }
@@ -421,6 +425,8 @@ public final class PredictionTileManager implements AutoCloseable {
     private final Map<PredictionTileKey, ReclaimCandidate> validatedReclaimEntries = new java.util.HashMap<>();
     private long validatedReclaimBytes;
     private PredictionTileKey reclaimTarget;
+    // An asynchronous eviction pays for this replacement, not another queued key.
+    private PredictionTileKey reclaimAdmissionTarget;
     private Map<PredictionTileKey, PredictionSchedulePreparation.Hint> scheduledHints = Map.of();
     private Runnable[] queuedRefresh = new Runnable[0];
     private int queuedRefreshIndex;
@@ -600,6 +606,7 @@ public final class PredictionTileManager implements AutoCloseable {
                           PredictionCpuBudget cpuBudget) {
         this.dimension = dimension;
         this.sampler = sampler;
+        this.generationReady = !(sampler instanceof PredictionCacheSampler);
         this.diskCache = diskCache;
         this.cityHints = new LostCityHints(dimension, sampler.profile().fingerprint());
         this.vegetation = new PredictionVegetation(sampler, diskCache, true);
@@ -766,15 +773,6 @@ public final class PredictionTileManager implements AutoCloseable {
                 Runtime.getRuntime().availableProcessors(), VSSClientConfig.CONFIG.predictionRefinementWorkers));
     }
 
-    private int throttledRefinementLimit(PredictionCpuBudget.ThrottleLevel throttle) {
-        int cap = refinementLimit();
-        return switch (throttle) {
-            case PAUSE -> 0;
-            case REDUCE -> Math.max(1, cap / 2);
-            case NONE -> cap;
-        };
-    }
-
     private boolean ordinaryRefinement(PredictionTileKey key) {
         return !requiredCoverage(key, false) && (!mediumCoverageWork(key) || backgroundWork(key))
                 && !PredictionWorkOrder.scoped(key, layout, buildFocus) && !dirtyTiles.contains(key);
@@ -890,7 +888,7 @@ public final class PredictionTileManager implements AutoCloseable {
         loadingDisplayProgress = PredictionLoadingProgress.INITIALIZING; loadingDisplayAt = 0; loadingDisplayCurrent = false;
         preparedWork.clear(); scopeCandidates.clear(); cacheCandidates.clear(); preparedReclaim.clear();
         nearGenerationAdmissions=nearCacheAdmissions=fairGenerationLane=0;
-        clearValidatedReclaim(); reclaimTarget = null; scheduledHints = Map.of();
+        clearValidatedReclaim(); reclaimTarget = reclaimAdmissionTarget = null; scheduledHints = Map.of();
         queuedRefresh = new Runnable[0]; queuedRefreshIndex = 0;
         for (var pool : List.of(executor, cacheExecutor)) {
             for (Runnable runnable : pool.getQueue().toArray(Runnable[]::new)) {
@@ -925,7 +923,7 @@ public final class PredictionTileManager implements AutoCloseable {
                 inputSnapshots.map(relief), inputSnapshots.set(editedCells), false, candidates, voxyOwnedTiles, uploaded,
                 voxyRadius, mediumCoverageLevelBias,
                 visibilityFeedback, inputSnapshots.set(dirtyTiles), viewBands, viewDependencies, inputSnapshots.map(failedAt),
-                inputSnapshots.map(deferredUntil), idleRefinement.copy(), busy, cpuBudget.allowsIdleRefinement(),
+                inputSnapshots.map(deferredUntil), idleRefinement.copy(), busy,
                 memoryBudget.allowsIdleRefinement() && idleResidentBytes() < Math.min(
                         PredictionIdleRefinement.MAX_RESIDENT_BYTES, idleRejectedBytes), !idlePending.isEmpty(), now, unifiedVoxy));
     }
@@ -957,7 +955,7 @@ public final class PredictionTileManager implements AutoCloseable {
                 || !terrainTargets.equals(result.terrain()) || !transitionTargets.equals(result.transitions())
                 || !mediumCoverage.equals(result.medium()) || !idleTargets.equals(result.idleTargets());
         idleRefinement = result.idle(); idleState = result.idleState();
-        idleAllowed = result.idleAllowed() && cpuBudget.allowsIdleRefinement() && memoryBudget.allowsIdleRefinement();
+        idleAllowed = result.idleAllowed() && memoryBudget.allowsIdleRefinement();
         for (var key : result.plan()) desiredGrace.put(key, now);
         desiredGrace.values().removeIf(deadline -> now - deadline > (diskCache == null ? DESIRED_GRACE_NANOS : COLD_TILE_NANOS));
         // A polling result with the same goals is not a new demand generation.
@@ -1104,6 +1102,26 @@ public final class PredictionTileManager implements AutoCloseable {
             refreshQueuedWork();
             admissionBatch = true;
             try {
+            if (reclaimAdmissionTarget != null) {
+                var target = reclaimAdmissionTarget;
+                boolean surface = surfaceBuildReady(target);
+                if (!effectivelyDesired(target) || !retryReady(target) || deferBackground(target, surface)
+                        || !localWorkAllowed(target, surface) || voxyOwnedTiles.contains(target)
+                        || captureHandoff.blocked(target)
+                        || !generationReady && !cachedUpgrade(target)
+                        || generationReady && !cachedUpgrade(target) && !surface && idleWork(target)
+                                && !idleAdmissionReady()
+                        || !terrainBuildNeeded(target) && !surface) {
+                    reclaimAdmissionTarget = null;
+                } else if (pending.contains(target)) {
+                    return;
+                } else {
+                    if (voxySource.retiring()) return;
+                    enqueue(target, cx, cz, surfaceBuildReady(target));
+                    if (!pending.contains(target)) reclaimPreparedWork(cx, cz, until);
+                    return;
+                }
+            }
             restoreCached(cx, cz); refillScope(cx, cz);
             if(unifiedVoxy) serviceGenerationWork(cx, cz, until);
             else servicePreparedCandidates(cx,cz,until);
@@ -1114,9 +1132,13 @@ public final class PredictionTileManager implements AutoCloseable {
 
     private boolean reclaimPreparedWork(int cx, int cz, long until) {
         if (memoryBudget.reclaimTargetBytes() == 0 || memoryBudget.activeBuildCount() != 0) return false;
-        PredictionTileKey target = null;
+        // Retired source data remains charged until disposal finishes. Do not
+        // evict another working set to pay a shortage already being released.
+        if (voxySource.retiring()) return true;
+        PredictionTileKey target = reclaimAdmissionTarget;
         int inspected = 0;
         for (var key : voxyDetailWork) {
+            if (target != null) break;
             if (inspected++ >= 64 || System.nanoTime() >= until) break;
             if (!pending.contains(key) && retryReady(key) && terrainBuildNeeded(key)) { target = key; break; }
         }
@@ -1150,13 +1172,20 @@ public final class PredictionTileManager implements AutoCloseable {
         // A visible downgrade must be capable of paying for its replacement.
         // Accumulate bounded slices instead of repeatedly scanning all meshes.
         if (memoryBudget.canReclaimDetail(validatedReclaimBytes)) {
-            for (int removed = 0; removed < 8 && !validatedReclaim.isEmpty()
+            // Reservations remain charged until disposal completes; account the bytes
+            // already assigned to this slice rather than evicting the entire batch.
+            long reclaimRemaining = memoryBudget.reclaimTargetBytes();
+            for (int removed = 0; removed < 8 && reclaimRemaining > 0 && !validatedReclaim.isEmpty()
                     && memoryBudget.reclaimTargetBytes() > 0 && System.nanoTime() < until; removed++) {
                 var candidate = validatedReclaim.removeFirst();
                 if (validatedReclaimEntries.get(candidate.key()) != candidate) continue;
                 discardReclaim(candidate.key());
                 var tile = ready.get(candidate.key());
-                if (tile != null && tile.revision() == candidate.revision() && reclaimEligible(candidate.key(), target, parentSource)) removeTile(candidate.key());
+                if (tile != null && tile.revision() == candidate.revision() && reclaimEligible(candidate.key(), target, parentSource)) {
+                    removeTile(candidate.key());
+                    reclaimAdmissionTarget = target;
+                    reclaimRemaining -= candidate.bytes();
+                }
             }
         }
         if (memoryBudget.hasFixedAllowance() && mediumCoveragePending && memoryBudget.reclaimTargetBytes() > 0
@@ -1199,7 +1228,7 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private boolean idleAdmissionReady() {
-        return idleAllowed && cpuBudget.allowsIdleRefinement()
+        return idleAllowed
                 && memoryBudget.allowsIdleRefinement() && pendingCaptures.isEmpty()
                 && !foregroundWorkPending
                 && pending.stream().noneMatch(key -> !idlePending.contains(key) && viewWork(key, surfacePending.contains(key)));
@@ -1455,7 +1484,6 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private synchronized void removeTile(PredictionTileKey key) {
-        voxySource.remove(key);
         discardReclaim(key);
         if (ready.remove(key) != null) {
             coverageSpatial.remove(key); coverageSpatialSize--;
@@ -1489,14 +1517,15 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private void releaseTileResources(PredictionTileKey key) {
-        voxySource.remove(key);
+        surfaceCacheAttempts.remove(key);
         invalidatedSurfaces.remove(key);
         idleResidents.remove(key);
         relief.remove(key);
         storedTiles.remove(key);
         surfaceReady.remove(key);
         PredictionMemoryBudget.Reservation reservation = residentMemory.remove(key);
-        if (reservation != null) reservation.close();
+        voxySource.removeLater(key, () -> !closed && !ready.containsKey(key),
+                () -> { if (reservation != null) reservation.close(); });
     }
 
     /** Explicit radius reductions must not wait for movement grace or a disk copy. */
@@ -1532,9 +1561,41 @@ public final class PredictionTileManager implements AutoCloseable {
         return layout;
     }
 
-    /** The terrain sampler backing this manager; stable for the session. */
+    /** Cache context is replaced once, in place, when generation is ready. */
     public ClientTerrainSampler sampler() {
         return sampler;
+    }
+
+    boolean generationReady() { return generationReady; }
+    PredictionDiskCache diskCache() { return diskCache; }
+
+    /** Profile worker: validate identity before preparing the full decoration context. */
+    boolean acceptsGeneration(ClientTerrainSampler replacement) {
+        var current = sampler;
+        return !closed && !generationReady && current.profile().equals(replacement.profile())
+                && java.util.Objects.equals(current.predictionCacheNamespace(), replacement.predictionCacheNamespace())
+                && current.cacheBiomes().equals(replacement.cacheBiomes())
+                && java.util.Arrays.equals(PredictionVoxelCache.identity(current), PredictionVoxelCache.identity(replacement));
+    }
+
+    /** Client thread: resident voxels, source, cache leases and coverage stay owned by this manager. */
+    synchronized boolean enableGeneration(ClientTerrainSampler replacement, PredictionVegetation preparedVegetation) {
+        if (closed || generationReady) return false;
+        var previous = sampler;
+        synchronized (surfaceContextLock) {
+            sampler = replacement;
+            vegetation = preparedVegetation;
+            surfaceContextSettings = surfaceSettings;
+            generationReady = true;
+        }
+        previous.close();
+        planning.invalidate();
+        cacheMissUntil.clear();
+        surfaceCacheAttempts.clear();
+        selectionTicks = 0;
+        scheduleAgain = true;
+        queueCaptureDrain();
+        return true;
     }
 
     private PredictionVegetation vegetationForBuild(int settings) {
@@ -2042,7 +2103,7 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     private synchronized void queueCaptureDrain() {
-        if (closed || captureDrainQueued || latestCaptures.isEmpty()) return;
+        if (closed || !generationReady || captureDrainQueued || latestCaptures.isEmpty()) return;
         long now = System.nanoTime();
         if (latestCaptures.keySet().stream().noneMatch(key -> now >= captureRetryAfter.getOrDefault(key, 0L))) return;
         captureDrainQueued = true;
@@ -2268,6 +2329,7 @@ public final class PredictionTileManager implements AutoCloseable {
         captureEpochs.keySet().removeIf(key -> !ready.containsKey(key) && !pending.contains(key));
         dirtyTiles.removeIf(key -> !ready.containsKey(key) && !pending.contains(key));
         invalidatedSurfaces.removeIf(key -> !ready.containsKey(key) && !pending.contains(key));
+        surfaceCacheAttempts.keySet().removeIf(key -> !ready.containsKey(key) && !pending.contains(key));
     }
 
     public boolean exactWorldgen() {
@@ -2563,6 +2625,7 @@ public final class PredictionTileManager implements AutoCloseable {
         result.put("surfacePipeline",surfacePipelineSnapshot());
         var currentVegetation = vegetation;
         result.put("vegetation",currentVegetation == null ? Map.of("initialized",false) : currentVegetation.performanceSnapshot());
+        result.put("generationReady", generationReady);
         result.put("foregroundDebt",foregroundWorkPending); result.put("voxyOwnedTiles",voxyOwnedTiles.size());
         result.put("planJobs",planning.plan.jobs()); result.put("planCommits",planning.plan.commits()); result.put("planDiscards",planning.plan.discards());
         result.put("planTopologyBuilds",planning.planCalculation.topologyBuilds());
@@ -2742,12 +2805,24 @@ public final class PredictionTileManager implements AutoCloseable {
     private synchronized void enqueue(PredictionTileKey key, int centerChunkX, int centerChunkZ,
                                       boolean surface, boolean cacheOnly) {
         if (closed || paused) return;
+        if (reclaimAdmissionTarget != null && !key.equals(reclaimAdmissionTarget)) return;
+        if (!generationReady) {
+            if (surface) return;
+            if (!cacheOnly) { enqueue(key, centerChunkX, centerChunkZ, false, true); return; }
+        }
+        final boolean finishedCacheOnly = !generationReady;
         if (!admissionBatch) cleanupPending();
         if (!dimension.equals(key.dimension()) || key.lod() < 0 || key.lod() >= layout.levelCount()) return;
         if (voxyOwnedTiles.contains(key)) return;
         if (captureHandoff.blocked(key)) { detailEvent(key, "capture-wait"); return; }
+        // Surface recovery shares the existing bounded cache lane. Only cache
+        // misses proceed to CPU/generation admission, once per content epoch.
+        if(surface && !cacheOnly && unifiedVoxy && surfaceBuildReady(key)
+                && !new SurfaceCacheAttempt(captureEpochs.getOrDefault(key,0L),meshRevision.get(),surfaceSettings).equals(surfaceCacheAttempts.get(key))) {
+            enqueue(key,centerChunkX,centerChunkZ,true,true);return;
+        }
         if (!cacheOnly && deferBackground(key, surface)) { detailEvent(key,"view-deferred");viewDeferredAdmissions.increment(); return; }
-        if (cacheOnly && (cachePending.size() >= CACHE_RESTORE_IN_FLIGHT || !cachedUpgrade(key))) return;
+        if (cacheOnly && (cachePending.size() >= CACHE_RESTORE_IN_FLIGHT || (surface ? !surfaceBuildReady(key) : !cachedUpgrade(key)))) return;
         boolean idle = !cacheOnly && !surface && idleWork(key);
         if (idle && (!idleAdmissionReady() || !idlePending.isEmpty())) return;
         if (dirtyTiles.contains(key) && ready.containsKey(key) && captureRefresh.defer(key, System.nanoTime())) {
@@ -2775,27 +2850,16 @@ public final class PredictionTileManager implements AutoCloseable {
         if (pending.contains(key)) return;
         boolean scoped = !cacheOnly && PredictionWorkOrder.scoped(key, layout, buildFocus);
         if (scoped && scopePending.size() >= PredictionWorkOrder.detailBuildLimit(executor.getCorePoolSize(), false, true)) return;
-        // CPU pressure sheds only ordinary refinement and background work;
-        // scoped, dirty and medium-coverage builds always stay admitted.
-        PredictionCpuBudget.ThrottleLevel throttle = cpuBudget.currentThrottle();
         boolean visibleCompletion = !cacheOnly && surface && visibleSurface(key);
         boolean ordinary = !cacheOnly && !visibleCompletion && ordinaryRefinement(key);
         PredictionTile current = ready.get(key);
-        Integer ordinaryTarget = ordinaryTargets.get(key);
-        // Finish current terrain/surfaces slowly under sustained pressure.
-        // Optional idle upgrades still require CPU headroom.
-        boolean detailTrickle = ordinary && !idle && throttle == PredictionCpuBudget.ThrottleLevel.PAUSE
-                && (surface || terrainLeaves.contains(key) && current != null && ordinaryTarget != null
-                    && current.cellAxis() < ordinaryTarget)
-                && cpuBudget.allowsDetailTrickle();
         long ordinaryPending = refinementPending.stream().filter(k -> !idlePending.contains(k)).count();
-        if (ordinary && ordinaryPending >= (detailTrickle ? 1 : throttledRefinementLimit(throttle))) return;
+        if (ordinary && ordinaryPending >= refinementLimit()) return;
         if (ordinary && movementUpgrade(key, surface)
                 && refinementPending.stream().filter(k -> !idlePending.contains(k) && movementUpgrade(k, false)).count()
                     >= PredictionMotionPace.upgradeBuildLimit(executor.getCorePoolSize())) return;
         boolean background = !cacheOnly && !visibleCompletion && backgroundWork(key) && !requiredCoverage(key, surface);
-        if (background && backgroundPending.size() >= (throttle == PredictionCpuBudget.ThrottleLevel.PAUSE
-                ? (detailTrickle ? 1 : 0) : backgroundLimit())) return;
+        if (background && backgroundPending.size() >= backgroundLimit()) return;
         failedAt.remove(key);
         deferredUntil.remove(key);
         // A reserved fair turn must survive both the executor heap and later
@@ -2803,31 +2867,18 @@ public final class PredictionTileManager implements AutoCloseable {
         int priority = cacheOnly ? -100 : fairGenerationAdmission ? FAIR_WORK_PRIORITY : workPriority(key, surface);
         double distance = PredictionWorkOrder.orderingDistance(key, layout, cameraBlockX, cameraBlockZ, buildFocus);
         VssLodLayout tileLayout = layout;
-        // Reserve the shared CPU slot before publishing work to the executor.
-        // The worker still performs the final lease check after it starts, since
-        // CPU and generation pressure may change while this task waits
-        // in the priority queue. A failed reservation gets a short backoff so
-        // replanning cannot create a stream of immediately rejected workers.
+        // Queue capacity and executing capacity are separate. The worker acquires
+        // its shared lease only when it starts; local generation may have changed.
+        // Native-demand managers reserve current capacity so rejected queue tails
+        // cannot consume the fair turn that the next completion should choose.
         boolean urgent = !idle && (dirtyTiles.contains(key)
                 || visibleCompletion || !surface && voxyDetail(key)
                 || !surface && (ready.get(key) == null || mediumCoverageWork(key))
                 || PredictionWorkOrder.scoped(key, tileLayout, buildFocus));
-        boolean pausedDetail = detailTrickle || !cacheOnly && !idle && !visibleCompletion
-                && ordinaryRefinement(key)
-                && cpuBudget.currentThrottle() == PredictionCpuBudget.ThrottleLevel.PAUSE;
-        // CPU headroom can tolerate a small executor backlog. Reserve that
-        // backlog separately from active CPU capacity so a one-worker pool can
-        // stay fed while each worker still performs the final lease check. When
-        // CPU pressure or detail trickle is active, retain strict admission so
-        // optional work cannot bypass the existing fuse.
-        boolean allowQueuedAdmission = !pausedDetail
-                && throttle == PredictionCpuBudget.ThrottleLevel.NONE;
         int queueLimit = Math.max(8, Math.min(32, executor.getCorePoolSize() * 4));
         ThreadPoolExecutor selectedExecutor = cacheOnly ? cacheExecutor : executor;
-        PredictionCpuBudget.Reservation cpuReservation = cacheOnly ? null : allowQueuedAdmission
-                ? cpuBudget.tryReserveQueued(urgent, pausedDetail, queueLimit)
-                : unifiedVoxy ? cpuBudget.tryReserveCurrent(urgent, pausedDetail)
-                : cpuBudget.tryReserve(urgent, pausedDetail);
+        PredictionCpuBudget.Reservation cpuReservation = cacheOnly ? null
+                : unifiedVoxy ? cpuBudget.tryReserve(urgent) : cpuBudget.tryReserveQueued(urgent, queueLimit);
         if (!cacheOnly && cpuReservation == null) {
             detailEvent(key,"cpu-budget");admissionReasons[ADMIT_CPU_BUDGET].increment();
             // CPU refusal is shared across managers/tiles by the budget's lane
@@ -2938,12 +2989,7 @@ public final class PredictionTileManager implements AutoCloseable {
                         || surface && visibleSurface(key) || !surface && voxyDetail(key)
                         || !surface && (ready.get(key) == null || mediumCoverageWork(key))
                         || PredictionWorkOrder.scoped(key, tileLayout, buildFocus));
-                // Recheck CPU pressure after queueing, and retain a trickle
-                // reservation even if CPU load recovered before the worker started.
-                boolean workerPausedDetail = detailTrickle || !cacheOnly && !idle && !(surface && visibleSurface(key))
-                        && ordinaryRefinement(key)
-                        && cpuBudget.currentThrottle() == PredictionCpuBudget.ThrottleLevel.PAUSE;
-                cpuLease = cacheOnly ? null : cpuBudget.tryAcquire(workerUrgent, workerPausedDetail);
+                cpuLease = cacheOnly ? null : cpuBudget.tryAcquire(workerUrgent);
                 if (!cacheOnly && cpuLease == null) {
                     detailEvent(key,"cpu-budget");admissionReasons[ADMIT_CPU_BUDGET].increment();
                     // The task already waited in the executor queue. Let the
@@ -2952,28 +2998,35 @@ public final class PredictionTileManager implements AutoCloseable {
                     // that may have elapsed while this worker was waiting.
                     return;
                 }
-                if (surface) {
+                if (surface && !cacheOnly) {
                     int span = tileLayout.tileBlocks(key.lod());
                     vegetationForBuild(buildSurfaceSettings).deferIfRenderingBusy(key.tileX() * span,
                             key.tileZ() * span, span, 1,
                             () -> captureCurrent(key, captureEpoch, revision));
                 }
-                reservation = cacheOnly ? memoryBudget.tryReserveRestore()
-                        : memoryBudget.tryReserveBuild(surface ? PredictionMemoryBudget.BuildKind.SURFACE
-                        : PredictionMemoryBudget.BuildKind.TERRAIN);
+                synchronized (this) {
+                    // Tasks already queued must honor the same workspace handoff.
+                    if (reclaimAdmissionTarget != null && !key.equals(reclaimAdmissionTarget)) return;
+                    reservation = cacheOnly ? memoryBudget.tryReserveRestore()
+                            : memoryBudget.tryReserveBuild(surface ? PredictionMemoryBudget.BuildKind.SURFACE
+                            : PredictionMemoryBudget.BuildKind.TERRAIN);
+                    if (reservation != null && key.equals(reclaimAdmissionTarget)) reclaimAdmissionTarget = null;
+                }
                 if (reservation == null) {
                     detailEvent(key,"memory-budget");admissionReasons[ADMIT_NO_RESERVATION].increment();
                     return;
                 }
                 byte[] voxelIdentity = diskCache == null ? null : voxelContentIdentity();
                 PredictionTile voxelResident = ready.get(key);
-                if (!surface && diskCache != null && !dirtyTiles.contains(key) && (voxelResident == null || cacheOnly)) {
+                if (diskCache != null && !dirtyTiles.contains(key) && (voxelResident == null || cacheOnly)) {
                     long readStarted = System.nanoTime();
                     try (var lease = diskCache.lease(PredictionDiskCache.Key.voxels(key.tileX(),key.tileZ(),key.lod()))) {
                         var saved = diskCache.readVoxels(lease,key,buildSurfaceSettings,voxelIdentity);
                         requireCaptureCurrent(key,captureEpoch,revision);
                         if (saved != null && (!lease.valid() || saved.voxels().axis() > tileLayout.cellAxis(key.lod()))) saved = null;
-                        if (saved != null && (voxelResident == null || saved.voxels().axis() > voxelResident.cellAxis())) {
+                        if (saved != null && (voxelResident == null || saved.voxels().axis() > voxelResident.cellAxis()
+                                || saved.voxels().axis()==voxelResident.cellAxis() && saved.voxels().surfaceComplete()
+                                    && !voxelResident.data().voxyTile.surfaceComplete())) {
                             buildAdmitted = true;
                             var completed = saved.restore(meshIds.incrementAndGet(),
                                     scopePromoted && (voxelResident == null || voxelResident.scopeOnly()),voxelResident);
@@ -2988,20 +3041,29 @@ public final class PredictionTileManager implements AutoCloseable {
                         }
                     } finally { diskReadNanos.add(System.nanoTime()-readStarted); }
                 }
+                if (finishedCacheOnly) return;
                 if (surface) {
                     // Decoration owns world-coordinate voxels, not the terrain sampling grid.
                     // Attach it to the current immutable terrain instead of waiting for final
                     // terrain resolution and replaying the complete density/colour build.
                     buildAdmitted = true;
-                    if (!PredictionWorkOrder.scoped(key, tileLayout, buildFocus)) mediumSinceSurface.set(0);
+                    if (!cacheOnly && !PredictionWorkOrder.scoped(key, tileLayout, buildFocus)) mediumSinceSurface.set(0);
                     long surfaceStarted = System.nanoTime();
                     var base = previousTerrain.data().voxyTile;
-                    var plants = vegetationForBuild(buildSurfaceSettings).tileForRendering(base.baseX(), base.baseZ(),
-                            base.span(), 1, tileLayout.trees(), editedCells::contains,
-                            () -> buildCurrent(key, captureEpoch, revision, previousTerrain.cellAxis(), true, false));
-                    requireBuildCurrent(key, captureEpoch, revision, previousTerrain.cellAxis(), true, false);
+                    var vegetation=vegetationForBuild(buildSurfaceSettings);
+                    java.util.function.BooleanSupplier currentSurface=() ->
+                            buildCurrent(key,captureEpoch,revision,previousTerrain.cellAxis(),true,cacheOnly);
+                    var cachedPlants=cacheOnly ? vegetation.restoreForRendering(base.baseX(),base.baseZ(),
+                            base.span(),1,tileLayout.trees(),editedCells::contains,currentSurface) : null;
+                    var plants=cacheOnly ? cachedPlants.tile() : vegetation.tileForRendering(base.baseX(),base.baseZ(),
+                            base.span(),1,tileLayout.trees(),editedCells::contains,currentSurface);
+                    boolean complete=!cacheOnly || cachedPlants.complete();
+                    requireBuildCurrent(key, captureEpoch, revision, previousTerrain.cellAxis(), true, cacheOnly);
+                    if(cacheOnly)surfaceCacheAttempts.put(key,new SurfaceCacheAttempt(captureEpoch,revision,buildSurfaceSettings));
                     var cities = cityHints.cacheSnapshot(base.baseX(), base.baseZ(), base.span()).buildings();
-                    var mesh = PredictionVoxelData.forVoxy(base.withVegetation(plants, cities));
+                    var surfaceVoxels=base.withVegetation(plants,cities,complete);
+                    if(!complete && retainSurface)surfaceVoxels=surfaceVoxels.retainFeatures(base);
+                    var mesh = PredictionVoxelData.forVoxy(surfaceVoxels);
                     mesh.terrainRevision = previousTerrain.terrainRevision();
                     mesh.parentLod = previousTerrain.data().parentLod;
                     mesh.retainedSampleObjects = previousTerrain.data().retainedSampleObjects;
@@ -3011,13 +3073,14 @@ public final class PredictionTileManager implements AutoCloseable {
                             Math.max(previousTerrain.depthBound().maxY(), plants.maxY())), System.nanoTime(), meshIds.incrementAndGet(),
                             previousTerrain.cellAxis(), previousTerrain.spacingBlocks(), previousTerrain.scopeOnly());
                     decorationNanos.add(System.nanoTime() - surfaceStarted);
-                    if (publishTile(completed, reservation, revision, captureEpoch, true, true,
+                    if (publishTile(completed, reservation, revision, captureEpoch, complete, complete,
                             storedTiles.contains(key), PredictionRelief.of(completed))) {
                         reservation.completeBuild(completed.retainedHeapBytes(), 0, false);
                         reservation = null;
-                        persistVoxels(completed,revision,captureEpoch,buildSurfaceSettings,voxelIdentity);
+                        if(complete)persistVoxels(completed,revision,captureEpoch,buildSurfaceSettings,voxelIdentity);
                         builtTiles.incrementAndGet();
                     }
+                    continueSurface=!complete;
                     return;
                 }
                 PredictionTile resident = ready.get(key);
@@ -3621,7 +3684,7 @@ public final class PredictionTileManager implements AutoCloseable {
         if (retirementScan == null) retirementScan = ready.values().iterator();
         long now = System.nanoTime(), until = now + 1_000_000L;
         int checked = 0, retired = 0;
-        while (retirementScan.hasNext() && checked++ < 64 && retired < 8 && System.nanoTime() < until) {
+        while (retirementScan.hasNext() && checked++ < 64 && retired < 64 && System.nanoTime() < until) {
             var tile = retirementScan.next(); var key = tile.key();
             if (ready.get(key) != tile) continue;
             // Native rendering no longer needs a hand-off for a region entirely
@@ -3642,7 +3705,7 @@ public final class PredictionTileManager implements AutoCloseable {
                     storedTiles.contains(key), layout, outside);
             // Inactive pressure retirement needs a currently resident fallback;
             // optional displayed downgrades use reclaimPreparedWork instead.
-            boolean pressure = memoryBudget.reclaimTargetBytes() > 0 && !effectivelyDesired(key)
+            boolean pressure = !voxySource.retiring() && memoryBudget.reclaimTargetBytes() > 0 && !effectivelyDesired(key)
                     && !PredictionWorkOrder.scoped(key, layout, buildFocus) && coveredByAncestor(ready.keySet(), layout, key)
                     && surfaceFallbackReady(key);
             if (pinned || stored || pressure) {
@@ -3820,6 +3883,7 @@ public final class PredictionTileManager implements AutoCloseable {
         }
         cacheExecutor.shutdownNow();
         cacheMissUntil.clear();
+        surfaceCacheAttempts.clear();
         ready.clear();
         coverageSpatial.clear(); coverageSpatialSize = 0; cacheScan = retirementScan = null; cacheScanCandidates.clear();
         residentMemory.values().forEach(PredictionMemoryBudget.Reservation::close);
@@ -3828,7 +3892,7 @@ public final class PredictionTileManager implements AutoCloseable {
         cachePending.clear();
         cacheCandidates.clear();
         scopePending.clear();
-        scopeCandidates.clear(); preparedWork.clear(); preparedReclaim.clear(); clearValidatedReclaim(); reclaimTarget = null; scheduledHints = Map.of();
+        scopeCandidates.clear(); preparedWork.clear(); preparedReclaim.clear(); clearValidatedReclaim(); reclaimTarget = reclaimAdmissionTarget = null; scheduledHints = Map.of();
         queuedRefresh = new Runnable[0]; queuedRefreshIndex = 0; scheduleAgain = false;
         backgroundPending.clear();
         surfacePending.clear();
@@ -3874,34 +3938,37 @@ public final class PredictionTileManager implements AutoCloseable {
     }
 
     /** Invalidates in-flight publications without destroying reusable meshes. */
-    synchronized void setPaused(boolean value) {
+    void setPaused(boolean value) {
         if (closed || paused == value) return;
-        paused = value;
-        meshRevision.incrementAndGet();
-        planning.invalidate();
-        selectionTicks = 0;
-        // Leave running keys reserved until their finally blocks execute.
-        // Clearing those keys here lets an obsolete job remove a new job's key.
-        if (value) {
-            preparedWork.clear(); preparedReclaim.clear(); clearValidatedReclaim();
-            queuedRefresh = new Runnable[0]; queuedRefreshIndex = 0; scheduledHints = Map.of();
-            activeBuildThreads.forEach(Thread::interrupt);
-            cacheExecutor.getQueue().removeIf(task -> {
-                if (task instanceof PredictionTask prediction && prediction.key != null) {
-                    pending.remove(prediction.key);
-                    cachePending.remove(prediction.key);
-                    return true;
-                }
-                return false;
-            });
-            executor.getQueue().removeIf(task -> {
-                if (task instanceof PredictionTask prediction && prediction.key != null) {
-                    prediction.releaseAdmission();
-                    pending.remove(prediction.key);
-                    return true;
-                }
-                return false;
-            });
+        synchronized (this) {
+            if (closed || paused == value) return;
+            paused = value;
+            meshRevision.incrementAndGet();
+            planning.invalidate();
+            selectionTicks = 0;
+            // Leave running keys reserved until their finally blocks execute.
+            // Clearing those keys here lets an obsolete job remove a new job's key.
+            if (value) {
+                preparedWork.clear(); preparedReclaim.clear(); clearValidatedReclaim(); reclaimAdmissionTarget = null;
+                queuedRefresh = new Runnable[0]; queuedRefreshIndex = 0; scheduledHints = Map.of();
+                activeBuildThreads.forEach(Thread::interrupt);
+                cacheExecutor.getQueue().removeIf(task -> {
+                    if (task instanceof PredictionTask prediction && prediction.key != null) {
+                        pending.remove(prediction.key);
+                        cachePending.remove(prediction.key);
+                        return true;
+                    }
+                    return false;
+                });
+                executor.getQueue().removeIf(task -> {
+                    if (task instanceof PredictionTask prediction && prediction.key != null) {
+                        prediction.releaseAdmission();
+                        pending.remove(prediction.key);
+                        return true;
+                    }
+                    return false;
+                });
+            }
         }
     }
 

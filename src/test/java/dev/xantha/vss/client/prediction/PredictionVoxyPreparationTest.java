@@ -18,8 +18,14 @@ class PredictionVoxyPreparationTest {
             long faces=(long)source.diagnostics().get("faceCacheBytes");
             assertTrue(columns>0);assertTrue(faces>0 && faces<=8448L);
             for(int x=4;x<=24;x++) {
-                source.put(fixture(x*64,0,64,41+x));
-                source.section(VoxyPredictionBridge.position(0,x*2,1,0),MAPPER);
+                // Each section fits individually; their aggregate exceeds the section
+                // budget. Oversized single sections deliberately bypass admission.
+                var columnsForSection=new PredictionVoxySource.Column[4096];var random=new Random(41+x);
+                for(int i=0;i<columnsForSection.length;i++)columnsForSection[i]=new PredictionVoxySource.Column(
+                        List.of(new PredictionVoxySource.Run(-64,4+random.nextInt(27),Blocks.STONE.defaultBlockState())),"minecraft:plains");
+                source.put(new PredictionVoxySource.Tile(new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,x,0,0),
+                        x*64,0,64,64,1,columnsForSection,List.of(),4096,true,0));
+                source.section(VoxyPredictionBridge.position(0,x*2,0,0),MAPPER);
             }
             var diagnostics=source.diagnostics();
             assertTrue((long)diagnostics.get("cacheEvictions")>0,"Exercise full-section byte pressure");

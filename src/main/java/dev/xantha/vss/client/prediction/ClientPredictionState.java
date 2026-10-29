@@ -193,8 +193,29 @@ public final class ClientPredictionState {
             if (!active.getAsBoolean()) return;
             try {
                 PredictionResources.awaitRetired();
+                var earlyManager = new java.util.concurrent.atomic.AtomicReference<PredictionTileManager>();
                 prepared.decoder().decode(key, active, (dimension, sampler) -> {
                     var timing = new PredictionInitializationTiming(dimension.location() + " install");
+                    var early = earlyManager.get();
+                    if (early != null && early.acceptsGeneration(sampler)) {
+                        sampler.bindCacheFingerprint(early.sampler().cacheFingerprint());
+                        var vegetation = new PredictionVegetation(sampler, early.diskCache(), true);
+                        minecraft.execute(() -> {
+                            if (!active.getAsBoolean() || minecraft.level == null
+                                    || !minecraft.level.dimension().equals(dimension) || MANAGERS.get(dimension) != early
+                                    || !early.enableGeneration(sampler, vegetation)) {
+                                PredictionResources.retireUnusedSampler(sampler);
+                                return;
+                            }
+                            VSSLogger.info("VSS prediction generation ready: dimension=" + dimension.location()
+                                    + ", rust=" + (sampler instanceof RustTerrainSampler)
+                                    + ", residentTiles=" + early.readyCount()
+                                    + ", receivedToReadyMs=" + (System.nanoTime() - requestedNanos) / 1_000_000L);
+                        });
+                        timing.finish();
+                        return;
+                    }
+                    if (early != null) { earlyManager.set(null); early.close(); }
                     PredictionDiskCache cache = prepared.storage() == null ? null : prepared.storage().open(sampler);
                     PredictionTileManager manager;
                     try { manager = new PredictionTileManager(dimension, sampler, PredictionMemoryBudget.SHARED, cache); }
@@ -221,6 +242,25 @@ public final class ClientPredictionState {
                                 + (System.nanoTime() - queued) / 1_000_000L + ", dimension=" + dimension.location());
                     });
                     timing.finish();
+                }, prepared.storage() == null ? null : (dimension, sampler) -> {
+                    PredictionDiskCache cache = prepared.storage().openExisting(sampler);
+                    if (cache == null) { PredictionResources.releaseSampler(sampler); return; }
+                    PredictionTileManager manager;
+                    try { manager = new PredictionTileManager(dimension, sampler, PredictionMemoryBudget.SHARED, cache); }
+                    catch (RuntimeException | Error failure) { cache.close(); throw failure; }
+                    earlyManager.set(manager);
+                    minecraft.execute(() -> {
+                        if (!active.getAsBoolean() || minecraft.level == null
+                                || !minecraft.level.dimension().equals(dimension) || earlyManager.get() != manager) {
+                            manager.close(); return;
+                        }
+                        var previous = MANAGERS.put(dimension, manager);
+                        if (previous != null) previous.close();
+                        manager.setPaused(!VSSClientConfig.CONFIG.isPredictionLoadingEnabled());
+                        profileReady = true;
+                        VSSLogger.info("VSS prediction cache ready: dimension=" + dimension.location()
+                                + ", receivedToCacheMs=" + (System.nanoTime() - requestedNanos) / 1_000_000L);
+                    });
                 });
             } catch (java.util.concurrent.CancellationException ignored) {
             } catch (Exception failure) {

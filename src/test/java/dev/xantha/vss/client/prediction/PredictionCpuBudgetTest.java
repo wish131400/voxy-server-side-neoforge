@@ -31,69 +31,57 @@ class PredictionCpuBudgetTest {
     private static final long SECOND = 1_000_000_000L;
     private static final class Environment {
         long now;
-        double system = .5, process = .4;
-        final PredictionCpuBudget budget = new PredictionCpuBudget(() -> 8,
-                () -> system, () -> process, () -> now, false);
+        final PredictionCpuBudget budget = new PredictionCpuBudget(() -> 8, () -> now);
     }
 
-    @Test void cpuPressureLimitsTheCombinedLanesAndReservesCoverage() {
+    @Test void configuredCapReservesOneCoverageLaneWithoutHalvingWorkers() {
         var e = new Environment();
-        e.system = .90;
         var leases = new ArrayList<PredictionCpuBudget.Lease>();
         try {
-            for (int i = 0; i < 3; i++) leases.add(assertLease(e.budget.tryAcquire(false)));
+            for (int i = 0; i < 7; i++) leases.add(assertLease(e.budget.tryAcquire(false)));
             assertNull(e.budget.tryAcquire(false));
             leases.add(assertLease(e.budget.tryAcquire(true)));
-            assertNull(e.budget.tryAcquire(true), "terrain and surface share the same total cap");
-            assertEquals(0, e.budget.localGenerationLimit(16, true));
+            assertNull(e.budget.tryAcquire(true), "terrain and surface share the configured cap");
+            assertTrue(e.budget.diagnostics().contains("limit=8,active=8"));
         } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
     }
 
-    @Test void saturationRetainsCoverageAndBoundedDetailProgress() {
+    @Test void completedDetailImmediatelyMakesRoomWithoutTrickleOrRecoveryDelay() {
         var e = new Environment();
-        e.system = .98;
-        assertNull(e.budget.tryAcquire(false));
-        try (var first = assertLease(e.budget.tryAcquire(true));
-             var second = assertLease(e.budget.tryAcquire(true))) {
-            assertNull(e.budget.tryAcquire(true));
-            assertEquals(0, e.budget.localGenerationLimit(16, true));
+        for (int i = 0; i < 100; i++) {
+            var queue = e.budget.tryReserveQueued(false, 8);
+            assertNotNull(queue);
+            queue.consume();
+            assertLease(e.budget.tryAcquire(false)).close();
         }
-        e.now = 2 * SECOND;
-        var detail = assertLease(e.budget.tryAcquire(false));
-        e.now = 4 * SECOND;
-        assertNull(e.budget.tryAcquire(false), "only one expensive trickle job can run");
-        detail.close();
-        assertLease(e.budget.tryAcquire(false)).close();
-        assertNull(e.budget.tryAcquire(false), "finishing a short job cannot flood the next frame");
+        assertEquals(0, e.now, "no two-second fake-clock advance should be needed");
+        assertTrue(e.budget.diagnostics().contains("active=0,detail=0"));
     }
 
-    @Test void processCpuReducesWorkWhenSystemLoadIsUnavailable() {
-        var e = new Environment();
-        e.system = Double.NaN; e.process = .90;
-        assertTrue(e.budget.diagnostics().contains("limit=4"));
-        e.now = SECOND; e.process = .98;
-        assertTrue(e.budget.diagnostics().contains("limit=2"));
-        assertNull(e.budget.tryAcquire(false));
+    @Test void admissionHasNoOperatingSystemLoadSamplerOrThrottleState() {
+        for (var field : PredictionCpuBudget.class.getDeclaredFields()) {
+            assertNotEquals(java.util.function.DoubleSupplier.class, field.getType());
+            assertFalse(java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType()));
+            assertNotEquals("pressure", field.getName());
+        }
+        assertTrue(new Environment().budget.diagnostics().startsWith("mode=configured,limit=8,"));
     }
 
-    @Test void briefRecoveryCannotReopenAllWorkersAndRunningLeasesAreNotCancelled() {
-        var e = new Environment();
-        var active = new ArrayList<PredictionCpuBudget.Lease>();
+    @Test void changingConfiguredLimitDoesNotCancelWorkAndIncreaseNeedsNoRecoveryWait() {
+        int[] configured = {8};
+        var budget = new PredictionCpuBudget(() -> configured[0], () -> 0);
+        var leases = new ArrayList<PredictionCpuBudget.Lease>();
         try {
-            for (int i = 0; i < 7; i++) active.add(assertLease(e.budget.tryAcquire(false)));
-            e.now = SECOND; e.system = .98;
-            assertNull(e.budget.tryAcquire(true), "new cap waits for old work to drain");
-            assertTrue(e.budget.diagnostics().contains("active=7"));
-            active.forEach(PredictionCpuBudget.Lease::close);
-            e.now = 2 * SECOND; e.system = .5;
-            assertTrue(e.budget.diagnostics().contains("limit=2"));
-            e.now = 5 * SECOND;
-            assertTrue(e.budget.diagnostics().contains("limit=4"));
-            e.now = 6 * SECOND;
-            e.budget.diagnostics();
-            e.now = 9 * SECOND;
-            assertTrue(e.budget.diagnostics().contains("limit=8"));
-        } finally { active.forEach(PredictionCpuBudget.Lease::close); }
+            for (int i = 0; i < 8; i++) leases.add(assertLease(budget.tryAcquire(true)));
+            configured[0] = 2;
+            assertNull(budget.tryAcquire(true));
+            assertTrue(budget.diagnostics().contains("limit=2,active=8"));
+            leases.forEach(PredictionCpuBudget.Lease::close);
+            leases.clear();
+            configured[0] = 8;
+            for (int i = 0; i < 8; i++) leases.add(assertLease(budget.tryAcquire(true)));
+            assertNull(budget.tryAcquire(true));
+        } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
     }
 
     @Test void integratedGenerationDrainsWithoutStarvingCoverageAndDisconnectClearsItsDebt() {
@@ -150,58 +138,24 @@ class PredictionCpuBudgetTest {
         } finally { active.forEach(PredictionCpuBudget.Lease::close); }
     }
 
-    @Test void pressureOneOnlyTricklesPausedDetailWhileRegularDetailRetainsItsReducedCap() {
-        var e = new Environment();
-        e.system = .90;
-        assertNull(e.budget.tryAcquire(false, true));
-        e.now = 2 * SECOND;
-        var trickle = assertLease(e.budget.tryAcquire(false, true));
-        e.now = 4 * SECOND;
-        assertNull(e.budget.tryAcquire(false, true), "a running trickle still occupies the only detail slot");
-        trickle.close();
-        assertLease(e.budget.tryAcquire(false, true)).close();
-        assertNull(e.budget.tryAcquire(false, true), "a short build cannot start another trickle immediately");
 
-        var regular = new Environment();
-        regular.system = .90;
-        var leases = new ArrayList<PredictionCpuBudget.Lease>();
-        try {
-            for (int i = 0; i < 3; i++) leases.add(assertLease(regular.budget.tryAcquire(false)));
-            assertNull(regular.budget.tryAcquire(false));
-            leases.add(assertLease(regular.budget.tryAcquire(true)));
-        } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
-    }
 
-    @Test void negativeNanoTimeAndSignedWrapKeepRecoveryAndDetailDelayBounded() {
+    @Test void signedClockWrapCannotKeepGenerationOrAdmissionBlocked() {
         for (long start : new long[] {-20 * SECOND, Long.MAX_VALUE - SECOND}) {
             var e = new Environment();
-            e.now = start; e.system = .98;
+            e.now = start;
+            e.budget.observeLocalGeneration(true, 8);
             assertNull(e.budget.tryAcquire(false));
-            e.now = start + 2 * SECOND;
-            assertLease(e.budget.tryAcquire(false)).close();
-            assertNull(e.budget.tryAcquire(false));
-            e.system = .5;
+            assertNull(e.budget.tryReserveQueued(false, 8));
             e.now = start + 3 * SECOND;
-            assertTrue(e.budget.diagnostics().contains("limit=2"));
-            e.now = start + 6 * SECOND;
-            assertTrue(e.budget.diagnostics().contains("limit=4"));
-            e.now = start + 7 * SECOND;
-            e.budget.diagnostics();
-            e.now = start + 10 * SECOND;
-            assertTrue(e.budget.diagnostics().contains("limit=8"));
+            var queue = e.budget.tryReserveQueued(false, 8);
+            assertNotNull(queue);
+            queue.consume();
+            assertLease(e.budget.tryAcquire(false)).close();
         }
     }
 
-    @Test void unavailableMetricsPreserveBoundedAdmissionAndSamplingIsNotPerTile() {
-        long[] now = {0}; int[] queries = {0};
-        var budget = new PredictionCpuBudget(() -> 4,
-                () -> { queries[0]++; return -1; }, () -> Double.NaN, () -> now[0], false);
-        for (int i = 0; i < 100; i++) assertLease(budget.tryAcquire(false)).close();
-        assertEquals(1, queries[0]);
-        now[0] = SECOND;
-        assertLease(budget.tryAcquire(false)).close();
-        assertEquals(2, queries[0]);
-    }
+
 
     @Test void concurrentAdmissionsShareOneCapAndClosingTwiceDoesNotLeakSlots() throws Exception {
         var budget = PredictionCpuBudget.fixed(4);
@@ -226,46 +180,19 @@ class PredictionCpuBudgetTest {
         } finally { executor.shutdownNow(); }
     }
 
-    @Test void slowMetricSamplerCannotBlockAdmissionMonitor() throws Exception {
-        var entered = new CountDownLatch(1);
-        var release = new CountDownLatch(1);
-        var budget = new PredictionCpuBudget(() -> 2,
-                () -> {
-                    entered.countDown();
-                    try {
-                        release.await(5, TimeUnit.SECONDS);
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                    }
-                    return .1;
-                }, () -> .1, System::nanoTime, true);
-        try {
-            assertTrue(entered.await(5, TimeUnit.SECONDS), "daemon sampler did not start");
-            var admission = Executors.newSingleThreadExecutor();
-            try {
-                var future = admission.submit(() -> budget.tryAcquire(true));
-                var lease = future.get(500, TimeUnit.MILLISECONDS);
-                assertNotNull(lease);
-                lease.close();
-            } finally {
-                admission.shutdownNow();
-            }
-        } finally {
-            release.countDown();
-        }
-    }
+
 
     @Test void queuedReservationsCountAgainstTheSharedCapAndReleaseIdempotently() {
         var budget = PredictionCpuBudget.fixed(2);
-        var first = budget.tryReserve(true, false);
-        var second = budget.tryReserve(true, false);
+        var first = budget.tryReserve(true);
+        var second = budget.tryReserve(true);
         assertNotNull(first);
         assertNotNull(second);
-        assertNull(budget.tryReserve(true, false));
+        assertNull(budget.tryReserve(true));
         first.consume();
         first.consume();
         try (var lease = assertLease(budget.tryAcquire(true))) {
-            assertNull(budget.tryReserve(true, false), "one active lease plus one queued reservation fills the cap");
+            assertNull(budget.tryReserve(true), "one active lease plus one queued reservation fills the cap");
         }
         second.close();
         second.close();
@@ -275,15 +202,15 @@ class PredictionCpuBudgetTest {
     @Test void boundedQueueReservationsReleaseWithoutChangingActiveCapacity() {
         var budget = PredictionCpuBudget.fixed(1);
         var active = assertLease(budget.tryAcquire(true));
-        var first = budget.tryReserveQueued(true, false, 2);
-        var second = budget.tryReserveQueued(false, false, 2);
+        var first = budget.tryReserveQueued(true, 2);
+        var second = budget.tryReserveQueued(false, 2);
         assertNotNull(first);
         assertNotNull(second);
-        assertNull(budget.tryReserveQueued(true, false, 2), "queue limit must be enforced");
+        assertNull(budget.tryReserveQueued(true, 2), "queue limit must be enforced");
 
         first.consume();
         first.consume();
-        var third = budget.tryReserveQueued(true, false, 2);
+        var third = budget.tryReserveQueued(true, 2);
         assertNotNull(third,
                 "consuming a queued task must release its queue slot");
 
@@ -298,43 +225,39 @@ class PredictionCpuBudgetTest {
 
     @Test void rejectedWorkerClosesAdmissionUntilCapacityReleaseOrRetryDeadline() {
         var now = new java.util.concurrent.atomic.AtomicLong();
-        var budget = new PredictionCpuBudget(() -> 1, () -> .1, () -> .1, now::get, false);
+        var budget = new PredictionCpuBudget(() -> 1, now::get);
         var active = assertLease(budget.tryAcquire(true));
-        var queued = budget.tryReserveQueued(true, false, 8);
+        var queued = budget.tryReserveQueued(true, 8);
         assertNotNull(queued);
         queued.consume();
         assertNull(budget.tryAcquire(true));
         for (int i = 0; i < 10000; i++) {
-            assertNull(budget.tryReserveQueued(true, false, 8));
-            assertNull(budget.tryReserve(true, false));
+            assertNull(budget.tryReserveQueued(true, 8));
+            assertNull(budget.tryReserve(true));
         }
         now.set(100_000_000L);
-        var probe = budget.tryReserveQueued(true, false, 8);
+        var probe = budget.tryReserveQueued(true, 8);
         assertNotNull(probe, "a capacity change outside prediction must get a bounded retry");
         probe.consume();
         assertNull(budget.tryAcquire(true));
         active.close();
-        var resumed = budget.tryReserveQueued(true, false, 8);
+        var resumed = budget.tryReserveQueued(true, 8);
         assertNotNull(resumed, "lease release wakes admission immediately, before retry timeout");
         resumed.consume();
         assertLease(budget.tryAcquire(true)).close();
     }
 
-    @Test void detailTrickleDoesNotFillExecutorWhileWaiting() {
+    @Test void queuedDetailRemainsBoundedAndReleaseWakesOtherManagersImmediately() {
         var e = new Environment();
-        e.system = .98;
-        for (int i = 0; i < 10000; i++) assertNull(e.budget.tryReserveQueued(false, false, 32));
-        e.now = 2 * SECOND;
-        var first = e.budget.tryReserveQueued(false, false, 32);
-        assertNotNull(first);
-        first.consume();
-        var active = assertLease(e.budget.tryAcquire(false));
-        e.now = 4 * SECOND;
-        assertNull(e.budget.tryReserveQueued(false, false, 32), "active detail owns the single trickle lane");
-        active.close();
-        var resumed = e.budget.tryReserveQueued(false, false, 32);
-        assertNotNull(resumed);
-        resumed.close();
+        var leases = new ArrayList<PredictionCpuBudget.Lease>();
+        try {
+            for (int i = 0; i < 7; i++) leases.add(assertLease(e.budget.tryAcquire(false)));
+            for (int i = 0; i < 100; i++) assertNull(e.budget.tryReserveQueued(false, 8));
+            leases.remove(0).close();
+            var resumed = e.budget.tryReserveQueued(false, 8);
+            assertNotNull(resumed);
+            resumed.close(); resumed.close();
+        } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
     }
 
     private static PredictionCpuBudget.Lease assertLease(PredictionCpuBudget.Lease lease) {
@@ -348,8 +271,6 @@ class PredictionCpuBudgetTest {
                 for (int i = 0; i <= 90; i++) PredictionFramePace.recordFrame(SECOND + i * gap);
                 assertEquals(fps, PredictionFramePace.averageFps(), .01);
                 var e = new Environment();
-                assertEquals(PredictionCpuBudget.ThrottleLevel.NONE, e.budget.currentThrottle());
-                assertTrue(e.budget.allowsIdleRefinement());
                 assertEquals(8, e.budget.localGenerationLimit(16, false));
                 assertEquals(8, e.budget.reserveLocalGeneration(16, false, 0));
                 e.budget.observeLocalGeneration(true, 0);
@@ -359,41 +280,8 @@ class PredictionCpuBudgetTest {
         } finally { PredictionFramePace.resetForTesting(); }
     }
 
-    @Test void cpuPressureRecoversAtThirtyFpsWithoutWaitingForFiftyFps() {
-        try {
-            PredictionFramePace.resetForTesting();
-            for (int i = 0; i <= 90; i++) PredictionFramePace.recordFrame(SECOND + i * 33_333_333L);
-            var e = new Environment();
-            e.system = .98;
-            assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE, e.budget.currentThrottle());
-            assertEquals(0, e.budget.localGenerationLimit(16, false));
-            assertFalse(e.budget.allowsIdleRefinement());
-            e.system = .1; e.process = .1; e.now = SECOND;
-            assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE, e.budget.currentThrottle());
-            e.now = 4 * SECOND;
-            assertEquals(PredictionCpuBudget.ThrottleLevel.REDUCE, e.budget.currentThrottle());
-            assertEquals(4, e.budget.localGenerationLimit(16, false));
-            e.now = 5 * SECOND;
-            e.budget.currentThrottle();
-            e.now = 8 * SECOND;
-            assertEquals(PredictionCpuBudget.ThrottleLevel.NONE, e.budget.currentThrottle());
-            assertEquals(8, e.budget.localGenerationLimit(16, false));
-            assertTrue(e.budget.allowsIdleRefinement());
-            assertEquals(30, PredictionFramePace.averageFps(), .01);
-        } finally { PredictionFramePace.resetForTesting(); }
-    }
 
-    @Test void optionalIdleRefinementRequiresCpuHeadroomAndHigherLoadStillThrottles() {
-        var e = new Environment();
-        e.system = .82;
-        assertEquals(PredictionCpuBudget.ThrottleLevel.NONE, e.budget.currentThrottle());
-        assertFalse(e.budget.allowsIdleRefinement());
-        e.now = SECOND; e.system = .90;
-        assertEquals(PredictionCpuBudget.ThrottleLevel.REDUCE, e.budget.currentThrottle());
-        assertEquals(4, e.budget.localGenerationLimit(16, false));
-        e.now = 2 * SECOND; e.system = .98;
-        assertEquals(PredictionCpuBudget.ThrottleLevel.PAUSE, e.budget.currentThrottle());
-        assertEquals(0, e.budget.localGenerationLimit(16, false));
-    }
+
+
 
 }

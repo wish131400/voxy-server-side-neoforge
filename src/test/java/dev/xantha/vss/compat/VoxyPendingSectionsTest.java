@@ -6,6 +6,36 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class VoxyPendingSectionsTest {
+    @Test void aContinuouslyDirtyOldestRegionCannotStarveAnotherRegion() {
+        var queue=new VoxyPendingSections();
+        long one=VoxyPredictionBridge.position(0,0,0,0),two=VoxyPredictionBridge.position(0,1,0,0);
+        long distant=VoxyPredictionBridge.position(4,100,0,0);
+        queue.add(one);queue.add(two);queue.add(distant);queue.view(0,0,1,0);
+        boolean seen=false;
+        for(int i=0;i<24;i++) {
+            Long next=queue.poll();
+            if(next==distant){seen=true;break;}
+            queue.add(next);
+        }
+        assertTrue(seen,"FIFO must rotate regions that never become empty");
+    }
+    @Test void teleportAndMeshDemandJumpAheadOfTheOldSceneWithoutStarvingIt() {
+        var queue=new VoxyPendingSections();
+        for(int x=0;x<200;x++)queue.add(VoxyPredictionBridge.position(4,x,0,0));
+        long nearby=VoxyPredictionBridge.position(4,1000,0,0);
+        long requested=VoxyPredictionBridge.position(4,-1000,0,0);
+        queue.add(nearby);queue.add(requested);queue.view(512000,0,1,0);
+        assertEquals(nearby,queue.poll());
+        queue.promote(requested);assertEquals(requested,queue.poll());
+        var delivered=new HashSet<Long>();
+        for(int i=0;i<16;i++) {
+            long live=VoxyPredictionBridge.position(4,1000+i,0,0);
+            queue.add(live);queue.promote(live);delivered.add(queue.poll());
+        }
+        assertTrue(delivered.contains(VoxyPredictionBridge.position(4,0,0,0)),"FIFO turns retain progress in the old scene");
+        while(!queue.isEmpty())assertTrue(delivered.add(queue.poll()));
+        assertFalse(queue.intersects(Integer.MIN_VALUE,Integer.MIN_VALUE,Integer.MAX_VALUE,Integer.MAX_VALUE));
+    }
     private static boolean intersects(Set<Long> positions,int x,int z,int maxX,int maxZ) {
         for(long p:positions) {
             long span=2L<<VoxyPredictionBridge.level(p);

@@ -61,6 +61,30 @@ public final class WorldgenRegistryDependencies implements RegistryOps.RegistryI
         }
     }
 
+    /** Tags accompany the registry values without changing the legacy custom-registry entry map. */
+    public JsonObject encodeTags() {
+        // These are the dynamic registries carried by WorldgenCodecSnapshot. Static
+        // blocks/items keep the client's own tags; they are never rebound by VSS.
+        Set<String> snapshotKeys = Set.of(
+                "minecraft:worldgen/noise", "minecraft:worldgen/density_function",
+                "minecraft:worldgen/configured_carver", "minecraft:worldgen/carver",
+                "minecraft:worldgen/configured_feature", "minecraft:worldgen/feature",
+                "minecraft:worldgen/placed_feature", "minecraft:worldgen/biome",
+                "minecraft:worldgen/structure", "minecraft:worldgen/structure_set",
+                "minecraft:worldgen/processor_list", "minecraft:worldgen/template_pool",
+                "minecraft:worldgen/material_condition", "minecraft:worldgen/material_rule",
+                "minecraft:worldgen/block_state_provider");
+        JsonObject result = new JsonObject();
+        access.registries().filter(entry -> requested.contains(entry.key())
+                || snapshotKeys.contains(entry.key().location().toString()))
+                .sorted(Comparator.comparing(entry -> entry.key().location().toString()))
+                .forEach(entry -> {
+                    JsonObject tags = WorldgenRegistryTags.encode(entry.value());
+                    if (tags.size() != 0) result.add(entry.key().location().toString(), tags);
+                });
+        return result;
+    }
+
     private <T> JsonObject encode(RegistryDataLoader.RegistryData<T> data) {
         JsonObject entries = new JsonObject();
         for (var entry : access.registryOrThrow(data.key()).entrySet()) {

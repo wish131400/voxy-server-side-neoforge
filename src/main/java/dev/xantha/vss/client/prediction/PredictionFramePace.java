@@ -1,6 +1,6 @@
 package dev.xantha.vss.client.prediction;
 
-/** Rolling frame-time diagnostics. Scheduling decisions use PredictionCpuBudget only. */
+/** Rolling frame-time diagnostics. Frame caps do not affect work admission. */
 public final class PredictionFramePace {
     /** Average frame window; ~1.5 s at 60 fps before publishing a settled average. */
     private static final int SAMPLES = 90;

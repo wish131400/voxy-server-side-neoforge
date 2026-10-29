@@ -95,7 +95,7 @@ public final class PlayerSessionManager {
             int clientCapabilities,
             String logPrefix) {
         if (lifecycle.isStopping()) {
-            return createSessionConfig(false);
+            return createSessionConfig(player.level().getServer(), false);
         }
         VSSServerConfig config = VSSServerConfig.CONFIG;
         boolean compatible = isCompatibleClient(clientProtocolVersion, clientCapabilities);
@@ -117,7 +117,7 @@ public final class PlayerSessionManager {
         } else if (!compatible) {
             logIncompatibleClient(logPrefix + " " + player.getGameProfile().getName(), clientProtocolVersion, clientCapabilities);
         }
-        return createSessionConfig(enabled);
+        return createSessionConfig(player.level().getServer(), enabled);
     }
 
     private void sendSessionConfig(ServerPlayer player) {
@@ -125,10 +125,10 @@ public final class PlayerSessionManager {
     }
 
     private void sendSessionConfig(ServerPlayer player, boolean enabled) {
-        VSSNetworking.sendToPlayer(player, createSessionConfig(enabled));
+        VSSNetworking.sendToPlayer(player, createSessionConfig(player.level().getServer(), enabled));
     }
 
-    private SessionConfigS2CPayload createSessionConfig(boolean enabled) {
+    private SessionConfigS2CPayload createSessionConfig(MinecraftServer server, boolean enabled) {
         VSSServerConfig config = VSSServerConfig.CONFIG;
         return new SessionConfigS2CPayload(
                 VSSConstants.PROTOCOL_VERSION,
@@ -139,7 +139,7 @@ public final class PlayerSessionManager {
                 config.midSyncRateLimitPerTick,
                 config.farSyncRateLimitPerTick,
                 config.distantSyncRateLimitPerTick,
-                config.generationConcurrencyLimitPerPlayer,
+                config.effectiveGenerationConcurrencyLimitPerPlayer(!server.isDedicatedServer()),
                 config.enableChunkGeneration,
                 config.totalBandwidthBytesPerSecond(),
                 configRevision.get());

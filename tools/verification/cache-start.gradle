@@ -1,0 +1,15 @@
+allprojects { afterEvaluate {
+    tasks.register('cacheStartupTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionCacheStartupTest.class','**/PredictionDimensionLifecycleTest.class'
+        include '**/PredictionVoxelCacheTest.class','**/PredictionVoxelCacheIntegrationTest.class'
+        include '**/PredictionCacheStorageTest.class','**/PredictionDimensionProfilesTest.class'
+        include '**/PredictionCachePublicationRepairTest.class'
+        include '**/PredictionCacheDecodeTest.class','**/PredictionInitializationTest.class'
+        forkEvery=1;maxHeapSize='2G';maxParallelForks=1
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }
