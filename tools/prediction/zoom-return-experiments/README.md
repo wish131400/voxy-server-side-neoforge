@@ -1,5 +1,7 @@
 **2026-10-12：缩小后显示范围恢复实验**
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 该目录保存本轮基线、生产差异、用户 Spark 与固定日志证据、旧版复现失败、新版 JUnit、逐轮 A/B CSV。所有实验只在显式 Gradle init script 中启用；不会打入成品或操作 Minecraft 实例。
 
 - `baseline/neoforge/`、`baseline/forge/` 是本轮开始时的三个生产文件；不是 Git HEAD。

@@ -1,5 +1,7 @@
 # Radial terrain quality bands
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 Artifact: `build/libs/vss-0.3-neoforge-1.21.1.jar`, 3,852,022 bytes.
 SHA-256: `156fceb20116b48817d78690636c484d79d9942cc9cd86ed5e15574a89eac64a`.
 Version remains `0.3-neoforge-1.21.1`.

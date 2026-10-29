@@ -1,5 +1,7 @@
 # 预测粗模首次显示延迟修复
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 2026-09-09 游戏日志中，第一块预测 tile 为 lod=10，`samples=4356`，
 `buildMs=7820.2`，生成 172,308 个顶点。日志保留在
 `build/prediction-first-coverage/game-before.log`。

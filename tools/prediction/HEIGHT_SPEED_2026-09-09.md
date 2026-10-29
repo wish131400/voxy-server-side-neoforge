@@ -1,5 +1,7 @@
 > Correction after a fresh-world reproduction: the original explanation below was incomplete. The offline Java oracle did not execute Tectonic's `NoisesMixin`, which changes positional noise seed names. Agreement with that oracle did not establish agreement with the running game. The confirmed cause, fix, and live-server comparison are documented in [TECTONIC_NOISE_SEEDS_2026-09-09.md](TECTONIC_NOISE_SEEDS_2026-09-09.md). Changed mod history remains a separate limitation for existing chunks, but does not explain the fresh-world bug.
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 # Height mismatch and preview scheduling
 
 The reported world has had its terrain mods changed or updated (confirmed by the user). Its enabled pack is now Tectonic 3.0.26 with default terrain settings and seed 1011965752357175303. Read-only inspection of existing region heightmaps gives an ocean floor of 137 at (71,217), 187 at (-17,35), and 128 at (256,256). Current Tectonic base terrain gives 107, 64, and 112 respectively in both Minecraft Java and Rust. Heightmaps include later surface/feature changes, so these are not block-for-block generation assertions, but the differences and changed generator history explain why old mountains cannot be reconstructed using only the current generator.

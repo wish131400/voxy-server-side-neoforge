@@ -1,5 +1,7 @@
 # Meridian-inspired VSS implementation validation, 2026-10-16
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 The default Gradle entry point tests **live production source**. The earlier
 `meridian-algorithms-20261016` experiment keeps its original frozen input and
 results; it is a reference, not the implementation under test.

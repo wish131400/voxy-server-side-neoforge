@@ -1,6 +1,6 @@
 # VSS 开发约定
 
-本约定用于 Forge 1.20.1 与 NeoForge 1.21.1。玩家安装与配置见 [README](README.md)，模块职责与现存边界见 [架构说明](docs/architecture.md)。
+本约定用于 Forge 1.20.1 与 NeoForge 1.21.1。玩家安装与配置见 [README](README.md)，模块职责与现存边界见 [架构说明](docs/development/architecture.md)。
 
 ## 环境与日常命令
 
@@ -47,7 +47,7 @@ CI 的 `verify.yml` 自动执行边界回归、规划调用方回归和打包，
 ## 依赖与线程纪律
 
 - `common` 不读取上层配置；启动入口提供动态日志开关。`config` 不调用网络、预测或兼容实现。
-- `api` 暴露契约，不能 import 这些实现。`VSSApi` 是客户端 API，含 `ClientLevel`，不得从专服初始化；服务端扩展使用 `api.worldgen` 或 `api.column`。整列过滤和覆盖语义见 [整列过滤接口](docs/column-filter-api-20261020.md)。
+- `api` 暴露契约，不能 import 这些实现。`VSSApi` 是客户端 API，含 `ClientLevel`，不得从专服初始化；服务端扩展使用 `api.worldgen` 或 `api.column`。整列过滤和覆盖语义见 [整列过滤接口](docs/development/column-filter-api.md)。
 - 服务端业务在 `VSSServerNetworking` 中装配，注入 lifecycle、registry、delivery 等依赖。旧命令/广播适配器的门面调用有明确白名单，不能新增同类反向依赖。
 - 预测和 Voxy 兼容层通过 `ClientLodSession` 查询唯一网络会话及稳定缓存身份，禁止依赖整个 `networking.client` 实现包。适配器必须无状态，默认断线不能声称真实覆盖成立。
 - 服务端玩家/世界读写在服务端线程；客户端可变状态在客户端线程；OpenGL 生命周期在渲染线程。后台计算使用安全快照，完成后回原线程检查版本。
@@ -56,7 +56,7 @@ CI 的 `verify.yml` 自动执行边界回归、规划调用方回归和打包，
 
 ## 实验、回归与发布
 
-生产修复和算法对照分开维护。保留的行为回归使用当前接口；历史 baseline 放在 `tools/prediction/`，不得编进主 JAR。旧独立渲染器及依赖其接口的测试已经移除，不再保留失效的默认编译排除名单；当前范围见 [实验登记](docs/architecture.md#实验与测试范围)。使用历史实验前须检查专用 fixture 和接口，不能用旧报告代替当前路径的验证。
+生产修复和算法对照分开维护。保留的行为回归使用当前接口；历史 baseline 放在 `tools/prediction/`，不得编进主 JAR。旧独立渲染器及依赖其接口的测试已经移除，不再保留失效的默认编译排除名单；当前范围见 [实验登记](docs/development/architecture.md#实验与测试范围)。使用历史实验前须检查专用 fixture 和接口，不能用旧报告代替当前路径的验证。
 
 不要为了让门禁通过而扩大排除、冻结未知违规或删除有效断言。新增边界例外须说明具体类型、原因和迁移计划，并同时更新测试与架构文档。不要把 `client.prediction` 的内部类批量改成 public 来迁包。
 

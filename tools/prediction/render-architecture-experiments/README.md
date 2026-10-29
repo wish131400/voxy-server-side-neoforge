@@ -1,5 +1,7 @@
 **渲染架构 A/B 证据**
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 本目录保留本轮原始数据和已撤回显示层级候选；生产源码只保留页组缓存、溢出页批量提交及计数修正。两仓库都有相同报告和结果。没有游戏帧率 A/B。
 
 结果在 results/neoforge、results/forge：regional-submission.csv 是 3,072 个绘制条目的精确修改前/后提交循环；overflow-submission.csv 是实际填满主 arena 后的 384 个地块。mode=0 是本场景基线，mode=1 是候选。encoded_items 是累计编码项，需取相邻帧差；uploaded_* 是本帧值。全部使用 24 轮预热、41 轮交替记录。

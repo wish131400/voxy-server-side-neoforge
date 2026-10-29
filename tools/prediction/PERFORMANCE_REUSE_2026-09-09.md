@@ -1,5 +1,7 @@
 # Prediction sampling and generation-lock improvements
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 The Java/native boundary now uses cached sparse columns and complete chunk columns before scheduling new samples, including near grids. Near cache misses are counted by chunk within the current batch: dense groups of at least 16 columns use the existing complete-chunk path, while thin borders use the existing native sparse path. The Rust surface implementation retains its biome-specific fallback to complete chunks.
 
 Previously, spacing below four always loaded every touched chunk in full. The regression case at (-1, -1), spacing one, 8 by 8 samples, now issues one complete chunk plus 15 sparse columns instead of four complete chunks. Height, fluid, flags and material IDs match complete-chunk results. Repeating the grid makes no further sampling submissions. Cached requests still honor sampler cancellation.

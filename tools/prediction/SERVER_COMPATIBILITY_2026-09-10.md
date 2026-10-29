@@ -1,5 +1,7 @@
 # 当前 VSS 服务端与预测 LOD：2026-09-10 评估
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 评估对象：桌面主仓库当前 NeoForge 1.21.1 / VSS 0.3 源码。未修改生产代码、整合包安装文件或玩家存档。
 
 ## 结论

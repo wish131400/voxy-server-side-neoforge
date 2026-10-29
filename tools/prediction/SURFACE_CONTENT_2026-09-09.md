@@ -1,5 +1,7 @@
 # Coarse canopy and missing surface content
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 Artifact: `build/libs/vss-0.3-neoforge-1.21.1.jar`, 3,860,895 bytes.
 SHA-256: `b01638904203755cead485f953e8bff284485cc8355b6e0eadb7e31a73eff444`.
 

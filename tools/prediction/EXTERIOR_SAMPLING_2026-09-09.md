@@ -1,5 +1,7 @@
 # Bounded exterior sampling
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 The sparse native surface path previously generated the target column down to the dimension floor, even though the published record contains only the outer solid boundary, fluid boundary, three material states and biome tints. This change stops base-column evaluation after retaining the exterior and the extra depth required by surface rules.
 
 The rule walker evaluates the maximum downward stone-depth threshold using the actual column surface-depth and secondary-noise values. The retained range includes the three material sample depths and an additional guard. Threshold arithmetic overflow or padding above 64 blocks disables truncation. Surface rules still run against the retained original blocks; ores, aquifers and density are evaluated normally at those positions.

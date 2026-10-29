@@ -1,5 +1,7 @@
 # Native packaging and refinement invalidation
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 Artifact: `build/libs/vss-0.3-neoforge-1.21.1.jar` (3,843,390 bytes).
 SHA-256: `8aa48f8ea8212ae762275c93706f0271fbe5687e1aec1a57282ffceb8ec99190`.
 

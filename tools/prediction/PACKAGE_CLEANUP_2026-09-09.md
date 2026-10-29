@@ -1,5 +1,7 @@
 # 原生后端、无用代码与 JAR 体积清理
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 本轮从已完成精细化减负的 0.3 包开始审查。旧原生后端仍存在备用调用路径，
 但不被当前 Rust 后端依赖。已移除旧路径，当前选择为：自定义兼容适配器、
 本项目 Rust 核心、Java 回退。新 Rust 原生包目前只覆盖 Windows x86_64；

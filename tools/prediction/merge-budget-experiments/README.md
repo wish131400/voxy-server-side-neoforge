@@ -1,5 +1,7 @@
 # 显示 LOD 构建分配与合并收益实验
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 日期：2026-10-12。只保留已验证的分配减少；试验过的共享记录、前后缀共享、大范围相邻矩形和完整档位去重均已从生产源码撤回。
 
 当前生产变化只有：`PredictionDisplayGeometry` 在工作线程已有数组内向前紧凑记录；`PredictionScanMerge.mergeDisplay` 只处理有效不透明前缀；显示档位通过原有准入条件后才复制需要发布的数据。网格、误差、预算、绘制范围和 GPU 编码逐字一致。

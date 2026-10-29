@@ -1,3 +1,7 @@
+# prediction native color compatibility 20261006
+
+> 历史记录：保留当时的实现、输入与验证结果，不能据此判断当前版本的渲染架构、配置或兼容范围。 当前说明见 [文档目录](README.md)，相关旧报告见 [历史索引](history/README.md)。 本报告路径保留，供既有验证工具及证据清单引用。
+
 **2026-10-06：预测原生地形后端的 Java 颜色兼容修复与验证**
 
 已修复 `tools/rust/vss-native-core/src/biome.rs` 中会拒绝整个原生地形文档的颜色校验。Biome codec 导出的是 Java 有符号 `int`，并不是只含 RGB 的非负整数。现在草、叶、水三个字段接受完整的 Java int32 值，按 Java 消费者的逐通道移位/掩码语义保留低 24 位；字段缺失规则、类型校验和 int32 范围校验继续生效。

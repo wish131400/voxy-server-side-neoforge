@@ -1,5 +1,7 @@
 # Historical Meridian algorithm measurements, 2026-10-16
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 This directory retains the **historical inputs and evidence**, not an active
 candidate implementation. The rejected/superseded experiment classes, old Gradle
 entry point, and old result collector were removed on 2026-10-16. Frozen
@@ -24,5 +26,5 @@ current full-shader two-pass occlusion comparison. The old procedural occlusion,
 binary canopy, encoding, demand, JNI, and duplicate mesher harnesses were retired;
 their historical results remain available in the reports.
 
-See `docs/meridian-018-algorithm-tests-20261016.md` for the original findings and
+See `docs/history/performance/meridian-018-algorithm-tests-20261016.md` for the original findings and
 `tools/prediction/raster-boxes-20261016/cleanup.json` for removed source hashes.

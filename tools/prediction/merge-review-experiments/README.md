@@ -1,5 +1,7 @@
 本实验用于 2026-10-12 的 Voxy / Distant Horizons 合并逻辑调查。它只生成临时 Java 实验类，不修改生产源码，不启动游戏，也不测量客户端 FPS。
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 从同一份历史捕获恢复 canonical 网格，剥离捕获时追加的显示变体，再重放当前生产扫描器、空间排序、显示变体与植被范围代码。输入只统计唯一的普通不透明瓦片，排除接缝。保留原水面尾部并验证逐字节一致；精确合并前后核对完整材质、颜色、光照、方向、平面的有向面积。
 
 对照包含三条路径：
@@ -20,4 +22,4 @@ python tools/prediction/merge-review-experiments/replay_merge_limits.py `
 
 输入语料来自 2026-10-10，缺少有效相机。材质适配使用捕获的 leafClass、原版雪和草/水草 sprite 名称，缺少完整方块注册表及 tag 快照；不适合外推所有整合包的植被数量。输出记录源文件 SHA256、逐瓦片面数、准入原因及统计结果。两个候选均只存在于实验类中，未进入生产代码。
 
-本次最终结果和比较依据保存于仓库的 `docs/vss-voxy-dh-merge-review-20261012.md` 和同名 JSON。
+本次最终结果和比较依据保存于仓库的 `docs/history/rendering/vss-voxy-dh-merge-review-20261012.md` 和同名 JSON。

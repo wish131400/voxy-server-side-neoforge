@@ -1,5 +1,7 @@
 # Prediction scheduling and persistent reload
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 All changes are in the desktop `main` working directory, `C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1`.
 
 ## Scheduling changes

@@ -1,5 +1,7 @@
 # Tectonic height mismatch: runtime noise seed aliases
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 The fresh world reproduces a real sampling error. The earlier attribution to changed terrain mods in an existing save was incomplete. Offline Java/Rust agreement did not validate the running modded generator.
 
 ## Confirmed cause

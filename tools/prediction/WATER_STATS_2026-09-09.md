@@ -1,5 +1,7 @@
 # Water handoff and client statistics
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 The installed game's `latest.log` records an `ArrayIndexOutOfBoundsException` in
 `ClientPredictionState.diagnostics`: the aggregation visited 20 legacy LOD levels
 while a manager returned nine counts. Statistics now grow the aggregate to each

@@ -1,5 +1,7 @@
 # Sparse workspace JNI benchmark
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 This is the existing display/exact JNI comparison harness with additional
 8x8 batches at 128, 256 and 512 block spacing. Sparse scenarios use 16 batches
 (1,024 requested columns) per fresh world. Dense and warm-cache controls retain

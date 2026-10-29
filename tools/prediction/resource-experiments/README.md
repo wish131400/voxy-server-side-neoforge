@@ -1,6 +1,8 @@
 # VSS resource optimization experiments, 2026-10-11
 
-The decision report is `docs/vss-resource-optimization-20261011.md`. Measurements
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
+The decision report is `docs/history/performance/vss-resource-optimization-20261011.md`. Measurements
 are local A/B benchmarks or policy replays, not Minecraft FPS comparisons.
 Production contains the accepted changes only.
 

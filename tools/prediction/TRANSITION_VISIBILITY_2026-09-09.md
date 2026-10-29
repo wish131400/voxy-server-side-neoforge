@@ -1,5 +1,7 @@
 # Refinement transitions and resident detail visibility
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 Artifact: `build/libs/vss-0.3-neoforge-1.21.1.jar`, 3,849,241 bytes.
 SHA-256: `9725948c806453a9108f17551067775fc8ceccd862c37470cae6ffdc2f717f63`.
 

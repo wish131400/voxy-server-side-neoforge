@@ -1,6 +1,6 @@
 # VSS source-built Rust worldgen core
 
-Minecraft 1.21.1 / NeoForge, mod version `0.3-neoforge-1.21.1`.
+VSS 0.3.6 / Minecraft 1.21.1 / NeoForge. See the [developer guide](../../CONTRIBUTING.md) for the platform build and the [documentation index](../../docs/README.md) for current behavior.
 
 The implementation follows the mapped Minecraft classes and effective runtime
 registries. Offline oracles call the actual Minecraft methods. Saved-world
@@ -10,10 +10,14 @@ captures are supplementary regression data; they do not define the algorithm.
 
 `ClientWorldgenProfileDecoder` selects `RustTerrainSampler` for supported noise
 generators when the independently named `vss_native_core` library is available.
-The worldgen interface is JNI ABI **5** (`RustWorldgenBackend`); the noise-only
+The worldgen interface is JNI ABI **6** (`RustWorldgenBackend`); the noise-only
 probe keeps ABI 1 for validation. The release packages the same core for
 **Windows x86_64, Linux x86_64/aarch64, macOS x86_64/aarch64**.
 Unknown targets use the Java sampler. The only production native backend is this core.
+
+## ABI evolution
+
+The following entries describe changes introduced by earlier ABI revisions; the current interface is ABI 6.
 
 ABI 3 adds `previewPoints`: grids below the full terrain axis use raw density
 at 16-block vertical intervals and refine the detected crossing to 4 blocks.
@@ -55,7 +59,7 @@ columns). Nether surfaces evaluate every solid run, and supported cave features
 share native edits with the Java compatibility stream. `columns` retains its
 uncoated density semantics. Block definitions now carry default-state
 replaceability for huge-fungus placement; absent metadata causes Java fallback
-instead of guessing. See `docs/nether-end-prediction.md` for support limits and
+instead of guessing. See [Nether / End support notes](../../docs/history/worldgen/nether-end-prediction.md) for support limits and
 the paired surface/decoration/structure fixtures.
 
 The 2026-10-25 ABI 6 build also adds the optional `displayGrid` entry. It accepts

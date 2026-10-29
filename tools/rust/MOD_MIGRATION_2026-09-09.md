@@ -1,5 +1,7 @@
 # Terrain Mod Native Migration
 
+> 历史开发记录；当前构建与 ABI 见 [Rust 工具说明](README.md)。
+
 Status: partial implementation, not completion of the requested all-Rust migration.
 Minecraft 1.21.1, NeoForge, VSS version `0.3-neoforge-1.21.1`.
 

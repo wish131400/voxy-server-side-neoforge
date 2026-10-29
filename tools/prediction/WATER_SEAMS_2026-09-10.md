@@ -1,5 +1,7 @@
 # 2026-09-10 水下浅色透视与闪烁：预测 LOD 补缝侧面
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 ## 范围
 
 本次修改在桌面主仓库 `C:/Users/Administrator/Desktop/voxyserverside-neoforge-1.21.1`。

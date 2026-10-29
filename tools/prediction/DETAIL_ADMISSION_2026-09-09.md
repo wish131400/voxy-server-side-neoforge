@@ -1,5 +1,7 @@
 # Fine terrain admission and preview progress
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 The user confirmed quick first coverage but very slow subsequent refinement. A read-only thread snapshot from the running JDK 25 game found all eight prediction workers executing `RustWorldgenBackend.surfacePoints`; each had consumed roughly 365 CPU seconds over 370 elapsed seconds. This is active native computation, not Java lock waiting. The snapshot alone does not imply one JNI call lasted 370 seconds.
 
 A later read-only snapshot of the existing prediction profile and manager diagnostics found:

@@ -1,5 +1,7 @@
 # Lithostitched registry dependency and seed synchronization
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 ## Runtime evidence
 
 The 12:54 session with Tectonic 3.0.26 and Lithostitched 1.8.0+beta6

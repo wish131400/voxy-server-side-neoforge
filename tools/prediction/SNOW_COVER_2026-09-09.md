@@ -1,5 +1,7 @@
 # Prediction snow cover — 2026-09-09
 
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../docs/development/architecture.md)；工具目录见 [实验索引](../../docs/development/prediction-experiments.md)。
+
 ## Observations
 
 The supplied screenshot shows white nearby snow terrain meeting green

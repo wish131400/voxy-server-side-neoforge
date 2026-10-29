@@ -1,4 +1,7 @@
 This directory keeps the pre-change submission baseline, retained-path benchmarks,
+
+> 历史实验说明：接口、命令与性能结论以记录时的输入为限。当前实现见 [模块架构](../../../docs/development/architecture.md)；工具目录见 [实验索引](../../../docs/development/prediction-experiments.md)。
+
 GPU counter/state checks, rollback evidence and archived results out of main.
 
 The production selector is flat. It has no new coarse-node stage or queue traversal.
