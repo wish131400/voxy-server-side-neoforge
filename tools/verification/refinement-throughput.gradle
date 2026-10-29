@@ -1,0 +1,29 @@
+allprojects { afterEvaluate {
+    tasks.register('refinementThroughputTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionPublicationLocalityTest.class','**/PredictionBiomeCacheTest.class'
+        include '**/PredictionPublicationReplayTest.class','**/PredictionDecorationQueryTest.class'
+        include '**/PredictionNearFirstSchedulingTest.class','**/PredictionCpuAdmissionIntegrationTest.class'
+        include '**/PredictionVoxyPreparationTest.class','**/PredictionVoxySourceTest.class'
+        include '**/PredictionCpuBudgetTest.class','**/PredictionParentLod*Test.class'
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+    tasks.register('refinementCacheContractTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionSamplingWorkTest.class','**/PredictionVoxyLoadingIntegrationTest.class'
+        filter {
+            includeTestsMatching '*PredictionSamplingWorkTest.grassFoliageWaterAndDecorationReuseExactBiomeCoordinates'
+            includeTestsMatching '*PredictionSamplingWorkTest.boundedBiomeCacheEvictionAndParallelWorkersKeepExactValues'
+            includeTestsMatching '*PredictionSamplingWorkTest.exactBiomesSurviveWorkerHandoffsAndLocalSlotCollisions'
+            includeTestsMatching '*PredictionSamplingWorkTest.decorationJobRetainsExactBiomesDespiteOtherRegionsEvictingSharedEntries'
+            includeTestsMatching '*PredictionVoxyLoadingIntegrationTest.nativeZoomDemandRunsThroughTicksWhileBootstrapWorkerIsStillPending'
+        }
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

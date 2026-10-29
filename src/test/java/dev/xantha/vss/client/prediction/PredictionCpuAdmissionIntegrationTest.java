@@ -116,7 +116,7 @@ class PredictionCpuAdmissionIntegrationTest {
             enqueue(manager, key, true);
             awaitIdle(manager);
             assertTrue(keys(manager, "surfaceReady").contains(key), "important surfaces must publish under CPU saturation");
-            assertTrue(sampler.work.get() > 0);
+            assertEquals(0, sampler.work.get(), "surface completion reuses resident terrain without density or color resampling");
             assertEquals(1, manager.builtTileCount());
             assertTrue(budget.diagnostics().contains("active=0,detail=0"));
         }

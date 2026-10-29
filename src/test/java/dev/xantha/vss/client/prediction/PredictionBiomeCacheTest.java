@@ -34,4 +34,78 @@ class PredictionBiomeCacheTest {
         assertSame(deferred, assertThrows(PredictionWorkDeferred.class, () -> cache.get(0, 0, 0)));
         assertSame(cancelled, assertThrows(java.util.concurrent.CancellationException.class, () -> cache.get(0, 0, 0)));
     }
+
+    @Test void adjacentJobsReuseExactNeighborhoodAcrossThreadsWithoutPointCollisions() throws Exception {
+        var source=mock(BiomeSource.class);var climate=mock(Climate.Sampler.class);
+        var answer=Holder.direct(mock(Biome.class));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        when(source.getNoiseBiome(anyInt(),anyInt(),anyInt(),same(climate))).thenAnswer(invocation->{calls.incrementAndGet();return answer;});
+        var cache=new PredictionBiomeCache(source,climate);
+        // Eight complete adjacent pages. Reverse traversal on another worker
+        // exercises both the shared pages and that worker's local references.
+        for(int y=-8;y<8;y++)for(int z=-8;z<8;z++)for(int x=-8;x<8;x++)assertSame(answer,cache.get(x,y,z));
+        assertEquals(4096,calls.get());
+        var pool=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {pool.submit(()->{
+            for(int y=7;y>=-8;y--)for(int z=7;z>=-8;z--)for(int x=7;x>=-8;x--)assertSame(answer,cache.get(x,y,z));
+        }).get(10,java.util.concurrent.TimeUnit.SECONDS);}finally{pool.shutdownNow();}
+        assertEquals(4096,calls.get(),"Adjacent jobs must not resample cached quart coordinates");
+    }
+
+    @Test void fullCoordinatesAndSamplerInstancesNeverAliasAfterPageEviction() {
+        var climate=mock(Climate.Sampler.class);var source=mock(BiomeSource.class);
+        var answer=Holder.direct(mock(Biome.class));
+        when(source.getNoiseBiome(anyInt(),anyInt(),anyInt(),same(climate))).thenReturn(answer);
+        var cache=new PredictionBiomeCache(source,climate);
+        for(int i=0;i<1024;i++)assertSame(answer,cache.get(i*32,Integer.MIN_VALUE+i,-i*64));
+        for(int x:new int[]{Integer.MIN_VALUE,-1,0,Integer.MAX_VALUE})
+            for(int y:new int[]{Integer.MIN_VALUE,-2048,0,2048,Integer.MAX_VALUE})assertSame(answer,cache.get(x,y,17));
+        verify(source).getNoiseBiome(-1,-2048,17,climate);
+        verify(source).getNoiseBiome(-1,2048,17,climate);
+        var other=mock(BiomeSource.class);var otherAnswer=Holder.direct(mock(Biome.class));
+        when(other.getNoiseBiome(-1,-2048,17,climate)).thenReturn(otherAnswer);
+        assertSame(otherAnswer,new PredictionBiomeCache(other,climate).get(-1,-2048,17));
+    }
+
+    @Test void sharedPageReadsPreserveDifferentAnswersDuringConcurrentMisses() throws Exception {
+        var source=mock(BiomeSource.class);var climate=mock(Climate.Sampler.class);
+        var even=Holder.direct(mock(Biome.class));var odd=Holder.direct(mock(Biome.class));
+        when(source.getNoiseBiome(anyInt(),anyInt(),anyInt(),same(climate))).thenAnswer(call->
+                (((int)call.getArgument(0)^(int)call.getArgument(1)^(int)call.getArgument(2))&1)==0?even:odd);
+        var cache=new PredictionBiomeCache(source,climate);
+        var pool=java.util.concurrent.Executors.newFixedThreadPool(4);
+        var jobs=new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
+        for(int worker=0;worker<4;worker++)jobs.add(()->{
+            for(int round=0;round<3;round++)for(int x=-9;x<=9;x++)for(int y=-9;y<=9;y++)for(int z=-9;z<=9;z++)
+                assertSame(((x^y^z)&1)==0?even:odd,cache.get(x,y,z));
+            return null;
+        });
+        try {for(var job:pool.invokeAll(jobs))job.get(15,java.util.concurrent.TimeUnit.SECONDS);}
+        finally {pool.shutdownNow();}
+        assertSame(even,cache.get(Integer.MIN_VALUE,0,0));
+        assertSame(odd,cache.get(Integer.MAX_VALUE,0,0));
+    }
+
+    @Test void retiredSparsePointsPreserveFullCoordinatesAndAnswersOnWorkerHandoff() throws Exception {
+        var source=mock(BiomeSource.class);var climate=mock(Climate.Sampler.class);
+        var even=Holder.direct(mock(Biome.class));var odd=Holder.direct(mock(Biome.class));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        when(source.getNoiseBiome(anyInt(),anyInt(),anyInt(),same(climate))).thenAnswer(call->{
+            calls.incrementAndGet();
+            return (((int)call.getArgument(0)^(int)call.getArgument(1)^(int)call.getArgument(2))&1)==0?even:odd;
+        });
+        var cache=new PredictionBiomeCache(source,climate);
+        int[][] points=new int[1024][3];
+        for(int i=0;i<points.length;i++) {
+            points[i]=new int[]{Integer.MIN_VALUE+i*4099,Integer.MAX_VALUE-i*8193,-i*131071};
+            var p=points[i];
+            assertSame(((p[0]^p[1]^p[2])&1)==0?even:odd,cache.get(p[0],p[1],p[2]));
+        }
+        int before=calls.get();
+        var pool=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {pool.submit(()->{
+            for(var p:points)assertSame(((p[0]^p[1]^p[2])&1)==0?even:odd,cache.get(p[0],p[1],p[2]));
+        }).get(10,java.util.concurrent.TimeUnit.SECONDS);}finally{pool.shutdownNow();}
+        assertTrue(calls.get()-before<points.length/10,"Retiring sparse pages must preserve cross-worker reuse");
+    }
 }

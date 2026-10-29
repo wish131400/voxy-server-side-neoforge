@@ -39,6 +39,12 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionClimateSampler", "FabricBiomeCompat", "copyClimateContext")
         check_class("client/prediction/FabricBiomeCompat", "net.fabricmc.fabric.impl.biome.MultiNoiseSamplerHooks", "fabric_getSeed", "fabric_setSeed")
         check_class("client/prediction/PredictionBiomeCache", "LookupFailure", "sample")
+        check_class("client/prediction/PredictionBiomeCache$Page", "AtomicReferenceArray", "matches")
+        check_class("client/prediction/PredictionBiomeCache$Local", "pages", "last")
+        check_class("client/prediction/PredictionBiomeCache$Stripe", "retainSparse", "RetiredPoints")
+        check_class("client/prediction/PredictionBiomeCache$RetiredPoints", "get", "put")
+        check_class("client/prediction/PredictionTerrainChange", "compare", "ordered", "LiquidBlock")
+        check_class("client/prediction/PredictionVoxySource", "PredictionTerrainChange", "sameFeatureBiomes", "terrainRangeReductions")
         check_class("client/prediction/PredictionVegetation", "END_CLIMATE_SETTINGS_VERSION", "LookupFailure")
         check_class("client/prediction/PredictionSurfaceStructures", "LookupFailure")
         inset = check_class("compat/VoxySurfaceHeights", "patchShader", "// VSS world-space model inset")
@@ -239,7 +245,7 @@ def verify(jar, platform, build_id, source):
     return {"jar": jar.name, "platform": platform, "buildId": build_id,
             "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
             "bytes": jar.stat().st_size, "nativeSha256": natives,
-            "integratedFixes": ["horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
+            "integratedFixes": ["terrain-interval-publication", "shared-quart-neighborhoods", "persistent-fair-generation-turn", "horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
                                 "layout-plan-domain-reset", "partial-vegetation-retention", "terrain-only-parent-proof",
                                 "retained-deferred-detail-demand", "view-priority-readmission", "completion-driven-detail-refill", "dimension-write-bounds", "reverse-coarse-column-coverage", "second-chance-column-cache", "incremental-candidate-union", "exact-display-biome-reuse", "prediction-display-withdrawal", "warm-toggle-reactivation", "concurrent-real-generation", "atomic-generation-admission", "auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
                                 "end-floating-columns", "empty-node-sample-readmission",

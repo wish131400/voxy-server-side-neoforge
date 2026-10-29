@@ -59,9 +59,9 @@ class PredictionDecorationQueryTest {
             assertTrue(chunks.add(chunk));
         }
         assertEquals(25, chunks.size());
-        assertThrows(UnsupportedOperationException.class,
+        assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class,
                 () -> level.getChunk(-7, -7, net.minecraft.world.level.chunk.status.ChunkStatus.EMPTY, true));
-        assertThrows(UnsupportedOperationException.class,
+        assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class,
                 () -> level.getChunk(-4, -4, net.minecraft.world.level.chunk.status.ChunkStatus.EMPTY, true));
     }
 
@@ -99,7 +99,7 @@ class PredictionDecorationQueryTest {
         assertTrue(level.predicateState(position, -1, 0, 0).is(Blocks.DIAMOND_BLOCK));
         level.endFeature(false);
         assertTrue(level.predicateState(position, -1, 0, 0).is(Blocks.GRASS_BLOCK));
-        assertThrows(UnsupportedOperationException.class, () -> level.predicateState(position, 64, 0, 0));
+        assertThrows(PredictionDecorationLevel.LocalPlacementFailure.class, () -> level.predicateState(position, 64, 0, 0));
     }
 
     @Test void heightCachesDistinguishPredicatesAndInvalidateOnWriteRollbackAndRemoval() {

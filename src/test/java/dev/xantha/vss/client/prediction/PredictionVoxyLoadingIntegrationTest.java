@@ -718,7 +718,9 @@ class PredictionVoxyLoadingIntegrationTest {
                 if(tile!=null && tile.cellAxis()==64)break;
                 Thread.sleep(3);
             }
-            await(manager);
+            // Publication can immediately admit neighboring terrain/plants.
+            // This scenario waits for its zoom target, not global queue idleness.
+            assertEquals(0,manager.failedTileCount(),manager.surfaceDiagnostics());
             assertTrue(((List<?>)field("scheduledPlan").get(manager)).isEmpty());
             assertEquals(1,jobs.size(),"Bootstrap stays queued throughout");
             assertEquals(64,manager.renderSnapshot().tiles().get(key).cellAxis());

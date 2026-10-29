@@ -195,6 +195,36 @@ class PredictionNearFirstSchedulingTest {
     }
 
     @Test @SuppressWarnings("unchecked")
+    void admittedFairWorkKeepsItsTurnThroughDirtyParentQueueRefresh() throws Exception {
+        var entered=new CountDownLatch(3);var release=new CountDownLatch(1);
+        try(var manager=manager(sampler(new AtomicInteger(),null,null),null,PredictionCpuBudget.fixed(8))) {
+            set(manager,"unifiedVoxy",true);
+            var pool=(ThreadPoolExecutor)get(manager,"executor");
+            pool.setMaximumPoolSize(3);pool.setCorePoolSize(3);
+            for(int worker=0;worker<3;worker++)pool.execute(new PredictionTask(null,0,0D,()->{
+                entered.countDown();try {release.await(10,TimeUnit.SECONDS);}
+                catch(InterruptedException e){Thread.currentThread().interrupt();}
+            }));
+            assertTrue(entered.await(5,TimeUnit.SECONDS));
+            var desired=(Set<PredictionTileKey>)get(manager,"desiredKeys");
+            var dirty=(Set<PredictionTileKey>)get(manager,"dirtyTiles");
+            var targets=(Set<PredictionTileKey>)get(manager,"voxyDetailTargets");
+            var work=(ArrayDeque<PredictionTileKey>)get(manager,"voxyDetailWork");
+            var near=key(1,0);var far=key(8,0);
+            desired.addAll(List.of(near,far));targets.addAll(desired);dirty.add(near);work.addAll(List.of(near,far));
+            set(manager,"nearGenerationAdmissions",3);set(manager,"fairGenerationLane",1);
+            invoke(manager,"serviceGenerationTurn",new Class[]{int.class,int.class,long.class},0,0,Long.MAX_VALUE);
+            invoke(manager,"serviceGenerationTurn",new Class[]{int.class,int.class,long.class},0,0,Long.MAX_VALUE);
+            assertEquals(2,pool.getQueue().size());
+            // Dirtying the fair key after admission must not erase its priority.
+            dirty.add(far);
+            invoke(manager,"refreshQueuedWork",new Class[]{});
+            var next=(PredictionTask)pool.getQueue().peek();
+            assertEquals(far,get(next,"key"),"Reserved far work must precede repeated dirty refreshes");
+        }finally{release.countDown();}
+    }
+
+    @Test @SuppressWarnings("unchecked")
     void cacheUsesThreeNearbyAdmissionsThenOneDistantTurnWithoutCpuOrParent() throws Exception {
         var entered=new CountDownLatch(1);var release=new CountDownLatch(1);var calls=new AtomicInteger();
         var cpu=new PredictionCpuBudget(()->4,()->.99,()->.99,System::nanoTime,false);

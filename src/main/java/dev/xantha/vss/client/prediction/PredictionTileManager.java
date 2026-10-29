@@ -389,7 +389,7 @@ public final class PredictionTileManager implements AutoCloseable {
     private int fairGenerationLane;
     private boolean fairGenerationAdmission;
     private long generationEnqueues;
-    private static final int FAIR_WORK_PRIORITY = -90;
+    private static final int FAIR_WORK_PRIORITY = Integer.MIN_VALUE;
     private static final int NEAR_WORK_BURST = 3;
     private volatile double cameraBlockX, cameraBlockY, cameraBlockZ;
     private boolean cameraInitialized;
@@ -1266,8 +1266,8 @@ public final class PredictionTileManager implements AutoCloseable {
                     ? new PredictionSchedulePreparation.Hint(workPriority(key, false), workPriority(key, true),
                         PredictionWorkOrder.distanceSquared(key, layout, cameraBlockX, cameraBlockZ)) : scheduledHints.get(key);
             if (hint == null) continue;
-            int priority = dirtyTiles.contains(key) ? Integer.MIN_VALUE + 1 + key.lod()
-                    : cachePending.contains(key) ? -100 : task.priority == FAIR_WORK_PRIORITY ? FAIR_WORK_PRIORITY
+            int priority = task.priority == FAIR_WORK_PRIORITY ? FAIR_WORK_PRIORITY
+                    : dirtyTiles.contains(key) ? Integer.MIN_VALUE + 1 + key.lod() : cachePending.contains(key) ? -100
                 : task.surface ? hint.surface() : hint.terrain();
             if ((priority != task.priority || hint.distance() != task.distanceSquared) && executor.getQueue().remove(task))
                 executor.getQueue().offer(new PredictionTask(key, priority, hint.distance(), task.surface, task.delegate, task.cpuReservation, task.buildSlots));
@@ -2798,8 +2798,9 @@ public final class PredictionTileManager implements AutoCloseable {
                 ? (detailTrickle ? 1 : 0) : backgroundLimit())) return;
         failedAt.remove(key);
         deferredUntil.remove(key);
-        int priority = dirtyTiles.contains(key) ? Integer.MIN_VALUE + 1 + key.lod()
-                : cacheOnly ? -100 : fairGenerationAdmission ? FAIR_WORK_PRIORITY : workPriority(key, surface);
+        // A reserved fair turn must survive both the executor heap and later
+        // reprioritization. Repeated dirty parents retain the other three turns.
+        int priority = cacheOnly ? -100 : fairGenerationAdmission ? FAIR_WORK_PRIORITY : workPriority(key, surface);
         double distance = PredictionWorkOrder.orderingDistance(key, layout, cameraBlockX, cameraBlockZ, buildFocus);
         VssLodLayout tileLayout = layout;
         // Reserve the shared CPU slot before publishing work to the executor.

@@ -82,6 +82,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     @Override public boolean compareNotificationFaces() { return true; }
     private final Map<Integer, Map<Long, Tile>> spatial = new HashMap<>();
     private long mapRevision;
+    private long terrainRangeReductions;
     private long tileBytes;
     private long featureBytes,featureIndexBytes,featureCount;
     private final Map<PredictionTileKey, Long> mapVersions = new HashMap<>();
@@ -703,6 +704,12 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         return new Footprint(tile.baseX()+minX*tile.step(),tile.baseZ()+minZ*tile.step(),
                 tile.baseX()+(maxX+1)*tile.step(),tile.baseZ()+(maxZ+1)*tile.step());
     }
+    private static boolean sameFeatureBiomes(Tile old,Tile tile) {
+        if(tile.features().isEmpty())return true;
+        for(int i=0;i<tile.columns().length;i++)
+            if(!old.columns()[i].biome().equals(tile.columns()[i].biome()))return false;
+        return true;
+    }
     Tile put(Tile tile, java.util.function.BooleanSupplier current) {
         // Compare immutable input outside the lock. Equal republished samples must not cancel valid builds.
         for(;;) {
@@ -719,6 +726,14 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
                 && observed.cityFeatures()==tile.cityFeatures() && observed.features().equals(tile.features());
         boolean sameContent=sameColumns && sameFeatures;
         Footprint affected=!sameColumns && sameFeatures ? changedTerrain(observed,tile) : Footprint.of(tile);
+        PredictionTerrainChange terrainChange=null;
+        // Stable grids do not change ownership. Compare run intervals before
+        // composing any native sections, rather than invalidating solid ground
+        // from the dimension floor for a one-block surface edit.
+        if(!sameColumns && sameFeatures && sameFeatureBiomes(observed,tile)) {
+            terrainChange=new PredictionTerrainChange();
+            for(int i=0;i<tile.columns().length;i++)terrainChange.compare(observed.columns()[i],tile.columns()[i]);
+        }
         int[] featureChanges=null;
         // Stable vegetation ownership permits a local update. Completion, first
         // coverage and city/vegetation ownership transitions still cover the tile.
@@ -734,12 +749,16 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         if(sameFeatures && observed.features()!=tile.features())tile=new Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),
                 tile.axis(),tile.step(),tile.columns(),observed.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),observed.featureIndex());
         Extent prepared = sameContent ? before : extent(tile, observed, before);
-        int[] height;ChangeInput input;
+        int[] height;ChangeInput input;boolean rangeReduced;
         synchronized(this) {
             if(closed || !current.getAsBoolean())return null;
             if(tiles.get(tile.key())!=observed)continue;
             if(sameContent) {unchangedPublications++;return observed;}
             height=changeHeight(tile,before,prepared,sameColumns);
+            rangeReduced=terrainChange!=null && lastMapper!=null && lastMapper.hasSkyLight()
+                    && (terrainChange.bottom()>height[0] || terrainChange.top()<height[1]);
+            if(terrainChange!=null && lastMapper!=null && lastMapper.hasSkyLight())
+                height=new int[]{terrainChange.bottom(),terrainChange.top()};
             if(featureChanges!=null && featureChanges[0]<featureChanges[3])height=new int[]{featureChanges[1],featureChanges[4]};
             input=changeInput(tile,affected,height);
         }
@@ -749,6 +768,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             if (closed || !current.getAsBoolean()) return null;
             Tile old = tiles.get(tile.key()); if(old!=observed || !changeCurrent(input,tile))continue;
             if(sameColumns)retainedColumnPublications++;
+            if(rangeReduced)terrainRangeReductions++;
             if(old!=null && old.columns()!=tile.columns())retireColumns(old);
             Extent after = prepared;
             tiles.put(tile.key(), tile); extents.put(tile.key(), after);
@@ -837,6 +857,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     synchronized Map<String, Object> diagnostics() {
         return Map.ofEntries(Map.entry("voxelTiles",tiles.size()),Map.entry("terrainBytes",tileBytes-featureBytes-featureIndexBytes),
                 Map.entry("featureBytes",featureBytes),Map.entry("featureIndexBytes",featureIndexBytes),Map.entry("featureCount",featureCount),
+                Map.entry("terrainRangeReductions",terrainRangeReductions),
                 Map.entry("cachedSections", mapped.size()), Map.entry("cacheHits", cacheHits.sum()), Map.entry("sectionBuilds", sectionBuilds.sum()), Map.entry("lightingBuilds", lightingBuilds.sum()),
                 Map.entry("coalescedReads", coalesced.sum()), Map.entry("emptyReads", emptyReads.sum()),
                 Map.entry("mappedBytes", mappedBytes),Map.entry("sectionCacheLimit",sectionLimit),

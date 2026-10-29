@@ -7,71 +7,82 @@ import net.minecraft.world.level.biome.Climate;
 
 /** Exact quart-coordinate reuse for surface rules, tints and decoration reads. */
 final class PredictionBiomeCache {
-    private static final int SIZE = 2048;
     private final BiomeSource source;
     private final Climate.Sampler climate;
-    private final ThreadLocal<Entries> workers = ThreadLocal.withInitial(Entries::new);
-    // Four ways per bucket retain overlapping decoration queries across workers.
-    // Full coordinates avoid BlockPos's truncated Y/large-coordinate aliases.
-    private static final int BUCKETS = 16_384, WAYS = 4;
-    private final Entries shared = new Entries(BUCKETS * WAYS);
-    private final byte[] next = new byte[BUCKETS];
-    private final Object[] locks = new Object[64];
+    // A page follows the spatial neighborhood used by adjacent decoration jobs.
+    // 128 shared pages retain at most 65536 exact quart answers. A bounded
+    // point cache retains sparsely populated retired pages across worker handoffs;
+    // workers hold only eight page references, rather than duplicate point tables.
+    private static final int PAGE_BITS = 3, PAGE_AXIS = 1 << PAGE_BITS;
+    private static final int STRIPES = 16, PAGES_PER_STRIPE = 8;
+    private final ThreadLocal<Local> workers = ThreadLocal.withInitial(Local::new);
+    private final Stripe[] stripes = new Stripe[STRIPES];
     private final java.util.concurrent.atomic.LongAdder localHits = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder sharedHits = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder loads = new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder evictions = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder pageEvictions = new java.util.concurrent.atomic.LongAdder();
 
     PredictionBiomeCache(BiomeSource source, Climate.Sampler climate) {
         this.source = source;
         this.climate = climate;
-        java.util.Arrays.setAll(locks, i -> new Object());
+        java.util.Arrays.setAll(stripes, i -> new Stripe());
     }
 
     Holder<Biome> get(int quartX, int quartY, int quartZ) {
-        Entries entries = workers.get();
-        int hash = quartX * 0x9E3779B9 ^ Integer.rotateLeft(quartZ * 0x85EBCA6B, 11) ^ quartY * 0xC2B2AE35;
-        int slot = (hash ^ hash >>> 16) & (SIZE - 1);
-        Holder<Biome> biome = entries.biomes[slot];
-        if (biome != null && entries.x[slot] == quartX && entries.y[slot] == quartY && entries.z[slot] == quartZ) {
-            localHits.increment();
-            return biome;
+        int px = quartX >> PAGE_BITS, py = quartY >> PAGE_BITS, pz = quartZ >> PAGE_BITS;
+        Local local = workers.get();
+        Page page = local.last;
+        if (page == null || !page.matches(px, py, pz)) {
+            page = null;
+            for (Page candidate : local.pages)
+                if (candidate != null && candidate.matches(px, py, pz)) { page = candidate; break; }
         }
-        int bucket = (hash ^ hash >>> 16) & (BUCKETS - 1);
-        Object lock = locks[bucket & (locks.length - 1)];
-        synchronized (lock) {
-            biome = sharedBiome(bucket, quartX, quartY, quartZ);
+        boolean localPage = page != null;
+        if (page == null) {
+            var key = new PageKey(px, py, pz);
+            Stripe stripe = stripe(key);
+            synchronized (stripe) {
+                page = stripe.pages.get(key);
+                if (page == null) {
+                    if (stripe.pages.size() == PAGES_PER_STRIPE) {
+                        var oldest = stripe.pages.entrySet().iterator();
+                        Page retired = oldest.next().getValue(); oldest.remove();
+                        pageEvictions.increment(); evictions.add(retired.loaded.sum());
+                        stripe.retainSparse(retired);
+                    }
+                    page = new Page(key); stripe.pages.put(key, page);
+                }
+            }
+            local.pages[local.next++ & (local.pages.length - 1)] = page;
         }
+        local.last = page;
+        int slot = ((quartY & (PAGE_AXIS - 1)) * PAGE_AXIS + (quartZ & (PAGE_AXIS - 1)))
+                * PAGE_AXIS + (quartX & (PAGE_AXIS - 1));
+        Holder<Biome> biome = page.biomes.get(slot);
         if (biome != null) {
-            sharedHits.increment();
+            if (localPage) localHits.increment(); else sharedHits.increment();
         } else {
+            Stripe stripe = stripe(page.key);
+            if (stripe.retired != null) {
+                synchronized (stripe) { biome = stripe.retired.get(quartX, quartY, quartZ); }
+                if (biome != null) {
+                    sharedHits.increment();
+                    if (page.biomes.compareAndSet(slot, null, biome)) page.loaded.increment();
+                    return biome;
+                }
+            }
             // Modded climate evaluation stays outside cache locks. Concurrent
             // misses may duplicate one lookup, but never serialize noise work.
             loads.increment();
             biome = sample(source, climate, quartX, quartY, quartZ);
-            synchronized (lock) {
-                if (sharedBiome(bucket, quartX, quartY, quartZ) == null) {
-                    int at = bucket * WAYS + next[bucket];
-                    next[bucket] = (byte) ((next[bucket] + 1) & (WAYS - 1));
-                    if (shared.biomes[at] != null) evictions.increment();
-                    shared.x[at] = quartX; shared.y[at] = quartY; shared.z[at] = quartZ;
-                    shared.biomes[at] = biome;
-                }
-            }
+            if (biome != null && page.biomes.compareAndSet(slot, null, biome)) page.loaded.increment();
         }
-        entries.x[slot] = quartX;
-        entries.y[slot] = quartY;
-        entries.z[slot] = quartZ;
-        entries.biomes[slot] = biome;
         return biome;
     }
 
-    private Holder<Biome> sharedBiome(int bucket, int x, int y, int z) {
-        for (int at = bucket * WAYS, end = at + WAYS; at < end; at++) {
-            if (shared.biomes[at] != null && shared.x[at] == x && shared.y[at] == y && shared.z[at] == z)
-                return shared.biomes[at];
-        }
-        return null;
+    private Stripe stripe(PageKey key) {
+        return stripes[(key.hashCode() ^ key.hashCode() >>> 16) & (STRIPES - 1)];
     }
 
     static Holder<Biome> sample(BiomeSource source, Climate.Sampler climate, int x, int y, int z) {
@@ -94,17 +105,67 @@ final class PredictionBiomeCache {
 
     String diagnostics() {
         return "localHits=" + localHits.sum() + ",sharedHits=" + sharedHits.sum()
-                + ",loads=" + loads.sum() + ",evictions=" + evictions.sum();
+                + ",loads=" + loads.sum() + ",evictions=" + evictions.sum() + ",pageEvictions=" + pageEvictions.sum();
     }
-
-    private static final class Entries {
-        final int[] x, y, z;
+    private record PageKey(int x, int y, int z) {
+        @Override public int hashCode() {
+            return x * 0x9E3779B9 ^ Integer.rotateLeft(z * 0x85EBCA6B, 11) ^ y * 0xC2B2AE35;
+        }
+    }
+    private static final class Page {
+        final PageKey key;
+        final java.util.concurrent.atomic.AtomicReferenceArray<Holder<Biome>> biomes =
+                new java.util.concurrent.atomic.AtomicReferenceArray<>(PAGE_AXIS * PAGE_AXIS * PAGE_AXIS);
+        final java.util.concurrent.atomic.LongAdder loaded = new java.util.concurrent.atomic.LongAdder();
+        Page(PageKey key) { this.key = key; }
+        boolean matches(int x, int y, int z) { return key.x == x && key.y == y && key.z == z; }
+    }
+    private static final class Local {
+        final Page[] pages = new Page[8];
+        Page last;
+        int next;
+    }
+    private static final class Stripe {
+        final java.util.LinkedHashMap<PageKey, Page> pages = new java.util.LinkedHashMap<>(16, .75F, true);
+        volatile RetiredPoints retired;
+        void retainSparse(Page page) {
+            // Dense neighborhoods already use their page capacity efficiently.
+            // Sparse reads must not consume an entire 512-slot page indefinitely.
+            if (page.loaded.sum() > 64) return;
+            if (retired == null) retired = new RetiredPoints();
+            for (int i = 0; i < page.biomes.length(); i++) {
+                Holder<Biome> biome = page.biomes.get(i);
+                if (biome != null) retired.put((page.key.x << PAGE_BITS) + (i & 7),
+                        (page.key.y << PAGE_BITS) + (i >> 6),
+                        (page.key.z << PAGE_BITS) + ((i >> 3) & 7), biome);
+            }
+        }
+    }
+    /** Eight-way exact points, at most 16384 answers across all stripes. */
+    private static final class RetiredPoints {
+        private static final int BUCKETS = 128, WAYS = 8;
+        final int[] x = new int[BUCKETS * WAYS], y = new int[BUCKETS * WAYS], z = new int[BUCKETS * WAYS];
+        final byte[] next = new byte[BUCKETS];
         final Holder<Biome>[] biomes;
-        Entries() { this(SIZE); }
-        @SuppressWarnings("unchecked")
-        Entries(int size) {
-            x = new int[size]; y = new int[size]; z = new int[size];
-            biomes = (Holder<Biome>[]) new Holder<?>[size];
+        @SuppressWarnings("unchecked") RetiredPoints() { biomes = (Holder<Biome>[]) new Holder<?>[BUCKETS * WAYS]; }
+        private int bucket(int x, int y, int z) {
+            int hash = x * 0x9E3779B9 ^ Integer.rotateLeft(z * 0x85EBCA6B, 11) ^ y * 0xC2B2AE35;
+            // Independent mixing avoids correlating point buckets with page stripes.
+            hash = (hash ^ hash >>> 16) * 0x7FEB352D;
+            hash = (hash ^ hash >>> 15) * 0x846CA68B;
+            return (hash ^ hash >>> 16) & (BUCKETS - 1);
+        }
+        Holder<Biome> get(int x, int y, int z) {
+            int bucket = bucket(x, y, z);
+            for (int at = bucket * WAYS; at < (bucket + 1) * WAYS; at++)
+                if (biomes[at] != null && this.x[at] == x && this.y[at] == y && this.z[at] == z) return biomes[at];
+            return null;
+        }
+        void put(int x, int y, int z, Holder<Biome> biome) {
+            if (get(x, y, z) != null) return;
+            int bucket = bucket(x, y, z), at = bucket * WAYS + next[bucket];
+            next[bucket] = (byte) ((next[bucket] + 1) & (WAYS - 1));
+            this.x[at] = x; this.y[at] = y; this.z[at] = z; biomes[at] = biome;
         }
     }
 }
