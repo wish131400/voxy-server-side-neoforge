@@ -1,0 +1,34 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('traversalCapacityTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/VoxyCapacityPlanTest.class', '**/VoxyTraversalCapacityTest.class', '**/VoxyTraversalCapacityMixinTest.class'
+            include '**/VoxyTraversalQueueGpuTest.class'
+            forkEvery = 1
+            maxHeapSize = '2G'
+            systemProperty 'vss.voxyJar', providers.gradleProperty('vssVoxyJar').get()
+            systemProperty 'vss.queueTiming', providers.gradleProperty('vssQueueTiming').getOrElse('false')
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+        }
+        if (providers.gradleProperty('vssVoxyMatrix').isPresent()) {
+            def inputs = new groovy.json.JsonSlurper().parse(project.file(providers.gradleProperty('vssVoxyMatrix').get()))
+            def checks = inputs.collect { row ->
+                tasks.register('traversalCompat_' + row.id, Test) {
+                    dependsOn tasks.named('testClasses')
+                    testClassesDirs = sourceSets.test.output.classesDirs
+                    classpath = sourceSets.test.runtimeClasspath
+                    useJUnitPlatform()
+                    include '**/VoxyTraversalCapacityMixinTest.class', '**/VoxyTraversalQueueGpuTest.class'
+                    forkEvery = 1
+                    maxHeapSize = '2G'
+                    systemProperty 'vss.voxyJar', project.file(row.jar).absolutePath
+                    testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+                }
+            }
+            tasks.register('traversalCompatMatrix') { dependsOn checks }
+        }
+    }
+}

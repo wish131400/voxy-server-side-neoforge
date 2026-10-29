@@ -60,6 +60,16 @@ def verify(jar, platform, build_id, source):
         check_class("compat/VoxyCompat$LocalSectionIndex", "settledRegions")
         check_class("compat/VoxyIngestTracker", "realColumnSettled")
         check_class("compat/VoxyPredictionBridge$Context", "hasSkyLight")
+        check_class("compat/VoxyCapacityPlan", "initialCapacity", "capacity")
+        check_class("compat/VoxyTraversalCapacity", "getCurrentMaxNodeId", "beforeAdd", "beforeTraversal", "ensureRoots", "ensureQueues")
+        check_class("compat/VoxyTraversalCapacity$1", "glCopyNamedBufferSubData", "free")
+        traversal_shader = check_class("compat/VoxyTraversalShader", "// VSS bounded traversal queues", "nodeQueueSource.length()", "enqueueSelfForRender")
+        require(b"atomicCompSwap" not in traversal_shader, "Serial GPU reservation retry loop packaged")
+        check_class("mixin/voxy/VoxyTraversalCapacityMixin", "vss$initialRootArray", "vss$initialQueues", "beforeTraversal")
+        check_class("mixin/voxy/VoxyTraversalQueueShaderMixin", "VoxyTraversalShader")
+        capacity_mixins = json.loads(archive.read("vss.compat.mixins.json"))["client"]
+        require(all(name in capacity_mixins for name in ("voxy.VoxyTraversalCapacityMixin", "voxy.VoxyTraversalQueueShaderMixin")),
+                "Capacity mixins absent from runtime configuration")
         check_class("client/prediction/PredictionVoxySource", "lightingBuilds")
         check_class("client/prediction/PredictionTileManager", "invalidatedSurfaces")
         check_class("client/prediction/PredictionCaptureHandoff", "await", "committed", "blocked", "reindex", "retired")
@@ -229,7 +239,7 @@ def verify(jar, platform, build_id, source):
     return {"jar": jar.name, "platform": platform, "buildId": build_id,
             "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
             "bytes": jar.stat().st_size, "nativeSha256": natives,
-            "integratedFixes": ["two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
+            "integratedFixes": ["horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
                                 "layout-plan-domain-reset", "partial-vegetation-retention", "terrain-only-parent-proof",
                                 "retained-deferred-detail-demand", "view-priority-readmission", "completion-driven-detail-refill", "dimension-write-bounds", "reverse-coarse-column-coverage", "second-chance-column-cache", "incremental-candidate-union", "exact-display-biome-reuse", "prediction-display-withdrawal", "warm-toggle-reactivation", "concurrent-real-generation", "atomic-generation-admission", "auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
                                 "end-floating-columns", "empty-node-sample-readmission",

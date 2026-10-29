@@ -64,7 +64,8 @@ class VoxyPredictionMixinApplicationTest {
              "compatibilityLevel":"JAVA_17","client":["voxy.PredictionVoxyMeshSourceMixin",
              "voxy.PredictionVoxyNeighborSourceMixin","voxy.PredictionVoxyWorldEventMixin","voxy.PredictionVoxyDetailMixin","voxy.PredictionVoxyTraversalShaderMixin",
              "voxy.StrictVoxyMeshWorkMixin","voxy.StrictVoxyVisibilityMixin","voxy.StrictVoxyUploadMixin",
-             "voxy.StrictVoxyBatchMixin","voxy.StrictVoxyMeshMixin","voxy.VoxyRenderDistanceMixin"],"injectors":{"defaultRequire":1}}
+             "voxy.StrictVoxyBatchMixin","voxy.StrictVoxyMeshMixin","voxy.VoxyRenderDistanceMixin",
+             "voxy.VoxyTraversalCapacityMixin","voxy.VoxyTraversalQueueShaderMixin"],"injectors":{"defaultRequire":1}}
             """;
         var harness = new VoxyMixinHarness(System.getProperty("vss.voxyJar"), config);
         assertTrue(dev.xantha.vss.mixin.voxy.VoxyPredictionPlugin.supports(name -> harness.getClassNode(name)), "Native render contract");
@@ -72,6 +73,11 @@ class VoxyPredictionMixinApplicationTest {
         new ClassReader(harness.apply("me.cortex.voxy.client.core.gl.shader.ShaderLoader")).accept(shaderLoader,0);
         assertTrue(shaderLoader.methods.stream().flatMap(m->java.util.stream.StreamSupport.stream(m.instructions.spliterator(),false))
                 .anyMatch(i->i instanceof MethodInsnNode call && call.owner.equals("dev/xantha/vss/compat/VoxyPredictionBridge") && call.name.equals("patchSubdivisionRequests")));
+        assertTrue(shaderLoader.methods.stream().flatMap(m->java.util.stream.StreamSupport.stream(m.instructions.spliterator(),false))
+                .anyMatch(i->i instanceof MethodInsnNode call && call.owner.equals("dev/xantha/vss/compat/VoxyTraversalShader")));
+        var traversal=new ClassNode();
+        new ClassReader(harness.apply("me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser")).accept(traversal,0);
+        for(MethodNode method:traversal.methods)new Analyzer<>(new BasicVerifier()).analyze(traversal.name,method);
         for (String name : new String[]{"RenderGenerationService","RenderDataFactory","../hierachical/AsyncNodeManager","../hierachical/NodeManager","VoxyRenderSystem","BuiltSection","../hierachical/AsyncNodeManager$SyncResults"}) {
             var node = new ClassNode();
             String target = name.equals("VoxyRenderSystem") ? "me.cortex.voxy.client.core.VoxyRenderSystem"

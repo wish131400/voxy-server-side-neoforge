@@ -10,6 +10,7 @@ import org.spongepowered.asm.service.MixinService;
 /** Selects the render overlay as one unit before any of its target classes are loaded. */
 public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
     private Boolean overlay;
+    private Boolean capacity;
     private static final String ROOT = "me/cortex/voxy/";
     private static final String SECTION = "L" + ROOT + "common/world/WorldSection;";
 
@@ -61,6 +62,13 @@ public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
         return node.methods.stream().anyMatch(m -> m.name.equals(name) && m.desc.equals(desc));
     }
     @Override public boolean shouldApplyMixin(String target, String mixin) {
+        if (mixin.endsWith(".VoxyTraversalCapacityMixin") || mixin.endsWith(".VoxyTraversalQueueShaderMixin")) {
+            if (capacity == null) {
+                try { capacity = supportsCapacity(name -> MixinService.getService().getBytecodeProvider().getClassNode(name.replace('/', '.'))); }
+                catch (Exception missing) { capacity = false; }
+            }
+            return capacity;
+        }
         if (mixin.endsWith(".VoxyRenderDistanceMixin")) {
             try {
                 ClassNode render = MixinService.getService().getBytecodeProvider().getClassNode(target);
@@ -76,6 +84,30 @@ public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
             catch (Exception missing) { overlay = false; }
         }
         return overlay;
+    }
+    public static boolean supportsCapacity(Classes classes) throws Exception {
+        ClassNode node = classes.get(ROOT + "client/core/rendering/hierachical/HierarchicalOcclusionTraverser");
+        String buffer = "L" + ROOT + "client/core/gl/GlBuffer;";
+        return node.fields.stream().anyMatch(f -> f.name.equals("idx2topNodeMapping") && f.desc.equals("[I"))
+                && node.fields.stream().anyMatch(f -> f.name.equals("topNodeCount") && f.desc.equals("I"))
+                && node.fields.stream().anyMatch(f -> f.name.equals("topNode2idxMapping")
+                        && f.desc.equals("Lit/unimi/dsi/fastutil/ints/Int2IntOpenHashMap;"))
+                && node.fields.stream().anyMatch(f -> f.name.equals("nodeManager")
+                        && f.desc.equals("L" + ROOT + "client/core/rendering/hierachical/AsyncNodeManager;"))
+                && java.util.stream.Stream.of("topNodeIds", "scratchQueueA", "scratchQueueB").allMatch(
+                        name -> node.fields.stream().anyMatch(f -> f.name.equals(name) && f.desc.equals(buffer)))
+                && constants(node, Integer.valueOf(200000)) == 1 && constants(node, Long.valueOf(800000)) == 3
+                && classes.get(ROOT + "client/core/VoxyRenderSystem").fields.stream().anyMatch(f -> f.name.equals("traversal")
+                        && f.desc.equals("L" + ROOT + "client/core/rendering/hierachical/HierarchicalOcclusionTraverser;"))
+                && method(node, "addTLN", "(I)V") && method(node, "remTLN", "(I)V")
+                && method(node, "traverseInternal", "()V")
+                && method(classes.get(ROOT + "client/core/rendering/hierachical/AsyncNodeManager"), "getCurrentMaxNodeId", "()I")
+                && method(classes.get(ROOT + "client/core/gl/shader/ShaderLoader"), "parse", "(Ljava/lang/String;)Ljava/lang/String;");
+    }
+    private static long constants(ClassNode node, Object value) {
+        return node.methods.stream().filter(m -> m.name.equals("<init>"))
+                .flatMap(m -> java.util.stream.StreamSupport.stream(m.instructions.spliterator(), false))
+                .filter(i -> i instanceof LdcInsnNode c && value.equals(c.cst)).count();
     }
     @Override public void onLoad(String mixinPackage) { }
     @Override public String getRefMapperConfig() { return null; }
@@ -122,5 +154,11 @@ public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
         if(mixin.endsWith(".PredictionVoxyNeighborSourceMixin"))
             dev.xantha.vss.compat.VoxyFaceData.nativeLayoutVerified=supportsFaceLayout(node);
     }
-    @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) { }
+    @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) {
+        if (mixin.endsWith(".VoxyTraversalCapacityMixin")) {
+            // Mutable resource handles are updated together on the render thread during growth.
+            var handles = Set.of("idx2topNodeMapping", "topNodeIds", "scratchQueueA", "scratchQueueB");
+            node.fields.stream().filter(f -> handles.contains(f.name)).forEach(f -> f.access &= ~org.objectweb.asm.Opcodes.ACC_FINAL);
+        }
+    }
 }

@@ -494,6 +494,8 @@ public final class VoxyPredictionBridge {
             float desired = VoxyRenderAccess.renderDistance(ctx.configDistance(), serverDistance,
                     ctx.source != null && enabled() ? distance : 0);
             if (ctx.renderSystem != renderSystem || Float.compare(ctx.distance, desired) != 0) {
+                ctx.capacity = VoxyTraversalCapacity.prepare(renderSystem, ctx.configDistance(), serverDistance,
+                        ctx.source != null && enabled() ? distance : 0);
                 ctx.setDistance.set(renderSystem, desired);
                 ctx.distance = desired; ctx.renderSystem = renderSystem;
             }
@@ -797,7 +799,8 @@ public final class VoxyPredictionBridge {
                 Map.entry("cachedSnapshotBytes", ctx == null ? 0L : ctx.cachedCount() * 262160L),
                 Map.entry("subdivisionWaiters", ctx == null ? 0 : ctx.subdivisionWaiters.size()),
                 Map.entry("pendingNotifications", ctx == null ? 0 : ctx.dirty.size()),
-                Map.entry("pendingWithdrawals", ctx == null ? 0 : ctx.withdrawals.size()));
+                Map.entry("pendingWithdrawals", ctx == null ? 0 : ctx.withdrawals.size()),
+                Map.entry("traversalCapacity", ctx == null || ctx.capacity == null ? Map.of() : ctx.capacity.snapshot()));
     }
 
     private static final class Context implements Mapper, RealColumn {
@@ -813,6 +816,7 @@ public final class VoxyPredictionBridge {
         final java.util.concurrent.ConcurrentLinkedQueue<Long> withdrawals = new java.util.concurrent.ConcurrentLinkedQueue<>();
         float distance = Float.NaN;
         Object renderSystem;
+        VoxyTraversalCapacity capacity;
         VoxySectionPruner pruner = new VoxySectionPruner();
         final VoxyRenderAccess.Sections voxels;
         final Method children, create, acquire, release, setChildren, acquireReal, worldEvent, blockId, biomeId;

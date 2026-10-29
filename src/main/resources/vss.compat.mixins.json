@@ -22,6 +22,8 @@
     "voxy.PredictionVoxyWorldEventMixin",
     "voxy.PredictionVoxyDetailMixin",
     "voxy.PredictionVoxyTraversalShaderMixin",
+    "voxy.VoxyTraversalCapacityMixin",
+    "voxy.VoxyTraversalQueueShaderMixin",
     "voxy.VoxelIngestServiceSourceMixin",
     "voxy.VoxyClientInstanceServerIngestMixin",
     "client.IrisPredictionCaptureMixin",
