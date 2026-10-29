@@ -782,10 +782,29 @@ class PredictionVoxyLoadingIntegrationTest {
             source.detailChanges(); assertTrue(source.detailRequests().isEmpty());
             manager.setNativeDetailLoading(true);
             refreshDetails(manager);
-            invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());await(manager);
+            // An exhausted frame budget may admit no generation at all. An empty
+            // pending set is not proof that the retained detail demand has finished.
+            invoke(manager,"serviceGenerationWork",new Class[]{int.class,int.class,long.class},
+                    0,0,System.nanoTime()-1);
+            assertEquals(0,manager.pendingCount());
+            assertNull(manager.renderSnapshot().tiles().get(key));
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
+            while(System.nanoTime()<deadline) {
+                invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());
+                var tile=manager.renderSnapshot().tiles().get(key);
+                if(tile!=null && tile.cellAxis()==64)break;
+                Thread.sleep(2);
+            }
+            await(manager);
+            var tile=manager.renderSnapshot().tiles().get(key);
+            assertNotNull(tile,manager.surfaceDiagnostics());
+            assertEquals(64,tile.cellAxis(),manager.surfaceDiagnostics());
+            assertTrue(calls.get()>0,"Retained demand must resume sampling without another GPU request");
             manager.setNativeDetailLoading(false);
+            int completedSamples=calls.get();
             assertTrue(source.requestDetail(node,(x,z)->false),"Ready data is never blocked by the loading switch");
-            assertEquals(64,manager.renderSnapshot().tiles().get(key).cellAxis());
+            assertEquals(completedSamples,calls.get(),"Ready data does not require further sampling");
+            assertEquals(0,manager.pendingCount());
         }
     }
 
