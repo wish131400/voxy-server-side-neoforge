@@ -1,0 +1,79 @@
+name: Native prediction core
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - tools/rust/vss-native-core/**
+      - .github/workflows/native.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+            library: vss_native_core.dll
+            artifact: target/release/vss_native_core.dll
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            library: libvss_native_core.so
+            rust_target: x86_64-unknown-linux-gnu
+            artifact: target/x86_64-unknown-linux-gnu/release/libvss_native_core.so
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+            library: libvss_native_core.so
+            rust_target: aarch64-unknown-linux-gnu
+            artifact: target/aarch64-unknown-linux-gnu/release/libvss_native_core.so
+          - os: macos-15-intel
+            platform: macos-x86_64
+            library: libvss_native_core.dylib
+            artifact: target/release/libvss_native_core.dylib
+          - os: macos-15
+            platform: macos-aarch64
+            library: libvss_native_core.dylib
+            artifact: target/release/libvss_native_core.dylib
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    defaults:
+      run:
+        working-directory: tools/rust/vss-native-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify native algorithms
+        run: cargo test --locked --release --lib
+      - name: Verify required biome routing and density graph parity
+        run: cargo test --locked --release --test terrablender --test terrablender_end --test blueprint --test biome_colors --test worldgen --test vanilla_parity
+      - name: Verify decoration bounds and compare vegetation against Minecraft references
+        run: cargo test --locked --release --test interior --test vegetation
+      - name: Build production library
+        if: runner.os != 'Linux'
+        run: cargo build --locked --release --lib
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Install pinned Linux linker
+        if: runner.os == 'Linux'
+        run: python -m pip install ziglang==0.13.0 cargo-zigbuild==0.23.4
+      - name: Build Linux library with the supported glibc baseline
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --locked --release --lib --target '${{ matrix.rust_target }}.2.28'
+      - name: Give the macOS library a portable install name and signature
+        if: runner.os == 'macOS'
+        run: |
+          install_name_tool -id '@rpath/libvss_native_core.dylib' '${{ matrix.artifact }}'
+          codesign --force --sign - '${{ matrix.artifact }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: tools/rust/vss-native-core/${{ matrix.artifact }}
+          if-no-files-found: error

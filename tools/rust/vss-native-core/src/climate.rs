@@ -196,6 +196,8 @@ pub enum BiomeSource {
         region_last: Vec<AtomicUsize>,
     },
     End(Id),
+    /// TerraBlender End areas use the server's initialized weights, zoom sizes and seed.
+    TerraBlenderEnd { erosion: Id, areas: Vec<EndArea> },
     Checker(Vec<String>, u32),
     /// Blueprint's `blueprint:modded`: wrap a source and route a share of the
     /// world through positional "slices". The slice array, its size and both
@@ -218,6 +220,41 @@ pub enum BiomeSource {
 pub struct BlueprintSlice {
     weight: i32,
     provider: BlueprintProvider,
+}
+
+pub struct EndArea {
+    grid: Grid,
+    biomes: Vec<String>,
+    fallback: String,
+}
+impl EndArea {
+    fn parse(v: &Value, seed: i64) -> Result<Self> {
+        let size = v["size"].as_i64().ok_or("missing End area size")?;
+        if !(0..=32).contains(&size) { return Err("End area zoom size".into()); }
+        let values = v["biomes"].as_array().ok_or("missing End weighted biomes")?;
+        if values.len() > 4096 { return Err("End biome count".into()); }
+        let mut biomes = Vec::new();
+        let mut weights = Vec::new();
+        let mut total = 0i64;
+        for value in values {
+            let name = string(value, "biome")?.to_string();
+            let weight = value["weight"].as_i64().ok_or("missing End biome weight")?;
+            if weight < 0 { return Err("negative End biome weight".into()); }
+            total = total.checked_add(weight).ok_or("End biome weight overflow")?;
+            if total > i32::MAX as i64 { return Err("End biome weight overflow".into()); }
+            let index = match biomes.iter().position(|item| item == &name) {
+                Some(index) => index,
+                None => { biomes.push(name); biomes.len() - 1 }
+            };
+            weights.push((index, weight));
+        }
+        if total == 0 { weights = vec![(biomes.len(), 1)]; }
+        Ok(Self { grid: uniqueness_grid(seed, size, weights), biomes,
+            fallback: string(v, "default_biome")?.to_string() })
+    }
+    fn sample(&self, x: i32, z: i32) -> &str {
+        self.biomes.get(self.grid.get(x, z)).map(String::as_str).unwrap_or(&self.fallback)
+    }
 }
 
 pub enum BlueprintProvider {
@@ -243,6 +280,9 @@ const MAX_BLUEPRINT_DEPTH: i32 = 16;
 impl BiomeSource {
     pub fn from_document(doc: &Value, g: &Graph, world_seed: i64) -> Result<Self> {
         let v = &doc["biome_source"];
+        if doc.get("vss_terrablender_end").is_some() {
+            return Self::terrablender_end(&doc["vss_terrablender_end"], v, g, world_seed);
+        }
         if doc.get("vss_terrablender").map_or(false, |s| s.is_object()) {
             return Self::terrablender(&doc["vss_terrablender"], v, &doc["possible_biomes"], g, world_seed);
         }
@@ -275,6 +315,17 @@ impl BiomeSource {
             s => return Err(format!("unsupported biome source {s}")),
         })
     }
+    fn terrablender_end(section: &Value, source: &Value, g: &Graph, seed: i64) -> Result<Self> {
+        if minecraft_type(source)? != "the_end" || section["revision"].as_i64() != Some(1)
+            || section["seed"].as_i64() != Some(seed)
+            || section["density_coordinates"].as_str() != Some("block") {
+            return Err("invalid required TerraBlender End routing contract".into());
+        }
+        let areas = ["highlands", "midlands", "edge", "islands"].iter()
+            .map(|name| EndArea::parse(&section[*name], seed)).collect::<Result<Vec<_>>>()?;
+        Ok(Self::TerraBlenderEnd { erosion: g.root("erosion")?, areas })
+    }
+
     /// Builds the positional-region routing from the server's
     /// `vss_terrablender` snapshot: region index 0 keeps the world's own
     /// multi-noise list, other regions search their captured climate points,
@@ -428,7 +479,7 @@ impl BiomeSource {
 
     pub fn uses_terrablender_routing(&self) -> bool {
         match self {
-            Self::TerraBlender { .. } => true,
+            Self::TerraBlender { .. } | Self::TerraBlenderEnd { .. } => true,
             Self::Blueprint { original, .. } => original.uses_terrablender_routing(),
             _ => false,
         }
@@ -501,6 +552,18 @@ impl BiomeSource {
                     }
                 }
                 base.search(target, last)
+            }
+            Self::TerraBlenderEnd { erosion, areas } => {
+                let x = p[0] >> 4; let z = p[2] >> 4;
+                if x as i64 * x as i64 + z as i64 * z as i64 <= 4096 {
+                    "minecraft:the_end"
+                } else {
+                    // Unlike vanilla End, TerraBlender evaluates erosion at the exact block coordinates.
+                    let value = g.compute(*erosion, p, Mode::Raw, scratch);
+                    let index = if value > 0.25 { 0 } else if value >= -0.0625 { 1 }
+                        else if value < -0.21875 { 3 } else { 2 };
+                    areas[index].sample(quart[0], quart[2])
+                }
             }
             Self::End(id) => {
                 let x = p[0] >> 4;
