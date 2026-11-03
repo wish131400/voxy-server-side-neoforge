@@ -1,0 +1,25 @@
+// Execute the released NeoForge FTF climate Mixin in an isolated test JVM.
+// -I tools/verification/freeterraforged.gradle ftfClimateMixinTest
+// -PvssFreeTerraForgedJar=<released NeoForge JAR>
+allprojects {
+    afterEvaluate {
+        tasks.register('ftfClimateMixinTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/FreeTerraForgedClimateMixinTest.class'
+            doFirst {
+                def released = project.file(providers.gradleProperty('vssFreeTerraForgedJar').get())
+                if (!released.isFile()) throw new GradleException('Released FTF JAR not found: ' + released)
+                systemProperty 'vss.freeTerraForgedJar', released.absolutePath
+                if (providers.gradleProperty('vssFtfEvidenceDirectory').isPresent()) {
+                    systemProperty 'vss.ftfEvidenceDirectory', project.file(providers.gradleProperty('vssFtfEvidenceDirectory').get()).absolutePath
+                }
+            }
+            maxParallelForks = 1
+            maxHeapSize = '2G'
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

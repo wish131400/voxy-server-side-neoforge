@@ -1,0 +1,23 @@
+allprojects {
+    afterEvaluate {
+        def benchRoot = project.file('tools/performance/generation-comparison')
+        def output = project.file(providers.gradleProperty('vssComparisonOutput').getOrElse('build/generation-comparison-20261031'))
+        sourceSets.create('generationComparison') {
+            java.srcDir new File(benchRoot, 'java')
+            compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+        }
+        neoForge.mods.named('vss') { sourceSet sourceSets.generationComparison }
+        neoForge.runs.named('server') {
+            gameDirectory = new File(output, 'server')
+            systemProperty 'vss.comparison.output', output.absolutePath
+            systemProperty 'vss.comparison.phase', providers.gradleProperty('vssComparisonPhase').getOrElse('generation')
+            systemProperty 'vss.comparison.profile', providers.gradleProperty('vssComparisonProfile').getOrElse('false')
+            systemProperty 'vss.comparison.resources', project.file('build/moddev/artifacts/neoforge-21.1.234-client-extra-aka-minecraft-resources.jar').absolutePath
+            jvmArgument '-Xms2G'
+            jvmArgument '-Xmx4G'
+            logLevel = org.slf4j.event.Level.INFO
+        }
+        tasks.named('runServer') { dependsOn tasks.named('generationComparisonClasses') }
+    }
+}

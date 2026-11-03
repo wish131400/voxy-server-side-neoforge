@@ -1,6 +1,7 @@
 package dev.xantha.vss.mixin.voxy;
 
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.compat.transform.VoxyStorageTransformer;
 import java.util.List;
 import java.util.Set;
 import org.objectweb.asm.Opcodes;
@@ -17,6 +18,8 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
     private static final String OBJECT = "Ljava/lang/Object;";
     private static final String REMOVE = "(" + OBJECT + ")" + OBJECT;
     private static final String PUT = "(" + OBJECT + OBJECT + ")" + OBJECT;
+    private static final String UPDATER = "me/cortex/voxy/common/world/WorldUpdater";
+    private static final String UPDATE = "(Lme/cortex/voxy/common/world/WorldEngine;Lme/cortex/voxy/common/voxelization/VoxelizedSection;)V";
 
     public static boolean instrument(ClassNode node) {
         if (method(node, "vss$ingestTrackingReady", "()Z") != null) return true;
@@ -66,6 +69,21 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             if (calls(enqueue, DEQUE, "add", "(" + OBJECT + ")Z").size() != 1) return false;
         }
 
+        // The Jiang port keeps native error handling in processJob but performs
+        // conversion and both air/non-air writes in one private processTask(task).
+        var writers = new java.util.ArrayList<MethodNode>();
+        if (!calls(worker, UPDATER, "insertUpdate", UPDATE).isEmpty()) writers.add(worker);
+        String processDescriptor = "(L" + task + ";)V";
+        var delegates = calls(worker, node.name, "processTask", processDescriptor);
+        if (!delegates.isEmpty()) {
+            MethodNode delegate = method(node, "processTask", processDescriptor);
+            if (delegates.size() != 1 || delegate == null
+                    || (delegate.access & (Opcodes.ACC_STATIC | Opcodes.ACC_ABSTRACT)) != 0
+                    || (delegate.access & Opcodes.ACC_PRIVATE) == 0
+                    || !calls(delegate, node.name, "processTask", processDescriptor).isEmpty()
+                    || calls(delegate, UPDATER, "insertUpdate", UPDATE).isEmpty()) return false;
+            writers.add(delegate);
+        }
         // All shape checks precede mutation. Unknown ports receive no readiness marker.
         MethodInsnNode publish = pending ? calls(enqueue, MAP, "put", PUT).get(0)
                 : calls(enqueue, DEQUE, "add", "(" + OBJECT + ")Z").get(0);
@@ -83,13 +101,31 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             bind.add(call("submittedSnapshot", "(" + OBJECT + ")V"));
         }
         enqueue.instructions.insertBefore(publish, bind);
+        if (!pending) for (MethodNode local : node.methods) if (local.name.equals("enqueueIngest")) {
+            for (MethodInsnNode publication : calls(local, DEQUE, "add", "(" + OBJECT + ")Z")) {
+                var registration = new InsnList();
+                registration.add(new InsnNode(Opcodes.DUP));
+                registration.add(call("published", "(" + OBJECT + ")V"));
+                local.instructions.insertBefore(publication,registration);
+            }
+            local.maxStack++;
+        }
+        // Preserve the actual native call and its exception behavior. Only a successful
+        // write certifies real air; normal returns, cap drops and failed jobs do not.
+        for (MethodNode writer : writers) {
+            for (MethodInsnNode update : calls(writer, UPDATER, "insertUpdate", UPDATE)) {
+                writer.instructions.insertBefore(update,new InsnNode(Opcodes.DUP2));
+                writer.instructions.insert(update,call("committed","(" + OBJECT + OBJECT + ")V"));
+            }
+            if (writer != worker) writer.maxStack += 2;
+        }
         if (pending) {
             after(enqueue, publish, "discarded");
             for (var remove : calls(enqueue, MAP, "remove", REMOVE)) after(enqueue, remove, "discarded");
             after(worker, calls(worker, MAP, "remove", REMOVE).get(0), "workerTask");
         } else after(worker, pops.get(0), "workerTask");
         enqueue.maxStack += 2;
-        worker.maxStack += 1;
+        worker.maxStack += 2;
         wrapWorker(node, worker);
 
         MethodNode marker = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
@@ -168,6 +204,10 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
     }
 
     @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) {
+        if(mixin.endsWith(".PredictionVoxyStorageMixin") || mixin.endsWith(".PredictionVoxyStorageIdentityMixin")) {
+            if(!VoxyStorageTransformer.instrument(node))VSSLogger.warn("Unsupported Voxy storage layout; real coverage persists only for this session");
+            return;
+        }
         if (TARGET.equals(target) && mixin.endsWith(".StrictVoxyIngestMixin") && !instrument(node))
             VSSLogger.warn("Unsupported Voxy ingest queue layout; task completion tracking disabled, using mesh/GPU readiness");
     }
@@ -176,7 +216,8 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
     @Override public boolean shouldApplyMixin(String target, String mixin) {
         // Ingest is independent of the renderer. Incomplete server/data-only ports must
         // not receive half of the mutually dependent mesh/batch/upload tracking group.
-        if (mixin.endsWith(".StrictVoxyIngestMixin")) return true;
+        if (mixin.endsWith(".StrictVoxyIngestMixin") || mixin.endsWith(".PredictionVoxyStorageMixin")
+                || mixin.endsWith(".PredictionVoxyStorageIdentityMixin")) return true;
         if (rendererPresent == null) {
             try {
                 var provider = org.spongepowered.asm.service.MixinService.getService().getBytecodeProvider();

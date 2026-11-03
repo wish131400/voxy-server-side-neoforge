@@ -12,6 +12,7 @@
 
 | 配置 | 默认值 | 允许上限 |
 | --- | ---: | ---: |
+| 允许生成真实区块 LOD（`enableChunkGeneration`） | 单人/局域网 `false`；专用服务器 `true` | — |
 | LOD 距离 | `128` 区块 | `8192` |
 | 全服总带宽 | `8 Mbps` | `100 Mbps` |
 | 发送队列数量 | `1024` 列 | `8192` |
@@ -23,7 +24,9 @@
 | 全服生成并发 | `32` | `1024` |
 | 脏列广播间隔 | `10` tick | `600` tick |
 
-单人游戏（含开放局域网）使用 `singleplayerGenerationConcurrencyLimit`，默认 `2`；独立服务器继续使用 `generationConcurrencyLimitPerPlayer`，默认 `4`。已有服务器自定义值保留；旧配置缺少单人字段时使用新默认值。这里控制真实区块自动生成，显式 `/vss chunky` 任务沿用自身额度。
+`enableChunkGeneration` 在单人和开放局域网默认关闭，在专用服务器默认开启，只控制补生成缺失的真实区块及其 LOD。已有真实区块读取、同步和脏区块刷新继续工作，预测 LOD 独立控制。已有配置保留保存值；旧配置缺少该字段时使用对应运行环境的默认值。
+
+单人游戏（含开放局域网）使用 `singleplayerGenerationConcurrencyLimit`，默认 `2`；独立服务器继续使用 `generationConcurrencyLimitPerPlayer`，默认 `4`。已有服务器自定义值保留；旧配置缺少单人字段时使用新默认值。这里控制真实区块自动生成，显式 `/vss chunky` 任务沿用自身额度，但也需要开启 `enableChunkGeneration`。
 
 近距离请求的 `0` 是特殊值，表示不限速并可使用单个协议批次的 `1024` 请求容量。手动填写时四档最高均为 `256/tick`；中、远、超远三档的 `0` 表示关闭该档请求。
 

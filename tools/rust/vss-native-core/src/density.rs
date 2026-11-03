@@ -11,7 +11,15 @@ use serde_json::Value;
 // document strings keep the standard randomized maps below.
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
+mod arithmetic_plan;
+mod shared_corners;
+#[cfg(test)]
+mod dependency_tests;
 mod column_plan;
+mod horizontal_climate;
+#[cfg(test)]
+mod horizontal_climate_tests;
+mod corner_cache;
 mod height_plan;
 mod surface_plan;
 pub(crate) use surface_plan::Sign as SurfaceSign;
@@ -105,6 +113,10 @@ enum Spline {
 }
 pub struct Graph {
     nodes: Vec<Node>,
+    horizontal_climate: Option<horizontal_climate::Shared>,
+    arithmetic_plan: arithmetic_plan::Plan,
+    shared_corner_safe: Vec<bool>,
+    shared_corners: std::sync::Arc<shared_corners::Pool>,
     column_plan: ColumnPlan,
     surface_plan: Option<surface_plan::SurfacePlan>,
     stateful_columns: bool,
@@ -347,6 +359,10 @@ impl Graph {
             .ok_or("missing legacy_random_source")?;
         let graph = Self {
             nodes: vec![],
+            horizontal_climate: None,
+            arithmetic_plan: arithmetic_plan::Plan::default(),
+            shared_corner_safe: vec![],
+            shared_corners: std::sync::Arc::new(shared_corners::Pool::default()),
             column_plan: ColumnPlan::empty(),
             surface_plan: None,
             stateful_columns: false,
@@ -410,6 +426,7 @@ impl Graph {
         }
         builder.graph.column_plan = ColumnPlan::compile(&builder.graph);
         builder.graph.surface_plan = surface_plan::SurfacePlan::compile(&builder.graph);
+        builder.graph.horizontal_climate = horizontal_climate::Shared::new(&builder.graph, &builder.intern, doc);
         Ok(builder.graph)
     }
 
@@ -472,6 +489,16 @@ impl Graph {
             dependencies.push(uses_y);
         }
         self.exposed_column_order = cache_order::exposed(self, &dependencies);
+        self.shared_corner_safe = cache_order::safe_corners(self, &dependencies);
+        self.arithmetic_plan = arithmetic_plan::Plan::compile(self);
+        // Root additions may change routing or exposed cache dependencies.
+        self.shared_corners.close();
+        self.shared_corners = std::sync::Arc::new(shared_corners::Pool::default());
+    }
+
+    pub(crate) fn close_shared_corners(&self) {
+        self.shared_corners.close();
+        if let Some(shared) = &self.horizontal_climate { shared.close(); }
     }
 
     pub fn initialize_column_caches(&self, scratch: &mut Scratch) {
@@ -494,6 +521,10 @@ impl Graph {
     pub fn add_root(&mut self, name: &str, value: &Value, doc: &Value) -> Result<Id> {
         let placeholder = Self {
             nodes: vec![],
+            horizontal_climate: None,
+            arithmetic_plan: arithmetic_plan::Plan::default(),
+            shared_corner_safe: vec![],
+            shared_corners: std::sync::Arc::new(shared_corners::Pool::default()),
             column_plan: ColumnPlan::empty(),
             surface_plan: None,
             stateful_columns: false,
@@ -524,6 +555,9 @@ impl Graph {
         b.graph.analyze_column_caches();
         b.graph.column_plan = ColumnPlan::compile(&b.graph);
         b.graph.surface_plan = surface_plan::SurfacePlan::compile(&b.graph);
+        if let Some(shared) = &mut b.graph.horizontal_climate {
+            shared.extend(b.graph.nodes.len(), ["temperature", "vegetation", "continents", "erosion", "depth", "ridges"].contains(&name));
+        }
         *self = b.graph;
         result
     }
@@ -600,6 +634,20 @@ impl Graph {
     pub(crate) fn raw_scratch(&self) -> Result<Scratch> {
         self.scratch_for_mode(0, 0, 4, 8, true)
     }
+    /// Raw climate proofs may omit Y only when the compiled dependency graph
+    /// proves independence. Stateful/modded column order is never inferred.
+    pub(crate) fn raw_y_independent(&self, id: Id) -> bool {
+        !self.stateful_columns && !self.exposed_column_order
+            && self.column_plan.y_dependent.get(id) == Some(&false)
+    }
+    pub(crate) fn global_range(&self, id: Id) -> (f64,f64) {
+        self.column_plan.bounds[id]
+    }
+    /// Raw climate interval. Its mode is distinct from Cell/Single and it
+    /// does not initialize terrain or interpolation workspaces.
+    pub(crate) fn raw_column_range(&self,id:Id,bottom:[i32;3],top:i32,s:&mut Scratch) -> (f64,f64) {
+        self.vertical_range(id,bottom,top,Mode::Raw,s)
+    }
     fn scratch_for_mode(&self, origin_x: i32, origin_z: i32, width: i32, height: i32, raw: bool) -> Result<Scratch> {
         if !(1..=64).contains(&width) || !(1..=64).contains(&height) {
             return Err("invalid noise cell size".into());
@@ -613,7 +661,8 @@ impl Graph {
             memo: vec![None; self.nodes.len()],
             horizontal: vec![HorizontalCache::default(); self.column_plan.count],
             use_column_plan: true,
-            corners: FxHashMap::default(),
+            corners: corner_cache::CornerCache::new(self.column_plan.corner_slots.clone(),
+                if raw { 0 } else { self.column_plan.corner_count }, origin_x, origin_z, width, height),
             cells: vec![None; if raw { 0 } else { self.interpolator_count }],
             column_edges: vec![None; if raw { 0 } else { self.interpolator_count }],
             flat: FxHashMap::default(),
@@ -643,6 +692,10 @@ impl Graph {
             cell_values: FxHashMap::default(),
             final_values: vec![],
             beard: 0.,
+            shared_corner: None,
+            shared_attempted: false,
+            shared_suspended: false,
+            climate_targets: crate::climate::targets::Targets::default(),
         })
     }
     /// Conservative range within ONE vertical interpolation cell. Unknown
@@ -680,6 +733,10 @@ impl Graph {
             || (mode==Mode::Cell && bottom[1].div_euclid(s.height) != top.div_euclid(s.height)) {
             return unknown;
         }
+        if mode==Mode::Raw && !whole_cell && self.raw_y_independent(id) {
+            let value=self.compute(id,bottom,mode,s);
+            return if value.is_finite() {(value,value)} else {unknown};
+        }
         if mode==Mode::Single && self.column_plan.slots.get(id).is_some_and(|slot| *slot!=column_plan::NONE) {
             let value=self.compute(id,bottom,mode,s);
             return (value,value);
@@ -693,6 +750,7 @@ impl Graph {
                 if a == b && a.is_finite() { return (a, b); }
                 (a.min(b), a.max(b))
             }
+            Node::Marker(_, n) if mode==Mode::Raw => range(*n,s),
             Node::Marker(Marker::Interpolated(_), n) if mode==Mode::Single => range(*n,s),
             Node::Marker(Marker::Cache2d, n) if mode==Mode::Single => range(*n,s),
             Node::Marker(Marker::Interpolated(slot), child) => {
@@ -841,6 +899,9 @@ impl Graph {
     }
 
     pub fn compute(&self, id: Id, p: [i32; 3], mode: Mode, s: &mut Scratch) -> f64 {
+        if mode == Mode::Raw {
+            if let Some(shared) = &self.horizontal_climate { if let Some(value) = shared.get(id, p) { return value; } }
+        }
         let slot = self.column_plan.slots.get(id).copied().unwrap_or(column_plan::NONE);
         if s.use_column_plan && slot != column_plan::NONE {
             if let Some(v) = s.horizontal[slot].get(p[0], p[2], mode) { return v; }
@@ -876,7 +937,29 @@ impl Graph {
         let __noise_start = std::time::Instant::now();
         let [x, y, z] = p;
         let ev = |n, s: &mut Scratch| self.compute(n, p, mode, s);
-        let v = match &self.nodes[id] {
+        // Only exact Single-mode interpolation inputs within the FlatCache
+        // lattice are independent of a NoiseChunk workspace. Beard and exposed
+        // stateful cache dependencies were excluded when compiling the graph.
+        let shared = mode == Mode::Single && !s.shared_suspended && s.use_column_plan
+            && !self.exposed_column_order && self.shared_corner_safe.get(id) == Some(&true)
+            && self.column_plan.corner_slots[id] != column_plan::NONE
+            && s.origin_x % 4 == 0 && s.origin_z % 4 == 0 && s.span >= 4
+            && (s.origin_x as i64..=s.origin_x as i64 + s.span as i64).contains(&(x as i64))
+            && (s.origin_z as i64..=s.origin_z as i64 + s.span as i64).contains(&(z as i64));
+        if shared {
+            if s.shared_corner.as_ref().is_some_and(|c| !c.belongs_to(&self.shared_corners)) {
+                s.release_shared_corners();
+            }
+            if !s.shared_attempted {
+                s.shared_attempted = true;
+                s.shared_corner = self.shared_corners.take();
+            }
+            if let Some(value) = s.shared_corner.as_ref().and_then(|c| c.get(id, p)) { return value; }
+            s.shared_suspended = true;
+        }
+        let v = if s.use_column_plan && self.arithmetic_plan.selected(id) {
+            self.arithmetic_plan.eval(id, self, p, mode, s)
+        } else { match &self.nodes[id] {
             Node::FtfNoise(noise, seed) => noise.compute(x as f32, z as f32, *seed) as f64,
             Node::FtfUnit(input, resolution) => ftf_unit(ev(*input, s), *resolution),
             Node::LinearSpline(input, points) => {
@@ -1087,24 +1170,24 @@ impl Graph {
                 }
                 Marker::Cache2d if mode != Mode::Raw => {
                     if self.stateful_columns {
-                        if let Some((qx, qz, value)) = s.last_2d[id] {
-                            if qx == x && qz == z {
-                                return value;
-                            }
+                        if let Some((_, _, value)) = s.last_2d[id].filter(|(qx,qz,_)| *qx==x && *qz==z) {
+                            value
+                        } else {
+                            let value = ev(*n, s);
+                            s.last_2d[id] = Some((x, z, value));
+                            value
                         }
-                        let value = ev(*n, s);
-                        s.last_2d[id] = Some((x, z, value));
-                        return value;
-                    }
-                    let key = (*n, x, z);
-                    if let Some(&v) = s.cached_2d.get(&key) {
-                        v
                     } else {
-                        let v = ev(*n, s);
-                        if s.cached_2d.len() < 16384 {
-                            s.cached_2d.insert(key, v);
+                        let key = (*n, x, z);
+                        if let Some(&v) = s.cached_2d.get(&key) {
+                            v
+                        } else {
+                            let v = ev(*n, s);
+                            if s.cached_2d.len() < 16384 {
+                                s.cached_2d.insert(key, v);
+                            }
+                            v
                         }
-                        v
                     }
                 }
                 Marker::Flat
@@ -1191,6 +1274,7 @@ impl Graph {
                 Marker::Cell if mode == Mode::Block => self.compute(*n, p, Mode::Cell, s),
                 _ => ev(*n, s),
             },
+        }
         };
         #[cfg(feature = "profiling")]
         if __noise {
@@ -1198,6 +1282,13 @@ impl Graph {
                 __noise_start.elapsed().as_nanos() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
+        }
+        if shared {
+            s.shared_suspended = false;
+            if let Some(cache) = s.shared_corner.as_mut() { cache.insert(id, p, v); }
+        }
+        if mode == Mode::Raw {
+            if let Some(shared) = &self.horizontal_climate { shared.put(id, p, v); }
         }
         s.memo[id] = Some((p, mode, v));
         if s.use_column_plan && slot != column_plan::NONE {
@@ -1251,6 +1342,10 @@ pub enum Mode {
     Slice,
 }
 pub struct Scratch {
+    shared_corner: Option<shared_corners::Lease>,
+    shared_attempted: bool,
+    shared_suspended: bool,
+    pub(crate) climate_targets: crate::climate::targets::Targets,
     origin_x: i32,
     origin_z: i32,
     pub span: i32,
@@ -1259,7 +1354,7 @@ pub struct Scratch {
     memo: Vec<Option<([i32; 3], Mode, f64)>>,
     horizontal: Vec<HorizontalCache>,
     use_column_plan: bool,
-    corners: FxHashMap<(Id, [i32; 3]), f64>,
+    corners: corner_cache::CornerCache,
     // One entry per interpolator, not per block or graph node.
     cells: Vec<Option<([i32; 3], [f64; 8])>>,
     column_edges: Vec<Option<([i32; 3], [f64; 2])>>,
@@ -1278,16 +1373,24 @@ pub struct Scratch {
     pub beard: f64,
 }
 impl Scratch {
+    /// Shared tables have their own 16 MiB/world and 64 MiB/process budget.
+    /// Return the lease before parking so idle jobs cannot monopolise it.
+    pub(crate) fn release_shared_corners(&mut self) {
+        self.shared_corner = None;
+        self.shared_attempted = false;
+        self.shared_suspended = false;
+    }
     /// Reuse allocations for another NoiseChunk in the same immutable graph.
     /// Even coordinate-keyed Flat/Cell memo can depend on the chunk origin;
     /// reset values before changing it, including fallback traversal state.
     pub(crate) fn reset_chunk(&mut self, x: i32, z: i32) {
+        self.release_shared_corners();
         self.origin_x = x;
         self.origin_z = z;
         self.span = 16;
         self.memo.fill(None);
         self.horizontal.fill(HorizontalCache::default());
-        self.corners.clear();
+        self.corners.reset(x,z);
         self.cells.fill(None);
         self.column_edges.fill(None);
         self.flat.clear();
@@ -1301,6 +1404,7 @@ impl Scratch {
         self.cell_values.clear();
         self.final_values.clear();
         self.beard = 0.;
+        self.climate_targets.clear();
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -1311,7 +1415,9 @@ impl Scratch {
             + self.horizontal.capacity()*size_of::<HorizontalCache>()
             + self.cells.capacity()*size_of::<Option<([i32;3],[f64;8])>>()
             + self.column_edges.capacity()*size_of::<Option<([i32;3],[f64;2])>>()
-            + (self.corners.capacity()+self.flat.capacity()+self.cached_2d.capacity())*64
+            + self.corners.retained_bytes()
+            + self.climate_targets.retained_bytes()
+            + (self.flat.capacity()+self.cached_2d.capacity())*64
             + self.last_2d.capacity()*size_of::<Option<(i32,i32,f64)>>()
             + self.once.capacity()*size_of::<(u64,f64)>()
             + self.final_values.capacity()*8
@@ -1319,6 +1425,7 @@ impl Scratch {
     }
     /// Offline oracle: retain the original recursive evaluation without the
     /// compiled horizontal reuse. Production queries leave this enabled.
+    pub(crate) fn enable_dense_corners(&mut self, enabled:bool) {self.corners.enable_dense(enabled);}
     pub fn disable_column_plan(&mut self) { self.use_column_plan = false; }
     pub fn clear_surface_slices(&mut self) {
         self.surface_slices = None;
@@ -1817,3 +1924,7 @@ pub fn end_islands(noise: &SimplexNoise, x: i32, z: i32) -> f64 {
     }
     (value as f64 - 8.) / 128.
 }
+
+#[cfg(test)]
+#[path = "density/legacy_optimization_tests.rs"]
+mod legacy_optimization_tests;

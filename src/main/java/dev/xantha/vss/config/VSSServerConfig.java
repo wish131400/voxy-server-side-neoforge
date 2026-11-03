@@ -6,6 +6,8 @@ import dev.xantha.vss.common.VSSConstants;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.fml.loading.FMLLoader;
 
 public class VSSServerConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-server-config.json";
@@ -100,7 +102,8 @@ public class VSSServerConfig extends JsonConfig {
     public int maxConcurrentNbtReads = 2;
     public int nbtReadQueueLimit = 256;
     public boolean enableChunkNbtColumnSync = true;
-    public boolean enableChunkGeneration = true;
+    // Missing real chunks only; existing-column sync and dirty refresh stay enabled.
+    public boolean enableChunkGeneration = FMLLoader.getDist() == Dist.DEDICATED_SERVER;
     public int nearSyncRateLimitPerTick = DEFAULT_NEAR_SYNC_RATE_LIMIT_PER_TICK;
     public int midSyncRateLimitPerTick = DEFAULT_MID_SYNC_RATE_LIMIT_PER_TICK;
     public int farSyncRateLimitPerTick = DEFAULT_FAR_SYNC_RATE_LIMIT_PER_TICK;
@@ -174,7 +177,7 @@ public class VSSServerConfig extends JsonConfig {
         help.put("maxConcurrentNbtReads", "昂贵区块 NBT 读取/转码的最大并发；默认 2；范围 1-16。");
         help.put("nbtReadQueueLimit", "昂贵区块 NBT 读取的有界等待队列；默认 256；范围 0-4096。");
         help.put("enableChunkNbtColumnSync", "是否允许从区块 NBT 读取 LOD；默认 true。");
-        help.put("enableChunkGeneration", "缺少 LOD 时是否允许服务端生成；默认 true。");
+        help.put("enableChunkGeneration", "允许生成真实区块 LOD：缺少远景数据时生成新的真实区块并制作 LOD，单人和开放局域网默认 false，专用服务器默认 true。关闭后仍同步已有真实区块及其脏区块刷新，不影响预测 LOD；手动预生成也需开启。");
         help.put("nearSyncRateLimitPerTick", "0-32 区块已有 LOD 请求数；默认 0；手动范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示不限速。");
         help.put("midSyncRateLimitPerTick", "33-64 区块已有 LOD 请求数；默认 8；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");
         help.put("farSyncRateLimitPerTick", "65-128 区块已有 LOD 请求数；默认 4；范围 0-" + MAX_SYNC_RATE_LIMIT_PER_TICK + "，0 表示关闭此档。");

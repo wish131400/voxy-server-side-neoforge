@@ -650,6 +650,8 @@ public final class VSSClientNetworking {
     }
 
     private static boolean sendHandshake(String failurePrefix) {
+        var connection = Minecraft.getInstance().getConnection();
+        if (connection == null || !connection.hasChannel(HandshakeC2SPayload.TYPE)) return false;
         try {
             int capabilities = clientCapabilities();
             VSSNetworking.sendToServer(new HandshakeC2SPayload(VSSConstants.PROTOCOL_VERSION, capabilities));

@@ -31,7 +31,7 @@ flowchart TD
 
 ## 预测渲染所有权
 
-预测计算仍由 Rust / Java 后端和 PredictionTileManager 调度。受支持的 Voxy 渲染系统就绪后，PredictionVoxySource 发布不可变体素数据，VoxyPredictionBridge 在构网读取阶段将其与真实数据合成，由 Voxy 负责网格、原生 LOD、遮挡和绘制。预测不写入真实持久缓存，不作为服务端真实列已存在的证据；适配未就绪时等待 Voxy 消费者恢复。详细边界见 [0.3.6 使用与升级说明](../user-guide/upgrade.md)。
+预测计算仍由 Rust / Java 后端和 PredictionTileManager 调度。受支持的 Voxy 渲染系统就绪后，PredictionVoxySource 发布不可变体素数据，VoxyPredictionBridge 在构网读取阶段将其与真实数据合成，由 Voxy 负责网格、原生 LOD、遮挡和绘制。预测不写入真实持久缓存，不作为服务端真实列已存在的证据；适配未就绪时等待 Voxy 消费者恢复。详细边界见 [0.3.7 使用与升级说明](../user-guide/upgrade.md)。
 
 ## 模块目录
 

@@ -9,6 +9,8 @@ allprojects {
             include '**/RustDisplayGridReuseTest.class', '**/PredictionTintReuseTest.class'
             include '**/RustGridReuseTest.class', '**/RustDecorationReuseTest.class'
             include '**/RustVegetationStageTest.class', '**/RustVegetationDeltaUploadTest.class'
+            include '**/RustDecorationHeightTest.class', '**/PredictionDecorationQueryTest.class'
+            include '**/PredictionPlacementExecutorTest.class'
             maxHeapSize = '3G'
             maxParallelForks = 1
             forkEvery = 1

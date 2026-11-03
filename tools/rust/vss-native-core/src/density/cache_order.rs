@@ -57,6 +57,36 @@ fn dependencies(g: &Graph, vertical: &[bool]) -> Vec<bool> {
     e
 }
 
+/// A Flat boundary hides vertical cache state only within its covered lattice.
+/// Beard is job-specific even behind Flat, so propagate it through every node.
+pub(super) fn safe_corners(g: &Graph, vertical: &[bool]) -> Vec<bool> {
+    fn spline(s: &Spline, beard: &[bool]) -> bool {
+        match s {
+            Spline::Constant(_) => false,
+            Spline::Multipoint { coordinate, points } => beard[*coordinate]
+                || points.iter().any(|(_, s, _)| spline(s, beard)),
+        }
+    }
+    let exposed = dependencies(g, vertical);
+    let mut beard = Vec::with_capacity(g.nodes.len());
+    for n in &g.nodes {
+        beard.push(match n {
+            Node::Beard => true,
+            Node::Marker(_, n) | Node::Unary(_, n) | Node::Clamp(n, ..)
+            | Node::Weird(_, n, _) | Node::FtfUnit(n, _) => beard[*n],
+            Node::Binary(_, a, b) => beard[*a] || beard[*b],
+            Node::Range(n, _, _, a, b) | Node::Mix(n, a, b) => beard[*n] || beard[*a] || beard[*b],
+            Node::Select(n, f, choices) => beard[*n] || beard[*f] || choices.iter().any(|(_, _, n)| beard[*n]),
+            Node::LinearSpline(n, points) => beard[*n] || points.iter().any(|(_, n)| beard[*n]),
+            Node::Spline(s) => spline(s, &beard),
+            Node::Shifted(_, _, _, shifts) | Node::FastNoise(_, _, _, shifts) => shifts.iter().any(|n| beard[*n]),
+            Node::CoordinateShift(n, shifts) => beard[*n] || shifts.iter().any(|n| beard[*n]),
+            _ => false,
+        });
+    }
+    exposed.into_iter().zip(beard).map(|(a, b)| !a && !b).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Mode;

@@ -1,0 +1,898 @@
+{
+  "scope": "Instrumented full prediction path, not a speed benchmark. Replay occurs after timed path; natural overlap does not imply temporal availability.",
+  "regions": [
+    {
+      "round": 0,
+      "java3D": 124236,
+      "javaXZ": 5442,
+      "native3D": 22795,
+      "nativeXZ": 5840,
+      "shared3D": 15428,
+      "shared3DPct": 12.418300653594772,
+      "sharedXZ": 5441,
+      "terrainPrior3D": 6914,
+      "terrainPriorXZ": 4491,
+      "sameRawAtNaturalIntersection": [
+        15428,
+        15428,
+        15428,
+        15428,
+        15428,
+        15428
+      ],
+      "sameTargetAtNaturalIntersection": [
+        15428,
+        15428,
+        15428,
+        15428,
+        15428,
+        15428
+      ],
+      "javaXZWithYDependentValues": {
+        "temperature": 0,
+        "humidity": 0,
+        "continentalness": 0,
+        "erosion": 0,
+        "depth": 5387,
+        "weirdness": 0
+      },
+      "replay": {
+        "javaCoordinates": 124236,
+        "complete": 124236,
+        "incomplete": 0,
+        "inconsistentRootValues": 0,
+        "sameRawDouble": [
+          124236,
+          124236,
+          124236,
+          124236,
+          124236,
+          124236
+        ],
+        "sameQuantizedTarget": [
+          124236,
+          124236,
+          124236,
+          124236,
+          124236,
+          124236
+        ],
+        "mismatches": [],
+        "availableBeforeJava3D": 14591,
+        "availableBeforeJavaXZ": 123694,
+        "submittedExact": 86208,
+        "readExact": 83795,
+        "submittedDisplay": 84576,
+        "readDisplay": 50849
+      },
+      "nativeStats": {
+        "coldNs": [
+          0,
+          136400,
+          4145500,
+          0,
+          0
+        ],
+        "colorNs": [
+          0,
+          307500,
+          9113800,
+          0,
+          0
+        ],
+        "inconsistentTargets": 0,
+        "recordNs": [
+          0,
+          912900,
+          24177200,
+          0,
+          0
+        ],
+        "records": [
+          0,
+          4356,
+          137537,
+          0,
+          0
+        ],
+        "targetCalls": [
+          0,
+          16311,
+          569007,
+          0,
+          0
+        ],
+        "targetMisses": [
+          0,
+          11727,
+          61101,
+          0,
+          0
+        ],
+        "uniqueCoordinates": 22795
+      },
+      "sameHorizontalRootAcrossJavaRust": {
+        "temperature": 124235,
+        "humidity": 124235,
+        "continentalness": 124235,
+        "erosion": 124235,
+        "weirdness": 124235
+      },
+      "java3DAtSharedXZ": 124235,
+      "columns": {
+        "exactRequestedJavaAndNative": 86208,
+        "exactRequestedObserved": 84127,
+        "exactRequestedUnobserved": 2081,
+        "readJavaAndNative": 84675,
+        "note": "Coordinate-union coverage, including display readers. Not a safe skip oracle: surface rules/neighbour geometry also need data; query batching may amortize work."
+      }
+    },
+    {
+      "round": 1,
+      "java3D": 124858,
+      "javaXZ": 5443,
+      "native3D": 26793,
+      "nativeXZ": 5814,
+      "shared3D": 15298,
+      "shared3DPct": 12.252318633968187,
+      "sharedXZ": 5437,
+      "terrainPrior3D": 7413,
+      "terrainPriorXZ": 4503,
+      "sameRawAtNaturalIntersection": [
+        15298,
+        15298,
+        15298,
+        15298,
+        15298,
+        15298
+      ],
+      "sameTargetAtNaturalIntersection": [
+        15298,
+        15298,
+        15298,
+        15298,
+        15298,
+        15298
+      ],
+      "javaXZWithYDependentValues": {
+        "temperature": 0,
+        "humidity": 0,
+        "continentalness": 0,
+        "erosion": 0,
+        "depth": 5389,
+        "weirdness": 0
+      },
+      "replay": {
+        "javaCoordinates": 124858,
+        "complete": 124858,
+        "incomplete": 0,
+        "inconsistentRootValues": 0,
+        "sameRawDouble": [
+          124858,
+          124858,
+          124858,
+          124858,
+          124858,
+          124858
+        ],
+        "sameQuantizedTarget": [
+          124858,
+          124858,
+          124858,
+          124858,
+          124858,
+          124858
+        ],
+        "mismatches": [],
+        "availableBeforeJava3D": 14879,
+        "availableBeforeJavaXZ": 124309,
+        "submittedExact": 87024,
+        "readExact": 84417,
+        "submittedDisplay": 82944,
+        "readDisplay": 37289
+      },
+      "nativeStats": {
+        "coldNs": [
+          0,
+          109500,
+          4211000,
+          0,
+          0
+        ],
+        "colorNs": [
+          0,
+          274500,
+          10344500,
+          0,
+          0
+        ],
+        "inconsistentTargets": 0,
+        "recordNs": [
+          0,
+          699800,
+          25873600,
+          0,
+          0
+        ],
+        "records": [
+          0,
+          4356,
+          168025,
+          0,
+          0
+        ],
+        "targetCalls": [
+          0,
+          13855,
+          723488,
+          0,
+          0
+        ],
+        "targetMisses": [
+          0,
+          13009,
+          83772,
+          0,
+          0
+        ],
+        "uniqueCoordinates": 26793
+      },
+      "sameHorizontalRootAcrossJavaRust": {
+        "temperature": 124851,
+        "humidity": 124851,
+        "continentalness": 124851,
+        "erosion": 124851,
+        "weirdness": 124851
+      },
+      "java3DAtSharedXZ": 124851,
+      "columns": {
+        "exactRequestedJavaAndNative": 87024,
+        "exactRequestedObserved": 84492,
+        "exactRequestedUnobserved": 2532,
+        "readJavaAndNative": 84586,
+        "note": "Coordinate-union coverage, including display readers. Not a safe skip oracle: surface rules/neighbour geometry also need data; query batching may amortize work."
+      }
+    },
+    {
+      "round": 2,
+      "java3D": 126050,
+      "javaXZ": 5448,
+      "native3D": 27932,
+      "nativeXZ": 5878,
+      "shared3D": 18780,
+      "shared3DPct": 14.898849662832209,
+      "sharedXZ": 5448,
+      "terrainPrior3D": 6090,
+      "terrainPriorXZ": 4481,
+      "sameRawAtNaturalIntersection": [
+        18780,
+        18780,
+        18780,
+        18780,
+        18780,
+        18780
+      ],
+      "sameTargetAtNaturalIntersection": [
+        18780,
+        18780,
+        18780,
+        18780,
+        18780,
+        18780
+      ],
+      "javaXZWithYDependentValues": {
+        "temperature": 0,
+        "humidity": 0,
+        "continentalness": 0,
+        "erosion": 0,
+        "depth": 5404,
+        "weirdness": 0
+      },
+      "replay": {
+        "javaCoordinates": 126050,
+        "complete": 126050,
+        "incomplete": 0,
+        "inconsistentRootValues": 0,
+        "sameRawDouble": [
+          126050,
+          126050,
+          126050,
+          126050,
+          126050,
+          126050
+        ],
+        "sameQuantizedTarget": [
+          126050,
+          126050,
+          126050,
+          126050,
+          126050,
+          126050
+        ],
+        "mismatches": [],
+        "availableBeforeJava3D": 15811,
+        "availableBeforeJavaXZ": 125493,
+        "submittedExact": 86160,
+        "readExact": 83804,
+        "submittedDisplay": 85984,
+        "readDisplay": 62985
+      },
+      "nativeStats": {
+        "coldNs": [
+          0,
+          114700,
+          4556900,
+          0,
+          0
+        ],
+        "colorNs": [
+          0,
+          272900,
+          10606100,
+          0,
+          0
+        ],
+        "inconsistentTargets": 0,
+        "recordNs": [
+          0,
+          701100,
+          26061400,
+          0,
+          0
+        ],
+        "records": [
+          0,
+          4356,
+          171854,
+          0,
+          0
+        ],
+        "targetCalls": [
+          0,
+          10873,
+          629645,
+          0,
+          0
+        ],
+        "targetMisses": [
+          0,
+          10396,
+          76645,
+          0,
+          0
+        ],
+        "uniqueCoordinates": 27932
+      },
+      "sameHorizontalRootAcrossJavaRust": {
+        "temperature": 126050,
+        "humidity": 126050,
+        "continentalness": 126050,
+        "erosion": 126050,
+        "weirdness": 126050
+      },
+      "java3DAtSharedXZ": 126050,
+      "columns": {
+        "exactRequestedJavaAndNative": 86160,
+        "exactRequestedObserved": 84846,
+        "exactRequestedUnobserved": 1314,
+        "readJavaAndNative": 85801,
+        "note": "Coordinate-union coverage, including display readers. Not a safe skip oracle: surface rules/neighbour geometry also need data; query batching may amortize work."
+      }
+    },
+    {
+      "round": 3,
+      "java3D": 125114,
+      "javaXZ": 5446,
+      "native3D": 26619,
+      "nativeXZ": 5788,
+      "shared3D": 15616,
+      "shared3DPct": 12.481416947743657,
+      "sharedXZ": 5445,
+      "terrainPrior3D": 7669,
+      "terrainPriorXZ": 4502,
+      "sameRawAtNaturalIntersection": [
+        15616,
+        15616,
+        15616,
+        15616,
+        15616,
+        15616
+      ],
+      "sameTargetAtNaturalIntersection": [
+        15616,
+        15616,
+        15616,
+        15616,
+        15616,
+        15616
+      ],
+      "javaXZWithYDependentValues": {
+        "temperature": 0,
+        "humidity": 0,
+        "continentalness": 0,
+        "erosion": 0,
+        "depth": 5391,
+        "weirdness": 0
+      },
+      "replay": {
+        "javaCoordinates": 125114,
+        "complete": 125114,
+        "incomplete": 0,
+        "inconsistentRootValues": 0,
+        "sameRawDouble": [
+          125114,
+          125114,
+          125114,
+          125114,
+          125114,
+          125114
+        ],
+        "sameQuantizedTarget": [
+          125114,
+          125114,
+          125114,
+          125114,
+          125114,
+          125114
+        ],
+        "mismatches": [],
+        "availableBeforeJava3D": 15167,
+        "availableBeforeJavaXZ": 124539,
+        "submittedExact": 86768,
+        "readExact": 84461,
+        "submittedDisplay": 82944,
+        "readDisplay": 37274
+      },
+      "nativeStats": {
+        "coldNs": [
+          0,
+          107400,
+          4254300,
+          0,
+          0
+        ],
+        "colorNs": [
+          0,
+          273200,
+          10519500,
+          0,
+          0
+        ],
+        "inconsistentTargets": 0,
+        "recordNs": [
+          0,
+          672500,
+          24568300,
+          0,
+          0
+        ],
+        "records": [
+          0,
+          4356,
+          167208,
+          0,
+          0
+        ],
+        "targetCalls": [
+          0,
+          13983,
+          723263,
+          0,
+          0
+        ],
+        "targetMisses": [
+          0,
+          13124,
+          83340,
+          0,
+          0
+        ],
+        "uniqueCoordinates": 26619
+      },
+      "sameHorizontalRootAcrossJavaRust": {
+        "temperature": 125113,
+        "humidity": 125113,
+        "continentalness": 125113,
+        "erosion": 125113,
+        "weirdness": 125113
+      },
+      "java3DAtSharedXZ": 125113,
+      "columns": {
+        "exactRequestedJavaAndNative": 86768,
+        "exactRequestedObserved": 84513,
+        "exactRequestedUnobserved": 2255,
+        "readJavaAndNative": 84575,
+        "note": "Coordinate-union coverage, including display readers. Not a safe skip oracle: surface rules/neighbour geometry also need data; query batching may amortize work."
+      }
+    },
+    {
+      "round": 4,
+      "java3D": 126055,
+      "javaXZ": 5441,
+      "native3D": 24274,
+      "nativeXZ": 5646,
+      "shared3D": 18501,
+      "shared3DPct": 14.676926738328508,
+      "sharedXZ": 5433,
+      "terrainPrior3D": 5820,
+      "terrainPriorXZ": 4474,
+      "sameRawAtNaturalIntersection": [
+        18501,
+        18501,
+        18501,
+        18501,
+        18501,
+        18501
+      ],
+      "sameTargetAtNaturalIntersection": [
+        18501,
+        18501,
+        18501,
+        18501,
+        18501,
+        18501
+      ],
+      "javaXZWithYDependentValues": {
+        "temperature": 0,
+        "humidity": 0,
+        "continentalness": 0,
+        "erosion": 0,
+        "depth": 5401,
+        "weirdness": 0
+      },
+      "replay": {
+        "javaCoordinates": 126055,
+        "complete": 126055,
+        "incomplete": 0,
+        "inconsistentRootValues": 0,
+        "sameRawDouble": [
+          126055,
+          126055,
+          126055,
+          126055,
+          126055,
+          126055
+        ],
+        "sameQuantizedTarget": [
+          126055,
+          126055,
+          126055,
+          126055,
+          126055,
+          126055
+        ],
+        "mismatches": [],
+        "availableBeforeJava3D": 15921,
+        "availableBeforeJavaXZ": 125375,
+        "submittedExact": 83424,
+        "readExact": 83063,
+        "submittedDisplay": 84736,
+        "readDisplay": 62649
+      },
+      "nativeStats": {
+        "coldNs": [
+          0,
+          128500,
+          5003300,
+          0,
+          0
+        ],
+        "colorNs": [
+          0,
+          280600,
+          10699300,
+          0,
+          0
+        ],
+        "inconsistentTargets": 0,
+        "recordNs": [
+          0,
+          794000,
+          29689100,
+          0,
+          0
+        ],
+        "records": [
+          0,
+          4356,
+          165693,
+          0,
+          0
+        ],
+        "targetCalls": [
+          0,
+          9742,
+          582462,
+          0,
+          0
+        ],
+        "targetMisses": [
+          0,
+          9446,
+          66147,
+          0,
+          0
+        ],
+        "uniqueCoordinates": 24274
+      },
+      "sameHorizontalRootAcrossJavaRust": {
+        "temperature": 126033,
+        "humidity": 126033,
+        "continentalness": 126033,
+        "erosion": 126033,
+        "weirdness": 126033
+      },
+      "java3DAtSharedXZ": 126033,
+      "columns": {
+        "exactRequestedJavaAndNative": 83424,
+        "exactRequestedObserved": 83086,
+        "exactRequestedUnobserved": 338,
+        "readJavaAndNative": 83748,
+        "note": "Coordinate-union coverage, including display readers. Not a safe skip oracle: surface rules/neighbour geometry also need data; query batching may amortize work."
+      }
+    }
+  ],
+  "mean": {
+    "java3D": 125262.6,
+    "javaXZ": 5444,
+    "native3D": 25682.6,
+    "nativeXZ": 5793.2,
+    "shared3D": 16724.6,
+    "shared3DPct": 13.345562527293467,
+    "sharedXZ": 5440.8,
+    "terrainPrior3D": 6781.2,
+    "terrainPriorXZ": 4490.2,
+    "availableBeforeJava3D": 15273.8,
+    "availableBeforeJavaXZ": 124682,
+    "submittedExact": 85916.8,
+    "readExact": 83908,
+    "submittedDisplay": 84236.8,
+    "readDisplay": 50209.2,
+    "exactRequestedJavaAndNative": 85916.8,
+    "exactRequestedObserved": 84212.8,
+    "exactRequestedUnobserved": 1704,
+    "readJavaAndNative": 84677,
+    "availableBeforeJava3DPct": 12.19342405474579,
+    "availableBeforeJavaXZPct": 99.5364937339637,
+    "exactRequestedUnobservedPct": 1.9833140899102388,
+    "records": [
+      0,
+      4356,
+      162063.4,
+      0,
+      0
+    ],
+    "recordNs": [
+      0,
+      756060,
+      26073920,
+      0,
+      0
+    ],
+    "coldNs": [
+      0,
+      119300,
+      4434200,
+      0,
+      0
+    ],
+    "colorNs": [
+      0,
+      281740,
+      10256640,
+      0,
+      0
+    ],
+    "targetCalls": [
+      0,
+      12952.8,
+      645573,
+      0,
+      0
+    ],
+    "targetMisses": [
+      0,
+      11540.4,
+      74201,
+      0,
+      0
+    ]
+  },
+  "outputMatchesPrior": true,
+  "outputHashes": {
+    "0": "00eca6cbec09ac36123a4afa2e55366ac3e74c59d19853a0d567befbbc632f77",
+    "1": "7e9412c26b9f7856c2ad5385771b9f15753bcd93e9df191de6fd320f044164ff",
+    "2": "4c10694d88bd3d2204f68d2b8462d243bff90d2277a9fb6d1cdabc2833e19a5d",
+    "3": "02e6eaec1d78d5248df55701a2e831374d30cbcf3dddae1b5ea4e88b4ef4ca79",
+    "4": "0c973c48fc4c502d27be88d44de331a6f378a659354c40be6280581a463af725"
+  },
+  "evidenceSha256": {
+    "java-sharing-baseline--1.json": "f70a5dfa69f0565d89e43198fd087e0f1b220853c562d1c6dcfe8517ce21db02",
+    "java-sharing-baseline-0.json": "dd5e71c5641346725fb2270b693b8a5dcb17efc45f2e55a891d2457cddeb45b3",
+    "java-sharing-baseline-1.json": "3dffb66196904ee4e7f75bf6dc5c2c46e78702e5b64acc01d05064777135550b",
+    "java-sharing-baseline-2.json": "af5cf7f25b52b2e2467451965b01684a7be614b4f73595b1713801af61a2a2a0",
+    "java-sharing-baseline-3.json": "68ea9ae849d5d0e8fbb9e95e250193234e5ac166c6115c79f40ab0163005c3ad",
+    "java-sharing-baseline-4.json": "720a2ee31bd6e7af3b3d19aba9069d915f472bd733171622f1572d40d2dfeed2",
+    "native-sharing-baseline--1.json": "9638b5be4730ffe9deb651f136593042970f702d224b10e67cf47ebb0c1a7bae",
+    "native-sharing-baseline-0.json": "9131b58e23d12fb12330d7229bdbe1d65a65e4579dc87907342a71ec8933478f",
+    "native-sharing-baseline-1.json": "e673c77e5eeaf9f5704cddef4324db68ed8af27129e1fbd4aa7ab8c5791a1974",
+    "native-sharing-baseline-2.json": "144f9066617c0c126b119cddecb43aacdb63023d759158f81a5ce40bb5115c89",
+    "native-sharing-baseline-3.json": "6a68e7a510bc1e7550067275252e696e005f814c2c4505d1b8358bc7ed7f4743",
+    "native-sharing-baseline-4.json": "77f1fbac9176068318a8d5248cb0cefeaad947fbfd9e95bcdf408ccde7dd8051",
+    "sharing-manifest.json": "ed64d23a92761a959ed307b2ca08a8fc3ec12200e21ceb128ec3240fa85b2e67"
+  },
+  "graph": {
+    "depth": {
+      "argument1": {
+        "from_value": 1.5,
+        "from_y": -64,
+        "to_value": -1.5,
+        "to_y": 320,
+        "type": "minecraft:y_clamped_gradient"
+      },
+      "argument2": "minecraft:overworld/offset",
+      "type": "minecraft:add"
+    },
+    "climateRoots": {
+      "temperature": {
+        "definition": {
+          "noise": "minecraft:temperature",
+          "shift_x": "minecraft:shift_x",
+          "shift_y": 0.0,
+          "shift_z": "minecraft:shift_z",
+          "type": "minecraft:shifted_noise",
+          "xz_scale": 0.25,
+          "y_scale": 0.0
+        },
+        "namedDependencies": [
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      },
+      "vegetation": {
+        "definition": {
+          "noise": "minecraft:vegetation",
+          "shift_x": "minecraft:shift_x",
+          "shift_y": 0.0,
+          "shift_z": "minecraft:shift_z",
+          "type": "minecraft:shifted_noise",
+          "xz_scale": 0.25,
+          "y_scale": 0.0
+        },
+        "namedDependencies": [
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      },
+      "continents": {
+        "definition": "minecraft:overworld/continents",
+        "namedDependencies": [
+          "minecraft:overworld/continents",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:overworld/continents",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      },
+      "erosion": {
+        "definition": "minecraft:overworld/erosion",
+        "namedDependencies": [
+          "minecraft:overworld/erosion",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:overworld/erosion",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      },
+      "depth": {
+        "definition": "minecraft:overworld/depth",
+        "namedDependencies": [
+          "minecraft:overworld/continents",
+          "minecraft:overworld/depth",
+          "minecraft:overworld/erosion",
+          "minecraft:overworld/offset",
+          "minecraft:overworld/ridges",
+          "minecraft:overworld/ridges_folded",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:overworld/continents",
+          "minecraft:overworld/depth",
+          "minecraft:overworld/erosion",
+          "minecraft:overworld/offset",
+          "minecraft:overworld/ridges",
+          "minecraft:overworld/ridges_folded",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      },
+      "ridges": {
+        "definition": "minecraft:overworld/ridges",
+        "namedDependencies": [
+          "minecraft:overworld/ridges",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ],
+        "sharedWithTerrainNamedDependencies": [
+          "minecraft:overworld/ridges",
+          "minecraft:shift_x",
+          "minecraft:shift_z"
+        ]
+      }
+    },
+    "terrainNamedDependencies": [
+      "minecraft:overworld/base_3d_noise",
+      "minecraft:overworld/caves/entrances",
+      "minecraft:overworld/caves/noodle",
+      "minecraft:overworld/caves/pillars",
+      "minecraft:overworld/caves/spaghetti_2d",
+      "minecraft:overworld/caves/spaghetti_2d_thickness_modulator",
+      "minecraft:overworld/caves/spaghetti_roughness_function",
+      "minecraft:overworld/continents",
+      "minecraft:overworld/depth",
+      "minecraft:overworld/erosion",
+      "minecraft:overworld/factor",
+      "minecraft:overworld/jaggedness",
+      "minecraft:overworld/offset",
+      "minecraft:overworld/ridges",
+      "minecraft:overworld/ridges_folded",
+      "minecraft:overworld/sloped_cheese",
+      "minecraft:shift_x",
+      "minecraft:shift_z",
+      "minecraft:y"
+    ]
+  },
+  "documentSha256": "9bfdc0a86bb1dc312d0d4f28507fe13629fd585e65966f3ee0e3f9facb30b2cc",
+  "binaryEvidenceSha256": {
+    "java-climate-baseline--1.bin": "66c21da335d006dea8d5d3a2c49a0f0ac5ce6dca10b389ad4ff65b32364f15c7",
+    "java-climate-baseline-0.bin": "51a8bf37b76344d01552958cfe36373f9cc3b0178afa622a9c300619701fd541",
+    "java-climate-baseline-1.bin": "7f8aafde9d71e922a016b9db4da378b2cb7d625d178ae57803b61606f20ed9ac",
+    "java-climate-baseline-2.bin": "a43f7585476412bcb4b9743fed985a989c086fd890cb03efd7198e0341ccd6b5",
+    "java-climate-baseline-3.bin": "456597a28e9c7232462b4c8030c0b9acf28910810a5c77f4b3e99d14aa4e2fc4",
+    "java-climate-baseline-4.bin": "3eb2d8d2ed7017d0cb22b8e353fa206743ad775eaeeec534e4cbfaf386d5d421",
+    "native-climate-baseline--1.bin": "1b6361c6320245fe8770116da69edf1c5b265c427e54f6116b46aba911c6703f",
+    "native-climate-baseline--1.bin.columns": "c15194c127af54f9e18f825d568a7f6a317757328b0b87952ccf4ef1ea6c76ae",
+    "native-climate-baseline-0.bin": "3fd29ddc3798fa86238255d01c3e3418790cc5cb82cfba1f12c68cae290f5056",
+    "native-climate-baseline-0.bin.columns": "1f28933b5f39e3bedab2cf769a4a1a118c4a65dd58a612ea2d7b47c69ee4055c",
+    "native-climate-baseline-1.bin": "95d2ecc7dc95279a628009d4ea36e0d866dae5b3d5334c9160c2fcdb95d26089",
+    "native-climate-baseline-1.bin.columns": "4b536035e96baa633dde45b020faecdd65fbcbcf7dad53a6c18c5da1288d5f09",
+    "native-climate-baseline-2.bin": "24c400712b8e97c6bb4b7b2366322f9a408399f349a3318014162253d41085d4",
+    "native-climate-baseline-2.bin.columns": "8f11982f5698d530f38ad0485395216a3fc3237bbff66df311e9175a4c018792",
+    "native-climate-baseline-3.bin": "3becba0eff574062a7916afdce6b205cdc282516f4045444236f102d3d2aaf3b",
+    "native-climate-baseline-3.bin.columns": "76db17a480b23dd1fadafec4a5583c8f578351f7798faed0c449f79e7f90f806",
+    "native-climate-baseline-4.bin": "33f1b2186ca70529992cc3245b828c21ff9ec8c21c1751322fde18a1f407a55e",
+    "native-climate-baseline-4.bin.columns": "282f66362e55745ce486189966327382d90032cce03d1a40b5b3ea820714d98c"
+  },
+  "columnEvidenceSha256": {
+    "java-columns-baseline--1.bin": "6741be5761ab69b7474b63d17fabc1d10f46a2f1655e670dfd22bffbc8743bb7",
+    "java-columns-baseline-0.bin": "e00d58369d0baf4b30593761cbbde08dc6397b877e25a487f2758e6ab830449d",
+    "java-columns-baseline-1.bin": "905f8450b97e790232021bb6d27db43a58277478917542b2e4466550c4e24e78",
+    "java-columns-baseline-2.bin": "712d23a9ba229fa7e28db18f9763ac6409f581397d5fa45ed1c63204cebbdf55",
+    "java-columns-baseline-3.bin": "3f8f0406d07d17ad87a27069b026e28c0a530b9e9b43f71560f93823255a60c5",
+    "java-columns-baseline-4.bin": "f02f5b935d16448d9c0c8eeb3e0c2462d14de69f3a351d2664115f1dc8c615a6"
+  },
+  "sourceValidation": {
+    "javaResourceCount": 490,
+    "nativeInputCount": 161,
+    "productionMismatch": [],
+    "nativeMismatch": [],
+    "diagnosticDllSha256": "8b5c0ad74738874cc5259d8b3d3fce8f8f21e9a46192d086e091abe577533b6a",
+    "productionDllSha256": "2ad535c6ff24b469ca9cb127a6bab73882bb32a1e49fedac3a9e6d89897527d1"
+  },
+  "runtimeComplete": true
+}

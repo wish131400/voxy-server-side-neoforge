@@ -1,0 +1,33 @@
+allprojects { afterEvaluate {
+    sourceSets.create('realAuthority') {
+        java.srcDirs=['src/test/java']
+        java.include 'dev/xantha/vss/compat/VoxyReal*Test.java',
+            'dev/xantha/vss/compat/VoxyMergeLocalityTest.java',
+            'dev/xantha/vss/compat/StrictIngestCompletionTest.java',
+            'dev/xantha/vss/compat/VoxyPredictionIngestHandoffTest.java',
+            'dev/xantha/vss/compat/VoxyIngest*Test.java',
+            'dev/xantha/vss/compat/VoxyIngest*Fixture.java',
+            'dev/xantha/vss/compat/IngestQueueFixture.java',
+            'dev/xantha/vss/compat/VoxyLegacyIngestMixinApplicationTest.java',
+            'dev/xantha/vss/compat/VoxyPredictionNotificationTest.java',
+            'dev/xantha/vss/compat/VoxySectionVersionsTest.java',
+            'dev/xantha/vss/compat/VoxyCompatLocalIndexLifecycleTest.java',
+            'dev/xantha/vss/compat/VoxyLocalIndexProbeTest.java',
+            'dev/xantha/vss/testutil/**',
+            'dev/xantha/vss/client/prediction/ForgeTestBootstrap.java',
+            'dev/xantha/vss/client/prediction/ClientTerrainSamplerTest.java'
+        compileClasspath+=sourceSets.main.output+sourceSets.test.compileClasspath
+        runtimeClasspath=output+files(sourceSets.main.output,sourceSets.test.compileClasspath,sourceSets.main.runtimeClasspath,configurations.testRuntimeClasspath)
+    }
+    tasks.register('realAuthorityTest',Test) {
+        dependsOn tasks.named('realAuthorityClasses')
+        testClassesDirs=sourceSets.realAuthority.output.classesDirs
+        classpath=sourceSets.realAuthority.runtimeClasspath
+        useJUnitPlatform();maxParallelForks=1;forkEvery=1;maxHeapSize='2G'
+        include '**/*Test.class'
+        ['vss.voxyJar':'vssVoxyJar','vss.legacyVoxyJar':'vssLegacyVoxyJar'].each { key,prop ->
+            if(providers.gradleProperty(prop).isPresent())systemProperty key,providers.gradleProperty(prop).get()
+        }
+        testLogging { events 'failed','skipped';exceptionFormat 'full' }
+    }
+} }

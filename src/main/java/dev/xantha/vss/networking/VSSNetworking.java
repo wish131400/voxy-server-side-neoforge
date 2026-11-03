@@ -44,7 +44,8 @@ public final class VSSNetworking {
     }
 
     public static void register(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar(PROTOCOL).executesOn(HandlerThread.MAIN);
+        // Missing VSS is allowed; installed peers still negotiate this protocol version.
+        PayloadRegistrar registrar = event.registrar(PROTOCOL).optional().executesOn(HandlerThread.MAIN);
 
         registrar.configurationToClient(
                 ServerIdentityS2CPayload.TYPE,
@@ -77,7 +78,9 @@ public final class VSSNetworking {
     }
 
     public static void registerConfigurationTasks(RegisterConfigurationTasksEvent event) {
-        event.register(new ServerIdentityConfigurationTask(event.getListener()));
+        if (event.getListener().hasChannel(ServerIdentityS2CPayload.TYPE)) {
+            event.register(new ServerIdentityConfigurationTask(event.getListener()));
+        }
     }
 
     public static void sendToServer(CustomPacketPayload payload) {

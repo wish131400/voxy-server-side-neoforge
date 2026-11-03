@@ -1,0 +1,52 @@
+{
+  "status": "experimental; not approved for release",
+  "files": {
+    "src/main/java/dev/xantha/vss/client/prediction/PredictionDecorationLevel.java": {
+      "baselineSha256": "13cff11d1df76fe6e08f5c7865ef9a4e7b486a3f6b8826e80b5ae0df06a38e62",
+      "prototypeSha256": "856ab15501763db569891b611af8a45f6b8332ab3ba403ca1ca457e238f4c4eb",
+      "normalizedPrototypeSha256": "c0f91460f152d6eccf959f2e96f89c043abe35c26570e4df11dfb451c4291da6"
+    },
+    "src/main/java/dev/xantha/vss/client/prediction/RustTerrainSampler.java": {
+      "baselineSha256": "205b19121f9d2eb2f4fcf3c0903b3296abea9d091589c9171e6a269167a9903b",
+      "prototypeSha256": "f93486c39702b0fb7f2e6b05cda27c0616b05ed1f44cfef977df2eb8981a48bc",
+      "normalizedPrototypeSha256": "79e32fcee9c8d1f43cd20a0d0b087d7ff20d2eea0bd64c9fb4ea11f4da98ad13"
+    },
+    "src/main/java/dev/xantha/vss/client/prediction/PredictionPlacementPruning.java": {
+      "baselineSha256": "9df26bf42973d9397a40d1cf454ae37862c3ae06eef866d185653c456e6fc86e",
+      "prototypeSha256": "a29a86f6d3a6067fb99698a12333e09ce3d80bbe094ede0ef78f6e2e1ca3855e",
+      "normalizedPrototypeSha256": "a29a86f6d3a6067fb99698a12333e09ce3d80bbe094ede0ef78f6e2e1ca3855e"
+    },
+    "src/main/java/dev/xantha/vss/client/prediction/RustWorldgenBackend.java": {
+      "baselineSha256": "33edfab6e6b523cd5b32c20bfff1960e64be75a218962844704365e0631da401",
+      "prototypeSha256": "0ef9f350e35670f5564f8d1f8994b27680c7aa317119afb83ac09aba92a2df78",
+      "normalizedPrototypeSha256": "252d625a53d2cb5985961922227a714cf40611b529a36e140717b9df470fee15"
+    },
+    "tools/rust/vss-native-core/src/backend.rs": {
+      "baselineSha256": "f8aa5f847e03d9962ab7331ef7975933e283582ce2c82eb3bbf7322171fe0211",
+      "prototypeSha256": "03f0a56a21ef55a219917cb865a41262507fa36acd25ece099d2e2c878129a62",
+      "normalizedPrototypeSha256": "9aef2a5e01f0981ddf0a0a1e08c72d37708778c110f477eed80023468dfeba7c"
+    },
+    "tools/rust/vss-native-core/src/surface.rs": {
+      "baselineSha256": "bc115bd3a46ce0714cddd515f4a57790838dc0c5ad2ec8ec610194d37211647d",
+      "prototypeSha256": "91be537aed586b78e8625a4d64d411841801b1df98a750897aaa780a4381bbb0",
+      "normalizedPrototypeSha256": "bec43295af7dddca615e59511c95c62b47e19fa520734d4fbaa5a431593750e5"
+    },
+    "tools/rust/vss-native-core/src/jni_worldgen.rs": {
+      "baselineSha256": "be1b09e4f1330877c773ae139271f103fcb77cc1a5038b73c5f9a00c16f35f37",
+      "prototypeSha256": "0bcae66698400ec9a9eb5dc56b9ca943a2a7a8ac9084ef4f2a88f96b5e4b1360",
+      "normalizedPrototypeSha256": "d8e53b08eaf32c04af52f684f4a6eaa5c90f2680113b951eeacce8bb61c78131"
+    },
+    "tools/rust/vss-native-core/src/blocks.rs": {
+      "baselineSha256": "c74504047fe3636156b196479d397ed577f8384fbd066f4b1274c4b64c07ad79",
+      "prototypeSha256": "3884462f4f093817a1124440ac5c2cc3ed909551602b5cd9b54cf8a27d148cb3",
+      "normalizedPrototypeSha256": "9adfb0de99209fc4375a967c5f88ca823b98327de1d4d95322564e4c3652645b"
+    },
+    "tools/rust/vss-native-core/src/backend/heights.rs": {
+      "baselineSha256": null,
+      "prototypeSha256": "0063f4649e897d67bee8fa22a2500cc139867fc20c3feef0c5001c3cd8bc0ee9",
+      "normalizedPrototypeSha256": "0063f4649e897d67bee8fa22a2500cc139867fc20c3feef0c5001c3cd8bc0ee9"
+    }
+  },
+  "patchSha256": "c8d46965dc6624c8df3d68e276c6c060e608b5d06f77b7738eb3959cc7344982",
+  "lineEndings": "normalizedPrototypeSha256 hashes UTF-8 text with LF; baselineSha256 and prototypeSha256 hash original file bytes."
+}

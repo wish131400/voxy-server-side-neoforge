@@ -11,6 +11,102 @@ from pathlib import Path
 import zipfile
 
 
+def class_references(data):
+    """Read real field/method and instanceof instructions, excluding unused entries.
+
+    This establishes that a packaged implementation calls its target APIs. It
+    does not establish execution, control flow correctness or rendering parity.
+    """
+    position = 0
+
+    def take(size):
+        nonlocal position
+        value = data[position:position + size]
+        if len(value) != size:
+            raise ValueError("Truncated class file")
+        position += size
+        return value
+
+    def number(size):
+        return int.from_bytes(take(size), "big")
+
+    if take(4) != b"\xca\xfe\xba\xbe":
+        raise ValueError("Invalid class file")
+    take(4)
+    pool = [None] * number(2)
+    index = 1
+    while index < len(pool):
+        tag = number(1)
+        if tag == 1:
+            pool[index] = take(number(2)).decode("utf-8", errors="replace")
+        elif tag in (7, 8, 16, 19, 20):
+            pool[index] = (tag, number(2))
+        elif tag in (9, 10, 11, 12, 17, 18):
+            pool[index] = (tag, number(2), number(2))
+        elif tag in (3, 4):
+            take(4)
+        elif tag in (5, 6):
+            take(8)
+            index += 1
+        elif tag == 15:
+            take(3)
+        else:
+            raise ValueError("Unknown constant pool tag: " + str(tag))
+        index += 1
+    take(6)
+    take(2 * number(2))
+
+    def attributes():
+        return [(pool[number(2)], take(number(4))) for _ in range(number(2))]
+
+    for _ in range(number(2)):
+        take(6)
+        attributes()
+    references = {}
+    for _ in range(number(2)):
+        number(2)
+        method, descriptor = pool[number(2)], pool[number(2)]
+        entries = references.setdefault((method, descriptor), set())
+        for name, value in attributes():
+            if name != "Code":
+                continue
+            code = value[8:8 + int.from_bytes(value[4:8], "big")]
+            offset = 0
+            while offset < len(code):
+                opcode = code[offset]
+                if 178 <= opcode <= 185:
+                    member = pool[int.from_bytes(code[offset + 1:offset + 3], "big")]
+                    owner = pool[pool[member[1]][1]]
+                    signature = pool[member[2]]
+                    entries.add((owner, pool[signature[1]], pool[signature[2]]))
+                elif opcode == 193:
+                    target = pool[int.from_bytes(code[offset + 1:offset + 3], "big")]
+                    entries.add((pool[target[1]], "<instanceof>", None))
+                if opcode in (170, 171):
+                    aligned = (offset + 4) & ~3
+                    if opcode == 170:
+                        low = int.from_bytes(code[aligned + 4:aligned + 8], "big", signed=True)
+                        high = int.from_bytes(code[aligned + 8:aligned + 12], "big", signed=True)
+                        offset = aligned + 12 + 4 * (high - low + 1)
+                    else:
+                        pairs = int.from_bytes(code[aligned + 4:aligned + 8], "big")
+                        offset = aligned + 8 + 8 * pairs
+                elif opcode == 196:
+                    offset += 6 if code[offset + 1] == 132 else 4
+                elif opcode in (185, 186, 200, 201):
+                    offset += 5
+                elif opcode == 197:
+                    offset += 4
+                elif opcode in (17, 19, 20, 132, 187, 189, 192, 193, 198, 199) or 153 <= opcode <= 168 or 178 <= opcode <= 184:
+                    offset += 3
+                elif opcode in (16, 18, 169, 188) or 21 <= opcode <= 25 or 54 <= opcode <= 58:
+                    offset += 2
+                else:
+                    offset += 1
+    return references
+
+
+
 def verify(jar, platform, build_id, source):
     def require(condition, message):
         if not condition:
@@ -40,7 +136,54 @@ def verify(jar, platform, build_id, source):
                 require(symbol.encode() in data, "Missing reference: " + name + ": " + symbol)
             return data
 
+        prefix="dev/xantha/vss/client/prediction/"
+        for cls,method,owner,called in [
+            ("PredictionVegetation","generate","PredictionBiomePruning","job"),
+            ("PredictionVegetation","generate","PredictionBiomePruning$Job","excludes"),
+            ("PredictionBiomePruning$Job","excludes","RustTerrainSampler","possibleBiomes"),
+            ("RustTerrainSampler","possibleBiomes","RustWorldgenBackend","possibleBiomes"),
+            ("RustVegetationStage","place","RustWorldgenBackend","applyPlacedFeature"),
+            ("RustWorldgenBackend","applyPlacedFeature","RustWorldgenBackend","placedFeatureStatus"),
+            ("RustWorldgenBackend","applyPlacedFeature","RustWorldgenBackend","placedFeature")]:
+            refs=class_references(archive.read(prefix+cls+".class"))
+            require(any(ref[0]==prefix+owner and ref[1]==called for (declared,_),entries in refs.items()
+                        if declared==method for ref in entries),"Missing executed pruning call: "+cls+"."+method)
+        bounds=check_class("client/prediction/PredictionFeatureBiomeBounds", "java/lang/Class")
+        require(b"getSimpleName" not in bounds and b"getPackageName" not in bounds,
+                "Predicate admission depends on names changed by release remapping")
+
+        if platform == "neoforge":
+            check_class("networking/VSSNetworking", "optional", "hasChannel")
+            check_class("networking/server/VSSServerNetworking", "hasChannel")
+            check_class("networking/client/VSSClientNetworking", "hasChannel")
+        else:
+            check_class("networking/VSSNetworking", "acceptMissingOr", "noResponse")
+            check_class("networking/server/VSSServerNetworking", "isRemotePresent")
+            check_class("networking/client/VSSClientNetworking", "isRemotePresent")
+            require('displayTest="IGNORE_ALL_VERSION"' in archive.read(metadata).decode(),
+                    "Forge server-list compatibility still requires a client installation")
+        check_class("common/worldgen/FreeTerraForgedRuntime", "TerraForgedChunkGenerator", "biomeReplacementConfig", "contributionRevision", "initializeEpoch")
+        check_class("client/prediction/FreeTerraForgedCells", "getFilteredChunk", "getPaddedCell", "provideAtChunk", "releaseTileCache")
+        check_class("client/prediction/FreeTerraForgedDensity", "FreeTerraForgedCells", "readFinite")
+        ftf = check_class("client/prediction/FreeTerraForgedCompat", "climateQuerySemantics", "setWorldgenPlan", "setClimateQuerySemantics",
+                          "copySpawnSearch", "getSpawnSearch", "setSpawnSearch", "WORLD_ORIGIN", "getConstructor", "newInstance")
+        ftf_refs = class_references(ftf)
+        require(any(ref[0] == prefix + "FreeTerraForgedCompat" and ref[1] == "copySpawnSearch"
+                    for (method, _), entries in ftf_refs.items() if method == "copyClimateContext" for ref in entries),
+                "FTF climate context does not execute the spawn-search repair")
+        for owner, called in [("java/lang/reflect/Constructor", "newInstance"), ("java/lang/reflect/Field", "get")]:
+            require(any(ref[0] == owner and ref[1] == called
+                        for (method, _), entries in ftf_refs.items() if method == "copySpawnSearch" for ref in entries),
+                    "FTF default spawn-search construction is missing: " + owner + "." + called)
+        check_class("client/prediction/FreeTerraForgedTerrainSampler", "runtimeOwner", "FreeTerraForgedCells")
+        check_class("client/prediction/ClientWorldgenProfileDecoder", "FreeTerraForgedRuntime", "vss_freeterraforged_runtime")
+        check_class("networking/server/session/WorldgenCodecSnapshot", "FreeTerraForgedRuntime", "vss_freeterraforged_release")
         check_class("client/prediction/PredictionClimateSampler", "FabricBiomeCompat", "copyClimateContext")
+        check_class("client/prediction/PredictionClimateSampler", "PredictionHorizontalClimate", "bindHorizontal")
+        check_class("client/prediction/PredictionClimateCache", "horizontalDescriptor", "horizontalBytes", "LIVE_BYTES")
+        check_class("client/prediction/PredictionClimateCache$NativeInputs", "horizontalLookup")
+        check_class("client/prediction/PredictionClimateIdentity", "doubleToRawLongBits")
+        check_class("client/prediction/RustTerrainSampler", "bindHorizontalClimate", "detachHorizontalClimate")
         check_class("client/prediction/FabricBiomeCompat", "net.fabricmc.fabric.impl.biome.MultiNoiseSamplerHooks", "fabric_getSeed", "fabric_setSeed")
         check_class("client/prediction/PredictionBiomeCache", "LookupFailure", "sample")
         check_class("client/prediction/PredictionBiomeCache$Points", "xs", "ys", "zs", "values")
@@ -66,6 +209,14 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionLodSampler", ":capture-palette-r2:")
         check_class("client/prediction/ClientWorldgenProfileDecoder", "Required TerraBlender region routing unavailable", "vss_terrablender_end")
         check_class("client/prediction/RustTerrainSampler", "Native library lacks required TerraBlender routing", "terrablenderRouting")
+        check_class("client/prediction/RustTerrainSampler", "exactSurfacePage", "Incomplete exact decoration page")
+        check_class("client/prediction/RustTerrainSampler", "proxyHeight", "proxyBlock")
+        check_class("client/prediction/PredictionDecorationLevel", "exactSurfacePage", "cachedBiomeRejects")
+        check_class("client/prediction/PredictionDecorationLevel", "proxyHeight", "columnQueryVersions")
+        check_class("client/prediction/PredictionPlacementExecutor", "PredictionPlacementPruning")
+        check_class("client/prediction/PredictionPlacementPruning", "cachedBiomeRejects", "pristinePredicates")
+        check_class("client/prediction/PredictionTreeModels", "visit", "stream", "available")
+        check_class("client/prediction/PredictionVegetation", "STABLE_GROUND_SETTINGS_VERSION")
         check_class("compat/VoxySectionData", "contentIdentity", "faceIdentity")
         check_class("compat/VoxySectionSignature", "compact")
         check_class("compat/VoxySectionSignature", "face", "EMPTY_FACE")
@@ -107,6 +258,19 @@ def verify(jar, platform, build_id, source):
         check_class("networking/client/VSSClientNetworking", "onClientLevelUnload")
         check_class("compat/VoxyCompat$LocalSectionIndex", "settledRegions")
         check_class("compat/VoxyIngestTracker", "realColumnSettled")
+        check_class("compat/VoxyIngestTracker", "authorityGeneration", "committed", "PUBLICATIONS", "VoxyRealIngestAccess")
+        check_class("compat/VoxyPredictionBridge$RealColumn", "coverageMask", "containsSectionAtLod")
+        check_class("compat/VoxyRealCoverage", "completeColumns", "verticalRange", "coverageMask")
+        check_class("compat/VoxyRealIngestAccess", "VoxyRealCoveragePersistence", "ACCESS", "save")
+        check_class("compat/VoxyRealIngestAccess$1", "saveSection", "markDirty")
+        check_class("compat/VoxyRealCoveragePersistence", "SHA-256", "getWorldId", "loadedSuccessfully")
+        check_class("compat/transform/VoxyStorageTransformer", "vss$coverageSaveBody", "vss$coverageLoadBody", "capture")
+        require("dev/xantha/vss/mixin/voxy/PredictionVoxyStoragePlugin.class" not in archive.namelist(),
+                "Storage helper remains in a reserved Mixin package")
+        check_class("mixin/voxy/PredictionVoxyStorageIdentityMixin")
+        strict_config = json.loads(archive.read("vss.strict.mixins.json"))
+        require("voxy.PredictionVoxyStorageMixin" in strict_config["client"]
+                and "voxy.PredictionVoxyStorageIdentityMixin" in strict_config["client"], "Real storage hooks absent")
         check_class("compat/VoxyPredictionBridge$Context", "hasSkyLight")
         check_class("compat/VoxyCapacityPlan", "initialCapacity", "capacity")
         check_class("compat/VoxyTraversalCapacity", "getCurrentMaxNodeId", "beforeAdd", "beforeTraversal", "ensureRoots", "ensureQueues")
@@ -288,6 +452,10 @@ def verify(jar, platform, build_id, source):
             if name.startswith("META-INF/vss-natives/") and name.endswith((".dll", ".so", ".dylib")):
                 require(archive.read(name) == (source / "src/main/resources" / name).read_bytes(),
                         "Native library differs from source: " + name)
+                require(b"RustWorldgenBackend_horizontalLookup" in archive.read(name), "Native climate input lookup absent: " + name)
+                require(b"RustWorldgenBackend_possibleBiomes" in archive.read(name), "Native biome certificate absent: " + name)
+                require(b"RustWorldgenBackend_placedFeatureStatus" in archive.read(name), "Native light placement entry absent: " + name)
+                require(b"vss_dry_air" in archive.read(name) and b"vss_aquifer_nearby" in archive.read(name), "Native exact height reuse absent: " + name)
                 natives[name] = hashlib.sha256(archive.read(name)).hexdigest()
         require(len(natives) == 5, "Expected all five native libraries")
         native_build = json.loads(archive.read("META-INF/vss-native-build.json"))
@@ -306,7 +474,7 @@ def verify(jar, platform, build_id, source):
     return {"jar": jar.name, "platform": platform, "buildId": build_id,
             "sha256": hashlib.sha256(jar.read_bytes()).hexdigest(),
             "bytes": jar.stat().st_size, "nativeSha256": natives,
-            "integratedFixes": ["view-priority-background-notifications", "asynchronous-budgeted-retirement", "off-lock-snapshot-disposal", "native-empty-fast-withdrawal", "steady-state-lock-bypass", "configured-shared-cpu-admission", "two-stage-warm-cache-startup", "in-place-native-backend-promotion", "streamed-voxel-content-digest", "stale-prepared-backend-retirement", "native-border-consumer-evidence", "byte-bounded-section-admission", "independent-partial-surface-cache-restore", "early-identical-input-notification", "answer-budget-biome-cache", "terrain-interval-publication", "shared-quart-neighborhoods", "persistent-fair-generation-turn", "horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
+            "integratedFixes": ["ftf-missing-spawn-search-default", "conservative-column-biome-certificates", "candidate-envelope-decoration-pruning", "committed-real-section-authority", "verified-native-image-coverage-persistence", "exact-dry-air-certificates", "reused-aquifer-neighbourhoods", "bounded-horizontal-climate-reuse", "validated-native-climate-sharing", "view-priority-background-notifications", "asynchronous-budgeted-retirement", "off-lock-snapshot-disposal", "native-empty-fast-withdrawal", "steady-state-lock-bypass", "configured-shared-cpu-admission", "two-stage-warm-cache-startup", "in-place-native-backend-promotion", "streamed-voxel-content-digest", "stale-prepared-backend-retirement", "native-border-consumer-evidence", "byte-bounded-section-admission", "independent-partial-surface-cache-restore", "early-identical-input-notification", "answer-budget-biome-cache", "terrain-interval-publication", "shared-quart-neighborhoods", "persistent-fair-generation-turn", "horizon-planned-root-capacity", "resident-node-traversal-capacity", "non-spinning-gpu-queue-bounds", "two-phase-dirty-capture-handoff", "bounded-capture-retry", "dirty-retention-buffer-fetch", "retired-refresh-barrier", "seeded-fabric-end-biomes", "failed-biome-surface-rejection", "end-decoration-cache-repair", "compact-column-pages", "contributing-feature-query", "native-owner-publication",
                                 "layout-plan-domain-reset", "partial-vegetation-retention", "terrain-only-parent-proof",
                                 "retained-deferred-detail-demand", "view-priority-readmission", "completion-driven-detail-refill", "dimension-write-bounds", "reverse-coarse-column-coverage", "second-chance-column-cache", "incremental-candidate-union", "exact-display-biome-reuse", "prediction-display-withdrawal", "warm-toggle-reactivation", "concurrent-real-generation", "atomic-generation-admission", "auxiliary-viewport-observer-guard", "native-detail-demand", "authoritative-viewport", "spatial-bootstrap-only", "liquid-surface-remainders", "native-liquid-transition-walls", "native-lod-topology", "world-space-model-inset", "nether-lighting",
                                 "end-floating-columns", "empty-node-sample-readmission",

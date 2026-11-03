@@ -147,10 +147,10 @@ impl World {
     }
 
     pub fn display_points(&self, points: &[(i32, i32)]) -> Result<Vec<SurfaceColumn>> {
-        self.display_points_impl(points, true)
+        self.display_points_impl(points)
     }
 
-    fn display_points_impl(&self, points: &[(i32, i32)], reuse_exact: bool) -> Result<Vec<SurfaceColumn>> {
+    fn display_points_impl(&self, points: &[(i32, i32)]) -> Result<Vec<SurfaceColumn>> {
         let _total_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[0]);
         self.check_active()?;
         self.display_queries[0].fetch_add(points.len() as u64, Ordering::Relaxed);
@@ -174,7 +174,7 @@ impl World {
                 .map_err(|_| "display cache lock")?;
             if let Some(rows) = points
                 .iter()
-                .map(|p| cache.get(p).copied().filter(|r| reuse_exact || r.values[3] & (1 << 26) != 0))
+                .map(|p| cache.get(p).copied())
                 .collect::<Option<Vec<_>>>()
             {
                 self.display_queries[1].fetch_add(points.len() as u64, Ordering::Relaxed);
@@ -198,7 +198,7 @@ impl World {
                 .lock()
                 .map_err(|_| "display cache lock")?;
             for (i, &(x, z)) in points.iter().enumerate() {
-                if let Some(value) = cache.get(&(x, z)).copied().filter(|r| reuse_exact || r.values[3] & (1 << 26) != 0) {
+                if let Some(value) = cache.get(&(x, z)).copied() {
                     self.display_queries[1].fetch_add(1, Ordering::Relaxed);
                     result[i] = value;
                 } else {
@@ -216,7 +216,7 @@ impl World {
         // and rotating the eight-chunk dense-query cache for every such point.
         let sparse_batch = groups.len() >= 8 && groups.values().all(|indices| indices.len() <= 4);
         let mut sparse_work: Option<Job<'_>> = None;
-        for ((cx, cz), indices) in groups {
+        for ((cx, cz), mut indices) in groups {
             self.check_active()?;
             let hint_scope = crate::prof::Scope::new(&crate::prof::DISPLAY[4]);
             let eligible = !self.terrain.graph.requires_complete_column_order()
@@ -260,6 +260,9 @@ impl World {
                 self.terrain.job(cx * 16, cz * 16, false)?
             };
             job.display = eligible;
+            if eligible {
+                indices.sort_by_key(|&i| (points[i].0.div_euclid(t.cell_width),points[i].1.div_euclid(t.cell_width)));
+            }
             // Whole-cell bounds pay off only when multiple requested columns
             // share a horizontal noise cell. Sparse grids keep column bounds.
             job.reuse_density_cells = indices.windows(2).any(|pair| {
@@ -267,6 +270,7 @@ impl World {
                 a.0.div_euclid(t.cell_width) == b.0.div_euclid(t.cell_width)
                     && a.1.div_euclid(t.cell_width) == b.1.div_euclid(t.cell_width)
             });
+            job.scratch.enable_dense_corners(job.reuse_density_cells);
             job.beard = self.adjustments.get(&(cx, cz));
             self.attach_tops(&mut job);
 
@@ -274,10 +278,9 @@ impl World {
             for i in indices {
                 self.check_active()?;
                 let (x, z) = points[i];
-                let exact = if reuse_exact { self.cached_surface_point(x, z)? } else { None };
-                let row = match exact {
-                    Some(row) => row,
-                    None => match if eligible {
+                // The requested view determines the result. Exact cache warmth must not
+                // change visual ground or the placement of model vegetation.
+                let row = match if eligible {
                         self.display_record(x, z, &mut job, scratch)?
                     } else {
                         None
@@ -298,7 +301,6 @@ impl World {
                             job.display = display;
                             row
                         }
-                    },
                 };
                 result[i] = row;
             }
@@ -515,7 +517,7 @@ impl World {
         // A previously exact point has different provenance flags. Evaluate
         // probes consistently under the visual policy; the Java caller still
         // retains its exact cells, and these results never enter exact caches.
-        let values = self.display_points_impl(&probes, false)?;
+        let values = self.display_points_impl(&probes)?;
         let first = values[0].values;
         if first[3] & (1 << 29) != 0
             || first[3] & (1 << 26) == 0
@@ -649,6 +651,44 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn visual_columns_ignore_exact_cache_warmup_and_eviction() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
+        let read=|f:&str|serde_json::from_str::<Value>(&std::fs::read_to_string(root.join(f)).unwrap()).unwrap();
+        let mut doc=read("overworld.json");
+        for(k,f)in[("block_definitions","blocks.json"),("biomes","biomes.json"),
+            ("grass_colormap","grass.json"),("foliage_colormap","foliage.json")] {doc[k]=read(f);}
+        for seed in [0,42] {
+            let cold=World::new(seed,seed,doc.clone()).unwrap();
+            let warm=World::new(seed,seed,doc.clone()).unwrap();
+            let points:Vec<_>=(0..16).map(|i|(100000+i/4,-100000+i%4)).collect();
+            let expected=cold.display_points(&points).unwrap();
+            warm.surface_points(&points).unwrap();
+            assert_eq!(warm.display_points(&points).unwrap().iter().map(|r|r.values).collect::<Vec<_>>(),
+                expected.iter().map(|r|r.values).collect::<Vec<_>>());
+            cold.surface_points(&points).unwrap();
+            cold.display_columns.lock().unwrap().clear();
+            assert_eq!(cold.display_points(&points).unwrap().iter().map(|r|r.values).collect::<Vec<_>>(),
+                expected.iter().map(|r|r.values).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn exact_page_matches_scalar_requests_in_reverse_order() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
+        let read=|f:&str|serde_json::from_str::<Value>(&std::fs::read_to_string(root.join(f)).unwrap()).unwrap();
+        let mut doc=read("overworld.json");
+        for(k,f)in[("block_definitions","blocks.json"),("biomes","biomes.json"),
+            ("grass_colormap","grass.json"),("foliage_colormap","foliage.json")] {doc[k]=read(f);}
+        let batch=World::new(42,42,doc.clone()).unwrap();
+        let scalar=World::new(42,42,doc).unwrap();
+        let points:Vec<_>=(0..16).map(|i|(-20+i/4,-36+i%4)).collect();
+        let rows=batch.surface_points(&points).unwrap();
+        for(i,&(x,z))in points.iter().enumerate().rev() {
+            assert_eq!(rows[i].values,scalar.surface_point(x,z).unwrap().values,"point={x},{z}");
+        }
+    }
+
     #[test]
     fn display_cache_overflow_preserves_other_columns_and_updates_do_not_duplicate_fifo() {
         let mut cache = DisplayColumns::new(65536);

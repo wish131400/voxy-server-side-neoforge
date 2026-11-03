@@ -69,7 +69,7 @@ class PredictionDiskCacheTest {
             assertTrue(Files.exists(PredictionCacheTestFiles.storage(cache).path(key)));
 
             PredictionCacheTestFiles.legacy(cache,key,bytes);
-            var field=PredictionDiskCache.class.getDeclaredField("COMMITS"); field.setAccessible(true);
+            var field=PredictionDiskCache.class.getDeclaredField("PROBES"); field.setAccessible(true);
             var executor=(java.util.concurrent.ExecutorService)field.get(null);
             var entered=new java.util.concurrent.CountDownLatch(1);
             var release=new java.util.concurrent.CountDownLatch(1);
@@ -133,7 +133,7 @@ class PredictionDiskCacheTest {
         var grid=new ClientColumnSample[66*66];Arrays.fill(grid,samples()[0]);
         try(var cache=new PredictionDiskCache(directory,77);var lease=cache.lease(last)) {assertTrue(cache.writeTerrain(lease,grid));}
         try(var cache=new PredictionDiskCache(directory,77)) {
-            var field=PredictionDiskCache.class.getDeclaredField("COMMITS");field.setAccessible(true);
+            var field=PredictionDiskCache.class.getDeclaredField("PROBES");field.setAccessible(true);
             var executor=(java.util.concurrent.ExecutorService)field.get(null);
             var entered=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
             var gate=executor.submit(()->{entered.countDown();release.await();return true;});

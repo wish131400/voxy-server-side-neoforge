@@ -1,0 +1,356 @@
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\density.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density.rs"
+index 2b2f685..d06297a 100644
+--- "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\density.rs"
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density.rs"
+@@ -11,6 +11,10 @@ use serde_json::Value;
+ // document strings keep the standard randomized maps below.
+ use rustc_hash::FxHashMap;
+ use std::collections::{HashMap, HashSet};
++mod arithmetic_plan_experiment;
++mod pure_subtree_experiment;
++mod noise_reuse_experiment;
++pub(crate) use noise_reuse_experiment::snapshot as reuse_snapshot;
+ mod column_plan;
+ mod corner_cache;
+ mod height_plan;
+@@ -105,6 +109,14 @@ enum Spline {
+     },
+ }
+ pub struct Graph {
++    arithmetic_enabled:bool,
++    arithmetic_plan:arithmetic_plan_experiment::Plan,
++    reuse_identity:u64,
++    reuse_capacity:usize,
++    subtree_capacity:usize,
++    corner_capacity:usize,
++    corner_safe:Vec<bool>,
++    subtree_entries:Vec<bool>,
+     nodes: Vec<Node>,
+     column_plan: ColumnPlan,
+     surface_plan: Option<surface_plan::SurfacePlan>,
+@@ -356,11 +368,24 @@ impl Graph {
+             interpolator_count: 0,
+             noises: vec![],
+             noise_ids: HashMap::new(),
++            arithmetic_enabled:false,
++            arithmetic_plan:arithmetic_plan_experiment::Plan::default(),
++            reuse_identity:noise_reuse_experiment::identity(),
++            reuse_capacity:0,
++            subtree_capacity:0,
++            corner_capacity:0,
++            corner_safe:vec![],
++            subtree_entries:vec![],
+             roots: HashMap::new(),
+             random: Random::new(seed, u8::from(!legacy)).positional(),
+             seed,
+             legacy,
+         };
++        let mut graph=graph;
++        graph.reuse_capacity=match doc["vss_experiment_noise_reuse"].as_u64() {Some(n @ (8192|32768|131072))=>n as usize,_=>0};
++        graph.subtree_capacity=match doc["vss_experiment_subtree_reuse"].as_u64() {Some(n @ (8192|32768|131072))=>n as usize,_=>0};
++        graph.corner_capacity=match doc["vss_experiment_corner_reuse"].as_u64() {Some(n @ (8192|32768|131072))=>n as usize,_=>0};
++        graph.arithmetic_enabled=doc["vss_experiment_arithmetic"].as_bool()==Some(true);
+         let mut builder = Builder {
+             graph,
+             doc,
+@@ -411,6 +436,8 @@ impl Graph {
+         }
+         builder.graph.column_plan = ColumnPlan::compile(&builder.graph);
+         builder.graph.surface_plan = surface_plan::SurfacePlan::compile(&builder.graph);
++        builder.graph.subtree_entries=pure_subtree_experiment::compile(&builder.graph);
++        builder.graph.arithmetic_plan=arithmetic_plan_experiment::Plan::compile(&builder.graph);
+         Ok(builder.graph)
+     }
+ 
+@@ -473,6 +500,7 @@ impl Graph {
+             dependencies.push(uses_y);
+         }
+         self.exposed_column_order = cache_order::exposed(self, &dependencies);
++        self.corner_safe=cache_order::experiment_safe_corners(self,&dependencies);
+     }
+ 
+     pub fn initialize_column_caches(&self, scratch: &mut Scratch) {
+@@ -503,6 +531,14 @@ impl Graph {
+             interpolator_count: 0,
+             noises: vec![],
+             noise_ids: HashMap::new(),
++            arithmetic_enabled:false,
++            arithmetic_plan:arithmetic_plan_experiment::Plan::default(),
++            reuse_identity:noise_reuse_experiment::identity(),
++            reuse_capacity:0,
++            subtree_capacity:0,
++            corner_capacity:0,
++            corner_safe:vec![],
++            subtree_entries:vec![],
+             roots: HashMap::new(),
+             random: Random::new(0, 0).positional(),
+             seed: 0,
+@@ -525,11 +561,16 @@ impl Graph {
+         b.graph.analyze_column_caches();
+         b.graph.column_plan = ColumnPlan::compile(&b.graph);
+         b.graph.surface_plan = surface_plan::SurfacePlan::compile(&b.graph);
++        b.graph.arithmetic_plan=arithmetic_plan_experiment::Plan::compile(&b.graph);
++        b.graph.subtree_entries=pure_subtree_experiment::compile(&b.graph);
+         *self = b.graph;
+         result
+     }
+     pub fn noise(&self, id: usize, x: f64, y: f64, z: f64) -> f64 {
+-        self.noises[id].sample(x, y, z)
++        if self.reuse_capacity==0 {return self.noises[id].sample(x,y,z);}
++        noise_reuse_experiment::sample(self.reuse_identity,
++            [id as u64,x.to_bits(),y.to_bits(),z.to_bits()],self.reuse_capacity,
++            ||self.noises[id].sample(x,y,z))
+     }
+     pub fn registered_noise(&mut self, name: &str, doc: &Value) -> Result<usize> {
+         if let Some(&id) = self.noise_ids.get(name) {
+@@ -645,6 +686,7 @@ impl Graph {
+             cell_values: FxHashMap::default(),
+             final_values: vec![],
+             beard: 0.,
++            subtree_suspended:false,
+             climate_targets: crate::climate::targets::Targets::default(),
+         })
+     }
+@@ -879,7 +921,22 @@ impl Graph {
+         let __noise_start = std::time::Instant::now();
+         let [x, y, z] = p;
+         let ev = |n, s: &mut Scratch| self.compute(n, p, mode, s);
+-        let v = match &self.nodes[id] {
++        let corner=self.corner_capacity!=0 && mode==Mode::Single && !s.subtree_suspended
++            && !self.exposed_column_order && self.corner_safe[id]
++            && self.column_plan.corner_slots[id]!=column_plan::NONE
++            && s.origin_x%4==0 && s.origin_z%4==0 && s.span>=4
++            && p[0]>=s.origin_x && p[0]<=s.origin_x+s.span
++            && p[2]>=s.origin_z && p[2]<=s.origin_z+s.span;
++        let reuse_capacity=if corner {self.corner_capacity} else {self.subtree_capacity};
++        let reuse=corner || (self.subtree_capacity!=0 && !s.subtree_suspended && self.subtree_entries[id]);
++        let key=[(1u64<<62)|id as u64,p[0] as u64,p[1] as u64,p[2] as u64];
++        if reuse {
++            if let Some(v)=noise_reuse_experiment::lookup(self.reuse_identity,key,reuse_capacity) {return v;}
++            s.subtree_suspended=true;
++        }
++        let v = if self.arithmetic_enabled && self.arithmetic_plan.selected(id) {
++            self.arithmetic_plan.eval(id,self,p,mode,s)
++        } else {match &self.nodes[id] {
+             Node::FtfNoise(noise, seed) => noise.compute(x as f32, z as f32, *seed) as f64,
+             Node::FtfUnit(input, resolution) => ftf_unit(ev(*input, s), *resolution),
+             Node::LinearSpline(input, points) => {
+@@ -1053,7 +1110,11 @@ impl Graph {
+                     .noise(*n, x as f64 / r, y as f64 / r, z as f64 / r)
+                     .abs()
+             }
+-            Node::Blended(n) => n.sample(x, y, z),
++            Node::Blended(n) => if self.reuse_capacity==0 {n.sample(x,y,z)} else {
++                noise_reuse_experiment::sample(self.reuse_identity,
++                    [(1u64<<63)|id as u64,x as u64,y as u64,z as u64],self.reuse_capacity,
++                    ||n.sample(x,y,z))
++            },
+             Node::End(n) => end_islands(n, x / 8, z / 8),
+             Node::Spline(sp) => self.spline(sp, p, mode, s) as f64,
+             Node::Marker(kind, n) => match kind {
+@@ -1194,6 +1255,7 @@ impl Graph {
+                 Marker::Cell if mode == Mode::Block => self.compute(*n, p, Mode::Cell, s),
+                 _ => ev(*n, s),
+             },
++        }
+         };
+         #[cfg(feature = "profiling")]
+         if __noise {
+@@ -1202,6 +1264,10 @@ impl Graph {
+                 std::sync::atomic::Ordering::Relaxed,
+             );
+         }
++        if reuse {
++            s.subtree_suspended=false;
++            noise_reuse_experiment::store(self.reuse_identity,key,reuse_capacity,v);
++        }
+         s.memo[id] = Some((p, mode, v));
+         if s.use_column_plan && slot != column_plan::NONE {
+             s.horizontal[slot].put(p[0], p[2], mode, v);
+@@ -1254,6 +1320,7 @@ pub enum Mode {
+     Slice,
+ }
+ pub struct Scratch {
++    subtree_suspended:bool,
+     pub(crate) climate_targets: crate::climate::targets::Targets,
+     origin_x: i32,
+     origin_z: i32,
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\density\\cache_order.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\cache_order.rs"
+index 8e10961..35c96bc 100644
+--- "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\density\\cache_order.rs"
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\cache_order.rs"
+@@ -239,3 +239,9 @@ mod tests {
+         }
+     }
+ }
++
++pub(super) fn experiment_safe_corners(g:&Graph,vertical:&[bool])->Vec<bool> {
++    let exposed=dependencies(g,vertical);
++    let beard=super::pure_subtree_experiment::beard_dependencies(g);
++    exposed.into_iter().zip(beard).map(|(a,b)|!a&&!b).collect()
++}
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\noise_reuse_experiment.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\noise_reuse_experiment.rs"
+new file mode 100644
+index 0000000..056d5f1
+--- /dev/null
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\noise_reuse_experiment.rs"
+@@ -0,0 +1,48 @@
++//! Isolated prototype: exact primitive reuse, bounded per worker, no world edits.
++use std::cell::RefCell;
++use std::sync::atomic::{AtomicU64,Ordering};
++use serde_json::{json,Value};
++static NEXT:AtomicU64=AtomicU64::new(1);
++pub(super) fn identity()->u64 { NEXT.fetch_add(1,Ordering::Relaxed) }
++#[derive(Clone,Copy,Default)]
++struct Entry { owner:u64, key:[u64;4], value:f64 }
++#[derive(Default)]
++struct Cache { entries:Vec<Entry>, hits:u64, misses:u64 }
++thread_local! { static CACHE:RefCell<Cache>=RefCell::new(Cache::default()); }
++#[inline]
++pub(super) fn sample(owner:u64,key:[u64;4],capacity:usize,compute:impl FnOnce()->f64)->f64 {
++    CACHE.with(|cell| {
++        let mut cache=cell.borrow_mut();
++        if cache.entries.len()!=capacity {cache.entries=vec![Entry::default();capacity];}
++        let mut h=key[0].wrapping_mul(0x9e3779b97f4a7c15)^key[1]^key[2].rotate_left(21)^key[3].rotate_left(43);
++        h=(h^(h>>30)).wrapping_mul(0xbf58476d1ce4e5b9);
++        h=(h^(h>>27)).wrapping_mul(0x94d049bb133111eb);
++        let slot=((h^(h>>31)) as usize)&(capacity-1);
++        let entry=cache.entries[slot];
++        if entry.owner==owner && entry.key==key {cache.hits+=1;return entry.value;}
++        cache.misses+=1;
++        let value=compute();
++        cache.entries[slot]=Entry {owner,key,value};
++        value
++    })
++}
++pub(crate) fn snapshot(reset:bool)->Value {CACHE.with(|c| {
++    let mut c=c.borrow_mut();let v=json!({"hits":c.hits,"misses":c.misses,
++        "slots":c.entries.len(),"bytes":c.entries.capacity()*std::mem::size_of::<Entry>()});
++    if reset {c.hits=0;c.misses=0;}v
++})}
++
++fn index(key:[u64;4],capacity:usize)->usize {
++    let mut h=key[0].wrapping_mul(0x9e3779b97f4a7c15)^key[1]^key[2].rotate_left(21)^key[3].rotate_left(43);
++    h=(h^(h>>30)).wrapping_mul(0xbf58476d1ce4e5b9);
++    h=(h^(h>>27)).wrapping_mul(0x94d049bb133111eb);
++    ((h^(h>>31)) as usize)&(capacity-1)
++}
++pub(super) fn lookup(owner:u64,key:[u64;4],capacity:usize)->Option<f64> {CACHE.with(|c| {
++    let mut c=c.borrow_mut();if c.entries.len()!=capacity {c.entries=vec![Entry::default();capacity];}
++    let entry=c.entries[index(key,capacity)];
++    if entry.owner==owner && entry.key==key {c.hits+=1;Some(entry.value)} else {c.misses+=1;None}
++})}
++pub(super) fn store(owner:u64,key:[u64;4],capacity:usize,value:f64) {CACHE.with(|c| {
++    c.borrow_mut().entries[index(key,capacity)]=Entry{owner,key,value};
++})}
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\pure_subtree_experiment.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\pure_subtree_experiment.rs"
+new file mode 100644
+index 0000000..185afe3
+--- /dev/null
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\pure_subtree_experiment.rs"
+@@ -0,0 +1,39 @@
++//! Classify immutable arithmetic subgraphs; stateful markers stay in the caller.
++use super::{Graph,Node,Spline};
++fn spline_children(s:&Spline,out:&mut Vec<usize>) {match s {
++    Spline::Constant(_)=>{},
++    Spline::Multipoint{coordinate,points}=> {out.push(*coordinate);for (_,s,_) in points {spline_children(s,out);}}
++}}
++fn children(n:&Node)->Vec<usize> {match n {
++    Node::Unary(_,n)|Node::Clamp(n,..)|Node::Weird(_,n,_)|Node::FtfUnit(n,_)|Node::Marker(_,n)=>vec![*n],
++    Node::Binary(_,a,b)=>vec![*a,*b],
++    Node::Range(n,_,_,a,b)|Node::Mix(n,a,b)=>vec![*n,*a,*b],
++    Node::Select(n,f,choices)=>std::iter::once(*n).chain(std::iter::once(*f)).chain(choices.iter().map(|(_,_,n)|*n)).collect(),
++    Node::LinearSpline(n,points)=>std::iter::once(*n).chain(points.iter().map(|(_,n)|*n)).collect(),
++    Node::Shifted(_,_,_,shifts)|Node::FastNoise(_,_,_,shifts)=>shifts.to_vec(),
++    Node::CoordinateShift(n,shifts)=>std::iter::once(*n).chain(shifts.iter().copied()).collect(),
++    Node::Spline(s)=>{let mut v=vec![];spline_children(s,&mut v);v},
++    _=>vec![],
++}}
++pub(super) fn compile(g:&Graph)->Vec<bool> {
++    let mut pure=Vec::with_capacity(g.nodes.len());
++    let mut cost:Vec<usize>=Vec::with_capacity(g.nodes.len());
++    for n in &g.nodes {
++        let c=children(n);
++        pure.push(!matches!(n,Node::Marker(..)|Node::Beard) && c.iter().all(|&id|pure[id]));
++        let own=if matches!(n,Node::Noise(..)|Node::Shift(..)|Node::Shifted(..)|Node::Weird(..)|Node::Blended(..)|Node::End(..)|Node::FastNoise(..)|Node::FtfNoise(..)) {32}else{1};
++        cost.push(c.iter().fold(own,|v,&id|v.saturating_add(cost[id]).min(4096)));
++    }
++    let mut selected=vec![false;g.nodes.len()];
++    for (i,n) in g.nodes.iter().enumerate() {
++        if !pure[i] {for child in children(n) {if pure[child] && cost[child]>=16 {selected[child]=true;}}}
++    }
++    for &id in g.roots.values() {if pure[id] && cost[id]>=16 {selected[id]=true;}}
++    selected
++}
++
++pub(super) fn beard_dependencies(g:&Graph)->Vec<bool> {
++    let mut beard=Vec::with_capacity(g.nodes.len());
++    for n in &g.nodes {beard.push(matches!(n,Node::Beard)||children(n).iter().any(|&i|beard[i]));}
++    beard
++}
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\arithmetic_plan_experiment.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\arithmetic_plan_experiment.rs"
+new file mode 100644
+index 0000000..41b0f11
+--- /dev/null
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\density\\arithmetic_plan_experiment.rs"
+@@ -0,0 +1,47 @@
++//! Compact arithmetic regions with original marker and noise delegates.
++use super::{Graph,Id,Mode,Node,Scratch,Unary,Binary,clamped_lerp,unary,java_min,java_max};
++#[derive(Clone,Copy)]
++enum Op { Leaf,Constant(f64),Gradient(f64,f64,f64,f64),Unary(Unary,Id),Binary(Binary,Id,Id),Clamp(Id,f64,f64),Range(Id,f64,f64,Id,Id) }
++#[derive(Default)]
++pub(super) struct Plan {ops:Vec<Op>,sizes:Vec<usize>}
++impl Plan {
++    pub fn compile(g:&Graph)->Self {
++        let mut ops=vec![];let mut sizes:Vec<usize>=vec![];
++        for node in &g.nodes {
++            let (op,size)=match *node {
++                Node::Constant(v)=>(Op::Constant(v),1),
++                Node::Gradient(a,b,c,d)=>(Op::Gradient(a as f64,b as f64-a as f64,c,d),1),
++                Node::Unary(op,n)=>(Op::Unary(op,n),1+sizes[n]),
++                Node::Binary(op,a,b)=>(Op::Binary(op,a,b),1+sizes[a]+sizes[b]),
++                Node::Clamp(n,a,b)=>(Op::Clamp(n,a,b),1+sizes[n]),
++                Node::Range(n,a,b,y,z)=>(Op::Range(n,a,b,y,z),1+sizes[n]+sizes[y]+sizes[z]),
++                _=>(Op::Leaf,0),
++            };
++            ops.push(op);sizes.push(size.min(128));
++        }
++        Self{ops,sizes}
++    }
++    pub fn selected(&self,id:Id)->bool {self.sizes.get(id).is_some_and(|&n|n>=4)}
++    pub fn eval(&self,id:Id,g:&Graph,p:[i32;3],mode:Mode,s:&mut Scratch)->f64 {
++        let ev=|n,s:&mut Scratch|self.eval(n,g,p,mode,s);
++        match self.ops[id] {
++            Op::Leaf=>g.compute(id,p,mode,s),
++            Op::Constant(v)=>v,
++            Op::Gradient(a,b,c,d)=>clamped_lerp((p[1] as f64-a)/b,c,d),
++            Op::Unary(op,n)=>unary(op,ev(n,s)),
++            Op::Clamp(n,a,b)=>ev(n,s).clamp(a,b),
++            Op::Range(n,a,b,y,z)=>{let v=ev(n,s);ev(if v>=a&&v<b {y}else{z},s)},
++            Op::Binary(op,a,b)=>{
++                let a=ev(a,s);
++                match op {
++                    Binary::Add=>a+ev(b,s),
++                    Binary::Mul=>if a==0. {0.}else{a*ev(b,s)},
++                    Binary::Min=>if s.use_column_plan && !g.stateful_columns
++                        && g.column_plan.bounds.get(b).is_some_and(|(min,_)|a<*min) {a}else{java_min(a,ev(b,s))},
++                    Binary::Max=>if s.use_column_plan && !g.stateful_columns
++                        && g.column_plan.bounds.get(b).is_some_and(|(_,max)|a>*max) {a}else{java_max(a,ev(b,s))},
++                }
++            }
++        }
++    }
++}
+diff --git "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\jni_worldgen.rs" "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\jni_worldgen.rs"
+index ab93c11..caf70ea 100644
+--- "a/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\tools\\rust\\vss-native-core\\src\\jni_worldgen.rs"
++++ "b/D:\\C-Users-Archive\\Desktop\\voxyserverside-neoforge-1.21.1\\build\\decoration-arithmetic-plan-20261101-b\\native\\src\\jni_worldgen.rs"
+@@ -1120,3 +1120,8 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
+         Ok(description)
+     }))
+ }
++
++#[no_mangle]
++pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_reuseProfile(
++    mut e: JNIEnv, _c: JClass, reset: jni::sys::jboolean,
++) -> jstring { output(&mut e,Ok(crate::density::reuse_snapshot(reset!=0))) }

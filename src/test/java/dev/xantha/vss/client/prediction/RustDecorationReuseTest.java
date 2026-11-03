@@ -49,6 +49,21 @@ class RustDecorationReuseTest {
         return (Map<Long, int[]>) field.get(sampler);
     }
 
+    @Test void exactPrefetchDoesNotReplaceDisplayGroundAndRawRecordsCompleteOnDemand() throws Exception {
+        try(var cold=sampler();var warm=sampler()) {
+            var expected=cold.sampleDisplayGrid(-16,-16,1,4,4,new ClientColumnSample[16]);
+            var raw=warm.exactSurfacePage(-16,-16,4);
+            assertEquals(10,raw[0].length,"ground-only queries do not resolve display metadata");
+            var actual=warm.sampleDisplayGrid(-16,-16,1,4,4,new ClientColumnSample[16]);
+            assertArrayEquals(expected,actual);
+            warm.sample(-16,-16);
+            assertEquals(11,sharedPoints(warm).get((long)-16<<32|-16&0xffffffffL).length);
+            assertEquals(11,warm.exactSurfacePage(-16,-16,4)[0].length);
+            warm.cancelWork();
+            assertThrows(java.util.concurrent.CancellationException.class,()->warm.exactSurfacePage(-16,-16,4));
+        }
+    }
+
     @Test void allWarmNativeColumnPoliciesHonorClosureCancellationAndThreadInterruption() throws Exception {
         for (boolean interior : new boolean[]{false, true}) for (String stop : new String[]{"close", "cancel", "interrupt"}) {
             try (var sampler = sampler(false, interior)) {

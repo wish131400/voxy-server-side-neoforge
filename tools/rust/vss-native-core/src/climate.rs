@@ -5,6 +5,8 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 type Space = [[i64; 2]; 7];
+pub(crate) mod targets;
+mod possible;
 #[derive(Clone)]
 struct Node {
     space: Space,
@@ -41,6 +43,7 @@ pub struct ParameterTree {
     root: Node,
     leaves: Vec<Node>,
     values: Vec<String>,
+    horizontal_groups: std::sync::OnceLock<Option<Vec<Node>>>,
 }
 impl ParameterTree {
     pub fn from_json(values: &Value) -> Result<Self> {
@@ -99,6 +102,7 @@ impl ParameterTree {
             root,
             leaves,
             values: names,
+            horizontal_groups: std::sync::OnceLock::new(),
         })
     }
     pub fn search<'a>(&'a self, target: [i64; 7], last: &mut Option<usize>) -> &'a str {
@@ -511,10 +515,7 @@ impl BiomeSource {
         match self {
             Self::Fixed(v) => v,
             Self::Multi(tree, ids) => {
-                let mut target = [0; 7];
-                for i in 0..6 {
-                    target[i] = quantize(g.compute(ids[i], p, Mode::Raw, scratch) as f32);
-                }
+                let target = targets::sample(g, ids, p, scratch);
                 tree.search(target, last)
             }
             Self::TerraBlender {
@@ -525,10 +526,7 @@ impl BiomeSource {
                 possible,
                 region_last,
             } => {
-                let mut target = [0; 7];
-                for i in 0..6 {
-                    target[i] = quantize(g.compute(ids[i], p, Mode::Raw, scratch) as f32);
-                }
+                let target = targets::sample(g, ids, p, scratch);
                 let index = grid.get(quart[0], quart[2]);
                 if index != 0 && index < regions.len() {
                     if let Some(Some(tree)) = regions.get(index) {
@@ -677,10 +675,7 @@ impl BlueprintProvider {
             Self::Original => original.sample(g, quart, scratch, last),
             Self::MultiNoise(tree, ids) => {
                 let p = quart.map(|v| v.wrapping_mul(4));
-                let mut target = [0i64; 7];
-                for i in 0..6 {
-                    target[i] = quantize(g.compute(ids[i], p, Mode::Raw, scratch) as f32);
-                }
+                let target = targets::sample(g, ids, p, scratch);
                 tree.search(target, last)
             }
             Self::Overlay(overlays) => {

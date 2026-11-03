@@ -92,8 +92,11 @@ final class PredictionTreeModels {
         if (decoration != null && !supports(feature)) decoration.useDisplayTerrain(false);
         try {
         var context = new PlacementContext(level, generator, biomeCheck ? Optional.of(feature) : Optional.empty());
-        PredictionPlacementExecutor.stream(feature, context, random, origin,
-                pos -> placeConfigured(feature.feature().value(), level, random, pos));
+        java.util.function.Consumer<BlockPos> terminal =
+                pos -> placeConfigured(feature.feature().value(), level, random, pos);
+        if (PredictionPlacementExecutor.available())
+            PredictionPlacementExecutor.visit(feature, context, random, origin, terminal);
+        else PredictionPlacementExecutor.stream(feature, context, random, origin, terminal);
         } finally { if (decoration != null) decoration.useDisplayTerrain(previous); }
     }
 

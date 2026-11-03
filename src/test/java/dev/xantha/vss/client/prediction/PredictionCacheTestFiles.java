@@ -18,6 +18,7 @@ final class PredictionCacheTestFiles {
 
     static void awaitBackgroundClose() throws Exception {
         awaitQueue(PredictionResources.class, "DISPOSER");
+        awaitQueue(PredictionDiskCache.class, "PROBES");
         awaitQueue(PredictionDiskCache.class, "COMMITS");
     }
 

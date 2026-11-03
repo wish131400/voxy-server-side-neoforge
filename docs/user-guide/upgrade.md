@@ -1,12 +1,12 @@
-# VSS 0.3.6 使用与升级说明
+# VSS 0.3.7 使用与升级说明
 
 [文档目录](../README.md)
 
-支持 NeoForge 1.21.1 / Java 21 和 Forge 1.20.1 / Java 17。两个 JAR 不能互换；更新多人游戏时，客户端与服务端均使用对应平台、同一次 0.3.6 构建。网络协议仍为 53。
+支持 NeoForge 1.21.1 / Java 21 和 Forge 1.20.1 / Java 17。两个 JAR 不能互换；更新多人游戏时，服务端与安装 VSS 的客户端使用对应平台、同一次 0.3.7 构建。客户端可不安装 VSS，仍可正常加入服务器。网络协议仍为 53。
 
 ## 安装与升级
 
-退出游戏或服务器后，移除旧 VSS JAR，再安装 `vss-0.3.6-neoforge-1.21.1.jar` 或 `vss-0.3.6-forge-1.20.1.jar`。保留现有配置和存档，通常无需删除 Voxy 缓存或整个预测缓存。旧记录会按来源与格式校验恢复；无法匹配的记录按需重建。
+退出游戏或服务器后，移除旧 VSS JAR，再安装 `vss-0.3.7-neoforge-1.21.1.jar` 或 `vss-0.3.7-forge-1.20.1.jar`。保留现有配置和存档，通常无需删除 Voxy 缓存或整个预测缓存。旧记录会按来源与格式校验恢复；无法匹配的记录按需重建。
 
 预测为 Beta，默认开启。已有配置继续使用保存值；`enablePrediction` 控制启用，`predictionDistanceBlocks` 控制方块距离，`predictionSpyglassLoading` 控制望远镜额外加载，`rememberTerrain` 控制本地预测缓存。
 

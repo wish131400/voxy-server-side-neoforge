@@ -11,7 +11,7 @@
 | 真实远景、Rust / Java 预测、开关与望远镜 | [预测与远景](user-guide/prediction.md) |
 | 管理命令、区域预生成和队列上限 | [命令](user-guide/commands.md) |
 | 缓存位置、迁移和加载排错 | [缓存与排错](user-guide/cache-and-troubleshooting.md) |
-| 0.3.6 升级与变化 | [升级说明](user-guide/upgrade.md) |
+| 0.3.7 升级与变化 | [升级说明](user-guide/upgrade.md) |
 | Voxy、Xaero 和世界生成模组 | [兼容范围](compatibility/README.md) |
 | 构建、验证与协作规范 | [贡献约定](../CONTRIBUTING.md) |
 | 模块、线程与资源所有权 | [架构](development/architecture.md) |

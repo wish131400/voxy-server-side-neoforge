@@ -40,6 +40,9 @@ public final class RustWorldgenBackend {
     /** Replaces both resource-pack colormaps atomically; terrain algorithms stay unchanged. */
     public static native void colormaps(long world,String document);
     public static native String describe(long handle);
+    public static native String horizontalDescriptor(long world);
+    public static native String horizontalStats(long world);
+    public static native int horizontalLookup(long world, ByteBuffer input, ByteBuffer output, int count);
     public static native String support(long world, String featureJson, int placedFeature);
     /** XYZ int32 input; one float64 density per point, at most 65,536 points. */
     public static native int density(long world, String routerNode, ByteBuffer xyz, ByteBuffer output, int count);
@@ -66,6 +69,21 @@ public final class RustWorldgenBackend {
     public static native String schedule(long world);
     /** Rust derives decoration/feature seeds, checks biome membership and applies modifiers lazily. */
     public static native String placedFeature(long result, String name, int chunkX, int chunkZ, int globalIndex, int step);
+    /** Same transaction without a diagnostic JSON result: zero/one means no writes/placed. */
+    public static native int placedFeatureStatus(long result, String name, int chunkX, int chunkZ, int globalIndex, int step);
+    private static volatile boolean legacyFeatureStatus;
+    static void applyPlacedFeature(long result, String name, int chunkX, int chunkZ, int globalIndex, int step) {
+        if (!legacyFeatureStatus) {
+            try {
+                placedFeatureStatus(result, name, chunkX, chunkZ, globalIndex, step);
+                return;
+            } catch (UnsatisfiedLinkError olderLibrary) {
+                legacyFeatureStatus = true;
+            }
+        }
+        placedFeature(result, name, chunkX, chunkZ, globalIndex, step);
+    }
+
     /** 256 X,Z records of ten int32: floor, fluid top/kind, flags, three material states, grass/leaf/water RGB. */
     public static native int surfaceColumns(long world, int chunkX, int chunkZ, ByteBuffer output);
     /** Sparse XZ int32 input, at most 64 records, same ten-int32 output as surfaceColumns. */
@@ -98,4 +116,7 @@ public final class RustWorldgenBackend {
      * No BiomeManager zoom or height clamp; existing ten-int surface records are unchanged.
      * Older libraries may omit both the palette and this entry point. */
     public static native int biomeIndices(long world, ByteBuffer quartXyz, ByteBuffer output, int count);
+    /** Conservative whole-column biome union; -1 keeps the original placement. */
+    public static native int possibleBiomes(long world,int minQuartX,int minQuartZ,
+                                          int maxQuartX,int maxQuartZ,ByteBuffer output);
 }

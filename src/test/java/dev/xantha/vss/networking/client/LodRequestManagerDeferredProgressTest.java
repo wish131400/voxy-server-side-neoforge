@@ -113,6 +113,23 @@ class LodRequestManagerDeferredProgressTest {
     }
 
     @Test
+    void disabledGenerationStillSendsDirtyRefreshWithoutGenerationOrSyncSlots() throws Exception {
+        Fixture f = new Fixture();
+        field("sessionConfig").set(f.manager, config(false));
+        long packed = PositionUtil.packPosition(2, 0);
+        f.manager.onDirtyColumns(new long[] {packed}, new long[] {10_000L});
+        RequestWindow window = new RequestWindow(0, 0, 0, 0, 0, 0, 1);
+
+        assertEquals(1, f.drain(window, 96));
+        assertEquals(packed, f.positions[0]);
+        assertFalse(f.allowGeneration[0]);
+        assertFalse(f.probes[0]);
+        assertEquals(1, f.tracker.dirtyRefreshSize());
+        assertEquals(0, f.tracker.generationSize());
+        assertEquals(9_999L, f.manager.requestTimestampFor(packed));
+    }
+
+    @Test
     void disabledGenerationNeverGrantsGenerationPermission() throws Exception {
         Fixture f = new Fixture();
         field("sessionConfig").set(f.manager, config(false));

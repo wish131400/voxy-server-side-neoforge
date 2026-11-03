@@ -14,11 +14,14 @@ import org.junit.jupiter.api.Test;
 class PredictionClimateSamplerTest {
     @BeforeAll static void bootstrap() { DensityMemoBenchTest.bootstrap(); }
 
+    private static boolean settled(PredictionClimateSampler sampler) {
+        return sampler.diagnostics().startsWith("state=ready") || sampler.diagnostics().equals("state=opaque");
+    }
     static void awaitCompiled(PredictionClimateSampler sampler) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (!sampler.diagnostics().startsWith("state=ready") && System.nanoTime() < deadline)
+        while (!settled(sampler) && System.nanoTime() < deadline)
             Thread.sleep(5);
-        assertTrue(sampler.diagnostics().startsWith("state=ready"), sampler.diagnostics());
+        assertTrue(settled(sampler), sampler.diagnostics());
     }
 
     static DensityFunction[] roots(Climate.Sampler source) {

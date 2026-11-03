@@ -11,6 +11,8 @@ use crate::{
     terrain::{Job, Substance, Terrain},
     vegetation::{Feature, Placed, PlacementContext},
 };
+#[cfg(test)]
+mod reuse_tests;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{
@@ -60,7 +62,7 @@ mod exterior_tests {
         assert_eq!(empty.values[2], 0);
     }
 
-    fn document() -> Value {
+    pub(super) fn document() -> Value {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worldgen");
         let read = |name: &str| {
             serde_json::from_str::<Value>(&std::fs::read_to_string(root.join(name)).unwrap())
@@ -180,6 +182,7 @@ pub struct SurfaceColumn {
 mod exterior;
 mod display;
 mod tint;
+mod possible;
 mod interior;
 struct ColumnCache {
     values: HashMap<(i32, i32), Arc<Vec<SurfaceColumn>>>,
@@ -214,7 +217,7 @@ pub struct World {
     /// `Job` never sees a repeat; this one survives across calls so adjacent
     /// grid samples reuse each other's column scans. A top is a pure function
     /// of `(x, z)` under the world's fixed adjustments.
-    neighbour_tops: Mutex<HashMap<(i32, i32), Option<(i32, Substance)>>>,
+    neighbour_tops: Mutex<crate::terrain::TopCache>,
     surface_work: Mutex<std::collections::VecDeque<((i32, i32), crate::terrain::SurfaceWork)>>,
     display_columns: Mutex<display::DisplayColumns>,
     display_queries: [std::sync::atomic::AtomicU64; 5],
@@ -226,6 +229,7 @@ pub struct World {
     cancelled: AtomicBool,
     color_biomes: [Mutex<tint::BiomeCache>; 16],
     color_work: Mutex<tint::WorkPool>,
+    possible_columns: Mutex<possible::Columns>,
     column_locks: [Mutex<()>; 64],
     placed_cache: Mutex<HashMap<String, Arc<Placed>>>,
     color_generation: std::sync::atomic::AtomicU64,
@@ -343,6 +347,7 @@ impl World {
             cancelled: AtomicBool::new(false),
             color_biomes: std::array::from_fn(|_| Mutex::new(tint::BiomeCache::default())),
             color_work: Mutex::new(tint::WorkPool::default()),
+            possible_columns: Mutex::new(possible::Columns::default()),
             column_locks: std::array::from_fn(|_| Mutex::new(())),
             placed_cache: Mutex::new(HashMap::new()),
             color_generation: std::sync::atomic::AtomicU64::new(0),
@@ -354,7 +359,7 @@ impl World {
                 point_order: std::collections::VecDeque::new(),
             }),
             reused_chunk_builds: std::sync::atomic::AtomicU64::new(0),
-            neighbour_tops: Mutex::new(HashMap::new()),
+            neighbour_tops: Mutex::new(crate::terrain::TopCache::new(1 << 16)),
             surface_work: Mutex::new(std::collections::VecDeque::new()),
             interior_columns: Mutex::new((HashMap::new(), std::collections::VecDeque::new())),
             display_columns: Mutex::new(display::DisplayColumns::new(65536)),
@@ -532,9 +537,10 @@ impl World {
             }
         };
         let t = &self.terrain;
-        let mut scratch =
-            t.graph
-                .scratch(chunk_x * 16, chunk_z * 16, t.cell_width, t.cell_height)?;
+        // Placement's biome filter evaluates Raw climate only. Reuse the
+        // bounded workspace pool instead of allocating NoiseChunk tables for
+        // each native feature attempt. RTree tie state still starts afresh.
+        let mut scratch = self.take_raw_work()?;
         let mut last = None;
         let mut allow = |feature: &str, p| {
             let mut q = zoom_quart(self.zoom_seed, p);
@@ -551,8 +557,9 @@ impl World {
             &mut random,
             [chunk_x * 16, t.min_y, chunk_z * 16],
             &mut context,
-        )?;
-        Ok((result, random.next_long()))
+        );
+        self.return_raw_work(scratch)?;
+        Ok((result?, random.next_long()))
     }
     pub fn state_table(palette: &Palette) -> Value {
         json!(palette.states.iter().map(|s| s.json()).collect::<Vec<_>>())
@@ -782,11 +789,9 @@ impl World {
             self.prepare_exterior_columns(&mut job, &[(x, z)]);
             job
         };
-        let t = &self.terrain;
-        let mut scratch = t
-            .graph
-            .scratch(x & !15, z & !15, t.cell_width, t.cell_height)?;
+        let mut scratch = self.take_raw_work()?;
         let result = self.generate_surface_point(x, z, &mut job, &mut scratch);
+        self.return_raw_work(scratch)?;
         if reusable {
             // Park even after a failed generation: the caches are still warm,
             // and `generate_surface_point` already released the job.
@@ -887,6 +892,7 @@ impl World {
         if points.len() > 64 {
             return Err("surface batch count".into());
         }
+        if let [(x, z)] = points { return Ok(vec![self.surface_point(*x, *z)?]); }
         let mut result = vec![SurfaceColumn { values: [0; 10] }; points.len()];
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
         for (i, &(x, z)) in points.iter().enumerate() {
@@ -896,8 +902,12 @@ impl World {
                 groups.entry((x >> 4, z >> 4)).or_default().push(i);
             }
         }
-        for ((cx, cz), indices) in groups {
+        for ((cx, cz), mut indices) in groups {
             let reusable = !self.terrain.graph.requires_complete_column_order();
+            if reusable && !self.adjustments.contains_key(&(cx,cz)) {
+                let width = self.terrain.cell_width;
+                indices.sort_by_key(|&i| (points[i].0.div_euclid(width),points[i].1.div_euclid(width)));
+            }
             let cached = if reusable {
                 let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
                 pool.iter().position(|(key, _)| *key == (cx, cz)).and_then(|i| pool.remove(i)).map(|(_, work)| work)
@@ -908,14 +918,16 @@ impl World {
             };
             job.beard = self.adjustments.get(&(cx, cz));
             self.attach_tops(&mut job);
+            job.scratch.enable_dense_corners(reusable && indices.windows(2).any(|pair| {
+                let (a,b)=(points[pair[0]],points[pair[1]]);
+                a.0.div_euclid(self.terrain.cell_width)==b.0.div_euclid(self.terrain.cell_width)
+                    && a.1.div_euclid(self.terrain.cell_width)==b.1.div_euclid(self.terrain.cell_width)
+            }));
             let missing: Vec<_> = indices.iter().map(|&i| points[i]).collect();
             self.prepare_exterior_columns(&mut job, &missing);
-            // One scratch per chunk: its origin is the chunk origin, which is
-            // what every column in this group samples from.
-            let t = &self.terrain;
-            let mut scratch = t
-                .graph
-                .scratch(cx * 16, cz * 16, t.cell_width, t.cell_height)?;
+            // Exterior record routing uses Raw mode. Full-depth fallback creates
+            // its own ordered workspace; neither uses this pool for interpolation.
+            let mut scratch = self.take_raw_work()?;
             for i in indices {
                 let (x, z) = points[i];
                 result[i] = match self.cached_surface_point(x, z)? {
@@ -926,6 +938,7 @@ impl World {
                     }
                 };
             }
+            self.return_raw_work(scratch)?;
             if reusable {
                 let mut pool = self.surface_work.lock().map_err(|_| "surface work lock")?;
                 // A small working set across JNI batches, never a world-sized
@@ -1386,6 +1399,7 @@ impl World {
     }
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.terrain.graph.close_shared_corners();
     }
     pub fn work_counts(&self) -> [u64; 2] {
         std::array::from_fn(|i| self.work[i].load(Ordering::Relaxed))

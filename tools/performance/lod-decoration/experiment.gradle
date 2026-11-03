@@ -1,0 +1,7 @@
+allprojects {
+    afterEvaluate {
+        neoForge.runs.named('server') {
+            systemProperty 'vss.lod.steps', providers.gradleProperty('vssLodSteps').getOrElse('4')
+        }
+    }
+}

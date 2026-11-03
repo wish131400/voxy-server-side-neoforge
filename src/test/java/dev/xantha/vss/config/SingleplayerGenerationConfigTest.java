@@ -7,6 +7,35 @@ import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
 class SingleplayerGenerationConfigTest {
+    @Test void generationDefaultsFollowEnvironmentWithoutOverwritingSavedChoices() throws Exception {
+        try (var loader = org.mockito.Mockito.mockStatic(net.neoforged.fml.loading.FMLLoader.class)) {
+            for (var environment : net.neoforged.api.distmarker.Dist.values()) {
+                loader.when(net.neoforged.fml.loading.FMLLoader::getDist).thenReturn(environment);
+                assertGenerationDefaults(environment == net.neoforged.api.distmarker.Dist.DEDICATED_SERVER);
+            }
+        }
+    }
+
+    private void assertGenerationDefaults(boolean expectedDefault) throws Exception {
+        var directory = java.nio.file.Files.createTempDirectory("vss-generation-toggle-");
+        var file = directory.resolve("vss-server-config.json");
+        var store = new JsonConfigStore(directory);
+        var config = store.load(VSSServerConfig.class, "vss-server-config.json");
+        assertEquals(expectedDefault, config.enableChunkGeneration);
+        assertTrue(config.enabled);
+        assertTrue(config.enablePredictionSync);
+        assertEquals(expectedDefault, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(file))
+                .getAsJsonObject().get("enableChunkGeneration").getAsBoolean());
+        for (String saved : new String[] {"{}", "{\"enableChunkGeneration\":true}",
+                "{\"enableChunkGeneration\":false}"}) {
+            java.nio.file.Files.writeString(file, saved);
+            boolean expected = saved.equals("{}") ? expectedDefault : saved.contains(":true");
+            assertEquals(expected, store.load(VSSServerConfig.class, "vss-server-config.json").enableChunkGeneration);
+            assertEquals(expected, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(file))
+                    .getAsJsonObject().get("enableChunkGeneration").getAsBoolean());
+        }
+    }
+
     @Test void defaultsSeparateIntegratedAndDedicatedGeneration() {
         var config=new VSSServerConfig();
         assertEquals(2,config.effectiveGenerationConcurrencyLimitPerPlayer(true));

@@ -1,0 +1,17 @@
+allprojects { afterEvaluate {
+    def root=file(providers.gradleProperty('vssBenchRoot').get())
+    layout.buildDirectory.set(new File(root,'gradle'))
+    sourceSets.main.java.setSrcDirs([new File(root,'main-java')])
+    sourceSets.main.resources.setSrcDirs([new File(root,'main-resources')])
+    def classes=new File(root,'gradle/classes/java/main')
+    tasks.named('compileJava',JavaCompile) { destinationDirectory.set(classes) }
+    sourceSets.main.output.classesDirs.setFrom(classes)
+    neoForge.runs.named('server') {
+        gameDirectory=new File(root,'server')
+        systemProperty 'vss.bench.output',root.absolutePath
+        systemProperty 'vss.bench.resources',project.file('build/moddev/artifacts/neoforge-21.1.234-client-extra-aka-minecraft-resources.jar').absolutePath
+        ['rounds':'5','warmups':'2','side':'16','step':'4'].each{k,v->systemProperty "vss.bench.${k}",providers.gradleProperty('vssBench'+k.capitalize()).getOrElse(v)}
+        jvmArgument '-Xms2G';jvmArgument '-Xmx4G'
+    }
+    tasks.named('jar') { enabled=false }
+} }

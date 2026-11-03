@@ -9,6 +9,8 @@ use crate::{
 };
 use serde_json::Value;
 mod exterior;
+#[cfg(test)]
+mod plan_tests;
 pub(crate) use exterior::ExteriorColumn;
 enum Rule {
     Block(StateId),
@@ -69,6 +71,11 @@ struct Context<'a> {
 }
 pub struct Surface {
     rule: Rule,
+    // Rules and their palette IDs are immutable for this world. Analyse their
+    // reachable writes once rather than walking the tree for every neighbour.
+    summaries: std::collections::HashMap<String, [bool; 6]>,
+    global_summary: [bool; 6],
+    depth_predicates: Vec<(i32, bool, i32)>,
     bands: [StateId; 192],
     band_offset: usize,
     depth: usize,
@@ -157,8 +164,11 @@ impl Surface {
             }
             i += r.next_bounded(16) as usize + 4;
         }
-        Ok(Self {
+        let mut surface = Self {
             rule,
+            summaries: std::collections::HashMap::new(),
+            global_summary: [false; 6],
+            depth_predicates: Vec::new(),
             bands,
             band_offset,
             depth,
@@ -169,7 +179,18 @@ impl Surface {
             water: palette.named("minecraft:water")?,
             packed_ice: palette.named("minecraft:packed_ice")?,
             snow: palette.named("minecraft:snow_block")?,
-        })
+        };
+        surface.global_summary = surface.analyse_summaries(palette, None);
+        if let Some(biomes) = doc["biomes"].as_object() {
+            for name in biomes.keys() {
+                let summary = surface.analyse_summaries(palette, Some(name));
+                surface.summaries.insert(name.clone(), summary);
+            }
+        }
+        let mut predicates = Vec::new();
+        surface.collect_depth_predicates(&surface.rule, &mut predicates);
+        surface.depth_predicates = predicates;
+        Ok(surface)
     }
     pub fn depth(&self, graph: &Graph, x: i32, z: i32) -> i32 {
         (graph.noise(self.depth, x as f64, 0., z as f64) * 2.75
@@ -233,6 +254,22 @@ impl Surface {
         self.summary_safe_for_biome(palette, Some(biome), false, Some(self.depth(graph, x, z) <= 0))
     }
     fn summary_safe_for_biome(&self, palette:&Palette,biome:Option<&str>,dry:bool,hole:Option<bool>)->bool {
+        let summary = match biome {
+            Some(name) => self.summaries.get(name),
+            None => Some(&self.global_summary),
+        };
+        match summary {
+            Some(values) => values[usize::from(dry)*3 + match hole {None=>0,Some(false)=>1,Some(true)=>2}],
+            // Keep the exact analysis for callers with a biome not in the
+            // world's document. Never infer safety from a missing entry.
+            None => self.analyse_summary(palette, biome, dry, hole),
+        }
+    }
+    fn analyse_summaries(&self, palette: &Palette, biome: Option<&str>) -> [bool; 6] {
+        std::array::from_fn(|i| self.analyse_summary(palette, biome, i>=3,
+            match i%3 {0=>None,1=>Some(false),_=>Some(true)}))
+    }
+    fn analyse_summary(&self, palette:&Palette,biome:Option<&str>,dry:bool,hole:Option<bool>)->bool {
         fn known(condition: &Condition, biome: Option<&str>, hole: Option<bool>) -> Option<bool> {
             match condition {
                 Condition::Biome(names) => biome.map(|b| names.iter().any(|n| n == b)),
@@ -300,6 +337,45 @@ impl Surface {
     /// With this many extra blocks, a truncated solid run produces exactly the
     /// same predicate results for every retained output material.
     pub fn exterior_padding(&self, graph: &Graph, x: i32, z: i32) -> Option<i32> {
+        let predicates = &self.depth_predicates;
+        if predicates.is_empty() { return Some(1); }
+        let depth = self.depth(graph, x, z);
+        let secondary = graph.noise(self.secondary, x as f64, 0., z as f64);
+        let mut maximum = 0;
+        for &(offset, add, range) in predicates {
+            let extra = if range == 0 {0} else {((secondary+1.)/2.*range as f64) as i32};
+            let value = 1i32.checked_add(offset)?
+                .checked_add(if add {depth} else {0})?.checked_add(extra)?;
+            maximum = maximum.max(value);
+        }
+        let padding = maximum.checked_add(1)?;
+        (padding<=64).then_some(padding)
+    }
+    fn collect_depth_predicates(&self, rule: &Rule, predicates: &mut Vec<(i32,bool,i32)>) {
+        fn collect(condition: &Condition, predicates: &mut Vec<(i32,bool,i32)>) {
+            match condition {
+                Condition::Stone(offset, add, range, true) => {
+                    let value=(*offset,*add,*range);
+                    if !predicates.contains(&value) {predicates.push(value);}
+                }
+                Condition::Not(inner) => collect(inner,predicates),
+                _ => {}
+            }
+        }
+        match rule {
+            Rule::Sequence(rules) => for rule in rules {self.collect_depth_predicates(rule,predicates);},
+            Rule::Condition(condition, rule) => {
+                collect(condition,predicates);self.collect_depth_predicates(rule,predicates);
+            }
+            Rule::Namespaced {base,sources} => {
+                self.collect_depth_predicates(base,predicates);
+                for (_,rule) in sources {self.collect_depth_predicates(rule,predicates);}
+            }
+            _ => {}
+        }
+    }
+    #[cfg(test)]
+    fn exterior_padding_recursive(&self, graph: &Graph, x: i32, z: i32) -> Option<i32> {
         fn condition(c: &Condition, depth: i32, secondary: f64) -> Option<i32> {
             match c {
                 Condition::Stone(offset, add, range, true) => {

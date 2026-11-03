@@ -1234,34 +1234,33 @@ public final class VSSVoxyOptionsIntegration {
     }
 
     private static Screen createOldSodiumConfigScreen(Screen parent) {
+        if (!classExists(OLD_OPTION_PAGE)) return null;
         try {
-            Object syncPage = oldSyncPage();
-            Object predictionPage = oldPredictionPage();
-            if (syncPage == null) {
-                return null;
-            }
-
             Class<?> videoSettingsScreen = Class.forName("net.caffeinemc.mods.sodium.client.gui.SodiumOptionsGUI");
-            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent, syncPage);
-            if (screen == null) {
-                return null;
-            }
-            // Make sure both pages exist on the screen's tab strip.
+            // Retain Sodium's corrupted-config recovery screen from its factory.
+            Object screen = invokeStatic(videoSettingsScreen, "createScreen", parent);
+            if (!videoSettingsScreen.isInstance(screen)) return screen instanceof Screen result ? result : null;
+            addPage(screen);
             Field pagesField = findPagesField(screen.getClass());
-            if (pagesField != null && predictionPage != null) {
+            if (pagesField != null) {
                 pagesField.setAccessible(true);
                 Object value = pagesField.get(screen);
-                if (value instanceof List<?> existing) {
-                    List<Object> pages = (List<Object>) existing;
-                    for (Object page : new Object[]{syncPage, predictionPage}) {
-                        if (page != null && !containsPageNamed(pages, pageName(page))) {
-                            pages.add(page);
+                if (value instanceof List<?> pages) {
+                    String name = Component.translatable("vss.voxy_options.sync_title").getString();
+                    for (Object page : pages) {
+                        if (name.equals(pageName(page))) {
+                            // setPage builds widgets and needs the font supplied by Screen.init.
+                            Field currentPage = videoSettingsScreen.getDeclaredField("currentPage");
+                            currentPage.setAccessible(true);
+                            currentPage.set(screen, page);
+                            break;
                         }
                     }
                 }
             }
             return screen instanceof Screen sodiumScreen ? sodiumScreen : null;
-        } catch (Throwable ignored) {
+        } catch (ReflectiveOperationException | RuntimeException failure) {
+            VSSLogger.warn("Failed to open VSS Sodium options screen", failure);
             return null;
         }
     }

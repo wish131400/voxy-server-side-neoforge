@@ -94,8 +94,8 @@ class FreeTerraForgedCompatTest {
 
             // Verify the full surface/tile interface against the actual published JAR.
             Class<?> context = loader.loadClass(prefix + "world.worldgen.GeneratorContext");
-            Class<?> cache = context.getField("cache").getType();
-            assertNotNull(cache.getMethod("provideAtChunk", int.class, int.class));
+            Class<?> cache = context.getField(api.epochBased ? "filteredChunkCache" : "cache").getType();
+            assertNotNull(cache.getMethod(api.epochBased ? "getFilteredChunk" : "provideAtChunk", int.class, int.class));
             Class<?> active = FreeTerraForgedCompat.activeChunk(loader);
             if (active != null) {
                 assertNotNull(active.getMethod("get"));
@@ -116,7 +116,9 @@ class FreeTerraForgedCompatTest {
         }
         // Standalone tests have no mod event bus. Apply only the actual mod's
         // queued custom codec registrations to its isolated registry objects.
-        var registersField = loader.loadClass(prefix + "platform.neoforge.RegistryUtilImpl").getDeclaredField("REGISTERS");
+        var registryUtil = loader.loadClass(prefix + "platform.neoforge.RegistryUtilImpl");
+        boolean epoch = new FreeTerraForgedCompat.Api(loader).epochBased;
+        var registersField = registryUtil.getDeclaredField(epoch ? "REGISTRATIONS" : "REGISTERS");
         registersField.setAccessible(true);
         var registers = (java.util.Map<?, ?>) registersField.get(null);
         var entriesField = net.neoforged.neoforge.registries.DeferredRegister.class.getDeclaredField("entries");
@@ -125,6 +127,14 @@ class FreeTerraForgedCompatTest {
             if (!(field.get(null) instanceof Registry target)) continue;
             Object deferred = registers.get(target.key());
             if (deferred == null) continue;
+            if (epoch) {
+                for (Object entry : (java.util.List<?>) deferred) {
+                    var id = entry.getClass().getDeclaredMethod("id"); id.setAccessible(true);
+                    var value = entry.getClass().getDeclaredMethod("value"); value.setAccessible(true);
+                    Registry.register(target, (ResourceLocation) id.invoke(entry), value.invoke(entry));
+                }
+                continue;
+            }
             var entries = (java.util.Map<net.neoforged.neoforge.registries.DeferredHolder<?, ?>, java.util.function.Supplier<?>>)
                     entriesField.get(deferred);
             for (var entry : entries.entrySet()) Registry.register(target, entry.getKey().getId(), entry.getValue().get());
@@ -172,7 +182,9 @@ class FreeTerraForgedCompatTest {
                 net.minecraft.core.registries.Registries.DENSITY_FUNCTION, Lifecycle.stable());
         density.freeze();
         var sourceAccess = new RegistryAccess.ImmutableRegistryAccess(List.of(presets, noises, density));
-        assertActualInitializerSamples(loader, sourceAccess, decodedAccess);
+        if (new FreeTerraForgedCompat.Api(loader).epochBased)
+            FreeTerraForgedRuntimeTest.verify(loader, sourceAccess, decodedAccess);
+        else assertActualInitializerSamples(loader, sourceAccess, decodedAccess);
     }
 
     private static void assertActualInitializerSamples(ClassLoader loader, RegistryAccess source,

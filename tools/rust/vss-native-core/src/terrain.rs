@@ -5,6 +5,10 @@ use crate::{
     random::Positional,
 };
 use serde_json::Value;
+mod top_cache;
+mod dry_air;
+mod aquifer_nearby;
+pub(crate) use top_cache::TopCache;
 // Job-local coordinates/IDs are lookup keys, never an evaluation order.
 use rustc_hash::{FxHashMap as HashMap, FxHashSet};
 
@@ -69,6 +73,8 @@ pub struct Terrain {
     fluid: Substance,
     aquifers: bool,
     ores: bool,
+    reuse_dry_air: bool,
+    reuse_aquifer_nearby: bool,
     final_density: Id,
     initial: Id,
     barrier: Id,
@@ -102,9 +108,10 @@ pub struct Job<'a> {
     density_height: Option<((i32, i32), Option<i32>)>,
     display_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
     levels: HashMap<(i32, i32), i32>,
+    nearby: aquifer_nearby::Nearby,
     locations: HashMap<[i32; 3], [i32; 3]>,
     fluids: HashMap<[i32; 3], Fluid>,
-    proven_air_cells: FxHashSet<[i32; 3]>,
+    proven_air_cells: HashMap<[i32; 3], bool>,
     surface_columns: HashMap<(i32, i32), Column>,
     surface_bottoms: HashMap<(i32, i32), (i32, i32)>,
     surface_tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
@@ -123,7 +130,7 @@ pub struct Job<'a> {
     ///
     /// A top is a pure function of `(x, z)` given the world's fixed
     /// `adjustments`, so sharing it across columns cannot change any result.
-    pub shared_tops: Option<&'a std::sync::Mutex<std::collections::HashMap<(i32, i32), Option<(i32, Substance)>>>>,
+    pub(crate) shared_tops: Option<&'a std::sync::Mutex<TopCache>>,
 }
 /// Owned query context, parked only within its immutable World and chunk.
 /// No borrowed terrain or structure pointers cross a call boundary.
@@ -136,7 +143,7 @@ pub(crate) struct SurfaceWork {
     levels: HashMap<(i32, i32), i32>,
     locations: HashMap<[i32; 3], [i32; 3]>,
     fluids: HashMap<[i32; 3], Fluid>,
-    proven_air_cells: FxHashSet<[i32; 3]>,
+    proven_air_cells: HashMap<[i32; 3], bool>,
     tops: HashMap<(i32, i32), Option<(i32, Substance)>>,
 }
 impl SurfaceWork {
@@ -236,6 +243,8 @@ impl Terrain {
             vein_toggle: graph.root("vein_toggle")?,
             vein_ridged: graph.root("vein_ridged")?,
             vein_gap: graph.root("vein_gap")?,
+            reuse_dry_air: doc["vss_dry_air"].as_bool() != Some(false),
+            reuse_aquifer_nearby: doc["vss_aquifer_nearby"].as_bool() != Some(false),
             aquifer_random: graph.random.from_hash("minecraft:aquifer").positional(),
             ore_random: graph.random.from_hash("minecraft:ore").positional(),
             graph,
@@ -266,9 +275,10 @@ impl Terrain {
             density_height: None,
             display_tops: HashMap::default(),
             levels: HashMap::default(),
+            nearby: aquifer_nearby::Nearby::default(),
             locations: HashMap::default(),
             fluids: HashMap::default(),
-            proven_air_cells: FxHashSet::default(),
+            proven_air_cells: HashMap::default(),
             surface_columns: HashMap::default(),
             surface_bottoms: HashMap::default(),
             surface_tops: HashMap::default(),
@@ -417,6 +427,7 @@ impl Job<'_> {
         self.density_height = None;
         self.display_tops.clear();
         self.levels.clear();
+        self.nearby = aquifer_nearby::Nearby::default();
         self.locations.clear();
         self.fluids.clear();
         self.proven_air_cells.clear();
@@ -428,7 +439,8 @@ impl Job<'_> {
         Ok(())
     }
 
-    pub(crate) fn park(self) -> SurfaceWork {
+    pub(crate) fn park(mut self) -> SurfaceWork {
+        self.scratch.release_shared_corners();
         SurfaceWork { scratch: self.scratch, density_cells: self.density_cells, density_ceiling: self.density_ceiling,
             density_height: self.density_height,
             display_tops: self.display_tops, levels: self.levels,
@@ -752,13 +764,7 @@ impl Job<'_> {
         }
         if let Some(shared) = self.shared_tops {
             if let Ok(mut cache) = shared.lock() {
-                // Matches the exact-point cache budget: 65536 entries of
-                // `(i32, i32) -> Option<(i32, Substance)>` is a couple of MiB.
-                // Eviction is not needed for correctness - a top is a pure
-                // function of position - so a full cache simply stops growing.
-                if cache.len() < 1 << 16 {
-                    cache.insert((x, z), found);
-                }
+                cache.insert((x, z), found);
             }
         }
         self.neighbour_tops.insert((x, z), found);
@@ -886,8 +892,8 @@ impl Job<'_> {
         self.density_interval(x,z,middle+1,top).or_else(||self.density_interval(x,z,bottom,middle))
     }
     /// Prove the rest of this interpolation cell is entirely air. No height
-    /// monotonicity assumption: unbounded density nodes or unequal aquifer
-    /// levels keep the original per-block query. Only exterior scans call it.
+    /// monotonicity assumption: unbounded density nodes or unproven aquifer
+    /// states keep the original per-block query. Only exterior scans call it.
     pub fn proven_air_bottom(&mut self, p: [i32; 3]) -> Option<i32> {
         let t = self.terrain;
         if t.graph.requires_complete_column_order() || self.beard.is_some() || self.scratch.beard != 0. {
@@ -898,11 +904,15 @@ impl Job<'_> {
         if p[1] != bottom + t.cell_height - 1 || bottom < t.min_y { return None; }
         let base = [p[0].div_euclid(t.cell_width) * t.cell_width,
             bottom, p[2].div_euclid(t.cell_width) * t.cell_width];
-        if self.proven_air_cells.contains(&base) { return Some(bottom); }
-        if self.prove_air_cell(base) {
-            if self.proven_air_cells.len() < 16384 { self.proven_air_cells.insert(base); }
-            return Some(bottom);
-        }
+        // A failed whole-cell proof is reusable too: it does not claim that
+        // any individual column is occupied. Keep the original column/aquifer
+        // fallback below, without repeating the same whole-cell solve.
+        let empty = if let Some(&empty) = self.proven_air_cells.get(&base) { empty } else {
+            let empty = self.prove_air_cell(base);
+            if self.proven_air_cells.len() < 16384 { self.proven_air_cells.insert(base,empty); }
+            empty
+        };
+        if empty { return Some(bottom); }
         if t.graph.column_range(t.final_density, [p[0], bottom, p[2]], p[1], &mut self.scratch).1 >= 0. {
             return None;
         }
@@ -910,22 +920,20 @@ impl Job<'_> {
             return (t.global(bottom).at(bottom) == Substance::Air
                 && t.global(p[1]).at(p[1]) == Substance::Air).then_some(bottom);
         }
-        // Every possible nearest-three candidate must have the SAME level.
-        // Then pressure() is exactly zero, and none may contain fluid anywhere
-        // in the interval. This preserves aquifer-created solids and dry pools.
+        // Cover every nearest-three candidate. Equal dry levels have zero pressure;
+        // differing levels need the stronger, exact dry-air pressure certificate.
         let gx = (p[0] - 5).div_euclid(16);
         let gz = (p[2] - 5).div_euclid(16);
-        let mut level = None;
+        let mut dry = dry_air::DryProof::new(t.reuse_dry_air);
         if t.global(bottom).at(bottom) == Substance::Lava { return None; }
         for dx in 0..=1 {
             for gy in (bottom + 1).div_euclid(12)-1..=(p[1]+1).div_euclid(12)+1 {
                 for dz in 0..=1 {
                     let q = self.aquifer_location([gx+dx, gy, gz+dz]);
                     let f = self.status(q);
-                    if f.at(bottom) != Substance::Air || level.is_some_and(|l| l != f.level) {
+                    if !dry.include(f, bottom) {
                         return None;
                     }
-                    level = Some(f.level);
                 }
             }
         }
@@ -944,18 +952,17 @@ impl Job<'_> {
         }
         if t.global(base[1]).at(base[1]) == Substance::Lava { return false; }
         // Union of every nearest-three candidate over the entire cell.
-        // Equal levels make all pressure terms zero; dry at the lowest Y
-        // means dry everywhere above it. Different levels fall back unchanged.
-        let mut level = None;
+        // Dry at the lowest Y means dry everywhere above it; differing levels
+        // additionally need the pressure certificate for every candidate pair.
+        let mut dry = dry_air::DryProof::new(t.reuse_dry_air);
         for gx in (base[0]-5).div_euclid(16)..=(base[0]+t.cell_width-1-5).div_euclid(16)+1 {
             for gy in (base[1]+1).div_euclid(12)-1..=(top+1).div_euclid(12)+1 {
                 for gz in (base[2]-5).div_euclid(16)..=(base[2]+t.cell_width-1-5).div_euclid(16)+1 {
                     let q = self.aquifer_location([gx,gy,gz]);
                     let f = self.status(q);
-                    if f.at(base[1]) != Substance::Air || level.is_some_and(|l| l != f.level) {
+                    if !dry.include(f, base[1]) {
                         return false;
                     }
-                    level = Some(f.level);
                 }
             }
         }
@@ -1005,7 +1012,7 @@ impl Job<'_> {
     }
     fn substance(&mut self, p: [i32; 3], density: f64) -> Substance {
         let t = self.terrain;
-        let [x, y, z] = p;
+        let y = p[1];
         if density > 0. {
             return Substance::Default;
         }
@@ -1013,44 +1020,11 @@ impl Job<'_> {
         if !t.aquifers || global == Substance::Lava {
             return global;
         }
-        let grid = [
-            (x - 5).div_euclid(16),
-            (y + 1).div_euclid(12),
-            (z - 5).div_euclid(16),
-        ];
-        let mut distances = [i32::MAX; 3];
-        let mut positions = [[0; 3]; 3];
-        for dx in 0..=1 {
-            for dy in -1..=1 {
-                for dz in 0..=1 {
-                    let g = [grid[0] + dx, grid[1] + dy, grid[2] + dz];
-                    let q = self.aquifer_location(g);
-                    let dx2 = q[0] - x;
-                    let dy2 = q[1] - y;
-                    let dz2 = q[2] - z;
-                    // Squared distances stay far inside i32: each term is at
-                    // most a few hundred. Plain multiplies keep this inlined;
-                    // `i32::pow` is a generic routine the optimiser may not
-                    // fold, and this runs 18 times per block evaluation.
-                    let d = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
-                    for i in 0..3 {
-                        if distances[i] >= d {
-                            for j in (i + 1..3).rev() {
-                                distances[j] = distances[j - 1];
-                                positions[j] = positions[j - 1];
-                            }
-                            distances[i] = d;
-                            positions[i] = q;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        let (distances, positions) = self.nearby_nearest(p);
         let a = self.status(positions[0]);
         let state = a.at(y);
         // Measurement build only; see the `skip-aquifer` feature. Returning here
-        // keeps the 18-offset nearest-aquifer scan but drops every `status` and
+        // keeps the 12-candidate nearest-aquifer scan but drops every `status` and
         // `fluid` call, so the difference from the unskipped run sizes the scan.
         #[cfg(feature = "skip-aquifer")]
         return state;
@@ -1285,6 +1259,7 @@ impl<'a> Job<'a> {
             reuse_density_cells: false, density_cells: work.density_cells, density_ceiling: work.density_ceiling,
             density_height: work.density_height,
             display_tops: work.display_tops, levels: work.levels,
+            nearby: aquifer_nearby::Nearby::default(),
             locations: work.locations, fluids: work.fluids, neighbour_tops: work.tops,
             proven_air_cells: work.proven_air_cells,
             surface_columns: HashMap::default(), surface_bottoms: HashMap::default(),
@@ -1655,6 +1630,24 @@ mod fluid_bound_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/worldgen");
         serde_json::from_str(&std::fs::read_to_string(root.join(name)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn failed_whole_cell_proof_keeps_column_fallback_and_survives_workspace_reuse() {
+        let mut doc=fixture("overworld.json");
+        doc["settings"]["aquifers_enabled"]=json!(false);
+        doc["settings"]["noise_router"]["final_density"]=json!({"type":"minecraft:y_clamped_gradient",
+            "from_y":64,"to_y":72,"from_value":1.,"to_value":-1.});
+        let t=Terrain::from_document(0,&doc).unwrap();
+        let mut reused=t.job(-16,-16,false).unwrap();
+        for (x,z) in [(-16,-16),(-15,-14),(-14,-15),(-13,-13)] {
+            assert_eq!(reused.surface_top(x,z),t.job(-16,-16,false).unwrap().surface_top(x,z));
+        }
+        assert_eq!(reused.proven_air_cells.get(&[-16,64,-16]),Some(&false));
+        let mut resumed=Job::resume(&t,reused.park());
+        assert_eq!(resumed.proven_air_cells.get(&[-16,64,-16]),Some(&false));
+        resumed.reset_display_chunk(4096,-4096).unwrap();
+        assert!(resumed.proven_air_cells.is_empty());
     }
 
     fn verify_exterior(t: &Terrain) {

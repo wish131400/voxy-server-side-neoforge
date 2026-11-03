@@ -1,0 +1,27 @@
+allprojects { afterEvaluate {
+    tasks.register('cacheRecoveryTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        ['PredictionCacheRecoveryConcurrencyTest', 'PredictionDiskCacheTest',
+         'PredictionAsyncTerrainCacheTest', 'PredictionDeferredCacheWriteTest',
+         'PredictionCacheStartupTest', 'PredictionVoxelCacheIntegrationTest',
+         'PredictionCacheWorkerLifecycleTest', 'PredictionRegionStorageTest'].each {
+            include "**/${it}.class"
+        }
+        jvmArgs '-XX:ActiveProcessorCount=8'
+        maxHeapSize = '2G'; maxParallelForks = 1; forkEvery = 1
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    }
+    tasks.register('cacheRecoveryLowCoreTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionCacheRecoveryConcurrencyTest.class'
+        jvmArgs '-XX:ActiveProcessorCount=4'
+        maxHeapSize = '2G'; maxParallelForks = 1
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    }
+} }

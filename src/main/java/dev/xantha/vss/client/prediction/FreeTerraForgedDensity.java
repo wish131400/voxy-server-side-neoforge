@@ -15,36 +15,33 @@ final class FreeTerraForgedDensity {
 
     static boolean coarse() { return COARSE.get(); }
 
+    static boolean isExactCell(Object function) { return function instanceof ExactCell; }
+
     static <T> T coarse(boolean value, java.util.function.Supplier<T> action) {
         return FreeTerraForgedCompat.scoped(COARSE, value, action);
     }
 
     static NoiseRouter map(Object context, NoiseRouter router) throws ReflectiveOperationException {
         if (context == null) return router;
-        FreeTerraForgedNativeFilters.register(context);
+        var cells = new FreeTerraForgedCells(context);
+        if (cells.tiled()) FreeTerraForgedNativeFilters.register(context);
         var loader = context.getClass().getClassLoader();
         var variant = FreeTerraForgedVariant.fromClass(context.getClass());
         var cellType = loader.loadClass(variant.worldgenClass("densityfunction.CellSampler"));
         var fieldMethod = cellType.getMethod("field");
         var lookup = context.getClass().getField("lookup").get(context);
         Object heightmap = lookup.getClass().getMethod("getHeightmap").invoke(lookup);
-        Object cache = context.getClass().getField("cache").get(context);
-        var provideMethod = cache.getClass().getMethod("provideAtChunk", int.class, int.class);
         var handles = MethodHandles.publicLookup();
-        MethodHandle provide = handles.unreflect(provideMethod).bindTo(cache)
-                .asType(MethodType.methodType(Object.class, int.class, int.class));
-        MethodHandle cell = handles.unreflect(provideMethod.getReturnType().getMethod("lookup", int.class, int.class))
-                .asType(MethodType.methodType(Object.class, Object.class, int.class, int.class));
         var mapped = new IdentityHashMap<DensityFunction, DensityFunction>();
         return router.mapAll(function -> {
             if (!cellType.isInstance(function)) return function;
             return mapped.computeIfAbsent(function, original -> {
                 try {
                     Object field = fieldMethod.invoke(original);
-                    MethodHandle read = handles.unreflect(fieldMethod.getReturnType().getMethod("read",
+                    MethodHandle read = handles.unreflect(fieldMethod.getReturnType().getMethod(cells.tiled() ? "read" : "readFinite",
                             loader.loadClass(variant.worldgenClass("cell.Cell")), heightmap.getClass()))
                             .bindTo(field).asType(MethodType.methodType(float.class, Object.class, Object.class));
-                    return new ExactCell(original, heightmap, provide, cell, read);
+                    return new ExactCell(original, heightmap, cells, read);
                 } catch (ReflectiveOperationException failure) {
                     throw new IllegalStateException("FreeTerraForged cell-field API unavailable", failure);
                 }
@@ -52,11 +49,11 @@ final class FreeTerraForgedDensity {
         });
     }
 
-    private record ExactCell(DensityFunction source, Object heightmap, MethodHandle provide,
-                             MethodHandle cell, MethodHandle read, ThreadLocal<Column> columns)
+    private record ExactCell(DensityFunction source, Object heightmap, FreeTerraForgedCells cells,
+                             MethodHandle read, ThreadLocal<Column> columns)
             implements DensityFunction.SimpleFunction, DensityMemo.NonMemoizable {
-        ExactCell(DensityFunction source, Object heightmap, MethodHandle provide, MethodHandle cell, MethodHandle read) {
-            this(source, heightmap, provide, cell, read, ThreadLocal.withInitial(Column::new));
+        ExactCell(DensityFunction source, Object heightmap, FreeTerraForgedCells cells, MethodHandle read) {
+            this(source, heightmap, cells, read, ThreadLocal.withInitial(Column::new));
         }
         @Override public double compute(FunctionContext point) {
             if (coarse()) return source.compute(point);
@@ -64,8 +61,7 @@ final class FreeTerraForgedDensity {
             int x = point.blockX(), z = point.blockZ();
             if (!value.valid || value.x != x || value.z != z) {
                 try {
-                    Object tile = (Object) provide.invokeExact(x >> 4, z >> 4);
-                    Object data = (Object) cell.invokeExact(tile, x, z);
+                    Object data = cells.cellAt(x, z);
                     value.value = (float) read.invokeExact(data, heightmap);
                     value.x = x; value.z = z; value.valid = true;
                 } catch (RuntimeException | Error failure) { throw failure; }

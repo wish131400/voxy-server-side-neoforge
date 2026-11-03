@@ -299,7 +299,8 @@ public final class VSSServerNetworking {
 
     @SubscribeEvent
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player && !isServerStopping()) {
+        if (event.getEntity() instanceof ServerPlayer player && !isServerStopping()
+                && player.connection.hasChannel(HandshakeRequestS2CPayload.TYPE)) {
             VSSNetworking.sendToPlayer(player, new HandshakeRequestS2CPayload());
         }
     }

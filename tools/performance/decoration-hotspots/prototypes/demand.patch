@@ -1,0 +1,472 @@
+--- a/src/main/java/dev/xantha/vss/client/prediction/PredictionDecorationLevel.java
++++ b/src/main/java/dev/xantha/vss/client/prediction/PredictionDecorationLevel.java
+@@ -56,6 +56,7 @@
+     // original immutable record for this bounded job instead of looking it up
+     // in the shared sampler for every ground/heightmap/tree-space query.
+     private int[][] nativeColumns;
++    private int[][] nativeHeights;
+     private int[][] displayColumns;
+     // Feature predicates often ask for the same block more than once (for
+     // example DiskFeature checks a column through several nested predicates).
+@@ -351,6 +352,13 @@
+                     : BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+         }
+         if (terrain instanceof RustTerrainSampler rust) {
++            // A height request may have proved this cell is above the immutable
++            // base. Overlay writes were checked first; material reads remain lazy.
++            if (!displayTerrain && nativeHeights != null) {
++                int[] heights=nativeHeights[columnSlot(pos.getX(),pos.getZ())];
++                if (heights!=null && heights[0]!=Integer.MIN_VALUE && pos.getY()>=heights[0])
++                    return Blocks.AIR.defaultBlockState();
++            }
+             return rust.proxyBlock(nativeColumn(rust, pos.getX(), pos.getZ()), pos.getY());
+         }
+         ClientColumnSample sample = columnActive(pos.getX(), pos.getZ());
+@@ -431,6 +439,24 @@
+                 && heightQueryTypes[querySlot] == typeId
+                 && heightQueryColumnVersions[querySlot] == columnVersion) return heightQueryValues[querySlot];
+         if (columnVersion == 0 && terrain instanceof RustTerrainSampler rust && !interiorTerrain()) {
++            if(!displayTerrain && (nativeColumns==null || nativeColumns[columnSlot]==null)) {
++                if(nativeHeights==null)nativeHeights=new int[COLUMN_CACHE_SIZE][];
++                int[] heights=nativeHeights[columnSlot];
++                if(heights==null) {
++                    int ox=Math.floorDiv(x,4)*4,oz=Math.floorDiv(z,4)*4;
++                    int[][] rows=rust.exactHeightPage(ox,oz);
++                    for(int i=0;i<16;i++)nativeHeights[columnSlot(ox+i/4,oz+i%4)]=rows[i];
++                    heights=nativeHeights[columnSlot];
++                }
++                if(heights[0]!=Integer.MIN_VALUE) {
++                    int result=switch(type) {
++                        case OCEAN_FLOOR, OCEAN_FLOOR_WG -> heights[1];
++                        default -> heights[0];
++                    };
++                    cacheHeightQuery(querySlot,x,z,typeId,result,columnVersion);
++                    return result;
++                }
++            }
+             int result = rust.proxyHeight(nativeColumn(rust, x, z), type);
+             cacheHeightQuery(querySlot, x, z, typeId, result, columnVersion);
+             return result;
+@@ -485,7 +511,12 @@
+         return value;
+     }
+ 
+-    /** Rejection hints only reuse observed block biomes; never sample speculative coordinates. */
++    /** The predicate and following BiomeFilter see this exact coordinate and no intervening write. */
++    boolean biomeRejects(net.minecraft.world.level.levelgen.placement.PlacedFeature feature,BlockPos pos) {
++        return context.generatorContext()!=null
++                && !context.generatorContext().getBiomeGenerationSettings(getBiome(pos)).hasFeature(feature);
++    }
++    /** Environment scans only reuse observed answers: their endpoint is not yet known. */
+     boolean cachedBiomeRejects(net.minecraft.world.level.levelgen.placement.PlacedFeature feature,
+                                BlockPos pos) {
+         checkQueryActive();
+--- a/src/main/java/dev/xantha/vss/client/prediction/RustTerrainSampler.java
++++ b/src/main/java/dev/xantha/vss/client/prediction/RustTerrainSampler.java
+@@ -248,6 +248,22 @@
+     }
+     /** One aligned 4x4 page in x-major order, shared with native display queries.
+      * Never insert these records in the exact Java point cache. */
++    private volatile boolean legacySurfaceHeights;
++    /** Height proof records are separate from complete material and display records. */
++    int[][] exactHeightPage(int x,int z) {
++        long id=handle();
++        int[][] rows=new int[16][2];
++        for(var row:rows)java.util.Arrays.fill(row,Integer.MIN_VALUE);
++        if(legacySurfaceHeights)return rows;
++        ByteBuffer input=positions.get(),output=scratch.get();input.clear();
++        for(int i=0;i<16;i++)input.putInt(x+i/4).putInt(z+i%4);
++        try {
++            if(RustWorldgenBackend.surfaceHeights(id,input,output,16)!=16)
++                throw new IllegalStateException("Incomplete native height page");
++        } catch(UnsatisfiedLinkError olderLibrary) {legacySurfaceHeights=true;return rows;}
++        for(int i=0;i<16;i++)for(int j=0;j<2;j++)rows[i][j]=output.getInt((i*2+j)*4);
++        return rows;
++    }
+     int[][] decorationDisplayPage(int x, int z) {
+         long id = handle();
+         ByteBuffer input = positions.get(), output = scratch.get(); input.clear();
+--- a/src/main/java/dev/xantha/vss/client/prediction/PredictionPlacementPruning.java
++++ b/src/main/java/dev/xantha/vss/client/prediction/PredictionPlacementPruning.java
+@@ -9,7 +9,7 @@
+ import net.minecraft.core.Direction;
+ import net.minecraft.world.level.levelgen.placement.*;
+ 
+-/** Cache-only rejection before a pure environment read; no random draws or coordinate sampling. */
++/** A final biome rejection may precede a pure read at the very same position. */
+ final class PredictionPlacementPruning {
+     private static final Set<String> PURE = Set.of("minecraft:true", "minecraft:matching_blocks",
+             "minecraft:matching_fluids", "minecraft:matching_block_tag", "minecraft:all_of",
+@@ -35,7 +35,8 @@
+         // Predicates that call custom block hooks or mutable world conditions are not a pure proof.
+         if(modifier.getClass()==BlockPredicateFilter.class) {
+             if(!pure(data.get("predicate")))return null;
+-            return (context,pos)->rejects(context,pos);
++            return (context,pos)->context.getLevel() instanceof PredictionDecorationLevel level
++                    && context.topFeature().isPresent() && level.biomeRejects(context.topFeature().get(),pos);
+         }
+         if(!pure(data.get("target_condition"))
+                 || data.has("allowed_search_condition") && !pure(data.get("allowed_search_condition")))return null;
+--- a/src/main/java/dev/xantha/vss/client/prediction/RustWorldgenBackend.java
++++ b/src/main/java/dev/xantha/vss/client/prediction/RustWorldgenBackend.java
+@@ -70,6 +70,9 @@
+     public static native int surfaceColumns(long world, int chunkX, int chunkZ, ByteBuffer output);
+     /** Sparse XZ int32 input, at most 64 records, same ten-int32 output as surfaceColumns. */
+     public static native int surfacePoints(long world, ByteBuffer xz, ByteBuffer output, int count);
++    /** Exact unedited proxy heights: two int32 per XZ (world surface, ocean floor).
++     * MIN_VALUE means material/geometry rules require surfacePoints. Additive ABI 6 entry. */
++    public static native int surfaceHeights(long world, ByteBuffer xz, ByteBuffer output, int count);
+     public static native int previewPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+     /** Display-only approximation, including visual vegetation; never seed exact caches. */
+     public static native int displayPoints(long world, ByteBuffer xz, ByteBuffer output, int count);
+--- a/tools/rust/vss-native-core/src/backend.rs
++++ b/tools/rust/vss-native-core/src/backend.rs
+@@ -180,6 +180,7 @@
+     pub values: [i32; 10],
+ }
+ mod exterior;
++mod heights;
+ mod display;
+ mod tint;
+ mod interior;
+@@ -1365,6 +1366,14 @@
+                 let columns = owner.decoration_points(&points,display)?;
+                 Ok(Arc::new(columns.iter().map(|column| column.values).collect()))
+             }))?;
++        if !display {
++            let height_owner = Arc::clone(self);
++            volume.proxy_height_loader(Box::new(move |px,pz| {
++                let points: Vec<_> = (0..16).map(|i|
++                    (ox + px as i32 * 4 + i / 4,oz + pz as i32 * 4 + i % 4)).collect();
++                height_owner.surface_heights(&points)
++            }));
++        }
+         volume.write_bounds = Some(([cx*16-16,self.decoration_min_y,cz*16-16],
+             [cx*16+32,self.decoration_min_y+self.decoration_height,cz*16+32]));
+         volume.proxy_base_bounds(t.min_y, t.height);
+--- a/tools/rust/vss-native-core/src/surface.rs
++++ b/tools/rust/vss-native-core/src/surface.rs
+@@ -215,6 +215,35 @@
+     }
+     pub fn sparse_safe(&self, palette: &Palette) -> bool {
+         self.sparse_safe_for_biome(palette, None)
++    }
++    /// The first solid must remain opaque for every proxy height predicate.
++    /// Only the rule at that block matters; other material layers stay lazy.
++    pub(crate) fn height_preserving_at(&self, palette: &Palette, biome: &str,
++                                       graph: &Graph, x: i32, z: i32) -> bool {
++        fn known(c: &Condition, name: &str, hole: bool) -> Option<bool> {
++            match c {
++                Condition::Biome(names) => Some(names.iter().any(|n| n == name)),
++                Condition::Hole => Some(hole),
++                Condition::Not(c) => known(c, name, hole).map(|b| !b),
++                _ => None,
++            }
++        }
++        fn solid(p: &Palette, id: StateId) -> bool {
++            !p.is_air(id) && !p.fluid(id) && p.definition(id).motion_blocking
++                && !p.tag(id, "minecraft:leaves")
++        }
++        fn safe(r: &Rule, p: &Palette, name: &str, hole: bool, bands: &[StateId]) -> bool {
++            match r {
++                Rule::Block(id) => solid(p, *id),
++                Rule::Bands => bands.iter().all(|id| solid(p, *id)),
++                Rule::Sequence(rules) => rules.iter().all(|r| safe(r,p,name,hole,bands)),
++                Rule::Condition(c, r) => known(c,name,hole)==Some(false) || safe(r,p,name,hole,bands),
++                Rule::Namespaced { base, sources } => safe(base,p,name,hole,bands)
++                    && sources.iter().filter(|(ns,_)| name.split(':').next()==Some(ns.as_str()))
++                        .all(|(_,r)| safe(r,p,name,hole,bands)),
++            }
++        }
++        solid(palette,self.default) && safe(&self.rule,palette,biome,self.depth(graph,x,z)<=0,&self.bands)
+     }
+     /// Steepness reads WORLD_SURFACE_WG: solid-to-water preserves its height.
+     /// Only reachable air writes can change a predecessor column's top.
+--- a/tools/rust/vss-native-core/src/jni_worldgen.rs
++++ b/tools/rust/vss-native-core/src/jni_worldgen.rs
+@@ -804,6 +804,24 @@
+     });
+     match result { Ok(n) => n, Err(err) => { fail(&mut e, err); -1 } }
+ }
++#[no_mangle]
++pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_surfaceHeights(
++    mut e: JNIEnv, _c: JClass, id:jlong, input:JByteBuffer, out:JByteBuffer, count:jint,
++) -> jint {
++    let result=guarded(|| {
++        if !(0..=64).contains(&count) {return Err("height batch count".into());}
++        let ptr=buffer(&mut e,&input,count as usize*8,false)?;
++        buffer(&mut e,&out,count as usize*8,true)?;
++        let bytes=unsafe {std::slice::from_raw_parts(ptr,count as usize*8)};
++        let points:Vec<_>=bytes.chunks_exact(8).map(|r| (i32::from_le_bytes(r[..4].try_into().unwrap()),
++            i32::from_le_bytes(r[4..].try_into().unwrap()))).collect();
++        let rows=world(id)?.surface_heights(&points)?;
++        let mut result=Vec::with_capacity(count as usize*8);
++        for row in rows {for n in row {result.extend(n.to_le_bytes());}}
++        put(&mut e,&out,&result)?;Ok(count)
++    });
++    match result {Ok(n)=>n,Err(err)=>{fail(&mut e,err);-1}}
++}
+ fn surface_points_jni(mut e: JNIEnv, id: jlong, input: JByteBuffer, out: JByteBuffer,
+     count: jint, mode: u8) -> jint {
+     let result = guarded(|| {
+--- a/tools/rust/vss-native-core/src/blocks.rs
++++ b/tools/rust/vss-native-core/src/blocks.rs
+@@ -293,6 +293,7 @@
+ /// on demand, storing only the cells a feature actually changed.
+ type ChunkColumns = Arc<Vec<[i32; 10]>>;
+ type ColumnLoader = Box<dyn Fn(usize, usize) -> Result<ChunkColumns> + Send + Sync>;
++type HeightLoader = Box<dyn Fn(usize, usize) -> Result<Vec<[i32; 2]>> + Send + Sync>;
+ type InteriorLoader = Box<dyn Fn(usize, usize) -> Result<Arc<Vec<StateId>>> + Send + Sync>;
+ 
+ pub struct ProxyBase {
+@@ -303,6 +304,8 @@
+     lazy_chunks: Vec<OnceLock<Result<ChunkColumns>>>,
+     page_axis: usize,
+     loader: Option<ColumnLoader>,
++    height_loader: Option<HeightLoader>,
++    height_pages: Vec<OnceLock<Result<Vec<[i32; 2]>>>>,
+     interior_loader: Option<InteriorLoader>,
+     base_bounds: Option<(i32, i32)>,
+     interior_columns: Vec<OnceLock<Result<Arc<Vec<StateId>>>>>,
+@@ -312,6 +315,22 @@
+     ice: StateId,
+ }
+ impl ProxyBase {
++    fn proved_height(&self, column: usize, load: bool) -> Result<Option<[i32; 2]>> {
++        let Some(loader) = &self.height_loader else { return Ok(None); };
++        let (qx,qz) = (column / self.depth,column % self.depth);
++        let axis = self.page_axis;
++        let slot = qx / axis * (self.depth / axis) + qz / axis;
++        // Once materials exist they are already the cheapest oracle.
++        if self.lazy_chunks[slot].get().is_some() { return Ok(None); }
++        if !load && self.height_pages[slot].get().is_none() { return Ok(None); }
++        let page = self.height_pages[slot].get_or_init(|| {
++            let rows = loader(qx / axis,qz / axis)?;
++            if rows.len() != axis * axis { return Err("height proof page count".into()); }
++            Ok(rows)
++        });
++        let row = page.as_ref().map_err(Clone::clone)?[(qx % axis) * axis + qz % axis];
++        Ok((row[0] != i32::MIN).then_some(row))
++    }
+     /// Value of flat index `i` before any edit. `origin_y` and `height` come
+     /// from the owning volume; the column words are absolute Y.
+     fn column(&self, column: usize) -> Result<[i32; 10]> {
+@@ -342,6 +361,9 @@
+                 Ok(values)
+             });
+             return Ok(values.as_ref().map_err(Clone::clone)?[(y - base_y) as usize]);
++        }
++        if self.proved_height(i / height,false)?.is_some_and(|h| y >= h[0]) {
++            return Ok(self.air);
+         }
+         let c = self.column(i / height)?;
+         let end = c[0].max(c[1]);
+@@ -487,6 +509,8 @@
+             lazy_chunks: Vec::new(),
+             page_axis: 16,
+             loader: None,
++            height_loader: None,
++            height_pages: Vec::new(),
+             interior_loader: None,
+             base_bounds: None,
+             interior_columns: Vec::new(),
+@@ -531,6 +555,13 @@
+         proxy.lazy_chunks = (0..width / axis * (depth / axis)).map(|_| OnceLock::new()).collect();
+         proxy.loader = Some(loader);
+         Ok(volume)
++    }
++    /// Heights have separate storage: a successful height read never publishes materials.
++    pub fn proxy_height_loader(&mut self, loader: HeightLoader) {
++        if let Some(proxy) = &mut self.proxy {
++            proxy.height_pages = (0..proxy.lazy_chunks.len()).map(|_| OnceLock::new()).collect();
++            proxy.height_loader = Some(loader);
++        }
+     }
+     /// Missing lazy data invalidates the transaction; it must never commit as air.
+     fn value_at(&mut self, i: usize) -> StateId {
+@@ -674,6 +705,16 @@
+                 return self.scan_heightmap_from(x, z, kind, top);
+             }
+             let column = i / self.size[1];
++            if !self.proxy_write_tops.contains_key(&column) {
++                match proxy.proved_height(column,true) {
++                    Ok(Some(h)) => {
++                        let base = if kind == 1 { h[1] } else { h[0] };
++                        return base.clamp(self.origin[1],top);
++                    }
++                    Ok(None) => {},
++                    Err(_) => { self.incomplete = true; return self.origin[1]; }
++                }
++            }
+             match proxy.column(column) {
+                 Ok(c) => top = top.min(c[0].max(c[1])
+                     .max(self.proxy_write_tops.get(&column).copied().unwrap_or(self.origin[1]))),
+--- /dev/null
++++ b/tools/rust/vss-native-core/src/backend/heights.rs
+@@ -0,0 +1,166 @@
++//! Exact proxy heights without material shells, neighbour rules or tint records.
++//! An unknown proof is returned explicitly; it never seeds an exact surface record.
++use super::*;
++
++pub const UNKNOWN_HEIGHT: i32 = i32::MIN;
++
++impl World {
++    pub fn surface_heights(&self, points: &[(i32,i32)]) -> Result<Vec<[i32;2]>> {
++        self.check_active()?;
++        if points.len()>64 || points.iter().any(|&(x,z)| x.abs_diff(0)>29999990 || z.abs_diff(0)>29999990) {
++            return Err("height batch outside range".into());
++        }
++        let mut out=vec![[UNKNOWN_HEIGHT;2];points.len()];
++        if self.terrain.graph.requires_complete_column_order() {return Ok(out);}
++        let mut groups=std::collections::BTreeMap::<_,Vec<usize>>::new();
++        for (i,&(x,z)) in points.iter().enumerate() {
++            groups.entry((x>>4,z>>4)).or_default().push(i);
++        }
++        let mut scratch=self.take_raw_work()?;
++        for ((cx,cz),mut indices) in groups {
++            if self.adjustments.contains_key(&(cx,cz)) {continue;}
++            indices.sort_by_key(|&i| (points[i].0.div_euclid(self.terrain.cell_width),points[i].1.div_euclid(self.terrain.cell_width)));
++            let work={
++                let mut pool=self.surface_work.lock().map_err(|_|"surface work lock")?;
++                pool.iter().position(|(key,_)|*key==(cx,cz)).and_then(|i|pool.remove(i)).map(|(_,w)|w)
++            };
++            let mut job=match work {Some(w)=>Job::resume(&self.terrain,w),None=>self.terrain.job(cx*16,cz*16,false)?};
++            self.attach_tops(&mut job);
++            job.scratch.enable_dense_corners(indices.len()>1);
++            for i in indices {
++                self.check_active()?;
++                out[i]=self.surface_height(points[i].0,points[i].1,&mut job,&mut scratch)?;
++            }
++            let work=job.park();let bytes=work.retained_bytes();
++            if bytes<=2*1024*1024 {
++                let mut pool=self.surface_work.lock().map_err(|_|"surface work lock")?;
++                let mut used:usize=pool.iter().map(|(_,w)|w.retained_bytes()).sum();
++                while pool.len()>=8 || used+bytes>16*1024*1024 {
++                    let Some((_,old))=pool.pop_front() else {break;};used=used.saturating_sub(old.retained_bytes());
++                }
++                pool.push_back(((cx,cz),work));
++            }
++        }
++        self.return_raw_work(scratch)?;
++        Ok(out)
++    }
++
++    fn surface_height(&self,x:i32,z:i32,job:&mut Job<'_>,scratch:&mut crate::density::Scratch)->Result<[i32;2]> {
++        let t=&self.terrain;
++        let Some((top_y,substance))=job.surface_top(x,z) else {return Ok([t.min_y;2]);};
++        // Surface geometry is dispatched using the original non-air top biome.
++        let biome_at=|y,scratch:&mut crate::density::Scratch| {
++            let mut q=zoom_quart(self.zoom_seed,[x,y,z]);
++            q[1]=q[1].clamp(t.min_y>>2,(t.min_y+t.height-1)>>2);
++            self.source.sample(&t.graph,q,scratch,&mut None)
++        };
++        if matches!(biome_at(if t.graph.legacy {0}else{top_y+1},scratch),
++                    "minecraft:eroded_badlands"|"minecraft:frozen_ocean"|"minecraft:deep_frozen_ocean") {
++            return Ok([UNKNOWN_HEIGHT;2]);
++        }
++        let mut y=top_y;let mut block=substance;
++        while !block.solid() && y>=t.min_y {
++            y-=1;if y>=t.min_y {block=job.block([x,y,z]);}
++        }
++        let floor=if y>=t.min_y {y+1}else{t.min_y};
++        if y>=t.min_y {
++            let state=self.base_ids[block as usize];
++            if !self.palette.definition(state).motion_blocking || self.palette.tag(state,"minecraft:leaves") {
++                return Ok([UNKNOWN_HEIGHT;2]);
++            }
++            if block==Substance::Default
++                && !self.surface.height_preserving_at(&self.palette,biome_at(y,scratch),&t.graph,x,z) {
++                return Ok([UNKNOWN_HEIGHT;2]);
++            }
++        }
++        // The existing proxy freezes its highest water cell from the exact
++        // temperature at the record's fluid position, independently of snowfall.
++        let ice=if substance==Substance::Water {
++            let name=biome_at(top_y,scratch);
++            self.colors.temperature(self.biomes.get(name).ok_or("missing height biome")?,[x,top_y,z])<0.15
++        } else {false};
++        Ok([top_y+1,if ice {top_y+1}else{floor}])
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn verify(doc:Value,seed:i64,points:&[(i32,i32)],require_proof:bool) {
++        let world=World::new(seed,0,doc.clone()).unwrap();
++        let oracle=World::new(seed,0,doc).unwrap();
++        let rows=world.surface_heights(points).unwrap();
++        let mut proved=0;
++        for (&(x,z),h) in points.iter().zip(rows) {
++            let row=oracle.surface_point(x,z).unwrap().values;
++            if h[0]!=UNKNOWN_HEIGHT {
++                proved+=1;
++                let mut v=Volume::proxy([x,world.terrain.min_y,z],1,1,world.terrain.height as usize,
++                    world.palette.clone(),vec![row]).unwrap();
++                for kind in 0..4 {
++                    assert_eq!(h[usize::from(kind==1)],v.heightmap_uncached(x,z,kind),
++                        "height proof {x},{z} kind={kind} record={row:?}");
++                }
++            }
++            assert_eq!(world.surface_point(x,z).unwrap().values,row,"height must not alter exact materials");
++        }
++        if require_proof {assert!(proved>0,"fixture must exercise the proof");}
++    }
++
++    #[test]
++    fn height_proofs_match_complete_proxy_and_keep_materials_cold() {
++        let mut doc=super::super::exterior_tests::document();
++        doc["settings"]["aquifers_enabled"]=json!(false);
++        doc["settings"]["ore_veins_enabled"]=json!(false);
++        doc["settings"]["surface_rule"]=json!({"type":"minecraft:block","result_state":{"Name":"minecraft:stone"}});
++        let points=[(-17,-17),(-16,-16),(0,0),(15,15),(1024,-2048)];
++        for top in [30,85] {
++            doc["settings"]["noise_router"]["final_density"]=json!({"type":"minecraft:y_clamped_gradient",
++                "from_y":top-16,"to_y":top+16,"from_value":1.,"to_value":-1.});
++            verify(doc.clone(),731,&points,true);
++        }
++        doc["settings"]["noise_router"]["final_density"]=json!(-1.);
++        verify(doc,731,&points,true);
++    }
++
++    #[test]
++    fn unknown_rules_geometry_and_stateful_graphs_fall_back() {
++        for name in ["minecraft:air","minecraft:water","minecraft:oak_leaves"] {
++            let mut doc=super::super::exterior_tests::document();
++            doc["settings"]["surface_rule"]=json!({"type":"minecraft:block","result_state":{"Name":name}});
++            let world=World::new(42,0,doc).unwrap();
++            assert_eq!(world.surface_heights(&[(0,0)]).unwrap(),vec![[UNKNOWN_HEIGHT;2]],"{name}");
++        }
++        for biome in ["minecraft:eroded_badlands","minecraft:frozen_ocean"] {
++            let mut doc=super::super::exterior_tests::document();
++            doc["biome_source"]=json!({"type":"minecraft:fixed","biome":biome});
++            assert_eq!(World::new(42,0,doc).unwrap().surface_heights(&[(0,0)]).unwrap(),vec![[UNKNOWN_HEIGHT;2]]);
++        }
++        let world=World::new(42,0,super::super::exterior_tests::document()).unwrap();
++        assert!(world.surface_heights(&[(i32::MIN,0)]).is_err());
++        assert!(world.surface_heights(&[(0,0);65]).is_err());
++        world.cancel();
++        assert!(world.surface_heights(&[]).is_err());
++    }
++
++    #[test]
++    fn vanilla_proofs_and_lazy_native_height_match_uncached_material_oracle() {
++        let doc=super::super::exterior_tests::document();
++        verify(doc.clone(),731,&[(-17,35),(0,0),(64,-128),(1024,2048)],false);
++        let world=Arc::new(World::new(731,0,doc).unwrap());
++        let mut volume=world.decoration_proxy(-1,-1,false).unwrap();
++        for (x,z) in [(-16,-16),(-1,-1)] {
++            for kind in 0..4 {
++                let actual=volume.heightmap(x,z,kind);
++                assert_eq!(actual,volume.heightmap_uncached(x,z,kind));
++            }
++            volume.begin().unwrap();
++            let stone=volume.palette.named("minecraft:stone").unwrap();
++            volume.set([x,200,z],stone);
++            assert_eq!(volume.heightmap(x,z,0),201);
++            volume.finish(false).unwrap();
++            assert_eq!(volume.heightmap(x,z,0),volume.heightmap_uncached(x,z,0));
++        }
++    }
++}

@@ -1,0 +1,20 @@
+allprojects { afterEvaluate {
+    def root=file(providers.gradleProperty('vssBenchRoot').get())
+    layout.buildDirectory.set(new File(root,'gradle'))
+    sourceSets.main.java.setSrcDirs([new File(root,'main-java')])
+    sourceSets.main.resources.setSrcDirs([new File(root,'main-resources')])
+    def classes=new File(root,'gradle/classes/java/main')
+    tasks.named('compileJava',JavaCompile) { destinationDirectory.set(classes) }
+    sourceSets.main.output.classesDirs.setFrom(classes)
+    minecraft.runs.server {
+        workingDirectory new File(root,'server')
+        property 'vss.bench.output',root.absolutePath
+        def resources=new File(gradle.gradleUserHomeDir,'caches/forge_gradle/minecraft_repo/versions/1.20.1/client-extra.jar')
+        property 'vss.bench.resources',resources.absolutePath
+        ['rounds':'5','warmups':'2','side':'16','step':'4'].each { k,v ->
+            property "vss.bench.${k}",providers.gradleProperty('vssBench'+k.capitalize()).getOrElse(v)
+        }
+        jvmArgs '-Xms2G','-Xmx4G'
+    }
+    tasks.matching{it.name in ['jar','reobfJar']}.configureEach{enabled=false}
+} }

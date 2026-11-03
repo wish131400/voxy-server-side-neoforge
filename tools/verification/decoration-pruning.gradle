@@ -1,0 +1,24 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('decorationPruningTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionFeatureBiomeBoundsTest.class', '**/RustBiomePruningTest.class'
+            include '**/RustFeatureStatusTest.class'
+            ['PredictionVegetationTest', 'PredictionPlacementExecutorTest', 'PredictionDecorationQueryTest',
+             'RustClimateSharingTest', 'RustBiomeIdentityTest'].each { include "**/${it}.class" }
+            maxHeapSize = '3G'
+            maxParallelForks = 1
+            forkEvery = 1
+            if (providers.gradleProperty('vssTestNativeLibrary').isPresent()) {
+                systemProperty 'vss.testNativeLibrary', file(providers.gradleProperty('vssTestNativeLibrary').get()).absolutePath
+            }
+            if (providers.gradleProperty('vssExpectLegacyFeatureStatus').getOrElse('false').toBoolean()) {
+                systemProperty 'vss.expectLegacyFeatureStatus', 'true'
+            }
+            testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

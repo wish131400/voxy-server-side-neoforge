@@ -11,7 +11,9 @@
     "voxy.StrictVoxyIngestMixin",
     "voxy.StrictVoxyMeshMixin",
     "voxy.StrictVoxyBatchMixin",
-    "voxy.StrictVoxyMeshWorkMixin"
+    "voxy.StrictVoxyMeshWorkMixin",
+    "voxy.PredictionVoxyStorageMixin",
+    "voxy.PredictionVoxyStorageIdentityMixin"
   ],
   "injectors": {
     "defaultRequire": 1

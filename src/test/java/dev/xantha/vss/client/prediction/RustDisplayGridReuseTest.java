@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
-/** Cross-language regression: exact Java reuse must preserve native grid admission. */
+/** Cross-language regression: exact cache warmth must preserve display policy and records. */
 class RustDisplayGridReuseTest {
     @Test void partialExactCacheReusePreservesTheNativeGridRoute() throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
@@ -14,6 +14,7 @@ class RustDisplayGridReuseTest {
         var profile = new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"), -64, 384,
                 "noise", "minecraft:overworld", 1L);
+        ClientColumnSample[][] grids = new ClientColumnSample[2][];
         long[] approximate = new long[2];
         long[] submitted = new long[2];
         long[] adaptive = new long[2];
@@ -35,7 +36,9 @@ class RustDisplayGridReuseTest {
                 long before = sampler.gridComputedPoints.sum();
                 var cachedPoint = cached == 0 ? null : sampler.sample(-16, -16);
                 var grid = sampler.sampleDisplayGrid(-16, -16, 1, 8, 8, new ClientColumnSample[64]);
-                if (cachedPoint != null) { assertFalse(grid[0].approximate()); assertEquals(cachedPoint, grid[0]); }
+                grids[cached] = grid;
+                assertTrue(grid[0].approximate());
+                if (cachedPoint != null) assertEquals(cachedPoint,sampler.sample(-16,-16),"display must retain the exact point");
                 approximate[cached] = Arrays.stream(grid).filter(ClientColumnSample::approximate).count();
                 submitted[cached] = sampler.gridComputedPoints.sum() - before;
                 var stats = com.google.gson.JsonParser.parseString(RustWorldgenBackend.decorationQueryStats(world)).getAsJsonObject();
@@ -47,7 +50,9 @@ class RustDisplayGridReuseTest {
         }
         assertEquals(64, submitted[0]);
         assertTrue(approximate[0] > 0, "fixture must exercise the adaptive display route");
-        assertEquals(63, submitted[1]);
+        assertEquals(64, submitted[1], "display must submit its own grid even when an exact point is cached");
+        assertEquals(approximate[0],approximate[1]);
+        assertArrayEquals(grids[0],grids[1],"exact warmup must not change any display record");
         assertEquals(1, adaptive[0]);
         assertEquals(1, adaptive[1], "partial reuse must preserve the full-grid shape");
         assertEquals(density[0], density[1], "one Java cache hit must not increase native density work");

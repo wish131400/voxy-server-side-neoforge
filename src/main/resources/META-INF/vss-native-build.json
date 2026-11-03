@@ -1,13 +1,26 @@
 {
   "schema": 1,
-  "commit": "c0e86dab556f0a13840ffae7cd939c68fb7d3f86",
-  "workflowUrl": "https://github.com/wish131400/voxy-server-side-neoforge/actions/runs/40905560969",
-  "sourceSha256": "ae6e955001db791f7e6845260f131fc5ecc163cc8694f3afc7b4ca31def02553",
+  "commit": "ecebd4a5cb16e99c4d19a142d6079ff4f38c1d43",
+  "workingTreeModified": true,
+  "buildKind": "local-cross",
+  "sourceSha256": "d0b4e486644798707aea0b5716bc9381ebaf97b085c960a7e2e12c6bf266416d",
   "libraries": {
-    "windows-x86_64/vss_native_core.dll": "622ddfca8a419650504ce3a0d055d8476133a074ccfa5da4f9c0e99952e27c6b",
-    "linux-x86_64/libvss_native_core.so": "a3f5cd56c28c09595022aee6f6a09496453531ba38d62c625efbbe368c98a1a0",
-    "linux-aarch64/libvss_native_core.so": "90bcee297a843c02c88942650761e832ed3661fd8de8a6ba3d81b3f425dd7cab",
-    "macos-x86_64/libvss_native_core.dylib": "068ffc63556c6a08d60f21ca7243fdb8a723d7c3e173af4e1a7d64c4eb53b6b1",
-    "macos-aarch64/libvss_native_core.dylib": "d835684126de3e74f3ea94a7b54ce2686ad2aac9369252d8f84631b5d5e13264"
+    "windows-x86_64/vss_native_core.dll": "de7a75ae179a067b80306d8ca493909e5ca4dffe289b3ea2c346e129e647ab6e",
+    "linux-x86_64/libvss_native_core.so": "654ec1fb7e1185d416115e2d3ea8ef81a6f91271c2e8c62da653e81b8c7f322a",
+    "linux-aarch64/libvss_native_core.so": "27bdcba2fe80308969067351205a00ec132b75b71246e12b6ae12706ff89a8ef",
+    "macos-x86_64/libvss_native_core.dylib": "54e1dfbfc445fd4942d16408598706c0311faff5e0cf0a8a6bb7fdbefebf8778",
+    "macos-aarch64/libvss_native_core.dylib": "05f4181b3be3c3a13f03c5f869045f47cac73ef915b2eca8dd4df334056d004c"
+  },
+  "validation": {
+    "buildId": "20261102-cross-version-pruning",
+    "executedPlatform": "windows-x86_64",
+    "javaJniRegressions": 65,
+    "matrix": "See cross-version-pruning-20261102.md for executed Rust regressions, each target complete-path output parity and measured generation costs.",
+    "otherPlatforms": "Five platforms cross compiled and audited against exact JNI exports and embedded hashes; Linux/macOS and ARM execution not exercised.",
+    "gameplay": "No new live-client FPS, movement or teleport validation.",
+    "tools": {
+      "ziglang": "0.13.0",
+      "cargo-zigbuild": "0.23.4"
+    }
   }
 }

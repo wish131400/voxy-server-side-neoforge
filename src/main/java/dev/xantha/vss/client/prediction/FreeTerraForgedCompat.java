@@ -7,7 +7,7 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.levelgen.RandomState;
 
-/** Optional FreeTerraForged context bridge; prediction tile filters run in Rust. */
+/** Optional FreeTerraForged context bridge for tile and epoch releases. */
 final class FreeTerraForgedCompat {
     private FreeTerraForgedCompat() { }
 
@@ -43,6 +43,9 @@ final class FreeTerraForgedCompat {
                     .filter(candidate -> candidate.hasPreset(registries)).findFirst()
                     .orElseThrow(() -> new IllegalStateException("FreeTerraForged snapshot contains no active preset"));
             Api api = new Api(loader, variant);
+            // Epoch releases initialize only their plan-owned generators. Other
+            // dimensions use the ordinary router and have no terrain context.
+            if (api.epochBased) return factory.get();
             return scoped(api.overworld, overworld, () -> {
                 RandomState state = factory.get();
                 api.initialize(state, registries);
@@ -69,6 +72,25 @@ final class FreeTerraForgedCompat {
                 .findFirst().orElse(null);
         if (api == null) return;
         try {
+            Method semantics;
+            try { semantics = api.getMethod("climateQuerySemantics"); }
+            catch (NoSuchMethodException tileRelease) { semantics = null; }
+            if (semantics != null) {
+                var plan = api.getMethod("getWorldgenPlan");
+                api.getMethod("setWorldgenPlan", plan.getReturnType()).invoke(target, plan.invoke(source));
+                Object query = semantics.invoke(source);
+                if (query != null) {
+                    Class<?> type = query.getClass();
+                    var policy = type.getMethod("policy");
+                    var preset = type.getMethod("preset");
+                    var context = type.getMethod("surfaceContext");
+                    api.getMethod("setClimateQuerySemantics", policy.getReturnType(), preset.getReturnType(),
+                            long.class, context.getReturnType()).invoke(target, policy.invoke(query),
+                            preset.invoke(query), type.getMethod("seed").invoke(query), context.invoke(query));
+                }
+                copySpawnSearch(api, source, target);
+                return;
+            }
             var preset = api.getMethod("getUndergroundBiomeBandingPreset");
             var context = api.getMethod("getUndergroundBiomeSurfaceContext");
             api.getMethod("setUndergroundBiomeBandingPreset", preset.getReturnType(), long.class).invoke(target,
@@ -79,6 +101,22 @@ final class FreeTerraForgedCompat {
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("FreeTerraForged climate context unavailable", failure);
         }
+    }
+
+    private static void copySpawnSearch(Class<?> api, Object source, Object target)
+            throws ReflectiveOperationException {
+        var get = api.getMethod("getSpawnSearch");
+        Object search = get.invoke(source);
+        if (search == null) search = get.invoke(target);
+        if (search == null) {
+            // The released Mixin can leave a new Climate.Sampler's search unset.
+            // Restore its WORLD_ORIGIN/ZERO default; setSpawnSearch rejects null.
+            Class<?> type = Class.forName(FreeTerraForgedVariant.CURRENT.packagePrefix
+                    + "data.worldgen.preset.settings.SpawnType", false, api.getClassLoader());
+            search = get.getReturnType().getConstructor(type, net.minecraft.core.BlockPos.class)
+                    .newInstance(type.getField("WORLD_ORIGIN").get(null), net.minecraft.core.BlockPos.ZERO);
+        }
+        api.getMethod("setSpawnSearch", get.getReturnType()).invoke(target, search);
     }
 
     /** Release only this prediction context, after its VSS workers have stopped. */
@@ -110,6 +148,7 @@ final class FreeTerraForgedCompat {
         final Class<?> stateType;
         final Method initialize;
         final Method context;
+        final boolean epochBased;
 
         Api(ClassLoader loader) throws ReflectiveOperationException {
             this(loader, FreeTerraForgedVariant.detect(loader));
@@ -118,18 +157,26 @@ final class FreeTerraForgedCompat {
         @SuppressWarnings("unchecked")
         Api(ClassLoader loader, FreeTerraForgedVariant variant) throws ReflectiveOperationException {
             this.variant = variant;
+            stateType = loader.loadClass(variant.stateClass());
+            Method initializer;
+            boolean epoch;
+            try { initializer = stateType.getMethod("initialize", RegistryAccess.class); epoch = false; }
+            catch (NoSuchMethodException epochRelease) {
+                initializer = stateType.getMethod("initialize", loader.loadClass(variant.worldgenClass("runtime.WorldgenEpoch")));
+                epoch = true;
+            }
+            initialize = initializer;
+            epochBased = epoch;
             ThreadLocal<Boolean> dimensionContext;
             try {
                 dimensionContext = (ThreadLocal<Boolean>) loader.loadClass(variant.worldgenClass(variant.abbreviation + "WorldGenContext"))
                         .getField("IS_VANILLA_OVERWORLD").get(null);
             } catch (ClassNotFoundException legacyRelease) {
-                if (variant != FreeTerraForgedVariant.LEGACY) throw legacyRelease;
+                if (variant != FreeTerraForgedVariant.LEGACY && !epochBased) throw legacyRelease;
                 // Earlier releases discover their context from CellSampler markers.
                 dimensionContext = ThreadLocal.withInitial(() -> false);
             }
             overworld = dimensionContext;
-            stateType = loader.loadClass(variant.stateClass());
-            initialize = stateType.getMethod("initialize", RegistryAccess.class);
             context = stateType.getMethod("generatorContext");
         }
 

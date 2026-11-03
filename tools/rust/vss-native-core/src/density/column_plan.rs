@@ -5,7 +5,10 @@ use super::{Binary, Graph, Marker, Mode, Node, Spline, Unary};
 pub(super) const NONE: usize = usize::MAX;
 pub(super) struct ColumnPlan {
     pub slots: Vec<usize>,
+    pub y_dependent: Vec<bool>,
     pub count: usize,
+    pub corner_slots: std::sync::Arc<[usize]>,
+    pub corner_count: usize,
     pub bounds: Vec<(f64, f64)>,
     pub height: Option<super::height_plan::HeightPlan>,
 }
@@ -13,7 +16,10 @@ impl ColumnPlan {
     pub fn empty() -> Self {
         Self {
             slots: vec![],
+            y_dependent: vec![],
             count: 0,
+            corner_slots: std::sync::Arc::from([]),
+            corner_count: 0,
             bounds: vec![],
             height: None,
         }
@@ -216,6 +222,17 @@ impl ColumnPlan {
                     let (a, b) = bounds[*b];
                     (l.min(a), h.max(b))
                 }
+                Node::Select(_, fallback, choices) => {
+                    // Every possible result must be finite before pruning an
+                    // enclosing interpolator's zero-weight corners.
+                    std::iter::once(*fallback)
+                        .chain(choices.iter().map(|(_, _, id)| *id))
+                        .try_fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), id| {
+                            let (a, b) = bounds[id];
+                            (a.is_finite() && b.is_finite()).then_some((lo.min(a), hi.max(b)))
+                        })
+                        .unwrap_or(unknown)
+                }
                 _ => unknown,
             };
             let pad = |v: f64| {
@@ -231,9 +248,21 @@ impl ColumnPlan {
                 (value.0 - pad(value.0), value.1 + pad(value.1))
             });
         }
+        let mut corner_slots = vec![NONE; g.nodes.len()];
+        let mut corner_count = 0;
+        for node in &g.nodes {
+            if let Node::Marker(Marker::Interpolated(_), child) = node {
+                if corner_slots[*child] == NONE {
+                    corner_slots[*child] = corner_count;
+                    corner_count += 1;
+                }
+            }
+        }
         Self {
+            corner_slots: corner_slots.into(), corner_count,
             height: super::height_plan::HeightPlan::compile(g, &slots),
             slots,
+            y_dependent: dependent,
             count,
             bounds,
         }

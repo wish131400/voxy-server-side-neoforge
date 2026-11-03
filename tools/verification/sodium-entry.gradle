@@ -1,0 +1,19 @@
+allprojects { afterEvaluate {
+    def p = project
+    def suite = p.sourceSets.create('sodiumEntry') {
+        java.srcDir p.file('tools/verification/sodium-entry/java')
+        compileClasspath += p.sourceSets.main.output + p.sourceSets.test.output + p.sourceSets.test.compileClasspath
+        runtimeClasspath += p.sourceSets.main.output + p.sourceSets.test.runtimeClasspath
+    }
+    dependencies.add(suite.runtimeOnlyConfigurationName, files(providers.gradleProperty('vssSodiumJar').get()))
+    tasks.register('sodiumEntryRecoveryTest', Test) {
+        dependsOn tasks.named(suite.classesTaskName), tasks.named('testClasses')
+        testClassesDirs = suite.output.classesDirs
+        classpath = suite.runtimeClasspath
+        useJUnitPlatform()
+        maxHeapSize = '2G'
+        maxParallelForks = 1
+        systemProperty 'vss.sodiumFactory', providers.gradleProperty('vssSodiumFactory').getOrElse('false')
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    }
+} }

@@ -61,6 +61,29 @@ class PredictionPlacementExecutorTest {
                 BlockPredicateFilter.forPredicate(BlockPredicate.ONLY_IN_AIR_PREDICATE));
     }
 
+    @Test void pruningRequiresObservedBiomesForEveryReachableScanEndpoint() {
+        var fixture=new Fixture();
+        var modifiers=List.<PlacementModifier>of(EnvironmentScanPlacement.scanningFor(Direction.DOWN,
+                BlockPredicate.matchesBlocks(Blocks.GRASS_BLOCK),4),BiomeFilter.biome());
+        var top=feature(modifiers);
+        var level=fixture.level();
+        var context=new PlacementContext(level,fixture.generator,Optional.of(top));
+        var reject=PredictionPlacementPruning.compile(modifiers,0,ignored->true);
+        assertNotNull(reject,()->PlacementModifier.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE,
+                modifiers.get(0)).toString());
+        assertFalse(reject.rejects(context,ORIGIN),"unknown biomes retain the original rule");
+        for(int i=0;i<4;i++)level.getBiome(ORIGIN.below(i));
+        assertFalse(reject.rejects(context,ORIGIN),"the maxSteps endpoint can also be returned");
+        level.getBiome(ORIGIN.below(4));
+        assertTrue(reject.rejects(context,ORIGIN));
+        var registered=fixture.generator.getBiomeGenerationSettings(level.getBiome(ORIGIN))
+                .features().get(0).stream().findFirst().orElseThrow().value();
+        assertFalse(reject.rejects(new PlacementContext(level,fixture.generator,Optional.of(registered)),ORIGIN));
+        assertNull(PredictionPlacementPruning.compile(modifiers,0,ignored->false));
+        assertNull(PredictionPlacementPruning.compile(List.of(modifiers.get(0),CountPlacement.of(1),
+                BiomeFilter.biome()),0,ignored->true),"random consumption cannot be bypassed");
+    }
+
     @Test void everyCandidateAndTerminalRandomDrawMatchTheVanillaLazyPipeline() {
         var opaque = new LazyModifier();
         var mixed = List.<PlacementModifier>of(CountPlacement.of(UniformInt.of(3, 7)), InSquarePlacement.spread(),

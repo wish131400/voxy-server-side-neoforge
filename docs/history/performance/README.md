@@ -4,6 +4,29 @@
 
 这些报告保存当时的实现和验证证据。按各文中的日期、版本、输入与未测范围解读；旧配置、独立预测渲染器和旧性能数据不代表当前实现。
 
+- [4096 格外的模板散布与简化环境：完整 CPU 生成实验（2026-11-03）](far-decoration-results-20261103.md)
+- [26.3 装饰候选排除与完整路径验证（2026-11-02）](decoration-pruning-20261102.md)
+- [26.x 树木、GPU 选择与材质查询修复（2026-11-02）](modern-generation-repair-20261102.md)
+- [装饰柱区间与输出需求裁剪：完整 CPU 路径实验（2026-11-02）](lod-decoration-results-20261102.md)
+- [水平气候复用：正式接入与十目标验证（2026-11-02）](climate-sharing-implementation-20261102.md)
+- [高度扫描的精确空气证明与含水层邻域复用（2026-11-02）](height-air-results-20261102.md)
+- [地表与环境查询按规则需求准备：完整路径实验（2026-11-02）](surface-demand-results-20261102.md)
+- [水平气候共享：完整路径收益实测（2026-11-02）](climate-sharing-results-20261102.md)
+- [Rust 地形与 Java 群系的精确共享边界（2026-11-02）](climate-sharing-audit-20261102.md)
+- [装饰预设与环境批量准备：完整路径实验（2026-11-02）](decoration-modules-results-20261102.md)
+- [装饰解耦、批处理与预设资源可行性审查（2026-11-02）](decoration-decoupling-audit-20261102.md)
+- [当前预测生成耗时分布（2026-11-02 复算）](generation-cost-distribution-20261102.md)
+- [插值依赖复用与紧凑算术计划（2026-11-01）](density-dependency-implementation-20261101.md)
+- [装饰公共查询路径优化（2026-11-01）](decoration-core-implementation-20261101.md)
+- [装饰按需高度与提前拒绝：实现和收益验收（2026-10-31）](decoration-demand-evaluation-20261031.md)
+- [装饰主瓶颈复核与架构优先级（2026-10-31）](decoration-architecture-hotspots-20261031.md)
+- [装饰高度查询优化与候选筛选对照（2026-10-31）](decoration-height-implementation-20261031.md)
+- [密度查询复用与缓存更新（2026-10-31）](density-reuse-implementation-20261031.md)
+- [通用装饰查询优化：生产实施与验证（2026-10-31）](generic-decoration-implementation-20261031.md)
+- [通用装饰优化：独立原型与收益实测（2026-10-31）](generic-decoration-optimization-results-20261031.md)
+- [通用装饰生成优化调研（2026-10-31）](generic-decoration-optimization-research-20261031.md)
+- [旧版密度范围与共享图计划同步（2026-10-31）](density-plan-sync-20261031.md)
+- [Rust 噪声优化同步（2026-10-31）](native-noise-sync-20261031.md)
 - [DH 性能设计对照与 VSS 预测 LOD 掉帧调查](DH_PERFORMANCE_REVIEW.md)
 - [DH 候选方案无损性与本地开销评估](dh-lossless-evaluation.md)
 - [Meridian 0.1.5 与当前 VSS 0.3.3 性能调查](meridian-015-performance-review.md)
@@ -52,3 +75,8 @@
 - [VSS 资源占用与 Iris 提交热点（2026-10-11）](vss-resource-profile-20261011.md)
 - [vss-zoom-return-profile-20261012](vss-zoom-return-profile-20261012.md)
 - [Vulkan feasibility assessment](vulkan-feasibility.md)
+
+- [气候与精确高度优化生产实施（2026-11-02）](climate-height-production-20261102.md)
+- [群系入口、工作区和地表规则隔离对照（2026-11-02）](evaluation-pipeline-20261102.md)
+
+- [全版本装饰候选提前筛选](cross-version-pruning-20261102.md)

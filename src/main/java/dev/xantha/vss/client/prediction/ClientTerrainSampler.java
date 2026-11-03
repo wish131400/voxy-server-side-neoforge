@@ -266,6 +266,19 @@ public class ClientTerrainSampler implements AutoCloseable {
     final void legacyCacheIdentity(java.util.function.Supplier<String> identity) { legacyCacheIdentity = identity; }
     final java.util.function.Supplier<String> legacyCacheIdentity() { return legacyCacheIdentity; }
 
+    private volatile Holder<Biome>[] cachedBiomeHolders;
+    final Holder<Biome> cacheBiomeHolder(int index) {
+        var context=decorationContext();
+        if(context!=this)return context.cacheBiomeHolder(index);
+        var holders=cachedBiomeHolders;
+        if(holders==null) {
+            @SuppressWarnings("unchecked") Holder<Biome>[] prepared=(Holder<Biome>[])new Holder<?>[biomeIndices.size()];
+            biomeIndices.forEach((holder,slot)->prepared[slot]=holder);
+            cachedBiomeHolders=holders=prepared;
+        }
+        return index>=0 && index<holders.length ? holders[index]:null;
+    }
+
     java.util.List<String> cacheBiomes() {
         ClientTerrainSampler context = decorationContext();
         if (context != this) return context.cacheBiomes();
@@ -496,13 +509,16 @@ public class ClientTerrainSampler implements AutoCloseable {
     }
 
     String climateCompilerDiagnostics() {
-        return climateOptimization == null ? "state=unavailable" : climateOptimization.diagnostics();
+        return climateOptimization == null ? "state=unavailable" : climateOptimization.diagnostics() + "," + climateOptimization.horizontalDiagnostics();
     }
 
     void cancelDensityCompilation() {
         if (densityCompilation != null) densityCompilation.close();
         if (climateOptimization != null) climateOptimization.close();
     }
+
+    void bindHorizontalClimate(long world, com.google.gson.JsonObject document) { if (climateOptimization != null) climateOptimization.bindHorizontal(world, randomState, document, seed); }
+    void detachHorizontalClimate() { if (climateOptimization != null) climateOptimization.detachHorizontal(); }
 
     @Override public void close() { cancelDensityCompilation(); }
 

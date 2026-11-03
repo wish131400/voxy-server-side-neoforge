@@ -1,0 +1,24 @@
+allprojects { afterEvaluate {
+    tasks.register('realCoveragePersistenceTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/VoxyRealCoveragePersistenceTest.class', '**/VoxyStorageBytecodeTest.class', '**/VoxyStorageMixinApplicationTest.class'
+        include '**/VoxyIngestWriteContractTest.class'
+        maxHeapSize = '512M'
+        maxParallelForks = 1
+        forkEvery = 1
+        if (project.hasProperty('vssCoverageVoxyMatrixRoot') || project.hasProperty('vssCoverageVoxyMatrices')) {
+            def paths = project.hasProperty('vssCoverageVoxyMatrixRoot')
+                ? ['matrix-neoforge.json', 'matrix-forge.json'].collect { new File(project.property('vssCoverageVoxyMatrixRoot'), it).path }
+                : project.property('vssCoverageVoxyMatrices').split(/[|]/).toList()
+            def rows = paths.collectMany { path ->
+                new groovy.json.JsonSlurper().parse(new File(path))
+            }
+            systemProperty 'vss.coverageVoxyJars', rows.collect { it.jar }.join('|')
+            systemProperty 'vss.voxyJar', rows.first().jar
+        }
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full'; showStandardStreams = true }
+    }
+} }

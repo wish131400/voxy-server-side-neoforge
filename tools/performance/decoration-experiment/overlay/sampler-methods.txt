@@ -1,0 +1,57 @@
+    private final it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>> experimentBiomes =
+            new it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap<>();
+    private net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>[] experimentBiomeHolders;
+    @SuppressWarnings("unchecked")
+    void experimentPrepare() {
+        var names = cacheBiomes();
+        experimentBiomeHolders = (net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome>[])new net.minecraft.core.Holder<?>[names.size()];
+        var registry = context.decorationAccess().registryOrThrow(net.minecraft.core.registries.Registries.BIOME);
+        for (int i=0;i<names.size();i++) experimentBiomeHolders[i]=registry.getHolderOrThrow(net.minecraft.resources.ResourceKey.create(
+                net.minecraft.core.registries.Registries.BIOME,net.minecraft.resources.ResourceLocation.parse(names.get(i))));
+    }
+    net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> experimentNoiseBiome(int x,int y,int z) {
+        long key = BlockPos.asLong(x,y,z);
+        var known = experimentBiomes.getAndMoveToLast(key);
+        if (known!=null) { DecorationExperimentSettings.biomeCacheHits++; return known; }
+        int[] queries=surfaceBiomePositions.get(), indices=surfaceBiomes.get();
+        queries[0]=x;queries[1]=y;queries[2]=z;
+        DecorationExperimentSettings.biomeCalls++;
+        sampleBiomeIndices(queries,1,indices);
+        var biome=indices[0]<0 ? context.noiseBiome(x,y,z) : experimentBiomeHolders[indices[0]];
+        if (biome!=null) {
+            experimentBiomes.putAndMoveToLast(key,biome);
+            while(experimentBiomes.size()>32768)experimentBiomes.removeFirst();
+        }
+        return biome;
+    }
+    int[][] experimentExactPage(int x,int z,int side) {
+        int count=side*side;
+        int[][] rows=new int[count][];
+        int[] missing=missingScratch.get();int pending=0;
+        ByteBuffer input=positions.get(),output=scratch.get();input.clear();
+        synchronized(points) {
+            for(int i=0;i<count;i++) {
+                int wx=x+i/side,wz=z+i%side;long key=(long)wx<<32|wz&0xffffffffL;
+                rows[i]=points.getAndMoveToLast(key);
+                if(rows[i]==null) {missing[pending++]=i;input.putInt(wx).putInt(wz);}
+            }
+        }
+        if(pending==0)return rows;
+        DecorationExperimentSettings.surfaceCalls++;
+        DecorationExperimentSettings.surfacePoints+=pending;
+        if(RustWorldgenBackend.surfacePoints(handle(),input,output,pending)!=pending)
+            throw new IllegalStateException("Incomplete experimental exact page");
+        int[] queries=surfaceBiomePositions.get(),indices=surfaceBiomes.get();
+        for(int j=0;j<pending;j++) {
+            int i=missing[j];int[] row=rows[i]=new int[11];
+            for(int k=0;k<10;k++)row[k]=output.getInt((j*10+k)*4);
+            surfaceBiomePosition(queries,j,x+i/side,z+i%side,row[0],row[1],row[2]);
+        }
+        surfaceBiomeIndices(queries,pending,indices);
+        long generation=tints.generation();
+        for(int j=0;j<pending;j++) {
+            int i=missing[j],wx=x+i/side,wz=z+i%side;int[] row=rows[i];row[10]=indices[j];
+            rememberColors(wx,wz,row,generation);rememberPoint((long)wx<<32|wz&0xffffffffL,row);
+        }
+        return rows;
+    }

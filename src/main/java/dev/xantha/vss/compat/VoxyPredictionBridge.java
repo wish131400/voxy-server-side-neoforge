@@ -161,7 +161,7 @@ public final class VoxyPredictionBridge {
                             if(!source.copyFace(pos,ctx,face,predicted)) {
                                 for(int i=0;i<1024;i++)output[direction*1024+i]=raw==null?0:raw.get(VoxyFaceData.index(face,i));
                             } else {
-                                mergeRealFace(predicted,raw,face,lod,nx,nz,VoxyCompat.confirmedPredictionColumns(ctx.engine),(long)ctx.skyLight<<56);
+                                mergeRealFace(predicted,raw,face,lod,nx,ny,nz,VoxyCompat.confirmedPredictionColumns(ctx.engine),(long)ctx.skyLight<<56);
                                 System.arraycopy(predicted,0,output,direction*1024,1024);
                             }
                         } finally {if(real!=null)ctx.release.invoke(real);}
@@ -677,20 +677,43 @@ public final class VoxyPredictionBridge {
 
     static void mergeRealFace(long[] target,VoxyRenderAccess.Voxels real,int face,int lod,int sx,int sz,
                               RealColumn authoritative,long emptyAir) {
+        mergeRealFace(target,real,face,lod,sx,0,sz,authoritative,emptyAir);
+    }
+    static void mergeRealFace(long[] target,VoxyRenderAccess.Voxels real,int face,int lod,int sx,int sy,int sz,
+                              RealColumn authoritative,long emptyAir) {
         int populated=real!=null && real.data()!=null && lod==0 ? realCells(real.data()) : 0;
         if(real!=null && real.data()==null && !air(real.uniform()))populated=255;
-        int step=1<<lod,bx=sx*(32<<lod),bz=sz*(32<<lod),group=Math.max(1,16/step),axis=32/group;
+        int step=1<<lod,bx=sx*(32<<lod),by=sy*(32<<lod),bz=sz*(32<<lod),group=Math.max(1,16/step),axis=32/group;
         byte[] known=new byte[axis*axis];
         for(int i=0;i<1024;i++) {
             int index=VoxyFaceData.index(face,i),x=index&31,z=index>>5&31,y=index>>10;
-            int cell=z/group*axis+x/group;
-            if(known[cell]==0)known[cell]=(byte)(authoritative.contains(Math.floorDiv(bx+x*step,16),Math.floorDiv(bz+z*step,16))?2:1);
+            int cell=(i>>5)/group*axis+(i&31)/group;
+            if(known[cell]==0)known[cell]=(byte)(authoritative.covers(
+                    Math.floorDiv(bx+x*step,16),Math.floorDiv(by+y*step,16),Math.floorDiv(bz+z*step,16),Math.max(1,step/16),lod)?2:1);
             long value=real==null?emptyAir:real.get(index);
             if(known[cell]==2 || lod==0 && (populated&1<<((x>>4)|(z>>4)<<1|(y>>4)<<2))!=0 || !air(value))target[i]=value;
         }
     }
 
-    public interface RealColumn { boolean contains(int chunkX, int chunkZ); }
+    public interface RealColumn {
+        boolean contains(int chunkX, int chunkZ);
+        default boolean containsSection(int chunkX,int sectionY,int chunkZ) { return contains(chunkX,chunkZ); }
+        default boolean containsSectionAtLod(int x,int y,int z,int lod) { return containsSection(x,y,z); }
+        default int coverageMask(int x,int firstY,int z,int count,int lod) {
+            if(contains(x,z))return -1;
+            int result=0;
+            for(int i=0;i<count;i++)if(containsSectionAtLod(x,firstY+i,z,lod))result|=1<<i;
+            return result;
+        }
+        default boolean covers(int x,int y,int z,int span) {
+            return covers(x,y,z,span,0);
+        }
+        default boolean covers(int x,int y,int z,int span,int lod) {
+            for(int dz=0;dz<span;dz++)for(int dx=0;dx<span;dx++)for(int dy=0;dy<span;dy++)
+                if(!containsSectionAtLod(x+dx,y+dy,z+dz,lod))return false;
+            return true;
+        }
+    }
     /** Known real air wins too. Non-air data always wins while the presence index is warming. */
     static void mergeReal(long[] target, long[] real, int lod, int sx, int sy, int sz, RealColumn authoritative) {
         mergeRealVoxels(target, real == null ? null : new VoxyRenderAccess.Voxels(real, 0), lod, sx, sy, sz, authoritative);
@@ -704,28 +727,30 @@ public final class VoxyPredictionBridge {
         mergeRealVoxels(target, real, lod, sx, sy, sz, authoritative, 15L << 56);
     }
     static void mergeRealVoxels(long[] target, VoxyRenderAccess.Voxels real, int lod, int sx, int sy, int sz, RealColumn authoritative, long emptyAir) {
-        int step = 1 << lod, bx = sx * (32 << lod), bz = sz * (32 << lod);
+        int step = 1 << lod, bx = sx * (32 << lod), by = sy * (32 << lod), bz = sz * (32 << lod);
         int populated = real != null && real.data() != null && lod == 0 ? realCells(real.data()) : 0;
         if (real != null && real.data() == null && !air(real.uniform())) populated = 255;
         int group = Math.max(1, 16 / step);
         for (int gz=0; gz<32; gz+=group) for (int gx=0; gx<32; gx+=group) {
-            boolean exact = authoritative.contains(Math.floorDiv(bx + gx * step,16), Math.floorDiv(bz + gz * step,16));
-            // Unknown/empty native sections do not require a 32768-voxel merge.
-            if (!exact && (real == null || real.data() == null && air(real.uniform()))) continue;
-            // Consecutive X voxels share a cache line. Confirmed columns copy complete rows,
-            // including authoritative air, rather than walking Y at a 1024-voxel stride.
-            if (exact) {
-                for (int y=0;y<32;y++) for (int z=gz;z<gz+group;z++) {
-                    int start=y<<10|z<<5|gx;
-                    if (real!=null && real.data()!=null) System.arraycopy(real.data(),start,target,start,group);
-                    else Arrays.fill(target,start,start+group,real==null ? emptyAir : real.uniform());
+            int cx=Math.floorDiv(bx+gx*step,16),cz=Math.floorDiv(bz+gz*step,16);
+            int known=lod<=4?authoritative.coverageMask(cx,Math.floorDiv(by,16),cz,32/group,lod):0;
+            if(lod<=4 && known==0 && (real==null || real.data()==null && air(real.uniform())))continue;
+            for (int gy=0; gy<32; gy+=group) {
+                boolean exact=lod<=4?(known&1<<(gy/group))!=0:authoritative.covers(cx,Math.floorDiv(by+gy*step,16),cz,Math.max(1,step/16),lod);
+                if (!exact && (real == null || real.data() == null && air(real.uniform()))) continue;
+                if (exact) {
+                    for (int y=gy;y<gy+group;y++) for (int z=gz;z<gz+group;z++) {
+                        int start=y<<10|z<<5|gx;
+                        if (real!=null && real.data()!=null) System.arraycopy(real.data(),start,target,start,group);
+                        else Arrays.fill(target,start,start+group,real==null ? emptyAir : real.uniform());
+                    }
+                    continue;
                 }
-                continue;
-            }
-            for (int y=0; y<32; y++) for (int z=gz; z<gz+group; z++) for (int x=gx; x<gx+group; x++) {
-                int i=y<<10|z<<5|x, octant=(x>>4)|(z>>4)<<1|(y>>4)<<2;
-                long value=real == null ? emptyAir : real.get(i);
-                if (lod == 0 && (populated & 1<<octant) != 0 || !air(value)) target[i]=value;
+                for (int y=gy; y<gy+group; y++) for (int z=gz; z<gz+group; z++) for (int x=gx; x<gx+group; x++) {
+                    int i=y<<10|z<<5|x, octant=(x>>4)|(z>>4)<<1|(y>>4)<<2;
+                    long value=real == null ? emptyAir : real.get(i);
+                    if (lod == 0 && (populated & 1<<octant) != 0 || !air(value)) target[i]=value;
+                }
             }
         }
     }
@@ -795,6 +820,20 @@ public final class VoxyPredictionBridge {
             changed(ctx,chunkX*16-16,Integer.MIN_VALUE,chunkZ*16-16,
                     chunkX*16+32,Integer.MAX_VALUE,chunkZ*16+32,pos->true,true);
         }
+    }
+    /** Native community transports must never settle a same-coordinate column in another engine. */
+    public static void realColumnSettled(Object engine, int chunkX, int chunkZ) {
+        VoxyCompat.settlePredictionColumn(engine, chunkX, chunkZ);
+        for (Context ctx : contexts()) if (ctx.engine == engine && ctx.source != null && !ctx.closed && ctx.supported
+                && VoxyCompat.confirmedPredictionColumn(engine, chunkX, chunkZ)) {
+            changed(ctx,chunkX*16-16,Integer.MIN_VALUE,chunkZ*16-16,
+                    chunkX*16+32,Integer.MAX_VALUE,chunkZ*16+32,pos->true,true);
+        }
+    }
+    /** Revoke composition evidence after the native update, including unchanged/all-air writes. */
+    static void realSectionCommitted(Object engine,int x,int y,int z) {
+        for(Context ctx:contexts())if(ctx.engine==engine && ctx.source!=null && !ctx.closed && ctx.supported)
+            changed(ctx,x*16-16,y*16-16,z*16-16,x*16+32,y*16+32,z*16+32,pos->true,true);
     }
     public static void detach(Source source) {
         // This path restores native data in a world that remains visible. World unload
@@ -873,6 +912,7 @@ public final class VoxyPredictionBridge {
         final LinkedHashMap<Long, CachedSection> cachedSections = new LinkedHashMap<>(64, .75f, true);
         Context(Object engine, Object nodes, net.minecraft.client.multiplayer.ClientLevel level) throws ReflectiveOperationException {
             this.engine = engine; this.nodes = nodes; this.level = level; this.dimension = level.dimension();
+            VoxyRealCoverage.of(engine).verticalRange(level.getMinSection(),level.getSectionsCount());
             skyLight = level.dimensionType().hasSkyLight() ? 15 : 0;
             Class<?> section = Class.forName("me.cortex.voxy.common.world.WorldSection");
             voxels = new VoxyRenderAccess.Sections(section); children = section.getMethod("getNonEmptyChildren");
@@ -1022,7 +1062,7 @@ public final class VoxyPredictionBridge {
                         var raw=real==null?null:voxels.read(real);
                         realFaces[direction]=VoxySectionSignature.face(raw,face);
                         if(owner.copyFace(neighbor,this,face,border[direction]))
-                            mergeRealFace(border[direction],raw,face,lod,nx,nz,VoxyCompat.confirmedPredictionColumns(engine),(long)skyLight<<56);
+                            mergeRealFace(border[direction],raw,face,lod,nx,ny,nz,VoxyCompat.confirmedPredictionColumns(engine),(long)skyLight<<56);
                         else for(int i=0;i<1024;i++)border[direction][i]=raw==null?0:raw.get(VoxyFaceData.index(face,i));
                     } finally {if(real!=null)release.invoke(real);}
                 }

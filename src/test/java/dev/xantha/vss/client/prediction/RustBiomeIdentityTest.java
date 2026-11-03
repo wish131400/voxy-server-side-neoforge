@@ -96,7 +96,7 @@ class RustBiomeIdentityTest {
         }
     }
 
-    @Test void exactPreviewDisplayAndDecorationRecordsCarryTheirIdentityImmediately() throws Exception {
+    @Test void publishedRecordsCarryIdentityAndRawDecorationResolvesBeforePersistence() throws Exception {
         var doc=fixedDocument();
         doc.getAsJsonObject("biome_source").addProperty("biome","minecraft:plains");
         var settings=doc.getAsJsonObject("settings");
@@ -116,10 +116,26 @@ class RustBiomeIdentityTest {
             for (var sample:sampler.sampleGrid(32,32,4,4)) assertEquals(1,sample.biomeIndex());
             for (var sample:sampler.sampleGrid(64,64,4,4,4,new ClientColumnSample[16],true)) assertEquals(1,sample.biomeIndex());
             var display=sampler.sampleDisplayGrid(-16,-16,1,8,8,new ClientColumnSample[64]);
-            assertEquals(point,display[0]);
+            assertTrue(display[0].approximate());
+            try (var cold=new RustTerrainSampler(RustWorldgenBackend.create(1,13,doc.toString()),PROFILE,new Context(false))) {
+                assertArrayEquals(cold.sampleDisplayGrid(-16,-16,1,8,8,new ClientColumnSample[64]),display,
+                        "exact warmup must not change display records or their biome identity");
+            }
+            assertEquals(point,sampler.sample(-16,-16),"display must not replace the exact point");
             for (var sample:display) assertEquals(1,sample.biomeIndex());
             assertTrue(sampler.diagnostics().contains("\"adaptiveGrids\":1"));
-            for (var row:sampler.decorationDisplayPage(0,0)) assertEquals(1,sampler.surfaceSample(row).biomeIndex());
+            var raw=sampler.decorationDisplayPage(0,0);
+            var decoration=new ClientColumnSample[16];
+            for (int i=0;i<raw.length;i++) {
+                // Internal ten-field records omit display metadata. Convert the
+                // x-major native page to the row-major publication grid.
+                var sample=sampler.surfaceSample(raw[i]);
+                assertEquals(-1,sample.biomeIndex());
+                decoration[(i%4)*4+i/4]=sample;
+            }
+            assertEquals(16,sampler.resolveBiomeIndices(decoration,4,0,0,1));
+            for (var sample:decoration) assertEquals(1,sample.biomeIndex());
+            assertEquals(0,sampler.resolveBiomeIndices(decoration,4,0,0,1));
             assertEquals(0,context.queries);
         }
     }

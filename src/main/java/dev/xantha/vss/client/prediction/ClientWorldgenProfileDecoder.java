@@ -3,6 +3,7 @@ package dev.xantha.vss.client.prediction;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedRuntime;
 import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile;
@@ -324,25 +325,49 @@ final class ClientWorldgenProfileDecoder {
         NoiseGeneratorSettings settings = NoiseGeneratorSettings.DIRECT_CODEC
                 .parse(registries.ops(), generatorRoot.get("settings"))
                 .getOrThrow();
-        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
-                biomeSource, Holder.direct(settings));
         boolean freeTerraForged = generatorRoot.has("vss_freeterraforged")
                 && generatorRoot.get("vss_freeterraforged").getAsBoolean();
-        RandomState randomState = FreeTerraForgedCompat.create(freeTerraForged,
-                profile.levelKey().equals(Level.OVERWORLD), registries.access(),
-                () -> RandomState.create(settings, registries.noiseLookup(), profile.seed()));
-        LevelHeightAccessor profileHeights = LevelHeightAccessor.create(profile.minY(), profile.height());
-        NoiseSettings noiseSettings = settings.noiseSettings().clampToHeightAccessor(profileHeights);
-        LevelHeightAccessor heights = LevelHeightAccessor.create(
-                noiseSettings.minY(), noiseSettings.height());
-        ClientTerrainSampler sampler = freeTerraForged ? new FreeTerraForgedTerrainSampler(
-                profile, generator, randomState, heights, registries, clientRegistries) : new ClientTerrainSampler(
-                profile.seed(), profile, generator, randomState, heights, settings.seaLevel(),
-                registries, clientRegistries);
-        sampler.bindDimensionType(generatorRoot);
-        // Epic Terrain uses height-dependent cache_2d nodes. Its surface needs
-        // NoiseChunk's evaluation order, including when no native library loads.
-        return registries.hasDensityNamespace("etn") ? new MinecraftColumnTerrainSampler(sampler) : sampler;
+        boolean epochBased = generatorRoot.has(FreeTerraForgedRuntime.FIELD);
+        NoiseBasedChunkGenerator generator;
+        try {
+            generator = epochBased ? FreeTerraForgedRuntime.generator(
+                    ClientWorldgenProfileDecoder.class.getClassLoader(), biomeSource, Holder.direct(settings))
+                    : new NoiseBasedChunkGenerator(biomeSource, Holder.direct(settings));
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("FreeTerraForged runtime generator unavailable", failure);
+        }
+        AutoCloseable owner = epochBased ? (AutoCloseable) generator : null;
+        try {
+            RandomState randomState = FreeTerraForgedCompat.create(freeTerraForged && !epochBased,
+                    profile.levelKey().equals(Level.OVERWORLD), registries.access(),
+                    () -> RandomState.create(settings, registries.noiseLookup(), profile.seed()));
+            if (epochBased) {
+                var type = net.minecraft.world.level.dimension.DimensionType.DIRECT_CODEC
+                        .parse(registries.ops(), generatorRoot.get("vss_dimension_type")).getOrThrow();
+                Object epoch = FreeTerraForgedRuntime.epoch(generator,
+                        generatorRoot.getAsJsonObject(FreeTerraForgedRuntime.FIELD),
+                        profile.dimension(), profile.seed(), registries.access(), type);
+                FreeTerraForgedRuntime.initialize(generator, epoch, randomState);
+            }
+            LevelHeightAccessor profileHeights = LevelHeightAccessor.create(profile.minY(), profile.height());
+            NoiseSettings noiseSettings = settings.noiseSettings().clampToHeightAccessor(profileHeights);
+            LevelHeightAccessor heights = LevelHeightAccessor.create(
+                    noiseSettings.minY(), noiseSettings.height());
+            ClientTerrainSampler sampler = freeTerraForged || epochBased ? new FreeTerraForgedTerrainSampler(
+                    profile, generator, randomState, heights, registries, clientRegistries, owner) : new ClientTerrainSampler(
+                    profile.seed(), profile, generator, randomState, heights, settings.seaLevel(),
+                    registries, clientRegistries);
+            sampler.bindDimensionType(generatorRoot);
+            // Epic Terrain uses height-dependent cache_2d nodes. Its surface needs
+            // NoiseChunk's evaluation order, including when no native library loads.
+            return registries.hasDensityNamespace("etn") ? new MinecraftColumnTerrainSampler(sampler) : sampler;
+        } catch (ReflectiveOperationException | RuntimeException | Error failure) {
+            if (owner != null) try { owner.close(); }
+            catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure instanceof Error error) throw error;
+            throw new IllegalStateException("Prediction generator initialization failed", failure);
+        }
     }
 
     private static JsonObject parse(byte[] bytes) {

@@ -34,7 +34,7 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
         }
     }
 
-    public byte[] apply(String name) throws Exception {
+    public void initialize() throws Exception {
         if (transformer == null) {
             var instance = MixinService.class.getDeclaredMethod("getInstance");
             instance.setAccessible(true);
@@ -53,7 +53,14 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
             constructor.setAccessible(true);
             transformer = (IMixinTransformer) constructor.newInstance();
         }
+    }
+
+    public byte[] apply(String name) throws Exception {
+        initialize();
         byte[] bytes = classes.get(name.replace('.', '/') + ".class");
+        if (bytes == null) try (InputStream input = getResourceAsStream(name.replace('.', '/') + ".class")) {
+            if (input != null) bytes = input.readAllBytes();
+        }
         if (bytes == null) throw new ClassNotFoundException(name);
         return transformer.transformClass(MixinEnvironment.getCurrentEnvironment(), name, bytes);
     }

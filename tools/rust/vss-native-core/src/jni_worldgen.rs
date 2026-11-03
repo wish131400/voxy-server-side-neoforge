@@ -1120,3 +1120,69 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
         Ok(description)
     }))
 }
+
+// Read-only copies of already computed Raw climate inputs; a miss never starts generation.
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_horizontalLookup(
+    mut e: JNIEnv, _c: JClass, id: jlong, input: JByteBuffer, out: JByteBuffer, count: jint,
+) -> jint {
+    let result = guarded(|| {
+        if !(0..=16).contains(&count) { return Err("horizontal batch count".into()); }
+        let w = world(id)?; w.check_active()?;
+        let p = buffer(&mut e, &input, count as usize * 8, false)?;
+        buffer(&mut e, &out, count as usize * 56, true)?;
+        let bytes = unsafe { std::slice::from_raw_parts(p, count as usize * 8) };
+        let points: Vec<_> = bytes.chunks_exact(8).map(|r| (i32::from_le_bytes(r[0..4].try_into().unwrap()),
+            i32::from_le_bytes(r[4..8].try_into().unwrap()))).collect();
+        put(&mut e, &out, &w.terrain.graph.horizontal_lookup(&points))?;
+        Ok(count)
+    });
+    match result { Ok(n) => n, Err(err) => { fail(&mut e,err); -1 } }
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_horizontalDescriptor(
+    mut e: JNIEnv, _c: JClass, id: jlong,
+) -> jstring {
+    let result = guarded(|| { let w = world(id)?; w.check_active()?; Ok(w.terrain.graph.horizontal_descriptor()) });
+    output(&mut e,result)
+}
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_horizontalStats(
+    mut e: JNIEnv, _c: JClass, id: jlong,
+) -> jstring {
+    let result = guarded(|| Ok(world(id)?.terrain.graph.horizontal_stats())); output(&mut e,result)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_possibleBiomes(
+    mut e: JNIEnv, _c: JClass, id: jlong, min_x: jint, min_z: jint,
+    max_x: jint, max_z: jint, out: JByteBuffer,
+) -> jint {
+    let result = guarded(|| {
+        let w = world(id)?;
+        let Some(indices) = w.possible_biomes(min_x,min_z,max_x,max_z)? else { return Ok(-1); };
+        let mut bytes=Vec::with_capacity(indices.len()*4);
+        for &index in &indices { bytes.extend(index.to_le_bytes()); }
+        put(&mut e,&out,&bytes)?;
+        Ok(indices.len() as jint)
+    });
+    match result { Ok(n) => n, Err(err) => { fail(&mut e,err); -1 } }
+}
+
+
+/// Production placement keeps the same transaction/random stream and skips JSON serialization.
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_placedFeatureStatus(
+    mut e: JNIEnv, _c: JClass, id: jlong, name: JString,
+    chunk_x: jint, chunk_z: jint, index: jint, step: jint,
+) -> jint {
+    let result = guarded(|| {
+        let name = text(&mut e, name, 32768)?;
+        let v = volume(id)?;
+        let mut v = v.lock().map_err(|_| "volume lock")?;
+        let owner = v.owner.clone();
+        let (placed, _) = owner.placed(&mut v.volume, &name, chunk_x, chunk_z, index, step)?;
+        Ok(i32::from(placed))
+    });
+    match result { Ok(status) => status, Err(err) => { fail(&mut e, err); -1 } }
+}

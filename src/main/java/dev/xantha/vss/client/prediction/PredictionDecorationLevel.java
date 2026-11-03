@@ -211,8 +211,10 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         if (nativeColumns == null) nativeColumns = new int[COLUMN_CACHE_SIZE][];
         int[] record = nativeColumns[slot];
         if (record == null) {
-            record = rust.surfaceRecord(x, z);
-            nativeColumns[slot] = record;
+            int ox = Math.floorDiv(x,4)*4, oz = Math.floorDiv(z,4)*4;
+            int[][] rows = rust.exactSurfacePage(ox,oz,4);
+            for (int i=0;i<16;i++) nativeColumns[columnSlot(ox+i/4,oz+i%4)] = rows[i];
+            record = nativeColumns[slot];
         }
         return record;
     }
@@ -253,8 +255,15 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         int slot = blockQuerySlot(x, y, z);
         if (blockQueryXs[slot] == x && blockQueryYs[slot] == y && blockQueryZs[slot] == z)
             blockQueryEpochs[slot] = 0L;
-        if (columnQueryVersions != null && ++columnQueryVersions[columnSlot(x, z)] == 0)
+        // Track writes even before the first height query, including restored
+        // cache entries and rollback. Rendering policy flags are not proof that
+        // a column has no overlay.
+        if (columnQueryVersions == null) columnQueryVersions = new int[COLUMN_CACHE_SIZE];
+        int columnSlot = columnSlot(x, z);
+        if (++columnQueryVersions[columnSlot] == 0) {
+            columnQueryVersions[columnSlot] = 1;
             java.util.Arrays.fill(heightQueryEpochs, 0L);
+        }
     }
 
     /** Structures/custom feature cuts retain their original extraction floor.
@@ -414,14 +423,18 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         checkQueryActive();
         checkColumnBounds(x, z);
         int columnSlot = columnSlot(x, z);
-        if (columnQueryVersions == null) columnQueryVersions = new int[COLUMN_CACHE_SIZE];
-        int columnVersion = columnQueryVersions[columnSlot];
+        int columnVersion = columnQueryVersions == null ? 0 : columnQueryVersions[columnSlot];
         int typeId = type.ordinal();
         int querySlot = heightQuerySlot(x, z, typeId);
         if (heightQueryEpochs[querySlot] == blockQueryEpoch
                 && heightQueryXs[querySlot] == x && heightQueryZs[querySlot] == z
                 && heightQueryTypes[querySlot] == typeId
                 && heightQueryColumnVersions[querySlot] == columnVersion) return heightQueryValues[querySlot];
+        if (columnVersion == 0 && terrain instanceof RustTerrainSampler rust && !interiorTerrain()) {
+            int result = rust.proxyHeight(nativeColumn(rust, x, z), type);
+            cacheHeightQuery(querySlot, x, z, typeId, result, columnVersion);
+            return result;
+        }
         ClientColumnSample sample = columnActive(x, z);
         int top = Math.max(Math.max(sample.surfaceY(), sample.fluidY()),
                 changedTops == null ? getMinBuildHeight() : changedTops[columnSlot]);
@@ -470,6 +483,16 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
         biomeBlockXs[slot] = x; biomeBlockYs[slot] = y; biomeBlockZs[slot] = z;
         biomeBlockValues[slot] = value;
         return value;
+    }
+
+    /** Rejection hints only reuse observed block biomes; never sample speculative coordinates. */
+    boolean cachedBiomeRejects(net.minecraft.world.level.levelgen.placement.PlacedFeature feature,
+                               BlockPos pos) {
+        checkQueryActive();
+        int x=pos.getX(),y=pos.getY(),z=pos.getZ(),slot=blockQuerySlot(x,y,z);
+        Holder<Biome> biome=biomeBlockValues[slot];
+        return biome!=null && biomeBlockXs[slot]==x && biomeBlockYs[slot]==y && biomeBlockZs[slot]==z
+                && !context.generatorContext().getBiomeGenerationSettings(biome).hasFeature(feature);
     }
 
     @Override public Holder<Biome> getNoiseBiome(int x, int y, int z) {

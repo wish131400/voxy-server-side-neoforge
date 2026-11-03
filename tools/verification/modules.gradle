@@ -27,7 +27,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/ColumnStorageReadPipelineTest.class', '**/ExistingColumnPreloaderTest.class'
     include '**/PlayerSession*Test.class', '**/ChunkyQueueLimitIntegrationTest.class'
     include '**/CancelableTaskCallbacksTest.class', '**/StrictLodVisibilityHandoffTest.class'
-    include '**/VSSClientNetworkingTest.class'
+    include '**/VSSClientNetworkingTest.class', '**/OptionalClientNetworkingTest.class'
     include '**/ClientLodSessionAdapterTest.class', '**/ClientConnectionIdentityTest.class'
     include '**/StrictVoxyNodeIndexTest.class'
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'

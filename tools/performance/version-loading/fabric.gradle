@@ -1,0 +1,32 @@
+allprojects { afterEvaluate {
+    def root=file(providers.gradleProperty('vssBenchRoot').get())
+    if (providers.gradleProperty('mcTarget').get()=='26.3') {
+        // Dedicated-server classpaths omit client LWJGL; supply the same GPU
+        // bindings explicitly for this headless compute experiment.
+        ['lwjgl','lwjgl-vulkan','lwjgl-shaderc'].each { name ->
+            dependencies.add('runtimeOnly',"org.lwjgl:${name}:3.4.3")
+            if(name!='lwjgl-vulkan')dependencies.add('runtimeOnly',"org.lwjgl:${name}:3.4.3:natives-windows")
+        }
+    }
+    layout.buildDirectory.set(new File(root,'gradle'))
+    tasks.matching{it.name=='assembleMainSources'}.configureEach { enabled=false }
+    sourceSets.main.java.setSrcDirs([new File(root,'main-java')])
+    sourceSets.main.resources.setSrcDirs([new File(root,'main-resources')])
+    def classes=new File(root,'gradle/classes/java/main')
+    tasks.named('compileJava',JavaCompile) { destinationDirectory.set(classes) }
+    sourceSets.main.output.classesDirs.setFrom(classes)
+    tasks.named('processResources',ProcessResources) {
+        destinationDir=new File(root,'gradle/resources/main')
+    }
+    sourceSets.main.output.resourcesDir=new File(root,'gradle/resources/main')
+    tasks.named('runServer',JavaExec) {
+        if(providers.gradleProperty('mcTarget').get()=='26.3') {
+            // Loom's server game classpath is selected separately from main.
+            classpath+=configurations.runtimeClasspath
+        }
+        systemProperty 'vss.bench.output',root.absolutePath
+        ['rounds':'5','warmups':'2','side':'16','step':'4','gpu':'false'].each{k,v->systemProperty "vss.bench.${k}",providers.gradleProperty('vssBench'+k.capitalize()).getOrElse(v)}
+        jvmArgs '-Xms2G','-Xmx4G'
+    }
+    ['jar','remapJar','sourcesJar'].each{name->tasks.matching{it.name==name}.configureEach{enabled=false}}
+} }

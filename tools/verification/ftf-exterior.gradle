@@ -1,0 +1,51 @@
+// -I tools/verification/ftf-exterior.gradle ftfExteriorTest
+// For the released graph fixture also provide vssFreeTerraForgedJar (named for Fabric).
+// vssC2meDfcJar optionally checks the real C2ME fallback wrapper; it is not a full Mixin launch.
+initscript { repositories { mavenCentral() }; dependencies { classpath 'org.ow2.asm:asm:9.8' } }
+import org.objectweb.asm.*
+import java.util.zip.*
+allprojects { afterEvaluate {
+ tasks.register('ftfExteriorTest', Test) {
+  dependsOn tasks.named('testClasses'); testClassesDirs=sourceSets.test.output.classesDirs
+  classpath=sourceSets.test.runtimeClasspath; useJUnitPlatform()
+  include '**/FreeTerraForgedExteriorTest.class', '**/PredictionJavaExteriorTest.class'
+  maxParallelForks=1; maxHeapSize='3G'
+  testLogging { events 'failed', 'skipped'; exceptionFormat='full'; showStandardStreams=true }
+ }
+ tasks.register('ftfExteriorReleasedTest', Test) {
+  dependsOn tasks.named('testClasses'); testClassesDirs=sourceSets.test.output.classesDirs
+  classpath=sourceSets.test.runtimeClasspath; useJUnitPlatform()
+  include '**/FreeTerraForgedCompatTest.class'
+  systemProperty 'vss.ftfExteriorReleased', 'true'
+  doFirst { systemProperty 'vss.freeTerraForgedJar', project.file(providers.gradleProperty('vssFreeTerraForgedJar').get()).absolutePath }
+  if(providers.gradleProperty('vssC2meDfcJar').isPresent()) systemProperty 'vss.c2meDfcJar', project.file(providers.gradleProperty('vssC2meDfcJar').get()).absolutePath
+  doFirst {
+   // Apply only access rules required by the release's density bootstrap, on a test copy.
+   def targets=['net/minecraft/world/level/levelgen/NoiseRouterData',
+    'net/minecraft/world/level/levelgen/NoiseBasedChunkGenerator',
+    'net/minecraft/world/level/levelgen/OreVeinifier$VeinType',
+    'net/minecraft/world/level/levelgen/DensityFunctions$WeirdScaledSampler$RarityValueMapper'] as Set
+   def source=classpath.files.find { it.isFile() && it.name.endsWith('.jar') && new ZipFile(it).withCloseable { z -> z.getEntry('net/minecraft/world/level/levelgen/NoiseRouterData.class')!=null } }
+   if(source==null)throw new GradleException('Named game JAR missing')
+   def output=layout.buildDirectory.file('ftf-exterior-test/game.jar').get().asFile;output.parentFile.mkdirs()
+   new ZipFile(source).withCloseable { zip -> new ZipOutputStream(new FileOutputStream(output)).withCloseable { out ->
+    zip.entries().each { e ->
+     out.putNextEntry(new ZipEntry(e.name));byte[] data=zip.getInputStream(e).bytes
+     if(e.name.endsWith('.class') && targets.contains(e.name.substring(0,e.name.length()-6))) {
+      def writer=new ClassWriter(0)
+      def publicFlags={ int flags -> (flags & ~6) | 1 }
+      new ClassReader(data).accept(new ClassVisitor(Opcodes.ASM9,writer) {
+       void visit(int v,int a,String n,String sig,String sup,String[] interfaces) { super.visit(v,publicFlags(a) & (n.endsWith('/NoiseBasedChunkGenerator') ? ~Opcodes.ACC_FINAL : -1),n,sig,sup,interfaces) }
+       FieldVisitor visitField(int a,String n,String d,String sig,Object value) { super.visitField(e.name.endsWith('/NoiseBasedChunkGenerator.class') ? a : publicFlags(a),n,d,sig,value) }
+       MethodVisitor visitMethod(int a,String n,String d,String sig,String[] exceptions) { super.visitMethod(e.name.endsWith('/NoiseBasedChunkGenerator.class') ? a : publicFlags(a),n,d,sig,exceptions) }
+      },0);data=writer.toByteArray()
+     }
+     out.write(data);out.closeEntry()
+    }
+   } }
+   classpath=files(classpath.files.collect { it==source ? output : it })
+  }
+  maxParallelForks=1; maxHeapSize='3G'
+  testLogging { events 'failed', 'skipped'; exceptionFormat='full'; showStandardStreams=true }
+ }
+} }

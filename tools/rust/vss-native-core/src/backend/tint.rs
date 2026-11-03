@@ -28,6 +28,25 @@ pub(super) struct WorkPool {
     bytes: usize,
 }
 impl World {
+    // Shared bounded pool for Raw-only routing. Density traversal owns its own Job.
+    pub(super) fn take_raw_work(&self) -> Result<Scratch> {
+        let cached = {
+            let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
+            let work = pool.idle.pop();
+            if let Some(s) = &work { pool.bytes -= s.retained_bytes(); }
+            work
+        };
+        match cached { Some(s) => Ok(s), None => self.terrain.graph.raw_scratch() }
+    }
+    pub(super) fn return_raw_work(&self, scratch: Scratch) -> Result<()> {
+        let bytes = scratch.retained_bytes();
+        let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
+        if pool.idle.len() < 8 && bytes <= WORK_BYTES.saturating_sub(pool.bytes) {
+            pool.bytes += bytes;
+            pool.idle.push(scratch);
+        }
+        Ok(())
+    }
     pub fn biome_names(&self) -> &[String] { &self.biome_names }
 
     /// Raw noise quart coordinates, exactly as BiomeSource.getNoiseBiome.
@@ -45,27 +64,13 @@ impl World {
         let biome = if let BiomeSource::Fixed(name) = &self.source {
             self.biome_indices.get(name).copied().ok_or_else(|| format!("missing biome {name}"))?
         } else {
-            let cached = {
-                let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
-                let work = pool.idle.pop();
-                if let Some(s) = &work { pool.bytes -= s.retained_bytes(); }
-                work
-            };
-            let mut scratch = match cached {
-                Some(s) => s,
-                None => self.terrain.graph.raw_scratch()?,
-            };
+            let mut scratch = self.take_raw_work()?;
             // Raw memo entries carry coordinates and mode; retain them across
             // requests. Do not retain ParameterTree's last-leaf tie preference:
             // the old single-point query started that preference afresh too.
             let name = self.source.sample(&self.terrain.graph, q, &mut scratch, &mut None);
             let result = self.biome_indices.get(name).copied().ok_or_else(|| format!("missing biome {name}"));
-            let bytes = scratch.retained_bytes();
-            let mut pool = self.color_work.lock().map_err(|_| "color work lock")?;
-            if pool.idle.len() < 8 && bytes <= WORK_BYTES.saturating_sub(pool.bytes) {
-                pool.bytes += bytes;
-                pool.idle.push(scratch);
-            }
+            self.return_raw_work(scratch)?;
             result?
         };
         shard.lock().map_err(|_| "biome color cache lock")?.insert(q, biome);

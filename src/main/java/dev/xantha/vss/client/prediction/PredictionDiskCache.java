@@ -27,6 +27,14 @@ final class PredictionDiskCache implements AutoCloseable {
         thread.setPriority(Thread.NORM_PRIORITY - 1);
         return thread;
     });
+    // Header reads must not queue behind encoding, commits or invalidations.
+    // Each cache submits only one bounded batch at a time to this shared lane.
+    private static final ExecutorService PROBES = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "vss-prediction-cache-probe");
+        thread.setDaemon(true);
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
+        return thread;
+    });
     private static final ScheduledExecutorService COMPACTIONS = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "vss-prediction-compaction");
         thread.setDaemon(true);
@@ -47,7 +55,7 @@ final class PredictionDiskCache implements AutoCloseable {
         long revision;
         boolean deleting;
     }
-    private static final class Entry { volatile boolean valid = true; int users; }
+    private static final class Entry { volatile boolean valid = true; int users; long hintRevision; }
     record Key(int kind, int x, int z, int detail) {
         @Override public int hashCode() { return PredictionKeyHash.hash(x,z,detail) ^ it.unimi.dsi.fastutil.HashCommon.mix(kind); }
         static Key terrain(int x, int z, int lod) { return new Key(0, x, z, lod); }
@@ -131,6 +139,7 @@ final class PredictionDiskCache implements AutoCloseable {
     private final ArrayDeque<Key> probeQueue = new ArrayDeque<>();
     private final Map<Key, Long> pendingProbes = new HashMap<>();
     private boolean probing;
+    private CompletableFuture<Void> probesFinished = CompletableFuture.completedFuture(null);
 
     /** Header-only batch lookup; hints never replace the validated read or its lease. */
     void probeTerrain(Collection<Key> candidates) {
@@ -142,6 +151,7 @@ final class PredictionDiskCache implements AutoCloseable {
                         && pendingProbes.putIfAbsent(key, System.nanoTime()) == null) probeQueue.add(key);
                 if (++count >= 32768) break;
             }
+            if (!probeQueue.isEmpty() && probesFinished.isDone()) probesFinished = new CompletableFuture<>();
             probeNextBatch();
         }
     }
@@ -149,7 +159,11 @@ final class PredictionDiskCache implements AutoCloseable {
     private void probeNextBatch() {
         List<Lease> batch = new ArrayList<>();
         synchronized (shared) {
-            if (closed || shared.owner != this || probing) return;
+            if (closed || shared.owner != this) {
+                probeQueue.clear(); pendingProbes.clear(); probesFinished.complete(null);
+                return;
+            }
+            if (probing) return;
             while (!probeQueue.isEmpty()) {
                 Key key = probeQueue.removeFirst();
                 if (key.kind != 0 || terrainHints.containsKey(key) || shared.invalidations.containsKey(key)) {
@@ -158,12 +172,14 @@ final class PredictionDiskCache implements AutoCloseable {
                 batch.add(lease(key));
                 if (batch.size() == 128) break;
             }
-            if (batch.isEmpty()) return;
+            if (batch.isEmpty()) { probesFinished.complete(null); return; }
             probing = true;
         }
-        COMMITS.execute(() -> {
+        PROBES.execute(() -> {
             try {
                 for (Lease lease : batch) try (lease) {
+                    long hintRevision;
+                    synchronized (shared) { hintRevision = lease.entry.hintRevision; }
                     int axis = 0;
                     if (lease.valid() && lease.readable) {
                         axis = voxelHeaderAxis(lease.key);
@@ -182,15 +198,17 @@ final class PredictionDiskCache implements AutoCloseable {
                         } catch (IOException | RuntimeException ignored) { }
                     }
                     synchronized (shared) {
-                        if (lease.valid() && lease.readable) rememberTerrain(lease.key, axis);
+                        // A commit may have replaced the header while this reader was in flight.
+                        if (lease.valid() && lease.readable && lease.entry.hintRevision == hintRevision
+                                && !terrainHints.containsKey(lease.key)) rememberTerrain(lease.key, axis);
                         pendingProbes.remove(lease.key);
                     }
                 }
             } finally {
                 synchronized (shared) {
-                    for (Lease lease : batch) pendingProbes.remove(lease.key);
+                    for (Lease lease : batch) { lease.close(); pendingProbes.remove(lease.key); }
                     probing = false;
-                    // Yield between batches to writes/invalidations, without waiting for a planner tick.
+                    // Yield between caches, without waiting for a planner tick.
                     probeNextBatch();
                 }
             }
@@ -855,7 +873,10 @@ final class PredictionDiskCache implements AutoCloseable {
         }
         writes.increment();
         synchronized (shared) {
-            terrainHints.remove(token.key.kind == 4 ? Key.terrain(token.key.x,token.key.z,token.key.detail) : token.key);
+            Key hint = token.key.kind == 4 ? Key.terrain(token.key.x,token.key.z,token.key.detail) : token.key;
+            terrainHints.remove(hint);
+            Entry probingEntry = shared.active.get(hint);
+            if (probingEntry != null) probingEntry.hintRevision++;
         }
         scheduleMaintenance();
         return token.valid();
@@ -877,6 +898,12 @@ final class PredictionDiskCache implements AutoCloseable {
             for (Key key : keys) if (key.kind == 0) expanded.add(Key.voxels(key.x,key.z,key.detail));
             for (Key key : expanded) {
                 terrainHints.remove(key);
+                if (key.kind == 4) {
+                    Key terrain = Key.terrain(key.x,key.z,key.detail);
+                    terrainHints.remove(terrain);
+                    Entry probingEntry = shared.active.get(terrain);
+                    if (probingEntry != null) probingEntry.hintRevision++;
+                }
                 terrainWriteColumns.remove(key);
                 voxelWriteIdentities.remove(key);
                 voxelWrites.remove(key);
@@ -1089,6 +1116,9 @@ final class PredictionDiskCache implements AutoCloseable {
         try {
             COMMITS.submit(() -> { }).get();
             for (var result : pending) result.get();
+            CompletableFuture<Void> probes;
+            synchronized (shared) { probes = probesFinished; }
+            probes.get();
         }
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         catch (ExecutionException failure) { error(failure); }
@@ -1130,6 +1160,7 @@ final class PredictionDiskCache implements AutoCloseable {
         synchronized (encodedStates) { encodedStates.clear(); }
         synchronized (shared) {
             terrainHints.clear(); pendingProbes.clear(); probeQueue.clear();
+            if (!probing) probesFinished.complete(null);
             terrainWriteColumns.clear();
             voxelWriteIdentities.clear();
             voxelWrites.clear();
@@ -1138,11 +1169,12 @@ final class PredictionDiskCache implements AutoCloseable {
                 shared.active.values().forEach(entry -> entry.valid = false);
                 shared.active.clear();
                 shared.owner = null;
-                COMMITS.execute(() -> {
+                probesFinished.thenRun(() -> COMMITS.execute(() -> {
+                    // All accepted header reads have ended before handles can close.
                     // Storage methods synchronize with builders and a newly opened session.
                     synchronized (shared) { if (shared.owner != null) return; }
                     try { shared.regions.close(); } catch (IOException failure) { error(failure); }
-                });
+                }));
             }
         }
         finished.complete(null);

@@ -27,11 +27,6 @@ final class PredictionPlacementExecutor {
     private static final ClassValue<Boolean> PRISTINE = new ClassValue<>() {
         @Override protected Boolean computeValue(Class<?> type) { return unmodified(type); }
     };
-    private static final ClassValue<Operation> OPERATIONS = new ClassValue<>() {
-        @Override protected Operation computeValue(Class<?> type) {
-            return PRISTINE.get(type) ? operation(type) : OPAQUE;
-        }
-    };
     private static final Operation OPAQUE = (modifier, run, next, position) -> {
         // flatMap closes each child stream after fully consuming it, even on failure.
         try (var positions = modifier.getPositions(run.context, run.random, position)) {
@@ -50,9 +45,7 @@ final class PredictionPlacementExecutor {
             plan = PLANS.get(feature);
             if (plan == null) {
                 var modifiers = List.copyOf(feature.placement());
-                var operations = new Operation[modifiers.size()];
-                for (int i = 0; i < operations.length; i++) operations[i] = OPERATIONS.get(modifiers.get(i).getClass());
-                plan = new Plan(modifiers, operations);
+                plan = compile(modifiers, PRISTINE::get);
                 PLANS.put(feature, plan);
             }
         }
@@ -74,6 +67,13 @@ final class PredictionPlacementExecutor {
         for (int i = 0; i < operations.length; i++) {
             Class<?> type = copy.get(i).getClass();
             operations[i] = pristine.test(type) ? operation(type) : OPAQUE;
+            var rejection=PredictionPlacementPruning.compile(copy,i,pristine);
+            if(rejection!=null) {
+                Operation original=operations[i];
+                operations[i]=(modifier,run,next,pos)-> {
+                    if(!rejection.rejects(run.context,pos))original.apply(modifier,run,next,pos);
+                };
+            }
         }
         return new Plan(copy, operations);
     }

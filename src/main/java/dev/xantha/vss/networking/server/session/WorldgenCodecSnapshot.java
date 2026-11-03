@@ -10,6 +10,7 @@ import dev.xantha.vss.common.processing.LodByteCompression;
 import dev.xantha.vss.common.worldgen.DensityFunctionSnapshot;
 import dev.xantha.vss.common.worldgen.DensityFunctionReferences;
 import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
+import dev.xantha.vss.common.worldgen.FreeTerraForgedRuntime;
 import dev.xantha.vss.common.worldgen.WorldgenRegistryDependencies;
 import dev.xantha.vss.common.worldgen.GeneratorTerrainCapabilities;
 import dev.xantha.vss.common.worldgen.TerrainPredictionPlan;
@@ -158,7 +159,8 @@ final class WorldgenCodecSnapshot {
     private static Encoded encodeNoiseGenerator(ChunkGenerator generator, NoiseBasedChunkGenerator noise,
             RegistryAccess access, DensityFunctionReferences references, WorldgenRegistryDependencies dependencies,
             String terrablenderRegionType, java.util.Optional<dev.xantha.vss.api.worldgen.TerrainSnapshot> extension) {
-        boolean inheritedNoise = GeneratorTerrainCapabilities.inheritsImplementation(
+        boolean freeTerraRuntime = FreeTerraForgedRuntime.supports(generator);
+        boolean inheritedNoise = freeTerraRuntime || GeneratorTerrainCapabilities.inheritsImplementation(
                 generator.getClass(), NoiseBasedChunkGenerator.class);
         RegistryOps<JsonElement> ops = dependencies.ops();
         JsonObject root = new JsonObject();
@@ -172,7 +174,14 @@ final class WorldgenCodecSnapshot {
             root.addProperty("vss_unsupported_reason", "Custom noise generator requires a registered backend: "
                     + generator.getClass().getName());
         }
-        root.add("biome_source", encodeBiomeSource(noise.getBiomeSource(), access, ops));
+        BiomeSource snapshotSource = freeTerraRuntime
+                ? FreeTerraForgedRuntime.acquisitionSource(generator) : noise.getBiomeSource();
+        root.add("biome_source", encodeBiomeSource(snapshotSource, access, ops));
+        if (freeTerraRuntime) {
+            root.add(FreeTerraForgedRuntime.FIELD, FreeTerraForgedRuntime.snapshot(generator));
+            dependencies.require(ResourceLocation.parse("freeterraforged:worldgen/biome_modifier"));
+            dependencies.require(ResourceLocation.parse("freeterraforged:worldgen/structure_rule"));
+        }
         // TerraBlender's positional region tree/surface-rule context is not
         // serialized by the vanilla codecs. A plain reconstructed generator
         // would draw the wrong biomes even with matching client mod jars.
@@ -181,6 +190,10 @@ final class WorldgenCodecSnapshot {
                 mods != null && mods.isLoaded("tectonic"));
         if (!noiseSeeds.isEmpty()) root.add("noise_seed_aliases", noiseSeeds);
         snapshotFreeTerraForged(root, access, dependencies, id -> mods != null && mods.isLoaded(id));
+        if (root.has("vss_freeterraforged") && mods != null) {
+            for (var variant : FreeTerraForgedVariant.values()) mods.getModContainerById(variant.namespace)
+                    .ifPresent(mod -> root.addProperty("vss_freeterraforged_release", mod.getModInfo().getVersion().toString()));
+        }
         if (mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
                 && noise.getBiomeSource() instanceof MultiNoiseBiomeSource) {
             // TerraBlender's positional region grid and per-region climate

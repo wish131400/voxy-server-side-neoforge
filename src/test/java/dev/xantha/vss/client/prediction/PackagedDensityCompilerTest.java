@@ -43,7 +43,9 @@ class PackagedDensityCompilerTest {
                         || name.startsWith("dev.xantha.vss.common.worldgen.FreeTerraForgedVariant")
                         || name.equals("dev.xantha.vss.client.prediction.PredictionRawDensity")
                         || name.startsWith("dev.xantha.vss.client.prediction.PredictionRawDensity$")
-                        || name.equals("dev.xantha.vss.client.prediction.PredictionClimateSampler")
+                        || name.startsWith("dev.xantha.vss.client.prediction.FabricBiomeCompat")
+                        || name.startsWith("dev.xantha.vss.client.prediction.PredictionClimate")
+                        || name.startsWith("dev.xantha.vss.client.prediction.PredictionHorizontalClimate")
                         || minecraft != null && name.startsWith("net.minecraft.");
                 if (!isolated) return super.loadClass(name, resolve);
                 synchronized (getClassLoadingLock(name)) {

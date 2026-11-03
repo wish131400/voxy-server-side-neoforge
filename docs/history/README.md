@@ -8,9 +8,13 @@
 | --- | ---: |
 | [加载、调度与缓存](loading/README.md) | 20 |
 | [渲染、交接与画面](rendering/README.md) | 95 |
-| [性能采样与优化实验](performance/README.md) | 48 |
+| [性能采样与优化实验](performance/README.md) | 49 |
 | [世界生成与模组适配](worldgen/README.md) | 14 |
 | [架构、接口与工程验证](engineering/README.md) | 9 |
 | [旧版发布与更新记录](releases/README.md) | 5 |
 
 少量报告由现有脚本生成或被证据清单引用，因此保留原路径，并在分类页登记。JSON、CSV 等证据文件保持原位；工具旁的实验说明见 [预测实验索引](../development/prediction-experiments.md)。
+
+- [真实区块接管预测体素修复（2026-11-02）](rendering/real-authority-repair-20261102.md)
+
+- [存储接管辅助类启动崩溃修复（2026-11-02）](rendering/storage-helper-loading-20261102.md)

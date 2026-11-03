@@ -49,6 +49,20 @@ impl BlendedNoise {
         })
     }
     pub fn sample(&self, x: i32, y: i32, z: i32) -> f64 {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if std::arch::is_x86_feature_detected!("sse4.1") {
+            // SAFETY: the octave loop is entered only on a supported CPU.
+            return unsafe { self.sample_sse41(x, y, z) };
+        }
+        self.sample_inner(x, y, z)
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn sample_sse41(&self, x: i32, y: i32, z: i32) -> f64 {
+        self.sample_inner(x, y, z)
+    }
+    #[inline(always)]
+    fn sample_inner(&self, x: i32, y: i32, z: i32) -> f64 {
         let x = x as f64 * self.xz_multiplier;
         let y = y as f64 * self.y_multiplier;
         let z = z as f64 * self.xz_multiplier;
@@ -108,5 +122,37 @@ impl BlendedNoise {
     }
     pub fn min_value(&self) -> f64 {
         -self.max_value()
+    }
+}
+
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
+mod cpu_dispatch_tests {
+    use super::*;
+    #[test]
+    fn blended_dispatch_matches_generic_bits() {
+        if !std::arch::is_x86_feature_detected!("sse4.1") {
+            return;
+        }
+        for seed in [0, -917, i64::MIN, i64::MAX] {
+            let mut random = Random::new(seed, 0);
+            let noise = BlendedNoise::new(
+                &mut random,
+                BlendedParameters {
+                    xz_scale: 0.25,
+                    y_scale: 0.125,
+                    xz_factor: 80.,
+                    y_factor: 160.,
+                    smear_scale_multiplier: 8.,
+                },
+            )
+            .unwrap();
+            for _ in 0..2048 {
+                let [x, y, z] =
+                    std::array::from_fn(|_| ((random.next_double() - 0.5) * 60000000.) as i32);
+                let expected = noise.sample_inner(x, y, z).to_bits();
+                assert_eq!(unsafe { noise.sample_sse41(x, y, z) }.to_bits(), expected);
+                assert_eq!(noise.sample(x, y, z).to_bits(), expected);
+            }
+        }
     }
 }

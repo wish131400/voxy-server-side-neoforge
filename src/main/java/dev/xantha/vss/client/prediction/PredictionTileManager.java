@@ -465,7 +465,7 @@ public final class PredictionTileManager implements AutoCloseable {
     private final java.util.ArrayDeque<PredictionTileKey> cacheCandidates = new java.util.ArrayDeque<>();
     private int nearCacheAdmissions;
     /** Keep several independent disk decodes in flight without opening an unbounded IO lane. */
-    private static final int CACHE_RESTORE_IN_FLIGHT = 4;
+    private static final int CACHE_RESTORE_IN_FLIGHT = 8;
     private final Set<PredictionTileKey> scopePending = tileStates.flag(6);
     private final java.util.ArrayDeque<BuildRequest> scopeCandidates = new java.util.ArrayDeque<>();
     /**
@@ -629,9 +629,10 @@ public final class PredictionTileManager implements AutoCloseable {
             thread.setPriority(Thread.NORM_PRIORITY - 1);
             return thread;
         });
-        // Cache hits never enter world generation. Two independent workers keep
-        // recovery moving even while generation is throttled by CPU pressure.
-        this.cacheExecutor = new ThreadPoolExecutor(2, 2, 15L, TimeUnit.SECONDS,
+        // Cache recovery has its own bounded lane. Small CPUs retain two workers;
+        // machines with at least eight logical processors can decode four tiles.
+        int cacheWorkers = Runtime.getRuntime().availableProcessors() >= 8 ? 4 : 2;
+        this.cacheExecutor = new ThreadPoolExecutor(cacheWorkers, cacheWorkers, 15L, TimeUnit.SECONDS,
                 new java.util.concurrent.ArrayBlockingQueue<>(CACHE_RESTORE_IN_FLIGHT), runnable -> {
             Thread thread = new Thread(runnable, "vss-cache-restore-" + dimension.location().getPath());
             thread.setDaemon(true);
@@ -2610,6 +2611,8 @@ public final class PredictionTileManager implements AutoCloseable {
         result.put("voxySource", voxySource.diagnostics());
         result.put("generationActive",executor.getActiveCount()); result.put("cacheActive",cacheExecutor.getActiveCount());
         result.put("generationQueued",executor.getQueue().size()); result.put("cachePending",cachePending.size());
+        result.put("cacheWorkerLimit",cacheExecutor.getCorePoolSize());
+        result.put("cacheQueued",cacheExecutor.getQueue().size()); result.put("cacheInFlightLimit",CACHE_RESTORE_IN_FLIGHT);
         result.put("sampleNanos",samplingNanos.sum()); result.put("surfaceNanos",decorationNanos.sum());
         result.put("meshNanos",meshingNanos.sum());
         result.put("diskNanos",diskReadNanos.sum()); result.put("nativeNanos",nativeSampleNanos.sum());

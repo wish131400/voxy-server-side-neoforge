@@ -1,0 +1,27 @@
+allprojects {
+    afterEvaluate {
+        tasks.register('climateSpeedTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionClimateSpeedTest.class'
+            systemProperty 'vss.climateBenchOutput', providers.gradleProperty('vssClimateBenchOutput').getOrElse(new File(project.layout.buildDirectory.get().asFile, 'climate-kernel.json').absolutePath)
+            maxHeapSize = '3G'
+            maxParallelForks = 1
+            testLogging { events 'failed'; exceptionFormat 'full' }
+        }
+        tasks.register('climateSharingTest', Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/PredictionClimateSamplerTest.class', '**/PredictionClimateCacheTest.class'
+            include '**/FloatDensityCompilerTest.class', '**/RustClimateSharingTest.class'
+            maxHeapSize = '3G'
+            maxParallelForks = 1
+            forkEvery = 1
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
+}

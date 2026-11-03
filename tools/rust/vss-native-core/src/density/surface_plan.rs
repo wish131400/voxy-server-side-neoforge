@@ -1,98 +1,78 @@
-//! Compile the sign-only part of final_density once per graph. Leaves keep
-//! the existing interval evaluator and interpolation cache; no noise changes.
+//! Compile sign queries to a compact shared DAG. Leaves preserve the exact
+//! interval evaluator; no floating point expression is reassociated.
 use super::{Binary, Graph, Id, Marker, Node, Scratch, Unary};
-pub(super) enum SurfacePlan {
-    Leaf(Id),
-    Min(Box<Self>, Box<Self>),
-    Scale(f64, Box<Self>),
-    Squeeze(Box<Self>),
+const MAX_PLAN_EXPANSIONS: usize = 128;
+#[derive(Clone, Copy)]
+enum Op {
+    Leaf(Id), Min(usize,usize), Max(usize,usize), Scale(f64,usize), Squeeze(usize),
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Sign {
-    Positive,
-    NonPositive,
-    Unknown,
-}
+pub(super) struct SurfacePlan { ops: Vec<Op>, root: usize }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Sign { Positive, NonPositive, Unknown }
 impl SurfacePlan {
     pub fn compile(g: &Graph) -> Option<Self> {
-        if g.requires_complete_column_order() {
-            return None;
-        }
-        fn node(g: &Graph, id: Id, depth: usize) -> SurfacePlan {
-            if depth > 64 {
-                return SurfacePlan::Leaf(id);
-            }
-            match &g.nodes[id] {
-                Node::Binary(Binary::Min, a, b) => SurfacePlan::Min(
-                    Box::new(node(g, *a, depth + 1)),
-                    Box::new(node(g, *b, depth + 1)),
-                ),
-                Node::Binary(Binary::Mul, a, b) if matches!(g.nodes[*a],Node::Constant(v) if v>0. && v.is_finite()) =>
-                {
-                    let Node::Constant(k) = g.nodes[*a] else {
-                        unreachable!()
-                    };
-                    SurfacePlan::Scale(k, Box::new(node(g, *b, depth + 1)))
+        if g.requires_complete_column_order() { return None; }
+        fn node(g:&Graph,id:Id,depth:usize,p:&mut SurfacePlan,slots:&mut std::collections::HashMap<Id,usize>,budget:&mut usize)->usize {
+            if let Some(&slot) = slots.get(&id) { return slot; }
+            let op = if depth>64 || *budget==0 { Op::Leaf(id) } else {
+                *budget-=1;
+                match &g.nodes[id] {
+                    Node::Binary(Binary::Min,a,b) => Op::Min(node(g,*a,depth+1,p,slots,budget),node(g,*b,depth+1,p,slots,budget)),
+                    // Java max propagates NaN. A positive branch may only
+                    // short-circuit when neither child can be non-finite.
+                    Node::Binary(Binary::Max,a,b) if [*a,*b].iter().all(|&n| {
+                        let (lo,hi)=g.column_plan.bounds[n]; lo.is_finite() && hi.is_finite()
+                    }) => Op::Max(node(g,*a,depth+1,p,slots,budget),node(g,*b,depth+1,p,slots,budget)),
+                    Node::Binary(Binary::Mul,a,b) => {
+                        let pair = match ( &g.nodes[*a], &g.nodes[*b] ) {
+                            (Node::Constant(k),_) if *k>0. && k.is_finite() => Some((*k,*b)),
+                            (_,Node::Constant(k)) if *k>0. && k.is_finite() => Some((*k,*a)),
+                            _=>None,
+                        };
+                        pair.map_or(Op::Leaf(id),|(k,n)|Op::Scale(k,node(g,n,depth+1,p,slots,budget)))
+                    }
+                    Node::Unary(Unary::Squeeze,n) => Op::Squeeze(node(g,*n,depth+1,p,slots,budget)),
+                    Node::Marker(Marker::Once|Marker::Cell,n) => return node(g,*n,depth+1,p,slots,budget),
+                    _=>Op::Leaf(id),
                 }
-                Node::Unary(Unary::Squeeze, n) => {
-                    SurfacePlan::Squeeze(Box::new(node(g, *n, depth + 1)))
-                }
-                Node::Marker(Marker::Once | Marker::Cell, n) => node(g, *n, depth + 1),
-                _ => SurfacePlan::Leaf(id),
-            }
+            };
+            let slot=p.ops.len(); p.ops.push(op); slots.insert(id,slot); slot
         }
-        Some(node(g, *g.roots.get("final_density")?, 0))
+        let mut plan=Self {ops:Vec::new(),root:0};
+        let mut budget=MAX_PLAN_EXPANSIONS;
+        plan.root=node(g,*g.roots.get("final_density")?,0,&mut plan,&mut std::collections::HashMap::new(),&mut budget);
+        Some(plan)
     }
-    pub fn classify(
-        &self,
-        g: &Graph,
-        p: [i32; 3],
-        top: i32,
-        s: &mut Scratch,
-        epsilon: f64,
-        whole_cell: bool,
-    ) -> Sign {
-        if !epsilon.is_finite() {
-            return Sign::Unknown;
-        }
-        match self {
-            Self::Leaf(id) => {
-                let (low, high) = if whole_cell {
-                    g.cell_range(*id, p, top, s)
-                } else {
-                    g.column_range(*id, p, top, s)
-                };
-                if high <= 0. {
-                    Sign::NonPositive
-                } else if low > epsilon && low.is_finite() && high.is_finite() {
-                    Sign::Positive
-                } else {
-                    Sign::Unknown
-                }
+    #[cfg(test)]
+    pub(super) fn node_count(&self)->usize {self.ops.len()}
+    pub fn classify(&self,g:&Graph,p:[i32;3],top:i32,s:&mut Scratch,epsilon:f64,whole_cell:bool)->Sign {
+        self.classify_at(self.root,g,p,top,s,epsilon,whole_cell)
+    }
+    fn classify_at(&self,slot:usize,g:&Graph,p:[i32;3],top:i32,s:&mut Scratch,epsilon:f64,whole_cell:bool)->Sign {
+        if !epsilon.is_finite() { return Sign::Unknown; }
+        match self.ops[slot] {
+            Op::Leaf(id) => {
+                let (low,high)=if whole_cell {g.cell_range(id,p,top,s)} else {g.column_range(id,p,top,s)};
+                if high<=0. {Sign::NonPositive}
+                else if low>epsilon && low.is_finite() && high.is_finite() {Sign::Positive}
+                else {Sign::Unknown}
             }
-            Self::Min(a, b) => {
-                let x = a.classify(g, p, top, s, epsilon, whole_cell);
-                if x == Sign::NonPositive {
-                    return x;
-                }
-                let y = b.classify(g, p, top, s, epsilon, whole_cell);
-                if y == Sign::NonPositive {
-                    return y;
-                }
-                if x == Sign::Positive && y == Sign::Positive {
-                    Sign::Positive
-                } else {
-                    Sign::Unknown
-                }
+            Op::Min(a,b) => {
+                let x=self.classify_at(a,g,p,top,s,epsilon,whole_cell);
+                if x==Sign::NonPositive || a==b {return x;}
+                let y=self.classify_at(b,g,p,top,s,epsilon,whole_cell);
+                if y==Sign::NonPositive {y} else if x==Sign::Positive && y==Sign::Positive {Sign::Positive} else {Sign::Unknown}
             }
-            Self::Scale(k, n) => n.classify(g, p, top, s, (epsilon + 1e-12) / k, whole_cell),
-            // squeeze(clamp(x)) preserves sign; its positive slope is >=3/8
-            // on [0,1]. Margin protects rounding and subsequent tiny scales.
-            Self::Squeeze(n) => {
-                if epsilon >= 0.4 {
-                    return Sign::Unknown;
-                }
-                n.classify(g, p, top, s, (epsilon + 1e-12) * 3., whole_cell)
+            Op::Max(a,b) => {
+                let x=self.classify_at(a,g,p,top,s,epsilon,whole_cell);
+                if x==Sign::Positive || a==b {return x;}
+                let y=self.classify_at(b,g,p,top,s,epsilon,whole_cell);
+                if y==Sign::Positive {y} else if x==Sign::NonPositive && y==Sign::NonPositive {Sign::NonPositive} else {Sign::Unknown}
+            }
+            Op::Scale(k,n) => self.classify_at(n,g,p,top,s,(epsilon+1e-12)/k,whole_cell),
+            Op::Squeeze(n) => {
+                if epsilon>=0.4 {return Sign::Unknown;}
+                self.classify_at(n,g,p,top,s,(epsilon+1e-12)*3.,whole_cell)
             }
         }
     }
@@ -111,6 +91,33 @@ mod probe {
         )
         .unwrap()
     }
+    #[test]
+    fn max_plan_preserves_thin_layers_and_unknown_nonfinite_children() {
+        use serde_json::json;
+        let original: serde_json::Value=serde_json::from_str(include_str!("../../tests/fixtures/worldgen/overworld.json")).unwrap();
+        let gradient=json!({"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,"from_value":1.,"to_value":-1.});
+        for second in [json!(-0.1),json!({"type":"minecraft:mul","argument1":1e308,"argument2":1e308}),
+            json!({"type":"minecraft:range_choice","input":gradient.clone(),"min_inclusive":0.01,
+                "max_exclusive":0.02,"when_in_range":1.,"when_out_of_range":-1.})] {
+            let mut doc=original.clone();
+            doc["settings"]["noise_router"]["final_density"]=json!({"type":"minecraft:max",
+                "argument1":{"type":"minecraft:mul","argument1":gradient.clone(),"argument2":0.01},"argument2":second});
+            let g=Graph::from_document(0,&doc).unwrap();
+            let root=g.root("final_density").unwrap();
+            let mut fast=g.scratch(-16,-16,4,8).unwrap();
+            let mut oracle=g.scratch(-16,-16,4,8).unwrap();
+            for bottom in (-64..320).step_by(8) {
+                for whole in [false,true] {
+                    let sign=g.surface_plan.as_ref().unwrap().classify(&g,[-4,bottom,-4],bottom+7,&mut fast,1e-12,whole);
+                    for y in bottom..bottom+8 {
+                        let value=g.compute(root,[-4,y,-4],super::super::Mode::Cell,&mut oracle);
+                        match sign {Sign::Positive=>assert!(value>0.),Sign::NonPositive=>assert!(!(value>0.)),Sign::Unknown=>{}}
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn lattice_ranges_use_two_corners_and_enclose_full_interpolation() {
         let mut d = document();

@@ -1,0 +1,36 @@
+// Opt-in experiment. Production source and release output directories are never used for writes.
+allprojects {
+    afterEvaluate {
+        def experiment = project.file(providers.gradleProperty('vssExperimentRoot').get())
+        layout.buildDirectory.set(new File(experiment, 'gradle'))
+        sourceSets.main.java.setSrcDirs([new File(experiment, 'main-java')])
+        sourceSets.main.resources.setSrcDirs([new File(experiment, 'main-resources')])
+        sourceSets.main.resources.include('vss-experiment/**')
+        // ModDev resolves the main class destination during project configuration.
+        // Moving buildDirectory alone does not relocate that already-bound path.
+        def experimentClasses = new File(experiment, 'gradle/classes/java/main')
+        tasks.named('compileJava', JavaCompile) { destinationDirectory.set(experimentClasses) }
+        sourceSets.main.output.classesDirs.setFrom(experimentClasses)
+        sourceSets.create('decorationExperiment') {
+            java.srcDirs new File(experiment, 'harness-java')
+            compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+        }
+        neoForge.mods.named('vss') { sourceSet sourceSets.decorationExperiment }
+        neoForge.runs.named('server') {
+            gameDirectory = new File(experiment, 'server')
+            systemProperty 'vss.comparison.output', experiment.absolutePath
+            systemProperty 'vss.comparison.phase', 'prediction'
+            systemProperty 'vss.comparison.resources', project.file('build/moddev/artifacts/neoforge-21.1.234-client-extra-aka-minecraft-resources.jar').absolutePath
+            systemProperty 'vss.experiment.reuseTrace', providers.gradleProperty('vssExperimentReuseTrace').getOrElse('false')
+            ['rounds': '2', 'warmups': '1', 'side': '8', 'modes': 'baseline,biome,page2,page4,scan,combined', 'verifyBiomes': 'false'].each { key, fallback ->
+                systemProperty "vss.experiment.${key}", providers.gradleProperty("vssExperiment${key.capitalize()}").getOrElse(fallback)
+            }
+            jvmArgument '-Xms2G'
+            jvmArgument '-Xmx4G'
+            logLevel = org.slf4j.event.Level.INFO
+        }
+        tasks.named('runServer') { dependsOn tasks.named('decorationExperimentClasses') }
+        tasks.named('jar') { enabled = false }
+    }
+}
