@@ -67,7 +67,7 @@ final class RustVegetationStage implements AutoCloseable {
     }
 
     void selectStep(List<PlacedFeature> features, int step) {
-        boolean display = !sampler.interiorTerrain() && visualPlants && step == net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
+        boolean display = PredictionFarDecoration.approximating() || !sampler.interiorTerrain() && visualPlants && step == net.minecraft.world.level.levelgen.GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
         if (display != displayProxy) { finish(); close(); synced=false; displayProxy=display; }
         this.step = step;
         this.features = new RustVegetationDescriptors.Job(sampler.featureDescriptors(features, step));
@@ -82,7 +82,9 @@ final class RustVegetationStage implements AutoCloseable {
                 permit=true;
                 long proxyStarted = System.nanoTime();
                 volume=RustWorldgenBackend.decorationProxy(sampler.handle(),x,z,sampler.interiorTerrain() ? 2 : displayProxy ? 1 : 0);
-                RustWorldgenBackend.decorationEntropy(volume,java.util.concurrent.ThreadLocalRandom.current().nextLong());
+                RustWorldgenBackend.decorationEntropy(volume,PredictionFarDecoration.approximating()
+                        ? sampler.profile().seed() ^ (long)x * 341873128712L ^ (long)z * 132897987541L ^ step
+                        : java.util.concurrent.ThreadLocalRandom.current().nextLong());
                 PROXY_NANOS.add(System.nanoTime() - proxyStarted);
                 PROXIES.increment();
                 // A new proxy starts from column summaries only; whatever Java

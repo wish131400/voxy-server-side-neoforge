@@ -1034,6 +1034,13 @@ final class PredictionDiskCache implements AutoCloseable {
             int x = (int) (source >> 32), z = (int) source;
             // Bit 2 separates reusable visual trees from exact feature replay.
             for (int settings = 0; settings < 32; settings++) {
+                // Include today's identity directly; historical variants remain below.
+                int current = settings | PredictionVegetation.runtimeSettings();
+                int currentEnd = current | PredictionVegetation.END_CLIMATE_SETTINGS_VERSION;
+                keys.add(Key.surface(x, z, current));
+                keys.add(Key.surface(x, z, current | 96));
+                keys.add(Key.surface(x, z, currentEnd));
+                keys.add(Key.surface(x, z, currentEnd | 96));
                 keys.add(Key.surface(x, z, settings));
                 keys.add(Key.surface(x, z, settings | 96));
                 // Corrected predicate semantics have a separate surface identity.

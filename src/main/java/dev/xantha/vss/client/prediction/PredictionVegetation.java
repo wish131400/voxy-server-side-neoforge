@@ -424,13 +424,17 @@ final class PredictionVegetation {
             for (int step = 0; step < Math.max(featureSteps.size(), DECORATION_STEPS.length); step++) {
                 requireCurrent(current);
                 level.useDisplayTerrain(false);
-                structures.place(level, chunkX, chunkZ, seed, step);
+                var far=PredictionFarDecoration.current();
+                if(far!=null)far.structures=true;
+                try { level.useDisplayTerrain(false); structures.place(level,chunkX,chunkZ,seed,step); }
+                finally { if(far!=null)far.structures=false; }
                 List<PlacedFeature> features = step < featureSteps.size() ? featureSteps.get(step) : List.of();
                 if (step >= enabled.length || enabled[step].length == 0) continue;
                 if (nativeStage != null) nativeStage.selectStep(features, step);
                 for (int index : enabled[step]) {
                     requireCurrent(current);
                     PlacedFeature feature = features.get(index);
+                    if(PredictionFarDecoration.replace(feature))continue;
                     if (missingRegistryFailures.contains(feature) || unsupportedFeatures.contains(feature)) continue;
                     if (pruning.excludes(feature,level,origin)) continue;
                     boolean reusableTree = treeModels != null && treeModels.supports(feature);

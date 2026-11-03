@@ -19,7 +19,11 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     record Box(int minX, int minY, int minZ, int maxX, int maxY, int maxZ, BlockState state) { }
     record Tile(PredictionTileKey key, int baseX, int baseZ, int span, int axis, int step,
                 Column[] columns, List<Box> features, long terrainBytes, boolean surfaceComplete, int cityFeatures,
-                PredictionVoxyFeatures featureIndex) {
+                PredictionVoxyFeatures featureIndex,boolean approximateDecorations) {
+        Tile(PredictionTileKey key,int baseX,int baseZ,int span,int axis,int step,Column[] columns,
+             List<Box> features,long terrainBytes,boolean surfaceComplete,int cityFeatures,PredictionVoxyFeatures featureIndex) {
+            this(key,baseX,baseZ,span,axis,step,columns,features,terrainBytes,surfaceComplete,cityFeatures,featureIndex,false);
+        }
         Tile {
             features=PredictionVoxyBoxes.of(features);
             if(featureIndex==null)featureIndex=PredictionVoxyFeatures.of(features);
@@ -44,14 +48,14 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             if (!previous.surfaceComplete && hasVegetation()) {
                 var retained=boxes().retainVegetation(cityFeatures,previous.boxes(),previous.cityFeatures);
                 if (retained==features) return this;
-                return new Tile(key,baseX,baseZ,span,axis,step,columns,retained,terrainBytes,false,cityFeatures);
+                return new Tile(key,baseX,baseZ,span,axis,step,columns,retained,terrainBytes,false,cityFeatures,null,approximateDecorations || previous.approximateDecorations);
             }
             var builder = new PredictionVoxyBoxes.Builder();
             builder.addRange(features,0,cityFeatures);
             builder.addRange(previous.features,previous.cityFeatures,previous.features.size());
             var retained=builder.build();
             return new Tile(key, baseX, baseZ, span, axis, step, columns, retained,
-                    terrainBytes, previous.surfaceComplete, cityFeatures);
+                    terrainBytes, previous.surfaceComplete, cityFeatures,null,previous.approximateDecorations);
         }
 
         boolean hasVegetation() { return features.size() > cityFeatures; }
@@ -61,12 +65,13 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             if (previous == null || !key.equals(previous.key) || baseX != previous.baseX || baseZ != previous.baseZ
                     || span != previous.span || axis != previous.axis || step != previous.step) return this;
             boolean ground = Arrays.equals(columns, previous.columns);
-            boolean plants = surfaceComplete == previous.surfaceComplete && cityFeatures == previous.cityFeatures
+            boolean plants = approximateDecorations == previous.approximateDecorations
+                    && surfaceComplete == previous.surfaceComplete && cityFeatures == previous.cityFeatures
                     && features.equals(previous.features);
             if (ground && plants) return previous;
             return new Tile(key,baseX,baseZ,span,axis,step,ground ? previous.columns : columns,
                     plants ? previous.features : features,ground ? previous.terrainBytes : terrainBytes,
-                    surfaceComplete,cityFeatures,plants ? previous.featureIndex : featureIndex);
+                    surfaceComplete,cityFeatures,plants ? previous.featureIndex : featureIndex,approximateDecorations);
         }
 
         Tile withVegetation(PredictionVegetation.Tile plants, dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) {
@@ -745,7 +750,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         boolean sameShape=observed!=null && observed.baseX()==tile.baseX() && observed.baseZ()==tile.baseZ()
                 && observed.span()==tile.span() && observed.axis()==tile.axis() && observed.step()==tile.step();
         boolean sameColumns=sameShape && Arrays.equals(observed.columns(),tile.columns());
-        boolean sameFeatures=sameShape && observed.surfaceComplete()==tile.surfaceComplete()
+        boolean sameFeatures=sameShape && observed.approximateDecorations()==tile.approximateDecorations()
+                && observed.surfaceComplete()==tile.surfaceComplete()
                 && observed.cityFeatures()==tile.cityFeatures() && observed.features().equals(tile.features());
         boolean sameContent=sameColumns && sameFeatures;
         Footprint affected=!sameColumns && sameFeatures ? changedTerrain(observed,tile) : Footprint.of(tile);
@@ -768,9 +774,9 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         }
         // Preserve reduced-column identities when only decoration/completion changed.
         if(sameColumns && observed.columns()!=tile.columns())tile=new Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),
-                tile.axis(),tile.step(),observed.columns(),tile.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),tile.featureIndex());
+                tile.axis(),tile.step(),observed.columns(),tile.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),tile.featureIndex(),tile.approximateDecorations());
         if(sameFeatures && observed.features()!=tile.features())tile=new Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),
-                tile.axis(),tile.step(),tile.columns(),observed.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),observed.featureIndex());
+                tile.axis(),tile.step(),tile.columns(),observed.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),observed.featureIndex(),tile.approximateDecorations());
         Extent prepared = sameContent ? before : extent(tile, observed, before);
         int[] height;ChangeInput input;boolean rangeReduced;
         synchronized(this) {

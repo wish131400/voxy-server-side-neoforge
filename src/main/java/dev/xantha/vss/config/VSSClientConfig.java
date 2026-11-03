@@ -34,6 +34,9 @@ public class VSSClientConfig extends JsonConfig {
     public volatile boolean enablePredictionLoading = true;
     /** Prediction horizon, in blocks. */
     public int predictionDistanceBlocks = 4_096;
+    /** Experimental biome-template decoration outside the exact radius. */
+    public boolean predictionFarDecorations = false;
+    public int predictionExactDistanceBlocks = 4_096;
     public int predictionBackgroundWorkers = 2;
     public int predictionRefinementWorkers = 0;
     /** Prediction detail profile: low, normal, high or extreme. */
@@ -77,6 +80,8 @@ public class VSSClientConfig extends JsonConfig {
         help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 4096；范围 "
                 + MIN_PREDICTION_DISTANCE_BLOCKS + "-" + MAX_PREDICTION_DISTANCE_BLOCKS
                 + "。它独立于 VSS 的 lodDistanceChunks。");
+        help.put("predictionFarDecorations", "实验性远区装饰模板与粗网格环境；默认 false。仅作用于真实计算半径外，允许改变装饰位置和形态，不扩大总预测距离。");
+        help.put("predictionExactDistanceBlocks", "保留现有装饰计算的半径，默认 4096 格；外加 256 格提前细化区。仅在开启远区装饰实验时生效。");
         help.put("predictionDetail", "预测地形采样细节等级 low/normal/high/extreme，影响视角细化需求；最终构网、LOD 和绘制使用 Voxy。");
         help.put("predictionBackgroundWorkers", "后台任务分类上限；默认 2，范围 1-4，与预测任务共用总 CPU 预算。可见区域按屏幕细节需求优先，纯视野外已有覆盖的区域停止新升级；画面边缘保留缓冲，最低粗覆盖、必要交接和已加载远景继续保留。");
         help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修分类上限，包含视野内地形和植被；默认 0 表示跟随性能档位（low 最多 3 / medium 最多 6 / high 为一半逻辑线程），也可指定 1-32。实际并发仍受共享 CPU 预算限制；缺失覆盖、望远镜目标和脏列修复优先处理。");
@@ -105,6 +110,7 @@ public class VSSClientConfig extends JsonConfig {
         desiredBandwidthKbps = clamp(desiredBandwidthKbps, 0, MAX_DESIRED_BANDWIDTH_KBPS);
         predictionDistanceBlocks = clamp(predictionDistanceBlocks,
                 MIN_PREDICTION_DISTANCE_BLOCKS, MAX_PREDICTION_DISTANCE_BLOCKS);
+        predictionExactDistanceBlocks = clamp(predictionExactDistanceBlocks, 256, MAX_PREDICTION_DISTANCE_BLOCKS);
         predictionPausedFps = clamp(predictionPausedFps, 0, 260);
         predictionBackgroundWorkers = clamp(predictionBackgroundWorkers, 1, 4);
         if (performanceTier == null) performanceTier = "medium";

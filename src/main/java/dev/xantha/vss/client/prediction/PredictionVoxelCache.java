@@ -81,6 +81,7 @@ final class PredictionVoxelCache {
     static void write(DataOutputStream out, Data data, int settings, byte[] identity, byte[] catalog,
                       PredictionDiskCache disk) throws IOException {
         var tile = data.voxels();
+        if(tile.approximateDecorations())throw new IOException("Approximate decorations are session-local");
         out.writeInt(tile.axis()); // The region index can probe this without decompressing the record.
         out.writeInt(settings); out.write(identity);
         out.writeBoolean(catalog != null); if (catalog != null) out.write(catalog);
