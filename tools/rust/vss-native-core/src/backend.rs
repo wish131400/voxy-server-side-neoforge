@@ -327,7 +327,7 @@ impl World {
             };
         }
         let display_biomes=biomes.keys().filter(|name|
-            !matches!(name.as_str(),"minecraft:eroded_badlands"|"minecraft:frozen_ocean"|"minecraft:deep_frozen_ocean")
+            !Surface::eroded_biome(name) && !matches!(name.as_str(),"minecraft:frozen_ocean"|"minecraft:deep_frozen_ocean")
                 && surface.display_safe_for_biome(&palette,Some(name))).cloned().collect();
         Ok(Self {
             decoration_min_y, decoration_height,
@@ -1010,12 +1010,7 @@ impl World {
             let mut q = zoom_quart(self.zoom_seed, [x, if t.graph.legacy { 0 } else { y }, z]);
             q[1] = q[1].clamp(t.min_y >> 2, (t.min_y + t.height - 1) >> 2);
             let name = self.source.sample(&t.graph, q, &mut scratch, &mut None);
-            if matches!(
-                name,
-                "minecraft:eroded_badlands"
-                    | "minecraft:frozen_ocean"
-                    | "minecraft:deep_frozen_ocean"
-            ) {
+            if Surface::geometry_biome(name) {
                 return None;
             }
             self.surface.exterior_padding(&t.graph, x, z)
@@ -1136,12 +1131,7 @@ impl World {
                     // all other neighbours are observed solely through height().
                     let needs_geometry = if (xx, zz) < (x, z) {
                         let (name, _) = biome([xx, if t.graph.legacy { 0 } else { y }, zz])?;
-                        matches!(
-                            name,
-                            "minecraft:eroded_badlands"
-                                | "minecraft:frozen_ocean"
-                                | "minecraft:deep_frozen_ocean"
-                        )
+                        Surface::geometry_biome(name)
                     } else {
                         false
                     };
@@ -1183,12 +1173,7 @@ impl World {
                                 first_non_air = false;
                                 let (name, _) =
                                     biome([x, if t.graph.legacy { 0 } else { y + 1 }, z])?;
-                                truncate_allowed = !matches!(
-                                    name,
-                                    "minecraft:eroded_badlands"
-                                        | "minecraft:frozen_ocean"
-                                        | "minecraft:deep_frozen_ocean"
-                                );
+                                truncate_allowed = !Surface::geometry_biome(name);
                             }
                             if !found && block.solid() {
                                 found = true;

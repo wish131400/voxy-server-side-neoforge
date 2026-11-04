@@ -3,12 +3,13 @@
 // -PvssFreeTerraForgedJar=<released NeoForge JAR>
 allprojects {
     afterEvaluate {
-        tasks.register('ftfClimateMixinTest', Test) {
+        ['ftfClimateMixinTest','ftfDimensionMixinTest','ftfFarPlacementTest','ftfOreMixinTest'].each { testTask ->
+        tasks.register(testTask, Test) {
             dependsOn tasks.named('testClasses')
             testClassesDirs = sourceSets.test.output.classesDirs
             classpath = sourceSets.test.runtimeClasspath
             useJUnitPlatform()
-            include '**/FreeTerraForgedClimateMixinTest.class'
+            include '**/' + [ftfClimateMixinTest:'FreeTerraForgedClimateMixinTest', ftfDimensionMixinTest:'FreeTerraForgedDimensionMixinTest', ftfFarPlacementTest:'FreeTerraForgedFarPlacementTest', ftfOreMixinTest:'FreeTerraForgedOreMixinTest'][testTask] + '.class'
             doFirst {
                 def released = project.file(providers.gradleProperty('vssFreeTerraForgedJar').get())
                 if (!released.isFile()) throw new GradleException('Released FTF JAR not found: ' + released)
@@ -20,6 +21,7 @@ allprojects {
             maxParallelForks = 1
             maxHeapSize = '2G'
             testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
         }
     }
 }

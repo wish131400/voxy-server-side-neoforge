@@ -121,6 +121,7 @@ pub struct Graph {
     surface_plan: Option<surface_plan::SurfacePlan>,
     stateful_columns: bool,
     exposed_column_order: bool,
+    initial_column_order: bool,
     wide_noise_cells: bool,
     interpolator_count: usize,
     noises: Vec<NormalNoise>,
@@ -367,6 +368,7 @@ impl Graph {
             surface_plan: None,
             stateful_columns: false,
             exposed_column_order: false,
+            initial_column_order: false,
             wide_noise_cells: doc["settings"]["noise"]["size_horizontal"].as_i64().is_some_and(|v|v>4),
             interpolator_count: 0,
             noises: vec![],
@@ -488,7 +490,8 @@ impl Graph {
             };
             dependencies.push(uses_y);
         }
-        self.exposed_column_order = cache_order::exposed(self, &dependencies);
+        self.exposed_column_order = cache_order::exposed(self, &dependencies, false);
+        self.initial_column_order = cache_order::exposed(self, &dependencies, true);
         self.shared_corner_safe = cache_order::safe_corners(self, &dependencies);
         self.arithmetic_plan = arithmetic_plan::Plan::compile(self);
         // Root additions may change routing or exposed cache dependencies.
@@ -502,7 +505,7 @@ impl Graph {
     }
 
     pub fn initialize_column_caches(&self, scratch: &mut Scratch) {
-        if !self.exposed_column_order {
+        if !self.exposed_column_order && !self.initial_column_order {
             return;
         }
         // NoiseChunk constructs each FlatCache after visiting its children.
@@ -529,6 +532,7 @@ impl Graph {
             surface_plan: None,
             stateful_columns: false,
             exposed_column_order: false,
+            initial_column_order: false,
             wide_noise_cells: false,
             interpolator_count: 0,
             noises: vec![],
@@ -637,7 +641,7 @@ impl Graph {
     /// Raw climate proofs may omit Y only when the compiled dependency graph
     /// proves independence. Stateful/modded column order is never inferred.
     pub(crate) fn raw_y_independent(&self, id: Id) -> bool {
-        !self.stateful_columns && !self.exposed_column_order
+        !self.exposed_column_order
             && self.column_plan.y_dependent.get(id) == Some(&false)
     }
     pub(crate) fn global_range(&self, id: Id) -> (f64,f64) {

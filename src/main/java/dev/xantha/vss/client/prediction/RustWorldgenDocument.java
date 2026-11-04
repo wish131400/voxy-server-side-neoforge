@@ -175,7 +175,7 @@ final class RustWorldgenDocument {
                 && !entry.getKey().equals("vss_generator_error") && !entry.getKey().equals("vss_lod_parameters")
                 && !entry.getKey().equals(dev.xantha.vss.common.worldgen.TerrainPredictionPlan.FIELD))
                 .forEach(entry -> result.add(entry.getKey(), entry.getValue()));
-        if (registries.has("custom_registries")) result.add("custom_registries", registries.get("custom_registries"));
+        RustSurfaceRegistries.copy(registries, result);
         for (String name : List.of("density_functions", "noises", "biomes", "configured_features", "placed_features")) {
             if (!registries.has(name)) throw new IllegalArgumentException("Missing native registry " + name);
             result.add(name, registries.get(name));

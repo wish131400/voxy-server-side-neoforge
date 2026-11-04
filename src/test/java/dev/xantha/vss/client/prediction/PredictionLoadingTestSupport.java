@@ -17,7 +17,7 @@ final class PredictionLoadingTestSupport {
         var residents=manager.renderSnapshot();
         var axes=new ArrayList<Integer>();for(int l=0;l<manager.layout().levelCount();l++)axes.add(PredictionWorkOrder.initialCellAxis(l));
         return new PredictionSchedulePreparation.Input(manager.layout(),null,view,0,80,0,20,-64,384,0,plan,
-                residents,Set.copyOf(keys),Set.of(),Set.of(),Set.of(),Set.of(),Set.of(),goals,goals,Map.of(),Map.of(),
+                residents,Set.copyOf(keys),Set.of(),Set.of(),Set.of(),java.util.Set.of(),Set.of(),Set.of(),goals,goals,Map.of(),Map.of(),
                 PredictionMediumCoverage.EMPTY,false,false,false,false,Map.copyOf(bands),Set.of(),Set.of(),
                 List.copyOf(axes),null,Map.of(),Map.of(),Map.of(),System.nanoTime(),false);
     }

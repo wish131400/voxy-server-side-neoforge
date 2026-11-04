@@ -143,7 +143,7 @@ class PredictionTeleportLoadingTest {
         }
     }
 
-    @Test void teleportRequestsNewPlanWithoutWaitingForPeriodicTickAndKeepsResidentFallback() throws Exception {
+    @Test void teleportRequestsNewPlanImmediatelyAndRetainsOnlyCurrentHorizonFallback() throws Exception {
         try(var manager=manager((x,z)->64,2)) {
             var requests=new ArrayList<PredictionPlanPreparation.Input>();
             var plans=new PredictionClientPreparation<PredictionPlanPreparation.Input,PredictionPlanPreparation.Result>(
@@ -156,10 +156,14 @@ class PredictionTeleportLoadingTest {
             assertEquals(1,requests.size());
             var old=((List<PredictionTileKey>)get(manager,"scheduledPlan")).get(0);
             var resident=tile(manager,old,8);residents(manager).put(old,resident);
+            var overlap=new PredictionTileKey(Level.OVERWORLD,20000/64,20000/64,0);
+            var fallback=tile(manager,overlap,8);residents(manager).put(overlap,fallback);
             manager.tick(20000,80,20000,.01,null);
             assertEquals(2,requests.size(),"teleport must request current coordinates immediately between periodic ticks");
             assertEquals(20000,requests.get(1).x());
-            assertSame(resident,residents(manager).get(old),"abandoning old work must not destroy resident fallback");
+            assertTrue(PredictionTileResidencyPolicy.outOfRetirementRange(old,manager.layout(),20000,20000));
+            assertFalse(residents(manager).containsKey(old),"Completely invisible residents must retire even before a new plan publishes");
+            assertSame(fallback,residents(manager).get(overlap),"Resident fallback inside the new horizon remains reusable");
             assertFalse((boolean)invoke(manager,"effectivelyDesired",old),"old work cannot consume the grace period after teleport");
             manager.tick(20000,80,20000,.01,null);
             assertFalse(((List<?>)get(manager,"scheduledPlan")).isEmpty());

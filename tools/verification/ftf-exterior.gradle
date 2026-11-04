@@ -5,16 +5,20 @@ initscript { repositories { mavenCentral() }; dependencies { classpath 'org.ow2.
 import org.objectweb.asm.*
 import java.util.zip.*
 allprojects { afterEvaluate {
+ if (providers.gradleProperty('vssFreeTerraForgedJar').isPresent())
+  dependencies.add('testRuntimeOnly', files(project.file(providers.gradleProperty('vssFreeTerraForgedJar').get())))
  tasks.register('ftfExteriorTest', Test) {
   dependsOn tasks.named('testClasses'); testClassesDirs=sourceSets.test.output.classesDirs
   classpath=sourceSets.test.runtimeClasspath; useJUnitPlatform()
   include '**/FreeTerraForgedExteriorTest.class', '**/PredictionJavaExteriorTest.class'
+  include '**/FreeTerraForgedGridTest.class', '**/FreeTerraForgedSamplesTest.class'
+  include '**/FreeTerraForgedRegionsTest.class'
   maxParallelForks=1; maxHeapSize='3G'
   testLogging { events 'failed', 'skipped'; exceptionFormat='full'; showStandardStreams=true }
  }
  tasks.register('ftfExteriorReleasedTest', Test) {
   dependsOn tasks.named('testClasses'); testClassesDirs=sourceSets.test.output.classesDirs
-  classpath=sourceSets.test.runtimeClasspath; useJUnitPlatform()
+  classpath=sourceSets.test.runtimeClasspath + files(providers.gradleProperty('vssFreeTerraForgedJar').map { project.file(it) }); useJUnitPlatform()
   include '**/FreeTerraForgedCompatTest.class'
   systemProperty 'vss.ftfExteriorReleased', 'true'
   doFirst { systemProperty 'vss.freeTerraForgedJar', project.file(providers.gradleProperty('vssFreeTerraForgedJar').get()).absolutePath }
@@ -23,6 +27,7 @@ allprojects { afterEvaluate {
    // Apply only access rules required by the release's density bootstrap, on a test copy.
    def targets=['net/minecraft/world/level/levelgen/NoiseRouterData',
     'net/minecraft/world/level/levelgen/NoiseBasedChunkGenerator',
+    'net/minecraft/world/level/levelgen/RandomState',
     'net/minecraft/world/level/levelgen/OreVeinifier$VeinType',
     'net/minecraft/world/level/levelgen/DensityFunctions$WeirdScaledSampler$RarityValueMapper'] as Set
    def source=classpath.files.find { it.isFile() && it.name.endsWith('.jar') && new ZipFile(it).withCloseable { z -> z.getEntry('net/minecraft/world/level/levelgen/NoiseRouterData.class')!=null } }
@@ -35,7 +40,7 @@ allprojects { afterEvaluate {
       def writer=new ClassWriter(0)
       def publicFlags={ int flags -> (flags & ~6) | 1 }
       new ClassReader(data).accept(new ClassVisitor(Opcodes.ASM9,writer) {
-       void visit(int v,int a,String n,String sig,String sup,String[] interfaces) { super.visit(v,publicFlags(a) & (n.endsWith('/NoiseBasedChunkGenerator') ? ~Opcodes.ACC_FINAL : -1),n,sig,sup,interfaces) }
+       void visit(int v,int a,String n,String sig,String sup,String[] interfaces) { super.visit(v,publicFlags(a) & ((n.endsWith('/NoiseBasedChunkGenerator') || n.endsWith('/RandomState')) ? ~Opcodes.ACC_FINAL : -1),n,sig,sup,interfaces) }
        FieldVisitor visitField(int a,String n,String d,String sig,Object value) { super.visitField(e.name.endsWith('/NoiseBasedChunkGenerator.class') ? a : publicFlags(a),n,d,sig,value) }
        MethodVisitor visitMethod(int a,String n,String d,String sig,String[] exceptions) { super.visitMethod(e.name.endsWith('/NoiseBasedChunkGenerator.class') ? a : publicFlags(a),n,d,sig,exceptions) }
       },0);data=writer.toByteArray()
@@ -43,7 +48,7 @@ allprojects { afterEvaluate {
      out.write(data);out.closeEntry()
     }
    } }
-   classpath=files(classpath.files.collect { it==source ? output : it })
+   classpath=files(classpath.files.collect { it==source ? output : it }) + files(project.file(providers.gradleProperty('vssFreeTerraForgedJar').get()))
   }
   maxParallelForks=1; maxHeapSize='3G'
   testLogging { events 'failed', 'skipped'; exceptionFormat='full'; showStandardStreams=true }

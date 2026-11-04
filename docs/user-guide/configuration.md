@@ -13,7 +13,7 @@
 | 配置 | 默认值 | 允许上限 |
 | --- | ---: | ---: |
 | 允许生成真实区块 LOD（`enableChunkGeneration`） | 单人/局域网 `false`；专用服务器 `true` | — |
-| LOD 距离 | `128` 区块 | `8192` |
+| LOD 距离 | `128` 区块 | `2048` 区块 |
 | 全服总带宽 | `8 Mbps` | `100 Mbps` |
 | 发送队列数量 | `1024` 列 | `8192` |
 | 发送队列内存 | `16 MiB` | `128 MiB` |
@@ -34,6 +34,8 @@
 
 ## 客户端默认值
 
+下表的距离使用设置页显示的区块单位。为兼容旧配置，`predictionDistanceBlocks` 与 `predictionExactDistanceBlocks` 的 JSON 键名保留，文件保存值为表中区块数乘以 16；设置页会自动换算。
+
 | 配置 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `receiveServerLods` | `true` | 接收服务端 LOD |
@@ -42,11 +44,15 @@
 | `offThreadSectionProcessing` | `true` | 在线程外解码和处理收到的列 |
 | `enableXaeroMapBridge` | `true` | 将服务端真实远景写入 Xaero 世界地图；预测转地图暂时停用 |
 | `enablePrediction` | `true` | 开启种子驱动的预测采样，由 Voxy 统一渲染 |
-| `predictionDistanceBlocks` | `4096` | 预测范围，单位方块，独立于服务端真实列同步距离 |
+| `predictionDistanceBlocks` | `512` 区块 | 预测半径，上限 `2048` 区块，独立于真实列同步距离 |
+| `predictionFarDecorations` | `true` | 精确区外使用模板装饰与共享粗网格环境查询 |
+| `predictionExactDistanceBlocks` | `64` 区块 | 精确装饰半径，外加 `16` 区块提前细化带 |
 | `predictionSpyglassLoading` | `true` | 允许望远镜额外加载远处精细地形、植被与建筑 |
 | `rememberTerrain` | `true` | 本地压缩保存预测地形与地表内容，允许释放闲置细节 |
 
-VSS 真实远景范围使用区块为单位，预测范围使用方块为单位。渲染范围取 Voxy 自身设置、VSS 当前协商有效范围和已启用预测范围中的最大值；例如 Voxy 2048 区块、VSS 有效范围 4096 区块时，渲染器按 4096 区块工作。服务端协商上限仍然生效。
+各版本的预测默认半径为 512 区块，远区模板装饰默认开启。精确装饰半径为 64 区块，外加 16 区块提前细化带；远处先显示模板植被，再补齐未替代的装饰和结构，靠近后转回精确计算。模板按种子和群系规则散布，位置和形态可能与精确结果不同。旧配置只迁移原默认值，已迁移后手动关闭或自定义的距离继续保留。
+
+VSS 真实远景和预测远景的距离设置统一使用区块，最大半径均为 2048 区块。旧配置中超出上限的值会在加载时自动收紧并保存，客户端的 0 仍表示使用服务端上限。渲染范围取 Voxy 自身设置、VSS 当前协商有效范围和已启用预测范围中的最大值；例如 Voxy 1024 区块、VSS 有效范围 2048 区块时，渲染器按 2048 区块工作。服务端协商上限仍然生效。
 
 进入世界后可执行 `/vssclient stats details`：`profile` 表示世界生成快照是否完成解码，`tiles`、`pending`、`failed` 表示预测瓦片与队列状态，`voxelBytes` 表示保留的预测体素数据量。渲染后端固定为 Voxy；GPU 网格、上传、遮挡与绘制状态由 Voxy 管理。VSS 性能记录只提供自身 CPU 工作、队列和发布开销，不把缺失的 Voxy GPU 计时当作零开销。
 

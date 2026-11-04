@@ -96,19 +96,18 @@ impl DisplayColumns {
 
 impl World {
     fn display_hint_eligible(&self, name: &str) -> bool {
-        self.display_biomes.contains(name)
-            || matches!(name, "minecraft:frozen_ocean" | "minecraft:deep_frozen_ocean")
+        !Surface::eroded_biome(name) && (self.display_biomes.contains(name)
+            || self.surface.display_may_be_safe(&self.palette, name))
     }
 
     fn display_biome_at(&self, name: &str, x: i32, z: i32) -> bool {
+        if Surface::eroded_biome(name) { return false; }
         if self.display_biomes.contains(name) { return true; }
-        // Frozen ocean is a region, not an iceberg at every column. The same
-        // noise gate as Surface::frozen proves that geometry is absent here.
-        // Hole is X/Z-only, so unreachable air/water rules stay unreachable at
-        // every material depth. Other unknown predicates remain conservative.
-        matches!(name, "minecraft:frozen_ocean" | "minecraft:deep_frozen_ocean")
-            && self.surface.iceberg_noise(&self.terrain.graph, x, z) <= 1.8
-            && self.surface.display_safe_at(&self.palette, name, &self.terrain.graph, x, z)
+        if matches!(name, "minecraft:frozen_ocean" | "minecraft:deep_frozen_ocean")
+            && self.surface.iceberg_noise(&self.terrain.graph,x,z)>1.8 { return false; }
+        // Hole is X/Z-only. Prove the current column's reachable writes instead
+        // of excluding a whole biome for fluid/air branches inactive in this column.
+        self.surface.display_safe_at(&self.palette,name,&self.terrain.graph,x,z)
     }
 
     /// Keep a caller's sparse reuse mask without destroying the regular grid.
@@ -351,7 +350,7 @@ impl World {
         // A conservative route hint: choosing the exact fallback is safe even
         // if the water floor later selects a different biome. Avoid traversing
         // the liquid column twice for swamps, icebergs and geometry rules.
-        if !self.display_biomes.contains(top_name) {
+        if !self.display_biome_at(top_name, x, z) {
             return Ok(None);
         }
         let (mut fluid_y, mut fluid) = (top, 0);
@@ -379,7 +378,7 @@ impl World {
         } else {
             self.source.sample(&t.graph, q, scratch, &mut None)
         };
-        if !self.display_biomes.contains(name) {
+        if !self.display_biome_at(name, x, z) {
             return Ok(None);
         }
         let biome = self.biomes.get(name).ok_or("missing display biome")?;
@@ -581,6 +580,23 @@ impl World {
                 let z = (i / 8) as f64 / 7.;
                 for (channel, corners) in colors.iter().enumerate() {
                     result[i].values[7 + channel] = bilinear_color(*corners, x, z);
+                }
+            }
+        }
+        // A Hole proof belongs to one column. Interpolation cannot transfer it
+        // from a safe perimeter to an unprobed lava/air or geometry column.
+        if self.surface.conditional_display() {
+            let t = &self.terrain;
+            let mut scratch = t.graph.raw_scratch()?;
+            for i in 0..64 {
+                if indices.contains(&i) { continue; }
+                let (x,z) = points[i];
+                for y in [result[i].values[0], result[i].values[1] - 1] {
+                    let mut q = zoom_quart(self.zoom_seed,[x,y,z]);
+                    q[1] = q[1].clamp(t.min_y >> 2,(t.min_y+t.height-1) >> 2);
+                    let name = self.source.sample(&t.graph,q,&mut scratch,&mut None);
+                    if !self.display_biome_at(name,x,z) { return Ok(None); }
+                    if result[i].values[2] == 0 { break; }
                 }
             }
         }
@@ -794,3 +810,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mod_admission_tests.rs"]
+mod mod_admission_tests;

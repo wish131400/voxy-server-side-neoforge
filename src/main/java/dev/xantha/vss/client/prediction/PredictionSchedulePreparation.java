@@ -11,7 +11,7 @@ final class PredictionSchedulePreparation {
                  double pixels, double minY, double maxY, long revision, List<PredictionTileKey> plan,
                  PredictionTileManager.RenderSnapshot residents, Set<PredictionTileKey> desired,
                  Set<PredictionTileKey> surfaceDesired, Set<PredictionTileKey> surfaceReady,
-                 Set<PredictionTileKey> dirty, Set<PredictionTileKey> fallback, Set<PredictionTileKey> pending,
+                 Set<PredictionTileKey> dirty, Set<PredictionTileKey> derivedRefresh, Set<PredictionTileKey> fallback, Set<PredictionTileKey> pending,
                  Map<PredictionTileKey, Integer> ordinary, Map<PredictionTileKey, Integer> terrain,
                  Map<PredictionTileKey, Integer> transitions, Map<PredictionTileKey, Integer> idle,
                  PredictionMediumCoverage medium, boolean mediumPending, boolean previewPending,
@@ -82,7 +82,7 @@ final class PredictionSchedulePreparation {
             return band()==PredictionWorkView.BUFFER?300_000:band()==PredictionWorkView.RECENT?600_000:PredictionWorkOrder.BACKGROUND_PRIORITY;
         }
         int priority(boolean surface) {
-            if(dirty)return Integer.MIN_VALUE+1+key.lod();
+            if(dirty&&!input.derivedRefresh().contains(key))return Integer.MIN_VALUE+1+key.lod();
             if(!surface&&idleWork())return input.view()==null?2_000_000:400_000+offset(false);
             if(scoped)return PredictionWorkOrder.priority(key,input.layout(),distance(),axis,surface,input.focus());
             int screen=0;

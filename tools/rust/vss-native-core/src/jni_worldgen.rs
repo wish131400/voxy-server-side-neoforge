@@ -1114,6 +1114,9 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
     output(&mut e, guarded(|| {
         let w = world(id)?;
         let mut description = w.palette.compact_mapping();
+        // Compact and full descriptions share the bounds of every native column row.
+        description["min_y"] = json!(w.terrain.min_y);
+        description["height"] = json!(w.terrain.height);
         description["terrablender_routing"] = json!(w.uses_terrablender_routing());
         description["signed_sqrt"] = json!(w.terrain.graph.uses_signed_sqrt());
         description["biome_names"] = json!(w.biome_names());

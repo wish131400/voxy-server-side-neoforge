@@ -180,9 +180,14 @@ class PredictionVoxyLoadingIntegrationTest {
             assertFalse(source.requestDetail(pos,(x,z)->false));
             refreshDetails(manager);
             cache.flush(); // Wait for the asynchronous header probe before servicing this isolated planner turn.
-            invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());await(manager);
-            assertEquals(8,manager.renderSnapshot().tiles().get(key).cellAxis());assertEquals(0,calls.get());
-            assertFalse(source.requestDetail(pos,(x,z)->false),"Cache presence cannot claim final precision");
+            var cpu=(PredictionCpuBudget)field("cpuBudget").get(manager);
+            var held=new ArrayList<PredictionCpuBudget.Lease>();
+            try {
+                for(int i=0;i<8;i++) {var lease=cpu.tryAcquire(true);assertNotNull(lease);held.add(lease);}
+                invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());await(manager);
+                assertEquals(8,manager.renderSnapshot().tiles().get(key).cellAxis());assertEquals(0,calls.get());
+                assertFalse(source.requestDetail(pos,(x,z)->false),"Cache presence cannot claim final precision");
+            } finally {held.forEach(PredictionCpuBudget.Lease::close);}
             refreshDetails(manager);
             invoke(manager,"servicePreparedWork",new Class[]{long.class},System.nanoTime());await(manager);
             assertEquals(64,manager.renderSnapshot().tiles().get(key).cellAxis());assertTrue(calls.get()>0);
@@ -379,6 +384,43 @@ class PredictionVoxyLoadingIntegrationTest {
             }
         } finally {}
     }
+    @Test @SuppressWarnings("unchecked")
+    void ordinaryCoverageSurvivesWorkerMemoryRefusalAndResumesWithoutReplanning() throws Exception {
+        var budget = new PredictionMemoryBudget(1024L * PredictionMemoryBudget.MIB,
+                0, () -> Long.MAX_VALUE, System::nanoTime, 1);
+        try (var manager = new PredictionTileManager(PROFILE.levelKey(), sampler(new AtomicInteger()),
+                budget, null, PredictionCpuBudget.fixed(1))) {
+            var outer = new PredictionTileKey(PROFILE.levelKey(), -1, -1, manager.layout().levelCount() - 1);
+            setup(manager, outer);
+            var prepared = (java.util.ArrayDeque<PredictionSchedulePreparation.Request>) field("preparedWork").get(manager);
+            prepared.add(new PredictionSchedulePreparation.Request(outer, false, 10_000, 0));
+            try (var held = budget.tryReserveBuild()) {
+                assertNotNull(held);
+                invoke(manager, "serviceGenerationWork", new Class[]{int.class, int.class, long.class},
+                        0, 0, Long.MAX_VALUE);
+                await(manager);
+                assertFalse(manager.renderSnapshot().tiles().containsKey(outer),
+                        "the occupied build slot must refuse the ordinary worker");
+            }
+            assertTrue(prepared.stream().anyMatch(request -> request.key().equals(outer)),
+                    "worker admission refusal must retain the original coverage request");
+            var nativeKey = new PredictionTileKey(PROFILE.levelKey(), 2, 0, 1);
+            ((Set<PredictionTileKey>) field("voxyDetailTargets").get(manager)).add(nativeKey);
+            enqueue(manager, nativeKey, false);
+            await(manager);
+            assertTrue(manager.renderSnapshot().tiles().containsKey(nativeKey), manager.surfaceDiagnostics());
+            // Completion uses a bounded slice. The next service turn must consume
+            // the same retained request even if that slice expired; no replan is needed.
+            invoke(manager, "serviceGenerationWork", new Class[]{int.class, int.class, long.class},
+                    0, 0, Long.MAX_VALUE);
+            await(manager);
+            assertNotNull(manager.renderSnapshot().tiles().get(outer),
+                    "refused ordinary coverage must resume from retained demand without replanning");
+            assertEquals(32, manager.renderSnapshot().tiles().get(outer).cellAxis());
+        }
+        assertEquals(0, budget.usedBytes());
+    }
+
     private static ClientColumnSample[] newPreview() {
         var samples=new ClientColumnSample[100];Arrays.fill(samples,PredictionVoxelFixtures.sample(64));return samples;
     }
@@ -641,7 +683,7 @@ class PredictionVoxyLoadingIntegrationTest {
     private static PredictionSchedulePreparation.Input scheduleInput(PredictionTileManager manager,PredictionTileKey key) throws Exception {
         return new PredictionSchedulePreparation.Input(manager.layout(),null,null,0,80,0,.01,-64,320,0,List.of(key),
                 manager.renderSnapshot(),Set.of(key),Set.of(key),Set.copyOf((Set<PredictionTileKey>)field("surfaceReady").get(manager)),
-                Set.of(),Set.of(),Set.of(),Map.of(key,32),Map.of(key,32),Map.of(),Map.of(),PredictionMediumCoverage.EMPTY,
+                Set.of(),java.util.Set.of(),Set.of(),Set.of(),Map.of(key,32),Map.of(key,32),Map.of(),Map.of(),PredictionMediumCoverage.EMPTY,
                 false,false,false,false,Map.of(),Set.of(),Set.of(),Collections.nCopies(manager.layout().levelCount(),32),null,
                 Map.of(),Map.of(),Map.of(),System.nanoTime(),false);
     }
@@ -945,7 +987,13 @@ class PredictionVoxyLoadingIntegrationTest {
     }
     private static void await(PredictionTileManager manager) throws Exception {
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20);
-        while(manager.pendingCount()>0 && System.nanoTime()<deadline)Thread.sleep(5);
+        var executor = (java.util.concurrent.ThreadPoolExecutor) field("executor").get(manager);
+        var cacheExecutor = (java.util.concurrent.ThreadPoolExecutor) field("cacheExecutor").get(manager);
+        while((manager.pendingCount()>0 || executor.getActiveCount()>0 || !executor.getQueue().isEmpty()
+                || cacheExecutor.getActiveCount()>0 || !cacheExecutor.getQueue().isEmpty())
+                && System.nanoTime()<deadline)Thread.sleep(5);
         assertEquals(0,manager.pendingCount()); assertEquals(0,manager.failedTileCount(),manager.surfaceDiagnostics());
+        assertEquals(0,executor.getActiveCount(),"generation completion handoffs must also finish");
+        assertEquals(0,cacheExecutor.getActiveCount(),"cache completion handoffs must also finish");
     }
 }

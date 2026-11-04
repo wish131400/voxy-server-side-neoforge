@@ -84,6 +84,13 @@ final class PredictionExteriorColumns {
                       ClientTerrainSampler sampler, BooleanSupplier valid) {
         if (sampler.floatingTerrain()) return enrichFloating(samples, grid, step, baseX, baseZ, sampler, valid);
         if (step > MAX_SPACING || sampler.interiorTerrain()) return 0;
+        try (var ignored = sampler.exteriorRequest()) {
+            return enrichRequest(samples, grid, step, baseX, baseZ, sampler, valid);
+        }
+    }
+
+    private static int enrichRequest(ClientColumnSample[] samples, int grid, int step, int baseX, int baseZ,
+                                     ClientTerrainSampler sampler, BooleanSupplier valid) {
         var queue = new ArrayDeque<Integer>();
         boolean[] queued = new boolean[samples.length];
         for (int z = 0; z < grid; z++) for (int x = 0; x < grid; x++) {
@@ -100,8 +107,9 @@ final class PredictionExteriorColumns {
             if (cliff) { queued[i] = true; queue.add(i); }
         }
         int changed = 0;
-        int[] pending = new int[8], xs = new int[8], zs = new int[8], bottoms = new int[8], tops = new int[8];
-        int[] requestIndex = new int[8];
+        int batchSize = sampler instanceof FreeTerraForgedTerrainSampler ? 64 : 8;
+        int[] pending = new int[batchSize], xs = new int[batchSize], zs = new int[batchSize];
+        int[] bottoms = new int[batchSize], tops = new int[batchSize], requestIndex = new int[batchSize];
         while (!queue.isEmpty()) {
             if (Thread.currentThread().isInterrupted() || !valid.getAsBoolean())
                 throw new java.util.concurrent.CancellationException();

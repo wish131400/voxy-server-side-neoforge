@@ -260,6 +260,112 @@ class PredictionCpuBudgetTest {
         } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
     }
 
+    @Test void strictReservationsTransferToExecutionWithoutReleasingTheirCapacity() {
+        var budget = PredictionCpuBudget.fixed(2);
+        var first = budget.tryReserve(true);
+        var second = budget.tryReserve(true);
+        assertNotNull(first);
+        assertNotNull(second);
+        try (var a = assertLease(first.acquire(true))) {
+            assertNull(first.acquire(true), "a reservation can be transferred only once");
+            first.close();
+            assertNull(budget.tryReserve(true), "a lease and a reservation still fill both slots");
+            try (var b = assertLease(second.acquire(true))) {
+                second.close();
+                assertNull(budget.tryReserve(true));
+                assertNull(budget.tryAcquire(true));
+            }
+        }
+        assertTrue(budget.diagnostics().contains("active=0,detail=0,localGeneration=0,queued=0,reserved=0"));
+        assertLease(budget.tryAcquire(true)).close();
+    }
+
+    @Test void cancelledAndRefusedQueueTransfersCannotBeReusedOrLeakCapacity() {
+        var budget = PredictionCpuBudget.fixed(1);
+        var cancelled = budget.tryReserve(true);
+        assertNotNull(cancelled);
+        cancelled.close();
+        assertNull(cancelled.acquire(true));
+        try (var active = assertLease(budget.tryAcquire(true))) {
+            var queued = budget.tryReserveQueued(true, 1);
+            assertNotNull(queued);
+            assertNull(queued.acquire(true), "queued work still checks executing capacity");
+            assertNull(queued.acquire(true));
+            queued.close();
+            assertTrue(budget.diagnostics().contains("queued=0,reserved=0"));
+        }
+        var resumed = budget.tryReserveQueued(true, 1);
+        assertNotNull(resumed);
+        try (var lease = assertLease(resumed.acquire(true))) {
+            resumed.close();
+            assertNull(budget.tryAcquire(true));
+        }
+    }
+
+    @Test void transferRechecksTheCurrentLimitAndReleasesRejectedReservations() {
+        var configured = new java.util.concurrent.atomic.AtomicInteger(2);
+        var budget = new PredictionCpuBudget(configured::get, () -> 0);
+        var first = budget.tryReserve(true);
+        var second = budget.tryReserve(true);
+        assertNotNull(first);
+        assertNotNull(second);
+        configured.set(1);
+        try (var lease = assertLease(first.acquire(true))) {
+            assertNull(second.acquire(true), "a queued permit cannot bypass a reduced worker limit");
+            second.close();
+            assertTrue(budget.diagnostics().contains("reserved=0"));
+        }
+        assertLease(budget.tryAcquire(true)).close();
+    }
+
+    @Test void transferRechecksLocalGenerationAndTheWorkersCurrentDetailPriority() {
+        var budget = new PredictionCpuBudget(() -> 2, () -> 0);
+        var blocked = budget.tryReserve(false);
+        assertNotNull(blocked);
+        budget.observeLocalGeneration(true, 2);
+        assertNull(blocked.acquire(false));
+        assertTrue(budget.diagnostics().contains("reserved=0"));
+        budget.observeLocalGeneration(false, 0);
+        var first = budget.tryReserve(true);
+        var second = budget.tryReserve(true);
+        assertNotNull(first);
+        assertNotNull(second);
+        try (var detail = assertLease(first.acquire(false))) {
+            assertNull(second.acquire(false), "an urgent queue hint cannot bypass the current detail lane limit");
+            var coverage = budget.tryReserve(true);
+            assertNotNull(coverage);
+            assertLease(coverage.acquire(true)).close();
+        }
+    }
+
+    @Test void concurrentTransfersKeepAllReservedSlotsVisibleToCompetingManagers() throws Exception {
+        var executor = Executors.newFixedThreadPool(12);
+        try {
+            for (int attempt = 0; attempt < 25; attempt++) {
+                var budget = PredictionCpuBudget.fixed(4);
+                var start = new CountDownLatch(1);
+                var transfers = new ArrayList<java.util.concurrent.Future<PredictionCpuBudget.Lease>>();
+                var competitors = new ArrayList<java.util.concurrent.Future<PredictionCpuBudget.Reservation>>();
+                for (int i = 0; i < 4; i++) {
+                    var reservation = budget.tryReserve(true);
+                    assertNotNull(reservation);
+                    transfers.add(executor.submit(() -> { start.await(); return reservation.acquire(true); }));
+                }
+                for (int i = 0; i < 8; i++)
+                    competitors.add(executor.submit(() -> { start.await(); return budget.tryReserve(true); }));
+                var leases = new ArrayList<PredictionCpuBudget.Lease>();
+                try {
+                    start.countDown();
+                    for (var transfer : transfers) leases.add(assertLease(transfer.get(5, TimeUnit.SECONDS)));
+                    for (var competitor : competitors)
+                        assertNull(competitor.get(5, TimeUnit.SECONDS), "transferring must not advertise spare capacity");
+                    assertNull(budget.tryAcquire(true));
+                } finally { leases.forEach(PredictionCpuBudget.Lease::close); }
+                assertLease(budget.tryAcquire(true)).close();
+            }
+        } finally { executor.shutdownNow(); }
+    }
+
     private static PredictionCpuBudget.Lease assertLease(PredictionCpuBudget.Lease lease) {
         assertNotNull(lease); return lease;
     }

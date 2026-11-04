@@ -34,6 +34,76 @@ class PredictionViewRefinementTest {
     @BeforeEach void resetFrames() { PredictionFramePace.resetForTesting(); }
     @AfterEach void clearFrames() { PredictionFramePace.resetForTesting(); }
 
+    @Test void nativeHistoryGetsFirstCoverageAndResumesFinalDetailWhenTurnedIntoView() throws Exception {
+        try (var f = new Fixture()) {
+            f.plan(FRONT, REAR);
+            set(f.manager, "unifiedVoxy", true);
+            f.keys("voxyDetailTargets").addAll(List.of(FRONT, REAR));
+            f.ready().remove(FRONT); f.ready().remove(REAR);
+            f.face(1);
+            assertEquals(16, invoke(f.manager,"terrainCellAxis",
+                    new Class<?>[]{PredictionTileKey.class,PredictionTile.class},FRONT,null));
+            f.enqueue(FRONT); f.awaitIdle();
+            assertEquals(64,f.ready().get(FRONT).cellAxis(),"visible preview hands back its unfinished native demand");
+            f.enqueue(REAR); f.awaitIdle();
+            assertEquals(16,f.ready().get(REAR).cellAxis(),"rear history receives usable coverage before quality");
+            assertEquals(true,invoke(f.manager,"deferBackground",
+                    new Class<?>[]{PredictionTileKey.class,boolean.class},REAR,false));
+            f.keys("dirtyTiles").add(REAR); f.enqueue(REAR); f.awaitIdle();
+            assertEquals(16,f.ready().get(REAR).cellAxis(),"content repair must not also request offscreen quality");
+            assertFalse(f.keys("dirtyTiles").contains(REAR));
+            f.face(-1);
+            invoke(f.manager,"serviceGenerationWork",new Class<?>[]{int.class,int.class,long.class},0,0,Long.MAX_VALUE);
+            f.awaitIdle();
+            assertEquals(64,f.ready().get(REAR).cellAxis(),"a turn resumes retained native demand without a new request");
+            f.keys("dirtyTiles").add(FRONT);
+            assertEquals(false,invoke(f.manager,"deferBackground",
+                    new Class<?>[]{PredictionTileKey.class,boolean.class},FRONT,false),"real content invalidation keeps priority");
+        }
+    }
+
+    @Test void repeatedDirtyNativeDemandRefinesTheViewAndOnlyRepairsRearHistory() throws Exception {
+        for (int residentAxis : new int[]{16, 32}) try (var f = new Fixture()) {
+            f.plan(FRONT, REAR);
+            set(f.manager, "unifiedVoxy", true);
+            f.keys("voxyDetailTargets").addAll(List.of(FRONT, REAR));
+            f.ready().put(FRONT, f.tile(FRONT, residentAxis));
+            f.ready().put(REAR, f.tile(REAR, 16));
+            f.face(1);
+            // Exercise a capture at each refinement stage. The worker may
+            // hand off the next clean upgrade before the test regains control.
+            f.keys("dirtyTiles").addAll(List.of(FRONT, REAR));
+            assertEquals(residentAxis * 2, invoke(f.manager, "terrainCellAxis",
+                    new Class<?>[]{PredictionTileKey.class, PredictionTile.class}, FRONT, f.ready().get(FRONT)));
+            assertEquals(16, invoke(f.manager, "terrainCellAxis",
+                    new Class<?>[]{PredictionTileKey.class, PredictionTile.class}, REAR, f.ready().get(REAR)));
+            f.enqueue(FRONT); f.awaitIdle();
+            // This fixture has one CPU slot; admit the rear repair after the
+            // foreground completion rather than testing a rejected reservation.
+            f.enqueue(REAR); f.awaitIdle();
+            assertEquals(64, f.ready().get(FRONT).cellAxis());
+            assertEquals(16, f.ready().get(REAR).cellAxis());
+            assertFalse(f.keys("dirtyTiles").contains(FRONT));
+            assertFalse(f.keys("dirtyTiles").contains(REAR));
+            assertTrue(f.samples.get() > 0, "actual terrain generation must execute");
+        }
+    }
+
+    @Test void backendMayRetainSeedPointsDuringDirtyRebuildWhileOtherBackendsResample() throws Exception {
+        int[] work=new int[2];
+        for(int mode=0;mode<2;mode++)try(var f=new Fixture()) {
+            f.retainSeed=mode==1;
+            f.plan(FRONT,REAR); f.ready().put(FRONT,f.tile(FRONT,64)); f.face(1);
+            f.keys("dirtyTiles").add(FRONT); f.enqueue(FRONT); f.awaitIdle();
+            assertFalse(f.keys("dirtyTiles").contains(FRONT));
+            assertEquals(64,f.ready().get(FRONT).heights()[0]);
+            work[mode]=f.samples.get();
+        }
+        assertTrue(work[0]>4000,"ordinary backends must still resample invalidated terrain");
+        assertTrue(work[1]<work[0]/4,"seed-only backend must reuse the resident grid, with just its cropped margin missing");
+        System.out.println("DIRTY_SEED_REUSE beforePoints="+work[0]+" afterPoints="+work[1]);
+    }
+
     @Test void projectedZoomBuildsMissingVisibleDetailAndZoomOutRetainsTheFinishedMesh() throws Exception {
         try (var f = new Fixture()) {
             var far = new PredictionTileKey(PROFILE.levelKey(), 4, 0, 3);
@@ -384,6 +454,7 @@ class PredictionViewRefinementTest {
     }
 
     private static final class Fixture implements AutoCloseable {
+        boolean retainSeed;
         final AtomicInteger samples = new AtomicInteger();
         final ClientColumnSample sample = PredictionVoxelFixtures.sample(64);
         final PredictionCpuBudget cpu = PredictionCpuBudget.fixed(1);
@@ -392,6 +463,7 @@ class PredictionViewRefinementTest {
                     @Override int initialTerrainCellAxis(int lod) { return PredictionWorkOrder.initialCellAxis(lod); }
                     @Override public ClientColumnSample sample(int x, int z) { samples.incrementAndGet(); return sample; }
                     @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return sample(x, z); }
+                    @Override ClientColumnSample retainAfterCapture(ClientColumnSample value) { return retainSeed ? value : null; }
                 }, new PredictionMemoryBudget(1024L * PredictionMemoryBudget.MIB, 0,
                         () -> Long.MAX_VALUE, System::nanoTime, 1), null, cpu);
 
@@ -433,10 +505,13 @@ class PredictionViewRefinementTest {
             PredictionDemandTestSupport.loading(manager, leaves, 0D, 0D, System.nanoTime());
             return manager.loadingProgress();
         }
-        void awaitIdle() throws InterruptedException {
+        void awaitIdle() throws Exception {
+            var executor = (ThreadPoolExecutor) get(manager, "executor");
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (manager.pendingCount() != 0 && System.nanoTime() < deadline) Thread.sleep(5);
+            while ((manager.pendingCount() != 0 || executor.getActiveCount() != 0
+                    || !executor.getQueue().isEmpty()) && System.nanoTime() < deadline) Thread.sleep(5);
             assertEquals(0, manager.pendingCount());
+            assertEquals(0, executor.getActiveCount(), "preview completion handoffs must also finish");
         }
         @Override public void close() { manager.close(); }
     }

@@ -9,6 +9,30 @@ import java.lang.invoke.MethodType;
 public final class VoxyRenderAccess {
     private VoxyRenderAccess() { }
 
+    private record Updates(java.lang.reflect.Field router, Method interests,
+                           java.lang.reflect.Field cache, Method clear) { }
+    private static final ClassValue<java.util.Optional<Updates>> UPDATES = new ClassValue<>() {
+        @Override protected java.util.Optional<Updates> computeValue(Class<?> nodes) {
+            try {
+                var router=nodes.getDeclaredField("router"); router.setAccessible(true);
+                var cache=nodes.getDeclaredField("geometryCache"); cache.setAccessible(true);
+                return java.util.Optional.of(new Updates(router,router.getType().getMethod("get",long.class),
+                        cache,cache.getType().getMethod("clear",long.class)));
+            } catch (ReflectiveOperationException | RuntimeException unavailable) { return java.util.Optional.empty(); }
+        }
+    };
+    /** Unwatched neighbors and retired nodes need cache invalidation, not a composed volume and six faces. */
+    static boolean invalidateUnwatched(Object nodes,long position) throws ReflectiveOperationException {
+        var binding=UPDATES.get(nodes.getClass());
+        if(binding.isEmpty())return false;
+        var methods=binding.get(); Object router=methods.router.get(nodes);
+        if(((Number)methods.interests.invoke(router,position)).intValue()!=0)return false;
+        methods.clear.invoke(methods.cache.get(nodes),position);
+        // A concurrent watch either sees the cleared cache and requests a fresh mesh,
+        // or becomes visible here and receives the ordinary update below.
+        return ((Number)methods.interests.invoke(router,position)).intValue()==0;
+    }
+
     private record Backlog(java.lang.reflect.Field service, Method count) { }
     private static final ClassValue<java.util.Optional<Backlog>> BACKLOGS = new ClassValue<>() {
         @Override protected java.util.Optional<Backlog> computeValue(Class<?> renderer) {

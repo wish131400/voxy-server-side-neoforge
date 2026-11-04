@@ -41,6 +41,31 @@ class PredictionFarDecorationNativeTest {
         var key=new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,Math.floorDiv(bx,span),Math.floorDiv(bz,span),2);
         return PredictionVoxySource.build(key,samples,grid,step,sampler,PredictionVegetation.Tile.EMPTY,null,false);
     }
+    @Test void oneUnsupportedFeatureCannotAbortOtherBiomeTemplates() throws Exception {
+        try(var terrain=sampler()) {
+            var context=org.mockito.Mockito.spy(terrain.decorationContext());
+            var generator=org.mockito.Mockito.spy(context.generatorContext());
+            var settings=context.generatorContext().getBiomeGenerationSettings(context.cacheBiomeHolder(0));
+            var broken=org.mockito.Mockito.mock(net.minecraft.world.level.levelgen.placement.PlacedFeature.class);
+            org.mockito.Mockito.when(broken.placement()).thenThrow(new IllegalStateException("Mod rule needs a live world"));
+            org.mockito.Mockito.when(broken.feature()).thenReturn(settings.features().get(9).get(0).value().feature());
+            var stages=new ArrayList<>(settings.features());
+            var entries=new ArrayList<net.minecraft.core.Holder<net.minecraft.world.level.levelgen.placement.PlacedFeature>>();
+            entries.add(net.minecraft.core.Holder.direct(broken));
+            settings.features().get(9).forEach(entries::add);
+            stages.set(9,net.minecraft.core.HolderSet.direct(entries));
+            var changed=org.mockito.Mockito.mock(net.minecraft.world.level.biome.BiomeGenerationSettings.class);
+            org.mockito.Mockito.when(changed.features()).thenReturn(stages);
+            org.mockito.Mockito.doReturn(changed).when(generator).getBiomeGenerationSettings(org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.doReturn(generator).when(context).generatorContext();
+            var proxy=org.mockito.Mockito.spy(terrain);
+            org.mockito.Mockito.doReturn(context).when(proxy).decorationContext();
+            var models=new PredictionFarDecoration(proxy,true,8,()->true);
+            assertFalse(models.replaced.contains(broken),"A failed rule must remain on original placement");
+            assertFalse(models.replaced.isEmpty(),"One mod callback cannot disable all remaining templates");
+        }
+    }
+
     @Test void weightedCoverageKeepsCoresAndDoesNotDoubleCountOverlappingCrowns() {
         var leaf=net.minecraft.world.level.block.Blocks.OAK_LEAVES.defaultBlockState();
         var log=net.minecraft.world.level.block.Blocks.OAK_LOG.defaultBlockState();
@@ -68,7 +93,41 @@ class PredictionFarDecorationNativeTest {
             assertThrows(CancellationException.class,()->new PredictionFarDecoration(sampler,true,8,()->false));
             var base=ground(sampler,8192,-8192,128,4);
             var service=new PredictionFarDecorations(sampler);
-            var first=service.build(base,null,true,p->false,()->true);
+            long previewStarted=System.nanoTime();
+            var preview=service.preview(base,null,true,p->false,()->true);
+            assertTrue(preview.approximateDecorations());assertFalse(preview.surfaceComplete());
+            assertFalse(preview.features().isEmpty());
+            var fallbackField=PredictionFarDecorations.class.getDeclaredField("vegetation");
+            fallbackField.setAccessible(true);
+            assertNull(fallbackField.get(service),"Template coverage must not initialize or run the fallback graph");
+            var cachedBox=new PredictionVoxySource.Box(0,300,0,1,301,1,net.minecraft.world.level.block.Blocks.GOLD_BLOCK.defaultBlockState());
+            var knownPartial=new PredictionVoxySource.Tile(base.key(),base.baseX(),base.baseZ(),base.span(),base.axis(),base.step(),
+                    base.columns(),List.of(cachedBox),base.terrainBytes(),false,0);
+            var previewWithCache=service.preview(knownPartial,null,true,p->false,()->true);
+            assertTrue(previewWithCache.features().contains(cachedBox),"First templates retain known disk-cache fallback");
+            var finerGround=ground(sampler,8192,-8192,128,2).retainFeatures(previewWithCache);
+            var refinedPartial=service.preview(finerGround,null,true,p->false,()->true);
+            assertTrue(refinedPartial.features().contains(cachedBox),"Partial geometric refinement retains fallback too");
+            assertFalse(refinedPartial.surfaceComplete());assertEquals(2,refinedPartial.decorationStep());
+            assertNull(fallbackField.get(service),"Geometry and cache handoff never run the fallback placement graph");
+            // Read actual Voxy voxels while fallback has not even been initialized.
+            var trunk=preview.features().stream().filter(b->b.state().is(net.minecraft.tags.BlockTags.LOGS)).findFirst().orElseThrow();
+            int wx=preview.baseX()+trunk.minX(),wz=preview.baseZ()+trunk.minZ(),wy=trunk.maxY()-1;
+            dev.xantha.vss.compat.VoxyPredictionBridge.Mapper mapper=(state,biome)->state.isAir()?0:((long)net.minecraft.world.level.block.Block.getId(state)+1)<<27;
+            try(var source=new PredictionVoxySource()) {
+                source.put(preview);
+                var voxels=source.section(dev.xantha.vss.compat.VoxyPredictionBridge.position(0,
+                        Math.floorDiv(wx,32),Math.floorDiv(wy,32),Math.floorDiv(wz,32)),mapper);
+                assertNotNull(voxels);
+                assertEquals(mapper.map(trunk.state(),"minecraft:forest"),voxels[(wy&31)<<10|(wz&31)<<5|(wx&31)] & ~31L,
+                        "Partial template trees must reach the Voxy section before fallback completes");
+            }
+            long firstVisible=System.nanoTime();
+            var first=service.build(preview,null,true,p->false,()->true);
+            long completed=System.nanoTime();
+            System.out.printf(Locale.ROOT,"FAR_FIRST_VISIBLE span=128 previewMs=%.3f completionAfterPreviewMs=%.3f totalMs=%.3f%n",
+                    (firstVisible-previewStarted)/1e6,(completed-firstVisible)/1e6,(completed-previewStarted)/1e6);
+            assertTrue(first.features().containsAll(preview.features()),"Fallback must retain every preview template box");
             var repeat=service.build(base,null,true,p->false,()->true);
             assertTrue(first.approximateDecorations());assertTrue(first.surfaceComplete());
             assertSame(base.columns(),first.columns());assertFalse(first.features().isEmpty());
@@ -131,6 +190,41 @@ class PredictionFarDecorationNativeTest {
         }
     }
 
+
+    @Test void bambooBiomeRetainsItsDenseStemsInFirstVisibleTemplates()throws Exception {
+        try(var terrain=sampler(Biomes.BAMBOO_JUNGLE,42)) {
+            var base=ground(terrain,8192,-8192,128,4);
+            var models=new PredictionFarDecoration(terrain,true,8,()->true);
+            var bambooRule=models.biomeRules.values().stream().flatMap(List::stream).filter(r->r.choices().stream()
+                    .anyMatch(c->c.models().stream().anyMatch(t->t.spans().stream().anyMatch(v->v.state().is(net.minecraft.world.level.block.Blocks.BAMBOO)))))
+                    .findFirst().orElseThrow();
+            assertTrue(bambooRule.count()>10,"Fixture must exercise density above the old grid cap");
+            List<Long> ids=null;
+            for(int step:new int[]{4,8,16}) {
+                var session=models.session();PredictionFarDecoration.Result result;
+                try(var scope=session.enter(()->true,p->false,base)) {result=session.generate(8192,-8192,128,step,true);}
+                var bambooAnchors=result.anchors().stream().filter(a->a.model().spans().stream().anyMatch(v->v.state().is(net.minecraft.world.level.block.Blocks.BAMBOO))).toList();
+                assertFalse(bambooAnchors.isEmpty());
+                var stable=bambooAnchors.stream().map(PredictionFarDecoration.Anchor::id).toList();
+                if(ids==null)ids=stable;else assertEquals(ids,stable,"Bamboo density and anchor positions cannot change with LOD");
+                assertTrue(result.boxes().stream().anyMatch(v->v.state().is(net.minecraft.world.level.block.Blocks.BAMBOO)),"Bamboo survives coarse material reduction");
+                System.out.println("BAMBOO_DENSITY step="+step+" expectedPerChunk="+bambooRule.count()+" anchors="+bambooAnchors.size()+" boxes="+result.boxes().size());
+            }
+            var service=new PredictionFarDecorations(terrain);
+            var preview=service.preview(base,null,true,p->false,()->true);
+            var stem=preview.features().stream().filter(v->v.state().is(net.minecraft.world.level.block.Blocks.BAMBOO)).findFirst().orElseThrow();
+            int x=base.baseX()+stem.minX(),z=base.baseZ()+stem.minZ(),y=stem.maxY()-1;
+            dev.xantha.vss.compat.VoxyPredictionBridge.Mapper mapper=(state,biome)->state.isAir()?0:((long)net.minecraft.world.level.block.Block.getId(state)+1)<<27;
+            try(var source=new PredictionVoxySource()) {
+                source.put(preview);
+                var data=source.section(dev.xantha.vss.compat.VoxyPredictionBridge.position(0,Math.floorDiv(x,32),Math.floorDiv(y,32),Math.floorDiv(z,32)),mapper);
+                assertNotNull(data);assertEquals(mapper.map(stem.state(),"minecraft:bamboo_jungle"),data[(y&31)<<10|(z&31)<<5|(x&31)] & ~31L);
+            }
+            var completed=service.build(preview,null,true,p->false,()->true);
+            assertTrue(completed.features().containsAll(preview.features()),"Completing the retained decoration cannot drop template bamboo");
+        }
+    }
+
     private static JsonObject document(ClientTerrainSampler context,NoiseGeneratorSettings settings,String biome)throws Exception {
         var lookup=net.minecraft.data.registries.VanillaRegistries.createLookup();
         var ops=lookup.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
@@ -173,18 +267,69 @@ class PredictionFarDecorationNativeTest {
             field("ordinaryTargets").set(manager,Map.of(key,base.axis()));
             field("viewBands").set(manager,Map.of(key,PredictionWorkView.VISIBLE));
             ((PredictionVoxySource)field("voxySource").get(manager)).put(base);
+            var service=org.mockito.Mockito.spy(new PredictionFarDecorations(terrain));
+            var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
+            org.mockito.Mockito.doAnswer(invocation->{
+                entered.countDown();assertTrue(release.await(60,TimeUnit.SECONDS));return invocation.callRealMethod();
+            }).when(service).build(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.anyBoolean(),
+                    org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
+            field("farDecorations").set(manager,service);
             call(manager,"refreshFarSurfaces",new Class<?>[0]);
             assertEquals(true,call(manager,"surfaceBuildReady",new Class<?>[]{PredictionTileManager.PredictionTileKey.class},key));
+            try {
+                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(60);
+                while(entered.getCount()>0 && System.nanoTime()<deadline) {
+                    synchronized(manager) {call(manager,"serviceVisibleSurfaces",new Class<?>[]{int.class,int.class,long.class},0,0,System.nanoTime()+1_000_000);}
+                    Thread.sleep(5);
+                }
+                assertEquals(0,entered.getCount(),manager.surfaceDiagnostics());
+                var partial=manager.renderSnapshot().tiles().get(key).data().voxyTile;
+                assertTrue(partial.approximateDecorations());assertFalse(partial.surfaceComplete());
+                assertFalse(partial.features().isEmpty(),"Templates must be published before blocked fallback starts");
+                assertFalse(((Set<?>)field("surfaceReady").get(manager)).contains(key));
+                assertEquals(1,((java.util.concurrent.atomic.AtomicInteger)field("activeFarCompletions").get(manager)).get());
+            } finally {release.countDown();}
             finish(manager,key,true);
             var far=manager.renderSnapshot().tiles().get(key).data().voxyTile;
             assertTrue(far.approximateDecorations(),manager.surfaceDiagnostics());
+            var completionCount=service.performanceSnapshot().get("completionBuilds");
+            var rawFine=ground(terrain,5120,0,64,1);
+            var fine=new PredictionVoxySource.Tile(key,5120,0,64,rawFine.axis(),1,
+                    rawFine.columns(),List.of(),rawFine.terrainBytes(),false,0).retainFeatures(far);
+            assertEquals(4,fine.decorationStep());assertTrue(fine.needsDecorationRefinement());
+            var fineResident=new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
+                    PredictionVoxelData.forVoxy(fine),new PredictionDepthBound(-64,320),0,2,fine.axis(),1);
+            ((Map<Object,Object>)field("ready").get(manager)).put(key,fineResident);
+            field("terrainTargets").set(manager,Map.of(key,fine.axis()));
+            field("ordinaryTargets").set(manager,Map.of(key,fine.axis()));
+            call(manager,"refreshFarSurfaces",new Class<?>[0]);
+            assertEquals(true,call(manager,"surfaceBuildReady",new Class<?>[]{PredictionTileManager.PredictionTileKey.class},key));
+            long refineDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(60);
+            while(manager.renderSnapshot().tiles().get(key).data().voxyTile.decorationStep()!=1 && System.nanoTime()<refineDeadline) {
+                synchronized(manager){call(manager,"serviceVisibleSurfaces",new Class<?>[]{int.class,int.class,long.class},0,0,System.nanoTime()+1_000_000);}
+                Thread.sleep(5);
+            }
+            var refined=manager.renderSnapshot().tiles().get(key).data().voxyTile;
+            assertEquals(1,refined.decorationStep());assertTrue(refined.surfaceComplete());
+            assertFalse(refined.needsDecorationRefinement());
+            assertEquals(completionCount,service.performanceSnapshot().get("completionBuilds"),"Geometric refinement reuses completed fallback");
+            assertEquals(far.features().subList(far.cityFeatures()+far.templateFeatures(),far.features().size()),
+                    refined.features().subList(refined.cityFeatures()+refined.templateFeatures(),refined.features().size()));
+            assertFalse(far.features().subList(far.cityFeatures(),far.cityFeatures()+far.templateFeatures()).equals(
+                    refined.features().subList(refined.cityFeatures(),refined.cityFeatures()+refined.templateFeatures())),"Coarse boxes must actually change");
+            long previews=((Number)service.performanceSnapshot().get("previewBuilds")).longValue();
+            for(int i=0;i<20;i++) {
+                call(manager,"refreshFarSurfaces",new Class<?>[0]);
+                synchronized(manager){call(manager,"serviceVisibleSurfaces",new Class<?>[]{int.class,int.class,long.class},0,0,System.nanoTime()+1_000_000);}
+            }
+            assertEquals(previews,((Number)service.performanceSnapshot().get("previewBuilds")).longValue(),"Completed fine templates do not loop");
             field("cameraBlockX").setDouble(manager,5120);
             call(manager,"refreshFarSurfaces",new Class<?>[0]);
-            assertSame(far,manager.renderSnapshot().tiles().get(key).data().voxyTile);
+            assertSame(refined,manager.renderSnapshot().tiles().get(key).data().voxyTile);
             finish(manager,key,false);
             var exact=manager.renderSnapshot().tiles().get(key).data().voxyTile;
             assertTrue(exact.surfaceComplete());assertFalse(exact.approximateDecorations());
-            assertSame(base.columns(),exact.columns());
+            assertSame(fine.columns(),exact.columns());
         } finally {config.predictionFarDecorations=enabled;config.predictionExactDistanceBlocks=radius;}
     }
     private static void finish(PredictionTileManager manager,PredictionTileManager.PredictionTileKey key,boolean approximate)throws Exception {

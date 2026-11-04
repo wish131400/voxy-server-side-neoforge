@@ -52,6 +52,7 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     private final VssLodSampleCache sharedColumns;
     private ClientColumnSample[] columns;
     private ClientColumnSample[] displaySamples;
+    @Override public net.minecraft.resources.ResourceLocation predictionDimension() { return terrain.profile().dimension(); }
     // State IDs are richer than ClientColumnSample's block IDs. Retain the
     // original immutable record for this bounded job instead of looking it up
     // in the shared sampler for every ground/heightmap/tree-space query.
@@ -170,6 +171,8 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
             }
             return sample;
         }
+        if (displayTerrain && PredictionFarDecoration.approximating() && !(terrain instanceof RustTerrainSampler))
+            return PredictionFarDecoration.current().proxySample(x, z);
         if (displayTerrain && terrain instanceof RustTerrainSampler rust) {
             int slot = columnSlot(x, z);
             if (displaySamples == null) displaySamples = new ClientColumnSample[COLUMN_CACHE_SIZE];

@@ -251,8 +251,13 @@ public class ClientTerrainSampler implements AutoCloseable {
     final void terrainBackendOverride(String id) { terrainBackendOverride = id; }
     final String terrainBackendOverride() { return terrainBackendOverride; }
 
+    boolean supportsLodGrid() { return false; }
     boolean sampleLodGrid(int x, int z, int step, int width, int height, ClientColumnSample[] target,
                          int offset, int stride, boolean preview) { return false; }
+
+    /** True when this backend handled the whole request, including a capture change partway through. */
+    boolean sampleLodGridRequest(int x, int z, int step, int size, ClientColumnSample[] target,
+                                 boolean preview, java.util.function.BooleanSupplier valid) { return false; }
 
     long cacheFingerprint() { return dimensionSalt ^ profile.dimension().hashCode(); }
 
@@ -406,6 +411,17 @@ public class ClientTerrainSampler implements AutoCloseable {
         }
         return occupied;
     }
+
+    interface SamplingScope extends AutoCloseable { @Override void close(); }
+
+    /** Mutable sampling work belongs to this worker request and ends even on cancellation. */
+    SamplingScope exteriorRequest() { return () -> {}; }
+
+    /** Own backend scratch across terrain, biome, exterior and decoration phases of one task. */
+    SamplingScope terrainRequest() { return () -> {}; }
+
+    /** A backend may retain immutable seed terrain when authoritative captures change. */
+    ClientColumnSample retainAfterCapture(ClientColumnSample sample) { return null; }
 
     boolean[][] exteriorFootprints(int[] x, int[] z, int step, int[] bottom, int[] top, int count,
                                    java.util.function.BooleanSupplier valid) {

@@ -32,6 +32,7 @@ class PredictionBackgroundSchedulingTest {
         };
         var budget=new PredictionMemoryBudget(2048L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,4);
         try(var manager=new PredictionTileManager(profile.levelKey(),sampler,budget,null)) {
+            var unified=PredictionTileManager.class.getDeclaredField("unifiedVoxy");unified.setAccessible(true);unified.setBoolean(manager,true);
             manager.setWorkView(PredictionWorkView.of(0,80,0,1,0,0,70,16D/9));
             var background=PredictionTileManager.class.getDeclaredMethod("backgroundWork",PredictionTileManager.PredictionTileKey.class);
             background.setAccessible(true);
@@ -47,6 +48,7 @@ class PredictionBackgroundSchedulingTest {
                 rear.add(key);
                 var parent=new PredictionTileManager.PredictionTileKey(profile.levelKey(),x>>1,0,2);
                 desired.add(key);desired.add(parent);leaves.add(key);
+                ((Set<PredictionTileManager.PredictionTileKey>)field(manager,"voxyDetailTargets")).add(key);
                 ready.put(parent,new PredictionTileManager.PredictionTile(parent,new int[0],new int[0],
                         new ClientColumnSample[0],null,new PredictionDepthBound(64,64),0,1,8,32));
             }

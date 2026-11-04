@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import vss_performance_mcp as mcp
 
@@ -77,6 +78,38 @@ class ProtocolTest(unittest.TestCase):
                     self.assertEqual(("/samples?limit=2", "Bearer " + token), observed[-1])
                 path.write_text(json.dumps({"host": "example.org", "port": 80, "token": "x"}), encoding="utf-8")
                 self.assertTrue(self.request("tools/call", {"name": "vss_get_status"}, session=path)["result"]["isError"])
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=5)
+
+    def test_large_live_report_is_complete_and_size_limit_is_explicit(self):
+        payload = json.dumps({"samples": [{"fps": 95}], "padding": "x" * (17 * 1024 * 1024)}).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Length", str(len(payload))); self.end_headers()
+                try:
+                    self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "session.json"
+                path.write_text(json.dumps({"host": "127.0.0.1", "port": server.server_port,
+                                            "token": "private-token"}), encoding="utf-8")
+                reply = self.request("tools/call", {"name": "vss_get_report"}, session=path)["result"]
+                self.assertFalse(reply["isError"])
+                self.assertEqual(json.loads(payload), json.loads(reply["content"][0]["text"]))
+                with patch.object(mcp, "MAX_RESPONSE_BYTES", 1024 * 1024):
+                    reply = self.request("tools/call", {"name": "vss_get_report"}, session=path)["result"]
+                self.assertTrue(reply["isError"])
+                self.assertIn("read limit", reply["content"][0]["text"])
+                self.assertNotIn("private-token", reply["content"][0]["text"])
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=5)
 

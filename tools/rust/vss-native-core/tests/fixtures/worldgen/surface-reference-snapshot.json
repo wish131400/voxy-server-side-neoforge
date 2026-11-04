@@ -1,0 +1,48 @@
+{
+  "custom_registries": {
+    "lithostitched:surface_rule": {
+      "test:last": {
+        "result_state": {
+          "Name": "minecraft:dirt"
+        },
+        "type": "minecraft:block"
+      },
+      "test:first": {
+        "result_state": {
+          "Name": "minecraft:granite"
+        },
+        "type": "minecraft:block"
+      }
+    }
+  },
+  "registry_tags": {
+    "lithostitched:surface_rule": {
+      "test:empty": [],
+      "test:ordered": [
+        "test:last",
+        "test:first"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "rules": "test:first",
+      "type": "lithostitched:reference"
+    },
+    {
+      "rules": [
+        "test:last",
+        "test:first"
+      ],
+      "type": "lithostitched:reference"
+    },
+    {
+      "rules": "#test:ordered",
+      "type": "lithostitched:reference"
+    },
+    {
+      "rules": "#test:empty",
+      "type": "lithostitched:reference"
+    }
+  ]
+}

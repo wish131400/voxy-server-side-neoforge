@@ -4,7 +4,6 @@ import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
@@ -33,7 +32,8 @@ final class PredictionSurfaceStructures {
     private final List<Holder<StructureSet>> sets;
     private final List<List<Holder<StructureSet>>> setsByStep;
     private final Map<Structure, Integer> indices = new HashMap<>();
-    private final Map<Key, StructureStart> starts = new LinkedHashMap<>(64, .75F, true);
+    private final PredictionSharedCache<Key, StructureStart> starts = new PredictionSharedCache<>(512);
+    private final PredictionStructureTerrain terrain;
     private final java.util.Set<Structure> loggedFailures = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Set<Structure> missingRegistryFailures = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.LongAdder placedStarts = new java.util.concurrent.atomic.LongAdder();
@@ -41,6 +41,7 @@ final class PredictionSurfaceStructures {
 
     PredictionSurfaceStructures(ClientTerrainSampler context) {
         this.context = context;
+        this.terrain = new PredictionStructureTerrain(context.generatorContext(), context.randomStateContext());
         this.access = context.decorationAccess();
         PredictionStructureTemplates found = null;
         ChunkGeneratorStructureState generation = null;
@@ -54,6 +55,9 @@ final class PredictionSurfaceStructures {
                         access.registryOrThrow(Registries.STRUCTURE_SET).holders()
                                 .filter(holder -> holder.value().placement() instanceof RandomSpreadStructurePlacement)
                                 .map(holder -> (Holder<StructureSet>) holder));
+                // Freeze vanilla's lazy placement maps before publishing this shared context.
+                // Random-spread generation then reads them without a global start lock.
+                generation.ensureStructuresGenerated();
                 possible = generation.possibleStructureSets().stream().filter(holder -> holder.value().structures()
                         .stream().anyMatch(entry -> supported(entry.structure().value()))).toList();
                 Map<GenerationStep.Decoration,Integer> stepIndices = new java.util.EnumMap<>(GenerationStep.Decoration.class);
@@ -136,10 +140,12 @@ final class PredictionSurfaceStructures {
                 // Some vanilla scattered pieces memoize height during postProcess.
                 // Serialize access to a cached start, without locking other starts.
                 synchronized (start) {
-                    start.placeInChunk(level, null, context.generatorContext(), random,
-                            new BoundingBox(chunkX * 16, level.getMinBuildHeight(), chunkZ * 16,
-                                    chunkX * 16 + 15, level.getMaxBuildHeight() - 1, chunkZ * 16 + 15),
-                            new ChunkPos(chunkX, chunkZ));
+                    try (var terrainScope = terrain.enter()) {
+                        start.placeInChunk(level, null, context.generatorContext(), random,
+                                new BoundingBox(chunkX * 16, level.getMinBuildHeight(), chunkZ * 16,
+                                        chunkX * 16 + 15, level.getMaxBuildHeight() - 1, chunkZ * 16 + 15),
+                                new ChunkPos(chunkX, chunkZ));
+                    }
                 }
                 placedStarts.increment();
                 success = true;
@@ -157,10 +163,13 @@ final class PredictionSurfaceStructures {
         }
     }
 
-    private synchronized StructureStart start(StructureSet set, ChunkPos pos) {
-        Key key = new Key(set, pos.toLong());
-        StructureStart cached = starts.get(key);
-        if (cached != null) return cached;
+    private StructureStart start(StructureSet set, ChunkPos pos) {
+        return starts.get(new Key(set, pos.toLong()), () -> {
+            try (var terrainScope = terrain.enter()) { return generateStart(set, pos); }
+        }, PredictionSurfaceStructures::checkCancelled);
+    }
+
+    private StructureStart generateStart(StructureSet set, ChunkPos pos) {
         checkCancelled();
         StructureStart result = StructureStart.INVALID_START;
         if (set.placement().isStructureChunk(state, pos.x, pos.z)) {
@@ -196,8 +205,6 @@ final class PredictionSurfaceStructures {
                 }
             }
         }
-        starts.put(key, result);
-        if (starts.size() > 512) starts.remove(starts.keySet().iterator().next());
         return result;
     }
 

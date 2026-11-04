@@ -83,7 +83,7 @@ public final class VoxyPredictionBridge {
             cacheHits = new LongAdder(), acquisitions = new LongAdder(), faceReads=new LongAdder(),faceSnapshotHits=new LongAdder(),
             unchangedNotifications=new LongAdder(),blockNotifications=new LongAdder(),childNotifications=new LongAdder(),
             earlyUnchangedNotifications=new LongAdder(), updateBatches=new LongAdder(),
-            updateNanos=new LongAdder(), emptyWithdrawals=new LongAdder();
+            updateNanos=new LongAdder(), emptyWithdrawals=new LongAdder(), unwatchedNotifications=new LongAdder();
     private static final int MAX_SNAPSHOTS = 512;
     private static final int NOTIFICATIONS_PER_BATCH = 256;
     private static final long UPDATE_SLICE_NANOS = 4_000_000L;
@@ -867,6 +867,7 @@ public final class VoxyPredictionBridge {
                 Map.entry("subdivisionWaiters", ctx == null ? 0 : ctx.subdivisionWaiters.size()),
                 Map.entry("pendingNotifications", ctx == null ? 0 : ctx.dirty.size()),
                 Map.entry("pendingWithdrawals", ctx == null ? 0 : ctx.withdrawals.size()),
+                Map.entry("unwatchedNotifications",unwatchedNotifications.sum()),
                 Map.entry("updateBatches", updateBatches.sum()), Map.entry("updateNanos", updateNanos.sum()),
                 Map.entry("emptyWithdrawals", emptyWithdrawals.sum()),
                 Map.entry("nativeMeshBacklog", ctx == null ? -1 : ctx.nativeMeshBacklog),
@@ -1141,6 +1142,11 @@ public final class VoxyPredictionBridge {
                         long pos = next;
                         long version=version(pos);
                         Source owner=enabled()?source:null;
+                        if(owner!=null && VoxyRenderAccess.invalidateUnwatched(nodes,pos)) {
+                            delivered.remove(pos);
+                            unwatchedNotifications.increment(); notifying=null;
+                            continue;
+                        }
                         Delivered previous=delivered.get(pos);
                         // First publication and revoked evidence go straight to the
                         // direct-write path. The optional probe never builds missing data.
@@ -1173,7 +1179,9 @@ public final class VoxyPredictionBridge {
                             } finally { if (real != null) release.invoke(real); notifying = null; }
                             continue;
                         }
-                        Object section = compose(engine, pos, real, false);
+                        // A retired overlay restores native data directly. Calling compose
+                        // here would recreate the request token just removed by pruning.
+                        Object section = retired ? real : compose(engine, pos, real, false);
                         if (section == null) {
                             section = create.invoke(null, level(pos), x(pos), y(pos), z(pos)); acquire.invoke(section);
                             Arrays.fill(voxels.writable(section), 0L);
@@ -1200,7 +1208,7 @@ public final class VoxyPredictionBridge {
                                     if((flags&1)!=0)blockNotifications.increment();
                                     if((flags&2)!=0)childNotifications.increment();
                                 } else unchangedNotifications.increment();
-                                delivered.put(pos,content);
+                                if(version>=0)delivered.put(pos,content);
                             }}
                         }
                         finally { release.invoke(section); notifying = null; }
@@ -1235,7 +1243,14 @@ public final class VoxyPredictionBridge {
             synchronized (pruner) {
                 if (closed) return;
                 pruner.prune(requested, cameraX, cameraZ, radius, System.nanoTime(), pos -> {
-                    invalidateCached(pos); dirty.remove(pos); predictionOnly.remove(pos);delivered.remove(pos);
+                    invalidateCached(pos);
+                    boolean published=predictionOnly.remove(pos);
+                    published|=delivered.remove(pos)!=null;
+                    subdivisionWaiters.remove(pos);
+                    // Forgetting the CPU request must not cancel its last native
+                    // geometry invalidation. Watched nodes still need withdrawal;
+                    // unwatched ones take the cheap geometry-cache path above.
+                    if(published)dirty.add(pos);
                 });
             }
         }

@@ -13,8 +13,10 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
     private final FreeTerraForgedCells cells;
     private final AutoCloseable runtimeOwner;
     private final FreeTerraForgedWater water;
+    private final FreeTerraForgedSamples exactSamples = new FreeTerraForgedSamples(32768);
+    private final FreeTerraForgedSamples previewSamples = new FreeTerraForgedSamples(8192);
     private volatile FreeTerraForgedExterior exterior;
-    private boolean closed;
+    private volatile boolean closed;
 
     FreeTerraForgedTerrainSampler(DimensionProfile profile, NoiseBasedChunkGenerator generator,
             RandomState randomState, LevelHeightAccessor heights,
@@ -62,9 +64,24 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
         return FreeTerraForgedDensity.coarse(false, () -> exterior().sample(xs, zs, step, bottoms, tops, count, valid));
     }
 
+    @Override SamplingScope exteriorRequest() { return exterior().request(); }
+
+    @Override SamplingScope terrainRequest() { return cells == null ? super.terrainRequest() : cells.request(); }
+
+    @Override ClientColumnSample retainAfterCapture(ClientColumnSample sample) {
+        // Captures, area mips and city summaries belong to mutable inputs. Seed-only
+        // surfaces and their sampled occupancy remain valid within this sampler.
+        // Enrichment still visits new cliffs and floods from retained overhangs.
+        return sample == null || sample.captured() || !sample.reusableFor(false)
+                || sample.floating() || PredictionExteriorColumns.interiorVolume(sample)
+                ? null : sample;
+    }
+
     @Override String densityCompilerDiagnostics() {
         var active = exterior;
-        return super.densityCompilerDiagnostics() + ",ftfExterior={" + (active == null ? "state=idle" : active.diagnostics()) + "}";
+        return super.densityCompilerDiagnostics() + ",ftfExterior={" + (active == null ? "state=idle" : active.diagnostics()) + "}"
+                + ",ftfSamples={" + exactSamples.diagnostics() + "},ftfPreviews={" + previewSamples.diagnostics() + "}"
+                + ",ftfRegions={" + (cells == null ? "state=idle" : cells.diagnostics()) + "}";
     }
 
     @Override public int surfaceY(int x, int z) { prepare(x, z); return super.surfaceY(x, z); }
@@ -75,11 +92,37 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
     }
 
     @Override public ClientColumnSample sampleForLod(int x, int z, int stepBlocks) {
-        return FreeTerraForgedDensity.coarse(false, () -> super.sampleForLod(x, z, stepBlocks));
+        return sampleSurface(x, z);
+    }
+
+    @Override public ClientColumnSample sampleSurface(int x, int z) {
+        return exactSamples.get(x, z, () -> FreeTerraForgedDensity.coarse(false, () -> super.sampleSurface(x, z)));
     }
 
     @Override public ClientColumnSample samplePreview(int x, int z) {
-        return FreeTerraForgedDensity.coarse(true, () -> super.samplePreview(x,z));
+        return previewSamples.get(x, z, () -> FreeTerraForgedDensity.coarse(true, () -> super.samplePreview(x,z)));
+    }
+
+    @Override boolean supportsLodGrid() { return true; }
+
+    @Override boolean sampleLodGridRequest(int x, int z, int step, int size, ClientColumnSample[] target,
+                                          boolean preview, java.util.function.BooleanSupplier valid) {
+        sampleLodGrid(x, z, step, size, size, target, 0, size, preview, valid);
+        return true;
+    }
+
+    @Override boolean sampleLodGrid(int x, int z, int step, int width, int height,
+            ClientColumnSample[] target, int offset, int stride, boolean preview) {
+        return sampleLodGrid(x, z, step, width, height, target, offset, stride, preview, () -> true);
+    }
+
+    boolean sampleLodGrid(int x, int z, int step, int width, int height,
+            ClientColumnSample[] target, int offset, int stride, boolean preview,
+            java.util.function.BooleanSupplier valid) {
+        return FreeTerraForgedGrid.sample(x, z, step, width, height, target, offset, stride, () -> {
+            if (closed || Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
+            return valid.getAsBoolean();
+        }, preview ? this::samplePreview : this::sampleSurface);
     }
 
     @Override int surfaceColorForLod(int x,int y,int z,boolean preview) {
@@ -118,6 +161,7 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
     @Override public void close() {
         synchronized (this) {
             closed = true;
+            exactSamples.close(); previewSamples.close();
             if (exterior != null) exterior.close();
         }
         try {

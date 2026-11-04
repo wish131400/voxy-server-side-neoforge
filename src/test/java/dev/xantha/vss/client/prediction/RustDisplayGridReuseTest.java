@@ -7,6 +7,14 @@ import org.junit.jupiter.api.Test;
 /** Cross-language regression: exact cache warmth must preserve display policy and records. */
 class RustDisplayGridReuseTest {
     @Test void partialExactCacheReusePreservesTheNativeGridRoute() throws Exception {
+        assertNativeGrid(false);
+    }
+
+    @Test void preliminaryOnlyVerticalCacheRetainsTheNativeDisplayGridRoute() throws Exception {
+        assertNativeGrid(true);
+    }
+
+    private void assertNativeGrid(boolean preliminaryOrder) throws Exception {
         ClientTerrainSamplerTest.bootstrapMinecraft();
         String library = System.getProperty("vss.testNativeLibrary");
         if (library != null) RustWorldgenBackend.load(java.nio.file.Path.of(library));
@@ -28,7 +36,14 @@ class RustDisplayGridReuseTest {
             settings.add("surface_rule", com.google.gson.JsonParser.parseString("{\"type\":\"minecraft:block\",\"result_state\":{\"Name\":\"minecraft:stone\"}}"));
             var flat = com.google.gson.JsonParser.parseString("{\"type\":\"minecraft:y_clamped_gradient\",\"from_y\":64,\"to_y\":80,\"from_value\":1,\"to_value\":-1}");
             settings.getAsJsonObject("noise_router").add("final_density", flat);
-            settings.getAsJsonObject("noise_router").add("initial_density_without_jaggedness", flat.deepCopy());
+            var initial = flat.deepCopy();
+            if (preliminaryOrder) {
+                var cache = new com.google.gson.JsonObject();
+                cache.addProperty("type", "minecraft:cache_2d");
+                cache.add("argument", initial);
+                initial = cache;
+            }
+            settings.getAsJsonObject("noise_router").add("initial_density_without_jaggedness", initial);
             long world = RustWorldgenBackend.create(1, 0, document.toString());
             try (var sampler = new RustTerrainSampler(world,
                     profile, new ClientTerrainSampler(1, profile))) {

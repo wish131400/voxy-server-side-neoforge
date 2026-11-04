@@ -18,6 +18,24 @@ class PredictionVoxyHorizonTest {
         var key=new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,0,0,7);
         source.put(new PredictionVoxySource.Tile(key,0,0,8192,8,1024,columns,List.of(),256));
     }
+    @Test void distanceShrinkAndReexpandRestoreAlreadyGeneratedSectionAndFaceCaches() {
+        try(var source=new PredictionVoxySource()) {
+            ancestor(source);
+            long pos=VoxyPredictionBridge.position(4,8,0,0);
+            source.window(0,0,8192);
+            assertTrue(solid(source.section(pos,MAPPER)[16]));
+            assertTrue(solid(source.face(pos,MAPPER,2)[16]));
+            long tiles=((Number)source.diagnostics().get("voxelTiles")).longValue();
+            source.window(0,0,1024);
+            assertFalse(solid(source.section(pos,MAPPER)[16]));
+            assertFalse(solid(source.face(pos,MAPPER,2)[16]));
+            source.window(0,0,8192);
+            assertTrue(solid(source.section(pos,MAPPER)[16]),"Expanded distance restores resident terrain without another put/build");
+            assertTrue(solid(source.face(pos,MAPPER,2)[16]),"Clipped neighbor faces must also be refreshed");
+            assertEquals(tiles,((Number)source.diagnostics().get("voxelTiles")).longValue());
+        }
+    }
+
     @Test void stableMaskPreservesTheWholeRequestedCircleAtSignedCellCorners() {
         for(double x:new double[]{0,63.999,-64,-.001,3761})for(double z:new double[]{0,-2460,63.999}) {
             var mask=PredictionVoxyHorizon.of(x,z,4096);

@@ -1,0 +1,15 @@
+allprojects { afterEvaluate {
+    tasks.register('surfaceQueueTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        ['PredictionSurfaceQueueTest', 'PredictionSchedulingConcurrencyTest',
+         'PredictionNearFirstSchedulingTest', 'PredictionTeleportSchedulingTest',
+         'PredictionSurfacePipelineTest', 'PredictionSurfaceDemandTest',
+         'PredictionFarDecorationTest', 'PredictionSurfaceRetryTest'].each { include "**/${it}.class" }
+        jvmArgs '-XX:ActiveProcessorCount=8'
+        maxHeapSize = '2G'; maxParallelForks = 1; forkEvery = 1
+        testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+    }
+} }

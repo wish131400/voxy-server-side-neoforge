@@ -19,6 +19,10 @@ final class PredictionWorldgenCapabilities {
             // Youkaishomecoming's four-corner noise condition. A live capture of
             // the overworld reported exactly these two as the last blockers.
             "terrablender:merged",
+            // Implemented by the native surface plan, including positional RNG
+            // and ordered references resolved from the registry snapshot.
+            "biomeswevegone:state_provider", "biomeswevegone:between_repeating_noise_range",
+            "biomeswevegone:bands", "lithostitched:reference",
             "youkaishomecoming:noise",
             "tectonic:invert",
             "lithostitched:axis", "lithostitched:ceil", "lithostitched:floor", "lithostitched:sin",

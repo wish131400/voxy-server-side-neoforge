@@ -60,3 +60,35 @@ fn independent_workspaces_share_exact_inputs_concurrently() {
     graph.close_shared_corners();
     assert_eq!(graph.horizontal_stats()["payloadBytes"],json!(0));
 }
+
+#[test]
+fn preliminary_cache_order_does_not_disable_independent_horizontal_climate() {
+    let mut doc = document();
+    doc["settings"]["noise_router"]["initial_density_without_jaggedness"] =
+        json!({"type":"minecraft:cache_2d","argument":{
+            "type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,
+            "from_value":1.0,"to_value":-1.0}});
+    let fast = Graph::from_document(-917, &doc).unwrap();
+    doc["vss_horizontal_climate"] = json!(false);
+    let slow = Graph::from_document(-917, &doc).unwrap();
+    assert!(fast.initial_column_order);
+    assert!(!fast.requires_complete_column_order());
+    for (x,z) in [(0,0),(-17,15),(100000,-100000),(0,0)] {
+        let mut a = fast.scratch(x,z,4,8).unwrap();
+        let mut b = slow.scratch(x,z,4,8).unwrap();
+        fast.initialize_column_caches(&mut a);
+        slow.initialize_column_caches(&mut b);
+        for mode in [Mode::Single,Mode::Raw,Mode::Cell,Mode::Raw] {
+            for y in [319,63,-64,319] {
+                a.advance_block(); b.advance_block();
+                for (name,&id) in &fast.roots {
+                    assert_eq!(fast.compute(id,[x,y,z],mode,&mut a).to_bits(),
+                        slow.compute(slow.root(name).unwrap(),[x,y,z],mode,&mut b).to_bits(),
+                        "{name} {mode:?} at {x},{y},{z}");
+                }
+            }
+        }
+    }
+    assert!(fast.horizontal_stats()["hits"].as_u64().unwrap()>0);
+    assert!(fast.horizontal_lookup(&[(0,0)]).iter().any(|b| *b != 0));
+}

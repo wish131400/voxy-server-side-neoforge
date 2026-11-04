@@ -162,7 +162,7 @@ class PredictionPlanningPipelineTest {
     static PredictionSchedulePreparation.Input schedulingInput(PredictionPlanPreparation.Input i) {
         return new PredictionSchedulePreparation.Input(i.layout(), i.focus(), i.view(), i.x(), i.y(), i.z(),
                 i.pixels(), i.minY(), i.maxY(), i.revision(), List.of(), i.residents(), Set.of(), Set.of(), Set.of(),
-                Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), Map.of(), Map.of(), PredictionMediumCoverage.EMPTY,
+                Set.of(),java.util.Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), Map.of(), Map.of(), PredictionMediumCoverage.EMPTY,
                 false, false, false, false, Map.of(), Set.of(), Set.of(), i.initialAxes(), null,
                 Map.of(), Map.of(), Map.of(), i.now(), false);
     }

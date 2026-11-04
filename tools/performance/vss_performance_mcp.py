@@ -6,6 +6,13 @@ import json
 from pathlib import Path
 import sys
 
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+class ReportTooLarge(ValueError):
+    pass
+
+
 TOOLS = [
     ("vss_get_status", "/status", "Read capture state, age and latest FPS/CPU/loading/stage metrics."),
     ("vss_get_samples", "/samples", "Read recent gameplay intervals (up to 600); labels and modes support comparisons."),
@@ -54,7 +61,10 @@ def query(session_path, report_path, path, limit):
         response = connection.getresponse()
         if response.status != 200:
             raise ValueError(f"VSS diagnostic service returned HTTP {response.status}; restart capture if the session is stale")
-        return json.loads(response.read(16 * 1024 * 1024))
+        payload = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_RESPONSE_BYTES:
+            raise ReportTooLarge()
+        return json.loads(payload)
     finally:
         connection.close()
 
@@ -100,6 +110,10 @@ def dispatch(request, session_path, report_path):
     try:
         data = query(session_path, report_path, match[1], limit)
         return ok({"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}], "isError": False})
+    except ReportTooLarge:
+        return ok({"content": [{"type": "text", "text":
+                   "Performance response exceeds the 64 MiB read limit; use vss_get_samples with a smaller limit."}],
+                   "isError": True})
     except (OSError, ValueError, http.client.HTTPException) as failure:
         # Do not echo descriptor contents or bearer tokens.
         detail = ("Session/report unavailable. Run /vssclient prediction perf start and check --session, "

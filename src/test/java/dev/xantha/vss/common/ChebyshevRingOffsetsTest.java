@@ -95,7 +95,7 @@ class ChebyshevRingOffsetsTest {
         int distance = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
         int count = ChebyshevRingOffsets.count(distance);
 
-        assertEquals(268_468_225, count);
+        assertEquals(16_785_409, count);
         assertEquals(distance, ChebyshevRingOffsets.ringForIndex(count - 1));
         assertEquals(distance, ChebyshevRingOffsets.ring(ChebyshevRingOffsets.offsetAt(count - 1)));
     }

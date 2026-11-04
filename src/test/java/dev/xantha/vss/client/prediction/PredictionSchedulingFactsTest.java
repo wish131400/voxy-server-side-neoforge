@@ -30,7 +30,7 @@ class PredictionSchedulingFactsTest {
             var focus=round%3==0?new VssLodFocus(0,0,512):null;
             var view=round%4==0?null:PredictionWorkView.of(0,80,0,1,0,0,70,1);
             var i=new Input(layout,focus,view,0,80,0,1000,-64,320,0,keys,
-                new RenderSnapshot(Level.OVERWORLD,layout,residents,Map.of()),Set.copyOf(keys),sets.get(0),sets.get(1),sets.get(2),sets.get(3),sets.get(4),
+                new RenderSnapshot(Level.OVERWORLD,layout,residents,Map.of()),Set.copyOf(keys),sets.get(0),sets.get(1),sets.get(2),Set.of(),sets.get(3),sets.get(4),
                 maps.get(0),maps.get(1),maps.get(2),maps.get(3),new PredictionMediumCoverage(sets.get(5),sets.get(6)),random.nextBoolean(),true,false,random.nextBoolean(),
                 maps.get(4),sets.get(7),sets.get(8),Collections.nCopies(layout.levelCount(),8),null,Map.of(),failed,deferred,100_000_000_000L,random.nextBoolean());
             for(var key:keys) {

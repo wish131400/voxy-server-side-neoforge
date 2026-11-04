@@ -9,6 +9,16 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class PredictionVoxySourceTest {
+
+    @Test void relocatedHorizonProvesOldPredictionAbsentBeforeDeferredCpuRetirement() {
+        try(var source=new PredictionVoxySource()) {
+            source.put(tile(0,0,0,32,1,8));
+            long pos=VoxyPredictionBridge.position(0,0,0,0);
+            source.window(0,0,1024);assertTrue(source.mayHavePrediction(pos,MAPPER));
+            source.window(10000,10000,1024);
+            assertFalse(source.mayHavePrediction(pos,MAPPER),"Resident CPU data outside the new horizon cannot pin a native mesh");
+        }
+    }
     @Test void deferredRemovalDoesNotBlockTheCallerOrDeleteReactivatedTiles() throws Exception {
         try(var source=new PredictionVoxySource()) {
             var tile=tile(0,0,0,32,1,8);source.put(tile);
@@ -258,6 +268,40 @@ class PredictionVoxySourceTest {
         }
     }
 
+
+    @Test void progressiveTemplateBlocksSurviveEmptyCoarseCompletionWithoutClaimingUnknownAir() {
+        for(boolean coarseHasTree:new boolean[]{false,true})try(var source=new PredictionVoxySource()) {
+            var parent=tile(0,0,1,32,2,4);
+            var oldTree=new PredictionVoxySource.Box(16,4,16,17,12,17,Blocks.DIRT.defaultBlockState());
+            source.put(new PredictionVoxySource.Tile(parent.key(),0,0,64,32,2,parent.columns(),
+                    coarseHasTree?List.of(oldTree):List.of(),320,true,0));
+            var child=tile(0,0,0,32,1,4);
+            var tree=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.STONE.defaultBlockState());
+            source.put(new PredictionVoxySource.Tile(child.key(),0,0,32,32,1,child.columns(),List.of(tree),320,false,0,null,true));
+            long pos=VoxyPredictionBridge.position(0,0,0,0);
+            var data=source.section(pos,MAPPER);
+            assertEquals(1L<<27,data[8<<10|8<<5|8],"A complete coarse surface cannot hide a finer progressive template");
+            assertEquals(coarseHasTree?3L<<27:0,data[8<<10|16<<5|16] & (0xfffffL<<27),
+                    "Unknown air in a progressive surface cannot remove inherited trees");
+            var map=source.mapChunk(0,0);
+            assertNotNull(map);
+            assertTrue(map.pixels()[8*16+8].runs().stream().anyMatch(r->r.state().is(Blocks.STONE) && r.top()==12),
+                    "Map projection must use the same progressive visibility as native voxels");
+            // Exact completion owns absence and replaces both partial and inherited trees.
+            source.put(new PredictionVoxySource.Tile(child.key(),0,0,32,32,1,child.columns(),List.of(),256,true,0));
+            assertEquals(0,source.section(pos,MAPPER)[8<<10|8<<5|8] & (0xfffffL<<27));
+        }
+        try(var source=new PredictionVoxySource()) {
+            var coarse=tile(0,0,1,32,2,4);
+            var tree=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.STONE.defaultBlockState());
+            source.put(new PredictionVoxySource.Tile(coarse.key(),0,0,64,32,2,coarse.columns(),List.of(tree),320,false,0,null,true));
+            var exact=tile(0,0,0,32,1,4);
+            source.put(new PredictionVoxySource.Tile(exact.key(),0,0,32,32,1,exact.columns(),List.of(),256,true,0));
+            assertEquals(0,source.section(VoxyPredictionBridge.position(0,0,0,0),MAPPER)[8<<10|8<<5|8] & (0xfffffL<<27),
+                    "A coarser template cannot override finer completed exact absence");
+        }
+    }
+
     @Test void sameFootprintTerrainUpgradeKeepsPublishedVegetation() {
         try (var source = new PredictionVoxySource()) {
             var preview = tile(0,0,0,16,2,4);
@@ -353,6 +397,28 @@ class PredictionVoxySourceTest {
         assertTrue(retained.surfaceComplete()); assertEquals(256L+retained.columns().length*4L+retained.boxes().bytes()+retained.featureIndex().bytes(),retained.bytes());
         assertTrue(PredictionVoxelData.forVoxy(retained).voxyTile.surfaceComplete());
     }
+    @Test void fineTemplateCoverageWithdrawsCoarseCrownsBeforeFallbackFinishes() {
+        for(boolean coarseComplete:new boolean[]{false,true})try(var source=new PredictionVoxySource()) {
+            var parent=tile(0,0,1,32,2,4);
+            var coarse=new PredictionVoxySource.Box(8,4,8,16,16,16,Blocks.DIRT.defaultBlockState());
+            var structure=new PredictionVoxySource.Box(20,4,20,21,8,21,Blocks.DIRT.defaultBlockState());
+            source.put(new PredictionVoxySource.Tile(parent.key(),0,0,64,32,2,parent.columns(),
+                    List.of(coarse,structure),320,coarseComplete,0,null,true,8,1));
+            var child=tile(0,0,0,32,1,4);
+            var fine=new PredictionVoxySource.Box(8,4,8,9,12,9,Blocks.STONE.defaultBlockState());
+            source.put(new PredictionVoxySource.Tile(child.key(),0,0,32,32,1,child.columns(),
+                    List.of(fine),320,false,0,null,true,1,1));
+            var voxels=source.section(VoxyPredictionBridge.position(0,0,0,0),MAPPER);
+            assertEquals(1L<<27,voxels[8<<10|8<<5|8]);
+            assertEquals(0,voxels[8<<10|15<<5|15] & (0xfffffL<<27),"Fine template absence must clear the old huge crown");
+            assertTrue(source.mapChunk(0,0).pixels()[8*16+8].runs().stream().anyMatch(run->run.state().is(Blocks.STONE)));
+            if(coarseComplete)assertEquals(3L<<27,voxels[6<<10|20<<5|20],"Unknown fallback cannot erase a retained structure");
+            source.put(new PredictionVoxySource.Tile(child.key(),0,0,32,32,1,child.columns(),List.of(),320,false,0,null,true,1,0));
+            voxels=source.section(VoxyPredictionBridge.position(0,0,0,0),MAPPER);
+            assertEquals(0,voxels[8<<10|8<<5|8] & (0xfffffL<<27),"An empty fine template stage still owns known template absence");
+        }
+    }
+
     @Test void coarsePredictionRemainsAvailableDuringPartialFineArrival() {
         try (var source = new PredictionVoxySource()) {
             source.put(tile(0,0,1,32,2,8));

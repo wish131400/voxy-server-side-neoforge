@@ -6,6 +6,19 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class VoxyPendingSectionsTest {
+    @Test void teleportReprioritizesPromotedOldMeshesBeforeSelectingAnUrgentUpdate() {
+        var queue=new VoxyPendingSections();
+        for(int i=0;i<4096;i++) {
+            long pos=VoxyPredictionBridge.position(0,i%16,i/256,i/16%16);
+            queue.add(pos);queue.promote(pos);
+        }
+        long destination=VoxyPredictionBridge.position(0,16000,0,0);
+        queue.add(destination);queue.promote(destination);queue.view(512000,0,1,0);
+        assertEquals(destination,queue.poll(),"The new view must precede thousands of promoted old-view updates");
+        assertEquals(4096,queue.size());
+        var seen=new HashSet<Long>();while(!queue.isEmpty())assertTrue(seen.add(queue.poll()));
+        assertEquals(4096,seen.size());
+    }
     @Test void aContinuouslyDirtyOldestRegionCannotStarveAnotherRegion() {
         var queue=new VoxyPendingSections();
         long one=VoxyPredictionBridge.position(0,0,0,0),two=VoxyPredictionBridge.position(0,1,0,0);

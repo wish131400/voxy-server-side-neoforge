@@ -17,6 +17,63 @@ class FreeTerraForgedExteriorTest {
         return fast.sample(new int[]{x}, new int[]{z}, step, new int[]{low}, new int[]{high}, 1, () -> true)[0];
     }
 
+    @Test void expandingAColumnOnlyEvaluatesItsMissingInterval() throws Exception {
+        var context = PredictionJavaExteriorTest.context(PredictionJavaExteriorTest.synthetic(DensityFunctions.constant(1), false));
+        try (var fast = fast(context)) {
+            assertArrayEquals(context.originalRange(0,0,1,100,161),sample(fast,0,0,1,100,161));
+            assertEquals(61,fast.evaluatedBlocks());
+            assertArrayEquals(context.originalRange(0,0,1,47,161),sample(fast,0,0,1,47,161));
+            assertEquals(114,fast.evaluatedBlocks(),"the original 61 blocks must not be evaluated again");
+            assertArrayEquals(context.originalRange(0,0,1,47,180),sample(fast,0,0,1,47,180));
+            assertEquals(133,fast.evaluatedBlocks(),"upward extension must also preserve completed occupancy");
+        }
+    }
+
+    @Test void neighbouringNoiseCellsShareOneRequestOwnedContext() throws Exception {
+        var context = PredictionJavaExteriorTest.context(PredictionJavaExteriorTest.synthetic(DensityFunctions.constant(1), false));
+        try (var fast = fast(context)) {
+            int[] xs=new int[16],zs=new int[16],lows=new int[16],tops=new int[16];
+            for(int i=0;i<16;i++){xs[i]=(i%4)*4;zs[i]=(i/4)*4;lows[i]=47;tops[i]=161;}
+            var values=fast.sample(xs,zs,1,lows,tops,16,()->true);
+            assertEquals(16,fast.builds());assertEquals(1,fast.contexts());
+            for(int i=0;i<16;i++)assertArrayEquals(context.originalRange(xs[i],zs[i],1,47,161),values[i]);
+        }
+    }
+
+    @Test void floodFrontiersAndNeighbourPassesReuseContextWhenXMovesBackwards() throws Exception {
+        var y = DensityFunctions.yClampedGradient(-64,192,-64,192);
+        var layers = DensityFunctions.rangeChoice(y,160,161,DensityFunctions.constant(1),
+                DensityFunctions.rangeChoice(y,71,98,DensityFunctions.constant(1),DensityFunctions.constant(-1)));
+        var context = PredictionJavaExteriorTest.context(PredictionJavaExteriorTest.synthetic(
+                DensityFunctions.cacheOnce(layers), false));
+        try (var fast = fast(context)) {
+            try (var request = fast.request()) {
+                for (int[] p : List.of(new int[]{0,0},new int[]{12,12},new int[]{4,8},new int[]{8,4},new int[]{0,4}))
+                    assertArrayEquals(context.originalRange(p[0],p[1],4,47,161),sample(fast,p[0],p[1],4,47,161));
+                assertEquals(1,fast.contexts(),"frontiers and anchor/neighbour passes own one graph for this chunk");
+                assertTrue(fast.diagnostics().contains("sliceRepositions="));
+            }
+            assertArrayEquals(context.originalRange(0,0,1,-64,161),sample(fast,0,0,1,-64,161));
+            assertEquals(2,fast.contexts(),"the completed request must release its mutable graph");
+        }
+    }
+
+    @Test void requestWorkingSetIsBoundedAndCancellationReleasesItsGraphs() throws Exception {
+        var context = PredictionJavaExteriorTest.context(PredictionJavaExteriorTest.synthetic(DensityFunctions.constant(1),false));
+        try (var fast = fast(context)) {
+            assertThrows(CancellationException.class, () -> {
+                try (var request = fast.request()) {
+                    for (int i=0;i<40;i++) sample(fast,i*16,0,1,100,161);
+                    sample(fast,0,0,1,47,161);
+                    assertEquals(41,fast.contexts(),"an evicted request context must be constructed again");
+                    fast.sample(new int[]{0},new int[]{0},1,new int[]{-64},new int[]{161},1,()->false);
+                }
+            });
+            assertArrayEquals(context.originalRange(0,0,1,-64,161),sample(fast,0,0,1,-64,161));
+            assertEquals(42,fast.contexts(),"cancellation must leave no old request on the worker");
+        }
+    }
+
     @Test void exactCellBatchMatchesOriginalAcrossVanillaDimensionsAquifersAndBorders() throws Exception {
         var lookup = net.minecraft.data.registries.VanillaRegistries.createLookup();
         for (var dimension : List.of(NoiseGeneratorSettings.OVERWORLD, NoiseGeneratorSettings.NETHER, NoiseGeneratorSettings.END)) {

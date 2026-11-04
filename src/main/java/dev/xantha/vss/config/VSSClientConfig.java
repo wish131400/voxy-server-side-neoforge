@@ -7,10 +7,10 @@ import java.util.Map;
 
 public class VSSClientConfig extends JsonConfig {
     private static final String FILE_NAME = "vss-client-config.json";
-    public static final String CURRENT_CONFIG_VERSION = "v0.2.16";
+    public static final String CURRENT_CONFIG_VERSION = PredictionConfigDefaults.VERSION;
     public static final int MAX_LOD_DISTANCE_CHUNKS = VSSConstants.MAX_CLIENT_LOD_DISTANCE_CHUNKS;
     public static final int MIN_PREDICTION_DISTANCE_BLOCKS = 1_024;
-    public static final int MAX_PREDICTION_DISTANCE_BLOCKS = 65_536;
+    public static final int MAX_PREDICTION_DISTANCE_BLOCKS = MAX_LOD_DISTANCE_CHUNKS * 16;
     public static final int MAX_DESIRED_BANDWIDTH_KBPS = 100_000;
     private static final Map<String, String> CONFIG_HELP = createConfigHelp();
     public static VSSClientConfig CONFIG = load(VSSClientConfig.class, FILE_NAME);
@@ -33,10 +33,10 @@ public class VSSClientConfig extends JsonConfig {
     /** Pause generation/refinement/cache loading while keeping resident prediction LOD visible. */
     public volatile boolean enablePredictionLoading = true;
     /** Prediction horizon, in blocks. */
-    public int predictionDistanceBlocks = 4_096;
-    /** Experimental biome-template decoration outside the exact radius. */
-    public boolean predictionFarDecorations = false;
-    public int predictionExactDistanceBlocks = 4_096;
+    public int predictionDistanceBlocks = PredictionConfigDefaults.DISTANCE_BLOCKS;
+    /** Biome-template decoration outside the exact radius. */
+    public boolean predictionFarDecorations = PredictionConfigDefaults.FAR_DECORATIONS;
+    public int predictionExactDistanceBlocks = PredictionConfigDefaults.EXACT_DISTANCE_BLOCKS;
     public int predictionBackgroundWorkers = 2;
     public int predictionRefinementWorkers = 0;
     /** Prediction detail profile: low, normal, high or extreme. */
@@ -77,11 +77,11 @@ public class VSSClientConfig extends JsonConfig {
         help.put("performanceTier", "预测性能档位 low/medium/high；默认 medium。low 使用四分之一逻辑线程（最多 4），medium 使用一半逻辑线程（最多 8），high 使用逻辑线程数减 2。所有档位仅按 CPU 负载自动减载，并与单人本地预生成共用余量；距离、细节等画质参数与档位无关。");
         help.put("enablePrediction", "预测远景总开关，控制预测 LOD 的显示与生成；Beta 功能，默认 true（开启）。只想暂停加载并保留已有远景，请关闭 enablePredictionLoading。");
         help.put("enablePredictionLoading", "是否继续加载预测远景；默认 true。关闭后暂停新区域生成、细化和成品缓存读取，已加载的预测 LOD 继续显示；重新开启后继续加载。仅影响客户端预测，不限制 Voxy 真实区块接收或 /vss chunky。");
-        help.put("predictionDistanceBlocks", "预测远景范围，单位方块；默认 4096；范围 "
-                + MIN_PREDICTION_DISTANCE_BLOCKS + "-" + MAX_PREDICTION_DISTANCE_BLOCKS
-                + "。它独立于 VSS 的 lodDistanceChunks。");
-        help.put("predictionFarDecorations", "实验性远区装饰模板与粗网格环境；默认 false。仅作用于真实计算半径外，允许改变装饰位置和形态，不扩大总预测距离。");
-        help.put("predictionExactDistanceBlocks", "保留现有装饰计算的半径，默认 4096 格；外加 256 格提前细化区。仅在开启远区装饰实验时生效。");
+        help.put("predictionDistanceBlocks", "预测远景半径，界面单位区块；默认 " + (PredictionConfigDefaults.DISTANCE_BLOCKS / 16) + "；范围 "
+                + (MIN_PREDICTION_DISTANCE_BLOCKS / 16) + "-" + MAX_LOD_DISTANCE_CHUNKS
+                + "。为兼容旧配置，此字段保存值为区块数乘以 16；它独立于 VSS 的 lodDistanceChunks。");
+        help.put("predictionFarDecorations", "远区装饰模板与粗网格环境；默认 " + PredictionConfigDefaults.FAR_DECORATIONS + "。仅作用于真实计算半径外，允许改变装饰位置和形态，不扩大总预测距离。");
+        help.put("predictionExactDistanceBlocks", "保留现有装饰计算的半径，默认 " + (PredictionConfigDefaults.EXACT_DISTANCE_BLOCKS / 16) + " 区块；外加 16 区块提前细化区。此字段保存值为区块数乘以 16；仅在开启远区装饰时生效。");
         help.put("predictionDetail", "预测地形采样细节等级 low/normal/high/extreme，影响视角细化需求；最终构网、LOD 和绘制使用 Voxy。");
         help.put("predictionBackgroundWorkers", "后台任务分类上限；默认 2，范围 1-4，与预测任务共用总 CPU 预算。可见区域按屏幕细节需求优先，纯视野外已有覆盖的区域停止新升级；画面边缘保留缓冲，最低粗覆盖、必要交接和已加载远景继续保留。");
         help.put("predictionRefinementWorkers", "中等覆盖完成后的普通精修分类上限，包含视野内地形和植被；默认 0 表示跟随性能档位（low 最多 3 / medium 最多 6 / high 为一半逻辑线程），也可指定 1-32。实际并发仍受共享 CPU 预算限制；缺失覆盖、望远镜目标和脏列修复优先处理。");
@@ -97,7 +97,21 @@ public class VSSClientConfig extends JsonConfig {
     @Override
     protected void validate() {
         if (!CURRENT_CONFIG_VERSION.equals(configVersion)) {
-            enableXaeroMapBridge = true;
+            // Keep choices already migrated before the exact-radius default changed.
+            boolean farDefaultsApplied = "v0.2.17".equals(configVersion) || "v0.2.18".equals(configVersion);
+            if (!"v0.2.16".equals(configVersion) && !farDefaultsApplied) enableXaeroMapBridge = true;
+            if (PredictionConfigDefaults.FAR_DECORATIONS) {
+                if (!farDefaultsApplied) {
+                    predictionFarDecorations = true;
+                    if (predictionDistanceBlocks == 4_096) {
+                        predictionDistanceBlocks = PredictionConfigDefaults.DISTANCE_BLOCKS;
+                    }
+                }
+                // Migrate the old 256-chunk default once; preserve custom radii.
+                if (!"v0.2.18".equals(configVersion) && predictionExactDistanceBlocks == 4_096) {
+                    predictionExactDistanceBlocks = PredictionConfigDefaults.EXACT_DISTANCE_BLOCKS;
+                }
+            }
         }
         configVersion = CURRENT_CONFIG_VERSION;
         lodDistanceChunks = clamp(lodDistanceChunks, 0, MAX_LOD_DISTANCE_CHUNKS);
@@ -128,6 +142,15 @@ public class VSSClientConfig extends JsonConfig {
 
     public boolean isPredictionLoadingEnabled() {
         return enablePrediction && enablePredictionLoading;
+    }
+
+    /** Settings use chunks; keep the existing persisted representation for compatibility. */
+    public int getPredictionDistanceChunks() {
+        return predictionDistanceBlocks / 16;
+    }
+
+    public void setPredictionDistanceChunks(int chunks) {
+        predictionDistanceBlocks = chunks * 16;
     }
 
     public void normalizeAndSave() {

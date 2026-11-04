@@ -3,7 +3,7 @@
 //! Single-position queries outside the covered lattice keep stateful semantics.
 use super::{Graph, Marker, Node, Spline};
 
-pub(super) fn exposed(g: &Graph, vertical: &[bool]) -> bool {
+pub(super) fn exposed(g: &Graph, vertical: &[bool], initial_only: bool) -> bool {
     if !g.stateful_columns {
         return false;
     }
@@ -18,7 +18,12 @@ pub(super) fn exposed(g: &Graph, vertical: &[bool]) -> bool {
         return true;
     }
     let e = dependencies(g, vertical);
-    g.roots.values().any(|id| e[*id])
+    // Preliminary heights use descending Single queries, not the block-cell
+    // arrays consumed by final density. An exposed cache in this root must
+    // keep its own query order without forcing every surface/display query
+    // to materialize complete columns.
+    g.roots.iter().any(|(name, id)|
+        (name == "initial_density_without_jaggedness") == initial_only && e[*id])
 }
 
 fn dependencies(g: &Graph, vertical: &[bool]) -> Vec<bool> {
@@ -110,6 +115,78 @@ mod tests {
     }
     fn sheltered() -> Value {
         json!({"type":"minecraft:flat_cache","argument":vertical_cache()})
+    }
+
+    #[test]
+    #[ignore = "requires downloaded EpicTerrain codec documents"]
+    fn epic_documents_keep_exact_surfaces_and_enable_display_queries() {
+        use crate::backend::World;
+        use std::time::Instant;
+        let files=std::env::var("VSS_EPIC_DOCUMENTS").expect("document paths separated by semicolons");
+        for path in files.split(';') {
+            let d:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            for seed in [0,-917] {
+                let fast=World::new(seed,0,d.clone()).unwrap();
+                let mut full=World::new(seed,0,d.clone()).unwrap();
+                println!("path={path} initial_order={} full_order={}",fast.terrain.graph.initial_column_order,fast.terrain.graph.exposed_column_order);
+                assert!(!fast.terrain.graph.requires_complete_column_order(),"{path}");
+                full.terrain.graph.exposed_column_order=true;
+                full.terrain.graph.column_plan=super::super::column_plan::ColumnPlan::compile(&full.terrain.graph);
+                full.terrain.graph.surface_plan=None;
+                let points=[(0,0),(15,15),(-17,5),(777,-919),(100000,-100000),(-29999980,29999980)];
+                let start=Instant::now();
+                let want=full.surface_points(&points).unwrap();
+                let full_us=start.elapsed().as_micros();
+                let start=Instant::now();
+                let actual=fast.surface_points(&points).unwrap();
+                let fast_us=start.elapsed().as_micros();
+                for (p,(a,b)) in points.iter().zip(actual.iter().zip(&want)) {
+                    assert_eq!(a.values,b.values,"{path} seed={seed} at {p:?}");
+                }
+                // Cold display coordinates exercise the real display route,
+                // not just the exact cache warmed by the parity comparison.
+                let display=[(2048,2048),(2052,2048),(2048,2052),(2052,2052)];
+                let start=Instant::now();let a=fast.display_points(&display).unwrap();let display_us=start.elapsed().as_micros();
+                let start=Instant::now();let b=fast.display_points(&display).unwrap();let cached_us=start.elapsed().as_micros();
+                assert_eq!(a.iter().map(|x|x.values).collect::<Vec<_>>(),b.iter().map(|x|x.values).collect::<Vec<_>>());
+                assert!(a.iter().any(|x| x.values[3]&(1<<26)!=0),"display route not entered: {path}");
+                println!("epic path={path} seed={seed} full_us={full_us} exact_us={fast_us} display_us={display_us} cached_us={cached_us}");
+            }
+        }
+    }
+
+    #[test]
+    fn preliminary_only_order_does_not_force_surface_arrays() {
+        let mut d = fixture();
+        // EpicTerrain puts a vertically varying density subtree inside a
+        // cache_2d used only by preliminary height / aquifer Single queries.
+        d["settings"]["noise_router"]["initial_density_without_jaggedness"] =
+            json!({"type":"minecraft:cache_2d","argument":{
+                "type":"minecraft:add","argument1":d["settings"]["noise_router"]["final_density"].clone(),
+                "argument2":{"type":"minecraft:y_clamped_gradient","from_y":-64,"to_y":320,
+                    "from_value":0.5,"to_value":-0.5}}});
+        for seed in [0, -917] {
+            let fast = Terrain::from_document(seed, &d).unwrap();
+            let mut full = Terrain::from_document(seed, &d).unwrap();
+            assert!(fast.graph.initial_column_order);
+            assert!(!fast.graph.requires_complete_column_order());
+            full.graph.exposed_column_order = true;
+            full.graph.column_plan = super::super::column_plan::ColumnPlan::compile(&full.graph);
+            full.graph.surface_plan = None;
+            for (x0,z0) in [(0,0),(-32,16),(100000,-100000)] {
+                let mut a = fast.job(x0,z0,false).unwrap();
+                let mut b = full.job(x0,z0,false).unwrap();
+                for (dx,dz) in [(0,0),(15,15),(7,8),(0,0)] {
+                    let (x,z)=(x0+dx,z0+dz);
+                    assert_eq!(a.preliminary(x,z),b.preliminary(x,z));
+                    for y in (fast.min_y..fast.min_y+fast.height).rev() {
+                        assert_eq!(a.block([x,y,z]),b.block([x,y,z]),
+                            "seed={seed} at {x},{y},{z}");
+                    }
+                    assert_eq!(a.surface_top(x,z),b.surface_top(x,z));
+                }
+            }
+        }
     }
 
     #[test]

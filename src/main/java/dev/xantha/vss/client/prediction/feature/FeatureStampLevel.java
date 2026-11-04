@@ -197,6 +197,8 @@ public class FeatureStampLevel implements WorldGenLevel {
     @Override public int getSeaLevel() { return SEA_LEVEL; }
     @Override public RandomSource getRandom() { return random; }
     public long seed() { return seed; }
+    /** Identity only; optional placement filters must never obtain a live server from a prediction level. */
+    public net.minecraft.resources.ResourceLocation predictionDimension() { return null; }
     @Override public long getSeed() { return seed; }
     @Override public boolean isClientSide() { return false; }
     @Override public boolean hasChunk(int x, int z) { return true; }

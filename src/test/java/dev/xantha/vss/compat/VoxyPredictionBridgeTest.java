@@ -5,6 +5,28 @@ import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 class VoxyPredictionBridgeTest {
+    @Test void pruningPublishedRequestsPreservesTheirFinalNativeInvalidation() throws Exception {
+        var type=Class.forName("dev.xantha.vss.compat.VoxyPredictionBridge$Context");
+        Object context=org.mockito.Mockito.mock(type,org.mockito.Mockito.CALLS_REAL_METHODS);
+        var requested=new VoxySectionVersions();var dirty=new VoxyPendingSections();
+        var predictionOnly=new java.util.HashSet<Long>();var delivered=new java.util.HashMap<Long,Object>();
+        var waiters=new VoxySubdivisionWaiters();
+        long pos=VoxyPredictionBridge.position(0,10000,0,0);
+        requested.put(pos,new java.util.concurrent.atomic.AtomicLong(1));
+        predictionOnly.add(pos);dirty.add(pos);waiters.add(pos);
+        var fields=java.util.Map.of("requested",requested,"dirty",dirty,"predictionOnly",predictionOnly,
+                "delivered",delivered,"cachedSections",new java.util.LinkedHashMap<>(),
+                "pruner",new VoxySectionPruner(),"subdivisionWaiters",waiters);
+        for(var entry:fields.entrySet()) {
+            var field=type.getDeclaredField(entry.getKey());field.setAccessible(true);field.set(context,entry.getValue());
+        }
+        var prune=type.getDeclaredMethod("prune",double.class,double.class,int.class);prune.setAccessible(true);
+        prune.invoke(context,0d,0d,1024);
+        assertFalse(requested.containsKey(pos));assertFalse(predictionOnly.contains(pos));
+        assertFalse(waiters.contains(pos));
+        assertTrue(dirty.contains(pos),"CPU retirement must not erase the final update of already published native geometry");
+    }
+
     @Test void faceMergeMatchesFullMergeForEveryDirectionLodAndRealAirMode() {
         var random=new java.util.Random(451);
         for(int lod=0;lod<=4;lod++)for(int mode=0;mode<5;mode++) {

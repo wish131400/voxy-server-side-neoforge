@@ -47,6 +47,18 @@ class PredictionDecorationQueryTest {
         };
     }
 
+    @Test void biomeQueriesUseDecorationContextWhenTerrainOnlyCarriesGeometry() {
+        var geometry=new ClientTerrainSampler(42,PROFILE) {
+            @Override Holder<Biome> noiseBiome(int x,int y,int z) {
+                throw new AssertionError("geometry backend is not a biome source");
+            }
+        };
+        var context=terrain();
+        var level=new PredictionDecorationLevel(geometry,context,access,0,0);
+        assertSame(warm,level.getNoiseBiome(0,0,0));
+        assertNotNull(level.getBiome(new net.minecraft.core.BlockPos(0,64,0)));
+    }
+
     @Test void allTwentyFiveVirtualChunksAreStableAndDistinctAtNegativeCoordinates() {
         var terrain = terrain();
         var level = new PredictionDecorationLevel(terrain, terrain, access, -4, -7);

@@ -136,7 +136,27 @@ def verify(jar, platform, build_id, source):
                 require(symbol.encode() in data, "Missing reference: " + name + ": " + symbol)
             return data
 
+        check_class("mixin/client/FreeTerraForgedPredictionOreMixin", "FeatureStampLevel", "activation")
+        require("client.FreeTerraForgedPredictionOreMixin" in archive.read("vss.compat.mixins.json").decode(),
+                "FTF non-ore compatibility is not registered")
         prefix="dev/xantha/vss/client/prediction/"
+        manager = check_class("client/prediction/PredictionTileManager", "activeFarCompletions")
+        check_class("client/prediction/PredictionFarDecorations", "previewBuilds", "previewNanos", "completionBuilds")
+        references = class_references(manager)
+        for called in ("preview", "build"):
+            require(any(ref[0] == prefix + "PredictionFarDecorations" and ref[1] == called
+                        for entries in references.values() for ref in entries),
+                    "Manager does not execute far decoration phase: " + called)
+        scatter = check_class("client/prediction/PredictionFarDecoration", "densityPlacements")
+        check_class("client/prediction/PredictionFarPlacementCount", "java/lang/invoke/MethodHandle", "ClassValue")
+        count_refs = class_references(scatter)
+        require(any(ref[:2] == (prefix + "PredictionFarPlacementCount", "sample")
+                    for (method, _), entries in count_refs.items() if method == "parsePlaced" for ref in entries),
+                "Template count still executes live-world placement wrappers")
+        references = class_references(scatter)
+        require(any(ref[0] == prefix + "PredictionFarDecoration" and ref[1] == "densityPlacements"
+                    for (method, _), entries in references.items() if method == "generate" for ref in entries),
+                "Far decoration still caps biome density at one candidate per cell")
         for cls,method,owner,called in [
             ("PredictionVegetation","generate","PredictionBiomePruning","job"),
             ("PredictionVegetation","generate","PredictionBiomePruning$Job","excludes"),
@@ -385,6 +405,10 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionVoxySource", "PredictionVoxyViewDemand", "observedView", "viewDemandBuilds",
                     "PredictionVoxyHorizon", "windowUpdates", "updateWindow")
         check_class("client/prediction/PredictionVoxyDetailQueue", "observe")
+        check_class("compat/VoxyRenderAccess", "invalidateUnwatched")
+        check_class("compat/VoxyPredictionBridge", "unwatchedNotifications")
+        check_class("compat/VoxyPredictionBridge$Context", "invalidateUnwatched")
+        check_class("compat/VoxyPendingSections", "urgentOrder")
         check_class("client/prediction/PredictionWorkView", "hasProjection", "atan")
         check_class("client/prediction/PredictionRenderer", "projection", "scoping", "ageSeconds")
         check_class("compat/VoxySectionSignature", "asLongBuffer", "java/nio/LongBuffer", "SHA-256")

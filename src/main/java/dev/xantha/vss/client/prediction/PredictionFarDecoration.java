@@ -14,7 +14,7 @@ import net.minecraft.world.level.levelgen.feature.Feature;
 import net.minecraft.world.level.levelgen.feature.configurations.*;
 import net.minecraft.world.level.levelgen.placement.*;
 
-/** Experimental distant appearance. Immutable captured rules are shared; every build owns its scope and scratch. */
+/** Distant appearance. Immutable captured rules are shared; every build owns its scope and scratch. */
 final class PredictionFarDecoration {
     private static final ThreadLocal<PredictionFarDecoration> ACTIVE = new ThreadLocal<>();
     static PredictionFarDecoration current() { return ACTIVE.get(); }
@@ -38,11 +38,13 @@ final class PredictionFarDecoration {
         Scope(PredictionFarDecoration previous) { this.previous=previous; }
         @Override public void close() { if(previous==null) ACTIVE.remove(); else ACTIVE.set(previous); }
     }
-    final RustTerrainSampler sampler;
+    final ClientTerrainSampler sampler;
+    final PredictionFarGround anchorGround;
     final ClientTerrainSampler context;
     final boolean proxyEnvironment;
     final int environmentStep;
     final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<int[]> proxyColumns = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+    final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<ClientColumnSample> javaColumns = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
     final java.nio.ByteBuffer proxyInput=java.nio.ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
     final java.nio.ByteBuffer proxyOutput=java.nio.ByteBuffer.allocateDirect(40).order(java.nio.ByteOrder.LITTLE_ENDIAN);
     final Set<PlacedFeature> replaced;
@@ -116,11 +118,12 @@ final class PredictionFarDecoration {
                 || active.proxyEnvironment && feature.feature().value().feature()==Feature.FREEZE_TOP_LAYER);
     }
 
-    PredictionFarDecoration(RustTerrainSampler sampler,boolean proxyEnvironment,int environmentStep,
+    PredictionFarDecoration(ClientTerrainSampler sampler,boolean proxyEnvironment,int environmentStep,
                             java.util.function.BooleanSupplier current) {
         currentBuild=current;
         checkCurrent();
         this.sampler=sampler;
+        anchorGround=new PredictionFarGround(sampler);
         this.proxyEnvironment=proxyEnvironment;
         this.environmentStep=environmentStep;
         context=sampler.decorationContext();
@@ -135,12 +138,14 @@ final class PredictionFarDecoration {
             var features=context.generatorContext().getBiomeGenerationSettings(holder).features();
             var rules=new ArrayList<Rule>();
             // Keep terrain-changing features, local modifications, ores and structures on the existing path.
-            // Only the biome's visible VEGETAL_DECORATION stage is eligible for this first prototype.
+            // Only the biome's visible VEGETAL_DECORATION stage is eligible for distant templates.
             if(features.size()>9) for(var entry:features.get(9)) {
                 PlacedFeature feature=entry.value();
                 List<Choice> choices=parsed.get(feature);
                 if(!parsed.containsKey(feature)) {
-                    choices=parsePlaced(feature,0);
+                    try { choices=parsePlaced(feature,0); }
+                    catch (java.util.concurrent.CancellationException | PredictionWorkDeferred cancelled) { throw cancelled; }
+                    catch (RuntimeException unsupported) { choices=List.of(); }
                     parsed.put(feature,choices);
                     var name=registry.getKey(feature);
                     audit.add(Map.of("feature",String.valueOf(name),"replaced",!choices.isEmpty(),
@@ -161,6 +166,7 @@ final class PredictionFarDecoration {
     }
 
     private PredictionFarDecoration(PredictionFarDecoration model) {
+        anchorGround=model.anchorGround;
         sampler=model.sampler; context=model.context; proxyEnvironment=model.proxyEnvironment; environmentStep=model.environmentStep;
         replaced=model.replaced; biomeRules=model.biomeRules; parsed=model.parsed;
         templates=model.templates; audit=model.audit;
@@ -174,11 +180,21 @@ final class PredictionFarDecoration {
         int[] record=proxyColumns.get(key);
         if(record==null) {
             proxyInput.clear();proxyInput.putInt(ax).putInt(az);
-            if(RustWorldgenBackend.decorationPoints(sampler.handle(),proxyInput,proxyOutput,1)!=1)throw new AssertionError("Incomplete coarse environment");
+            if (!(sampler instanceof RustTerrainSampler rust)) throw new IllegalStateException("Native environment requested for a Java sampler");
+            if(RustWorldgenBackend.decorationPoints(rust.handle(),proxyInput,proxyOutput,1)!=1)throw new AssertionError("Incomplete coarse environment");
             record=new int[10];for(int i=0;i<10;i++)record[i]=proxyOutput.getInt(i*4);
             proxyColumns.put(key,record);
         }
         return record;
+    }
+
+    ClientColumnSample proxySample(int x, int z) {
+        checkCurrent();
+        int ax = Math.floorDiv(x, environmentStep) * environmentStep, az = Math.floorDiv(z, environmentStep) * environmentStep;
+        long key = (long) ax << 32 | az & 0xffffffffL;
+        var sample = javaColumns.get(key);
+        if (sample == null) { sample = sampler.sampleForLod(ax, az, environmentStep); javaColumns.put(key, sample); }
+        return sample;
     }
 
     private List<Choice> parsePlaced(PlacedFeature feature,int depth) {
@@ -186,6 +202,11 @@ final class PredictionFarDecoration {
         if(depth>12)return List.of();
         double count=1;
         for(var modifier:feature.placement()) {
+            Boolean dimensionAllowed = PredictionDimensionFilter.allows(modifier, context.profile().dimension());
+            if (dimensionAllowed != null) {
+                if (!dimensionAllowed) return List.of();
+                continue;
+            }
             String type=BuiltInRegistries.PLACEMENT_MODIFIER_TYPE.getKey(modifier.type()).getPath();
             if(type.equals("count") || type.equals("rarity_filter") || type.equals("noise_based_count") || type.equals("noise_threshold_count")) {
                 int n=type.startsWith("noise_")?2048:256;
@@ -194,7 +215,7 @@ final class PredictionFarDecoration {
                 for(int i=0;i<n;i++) {
                     if((i&63)==0)checkCurrent();
                     var pos=new BlockPos((int)mix(i*0x9e3779b97f4a7c15L),64,(int)mix(i*0xc2b2ae3d27d4eb4fL));
-                    sum+=modifier.getPositions(null,random,pos).count();
+                    sum+=PredictionFarPlacementCount.sample(modifier,random,pos);
                 }
                 count*=sum/n;
             } else if(!Set.of("in_square","biome","heightmap","surface_water_depth_filter","block_predicate_filter").contains(type)) {
@@ -251,6 +272,7 @@ final class PredictionFarDecoration {
             long seed=mix(0x4652415254454d50L+variant);
             var soils=new LinkedHashSet<GroundCondition>();
             var level=new FeatureStampLevel(seed,context.decorationAccess(),Blocks.GRASS_BLOCK.defaultBlockState()) {
+                @Override public net.minecraft.resources.ResourceLocation predictionDimension() { return context.profile().dimension(); }
                 @Override public boolean isStateAtPosition(BlockPos p,java.util.function.Predicate<BlockState> predicate) {
                     boolean result=super.isStateAtPosition(p,predicate);
                     if(p.getY()==GROUND_Y-1 && !placed().containsKey(p))soils.add(new GroundCondition(predicate,result));
@@ -260,7 +282,7 @@ final class PredictionFarDecoration {
                 @Override public boolean setBlock(BlockPos p,BlockState state,int flags,int recursion) {
                     if((writes&255)==0)checkCurrent();
                     if(++writes>32768 || Math.abs(p.getX())>24 || Math.abs(p.getZ())>24 || p.getY()<GROUND_Y-8 || p.getY()>GROUND_Y+96)
-                        throw new UnsupportedOperationException("experimental capture bounds");
+                        throw new UnsupportedOperationException("template capture bounds");
                     return super.setBlock(p,state,flags,recursion);
                 }
             };
@@ -304,23 +326,40 @@ final class PredictionFarDecoration {
         int minX=Math.floorDiv(bx-26,5),maxX=Math.floorDiv(bx+span+25,5);
         int minZ=Math.floorDiv(bz-26,5),maxZ=Math.floorDiv(bz+span+25,5);
         var column=new ClientColumnSample[1];
+        var localGround=new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<ClientColumnSample>();
         for(int gz=minZ;gz<=maxZ;gz++)for(int gx=minX;gx<=maxX;gx++) {
             checkCurrent(); anchors++;
-            long root=mix(sampler.profile().seed()^((long)gx*0x9e3779b97f4a7c15L)^((long)gz*0xc2b2ae3d27d4eb4fL)^stringHash(sampler.profile().dimension().toString()));
-            int x=gx*5+(int)Long.remainderUnsigned(mix(root^11),5)-2;
-            int z=gz*5+(int)Long.remainderUnsigned(mix(root^17),5)-2;
+            long root=anchorGround.root(gx,gz);
+            int anchorX=gx*5+(int)Long.remainderUnsigned(mix(root^11),5)-2;
+            int anchorZ=gz*5+(int)Long.remainderUnsigned(mix(root^17),5)-2;
+            int x=anchorX,z=anchorZ;
             // One stable, exact-coordinate display anchor per cell. Preserve it across LOD changes.
-            column[0]=null;
-            sampler.sampleDisplayGridInPlace(x,z,1,1,1,column,0,1);
+            var ground=anchorGround.at(gx,gz,this::checkCurrent);
             anchorSamples++;
-            var ground=column[0];
+            localGround.clear();
+            localGround.put((long)x<<32 | z&0xffffffffL,ground);
             var rules=biomeRules.getOrDefault(ground.biomeIndex(),List.of());
             String biome=sampler.cacheBiomes().get(ground.biomeIndex());
             groundByBiome.merge(biome,1L,Long::sum);
             if(!ground.hasSurface() || ground.hasFluid() || isCaptured(x,z))continue;
             for(var rule:rules) {
-                long hash=mix(root^rule.salt);
-                if(unit(hash)>=Math.min(.9,rule.count*25.0/256.0))continue;
+                long cellHash=mix(root^rule.salt);
+                int candidates=densityPlacements(rule.count*25.0/256.0,cellHash);
+                for(int candidate=0;candidate<candidates;candidate++) {
+                checkCurrent();
+                long hash=candidate==0?cellHash:mix(cellHash^candidate*0x632be59bd9b4e019L);
+                x=candidate==0?anchorX:gx*5+(int)Long.remainderUnsigned(mix(hash^11),5)-2;
+                z=candidate==0?anchorZ:gz*5+(int)Long.remainderUnsigned(mix(hash^17),5)-2;
+                long groundKey=(long)x<<32 | z&0xffffffffL;
+                ground=localGround.get(groundKey);
+                if(ground==null) {
+                    column[0]=null;
+                    if (sampler instanceof RustTerrainSampler rust) rust.sampleDisplayGridInPlace(x,z,1,1,1,column,0,1);
+                    else column[0]=sampler.sampleForLod(x,z,1);
+                    ground=column[0];localGround.put(groundKey,ground);anchorSamples++;
+                }
+                if(!ground.hasSurface() || ground.hasFluid() || isCaptured(x,z)
+                        || !biomeRules.getOrDefault(ground.biomeIndex(),List.of()).contains(rule))continue;
                 selected++;
                 double choiceValue=unit(mix(hash^23))*rule.count;
                 Choice choice=rule.choices.getLast();
@@ -366,6 +405,7 @@ final class PredictionFarDecoration {
                     } else boxes.add(sx,bottom,sz,Math.min(span,sx+width),top,Math.min(span,sz+width),rotated);
                     emitted++;
                 }
+                }
             }
         }
         if(coarse) {
@@ -390,6 +430,11 @@ final class PredictionFarDecoration {
         return Map.of("biomes",biomeRules.size(),"replacedFeatures",replaced.size(),"parsedFeatures",parsed.size(),
                 "templateAttempts",templateAttempts,"templateFailures",templateFailures,
                 "templates",templates.values().stream().mapToInt(List::size).sum(),"features",audit);
+    }
+    /** Stable stochastic rounding preserves expected biome density above one placement per grid cell. */
+    static int densityPlacements(double expected,long hash) {
+        int whole=(int)Math.floor(expected);
+        return whole+(unit(hash)<expected-whole?1:0);
     }
     static long mix(long h) { h=(h^(h>>>30))*0xbf58476d1ce4e5b9L;h=(h^(h>>>27))*0x94d049bb133111ebL;return h^(h>>>31); }
     static double unit(long h) { return (h>>>11)*0x1.0p-53; }

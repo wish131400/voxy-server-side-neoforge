@@ -25,7 +25,7 @@ fn position(x: i32, z: i32) -> (u64, usize) {
 }
 impl Shared {
     pub(super) fn new(g: &Graph, intern: &HashMap<String, Id>, doc: &Value) -> Option<Self> {
-        if doc["vss_horizontal_climate"].as_bool() == Some(false) || g.stateful_columns { return None; }
+        if doc["vss_horizontal_climate"].as_bool() == Some(false) || g.exposed_column_order { return None; }
         fn cut(g: &Graph, id: Id, out: &mut Vec<Id>) {
             if g.column_plan.slots[id] != super::column_plan::NONE { out.push(id); return; }
             match &g.nodes[id] {

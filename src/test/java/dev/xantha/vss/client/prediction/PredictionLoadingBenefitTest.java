@@ -32,7 +32,7 @@ class PredictionLoadingBenefitTest {
             var changedSchedule=new PredictionSchedulePreparation.Input(schedule.layout(),schedule.focus(),schedule.view(),
                     schedule.x(),schedule.y(),schedule.z(),schedule.pixels(),schedule.minY(),schedule.maxY(),schedule.revision(),
                     schedule.plan(),new RenderSnapshot(Level.OVERWORLD,schedule.layout(),absent,Map.of(),Set.of()),
-                    schedule.desired(),schedule.surfaceDesired(),schedule.surfaceReady(),schedule.dirty(),schedule.fallback(),schedule.pending(),
+                    schedule.desired(),schedule.surfaceDesired(),schedule.surfaceReady(),schedule.dirty(),schedule.derivedRefresh(),schedule.fallback(),schedule.pending(),
                     schedule.ordinary(),schedule.terrain(),schedule.transitions(),schedule.idle(),schedule.medium(),schedule.mediumPending(),
                     schedule.previewPending(),schedule.localTurn(),schedule.moving(),schedule.bands(),schedule.dependencies(),schedule.hidden(),
                     schedule.initialAxes(),schedule.disk(),schedule.cacheMiss(),schedule.failed(),schedule.deferred(),schedule.now(),schedule.reclaimNeeded());

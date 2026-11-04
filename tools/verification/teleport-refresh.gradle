@@ -1,0 +1,12 @@
+allprojects { afterEvaluate {
+    tasks.register('teleportRefreshTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        ['VoxyPendingSectionsTest','VoxyRenderAccessTest','VoxyPredictionBridgeTest','VoxySectionPrunerTest',
+         'PredictionTeleportSchedulingTest','PredictionTeleportLoadingTest','PredictionVoxyHorizonTest','PredictionVoxyViewDemandTest','PredictionVoxySourceTest',
+         'PredictionSchedulingConcurrencyTest','PredictionSurfaceQueueTest'].each {include "**/${it}.class"}
+        forkEvery=1;maxHeapSize='2G'
+        testLogging {events 'failed','skipped';exceptionFormat 'full';showStandardStreams=true}
+    }
+} }

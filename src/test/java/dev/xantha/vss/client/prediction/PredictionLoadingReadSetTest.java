@@ -30,7 +30,7 @@ class PredictionLoadingReadSetTest {
         PredictionLoadingPreparation.Input input(){
             var scheduling=new PredictionSchedulePreparation.Input(base.layout(),base.focus(),base.view(),x,80,0,
                     base.pixels(),-64,320,base.revision(),plan,new RenderSnapshot(dimension,base.layout(),Map.copyOf(tiles),Map.copyOf(epochs)),
-                    Set.of(key),Set.copyOf(surface),Set.copyOf(surfaceReady),Set.copyOf(dirty),Set.of(),Set.of(),Map.copyOf(ordinary),Map.copyOf(terrain),
+                    Set.of(key),Set.copyOf(surface),Set.copyOf(surfaceReady),Set.copyOf(dirty),java.util.Set.of(),Set.of(),Set.of(),Map.copyOf(ordinary),Map.copyOf(terrain),
                     Map.copyOf(transitions),Map.of(),PredictionMediumCoverage.EMPTY,false,false,false,moving,Map.copyOf(bands),Set.of(),Set.of(),
                     base.initialAxes(),null,Map.of(),Map.copyOf(failed),Map.copyOf(deferred),now,false);
             return new PredictionLoadingPreparation.Input(scheduling,plan,Set.of(key),Set.of(),Map.copyOf(captures),Map.of(),768,

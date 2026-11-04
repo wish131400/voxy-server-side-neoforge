@@ -36,12 +36,7 @@ impl World {
             Ok((name, self.biomes.get(name).ok_or("missing exterior biome")?))
         };
         let geometry = |name: &str| {
-            matches!(
-                name,
-                "minecraft:eroded_badlands"
-                    | "minecraft:frozen_ocean"
-                    | "minecraft:deep_frozen_ocean"
-            )
+            Surface::geometry_biome(name)
         };
         // Neighbour steepness has often already located this exact boundary.
         // Publish the centre through the same cache so subsequent columns can

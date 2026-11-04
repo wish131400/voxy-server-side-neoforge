@@ -124,7 +124,10 @@ class PredictionNearFirstSchedulingTest {
             ((Set<PredictionTileKey>)get(manager,"voxyDetailTargets")).addAll(keys);
             ((Set<PredictionTileKey>)get(manager,"desiredKeys")).addAll(keys);
             var work=(ArrayDeque<PredictionTileKey>)get(manager,"voxyDetailWork");work.addAll(keys);
+            long refusedBefore=(long)get(cpu,"deferrals");
             for(int i=0;i<3;i++)invoke(manager,"serviceGenerationWork",new Class[]{int.class,int.class,long.class},0,0,Long.MAX_VALUE);
+            assertEquals(refusedBefore+3,(long)get(cpu,"deferrals"),
+                    "A global CPU refusal must finish this turn before a farther key can race a released permit");
             assertEquals(keys,List.copyOf(work),"refused CPU permits must not rotate near work behind distant work");
             assertEquals(0,get(manager,"nearGenerationAdmissions"));
             held.close();
@@ -140,12 +143,12 @@ class PredictionNearFirstSchedulingTest {
             await(manager);
             // Plants consume admissions too, so a fair distant terrain turn can precede
             // the third ordinary terrain job. Ordinary terrain must still remain near-first.
-            assertEquals(List.of(1,2,3),nearTerrain.subList(0,3));
+            assertEquals(List.of(1,2,3),nearTerrain.subList(0,3),"ordinary="+nearTerrain+"; fair="+fairTerrain+"; order="+order+"; priorities="+priorities);
             // Check admitted fair terrain, rather than a wall-clock race between
             // CPU-refused tail candidates. The deterministic lane fixture below
             // separately proves the exact distant key selected with free capacity.
             assertFalse(fairTerrain.isEmpty(),"Native terrain retains a fair lane turn");
-            assertTrue(fairTerrain.get(0)>=5,"A native fair turn must reach the far end: "+order);
+            assertTrue(fairTerrain.get(0)>=5,"A native fair turn must reach the far end: "+order+"; ordinary="+nearTerrain+"; fair="+fairTerrain+"; priorities="+priorities);
             // A terrain publication now starts its plant completion too. Fairness counts
             // admissions across all lanes, so every fourth task (including plants) is fair.
             int fairPriority=(int)get(manager,"FAIR_WORK_PRIORITY");
@@ -158,8 +161,37 @@ class PredictionNearFirstSchedulingTest {
     }
 
     @Test @SuppressWarnings("unchecked")
+    void fallbackGenerationCountsSuccessfulAdmissionsAndRetainsItsFairTurn() throws Exception {
+        var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
+        try(var manager=manager(sampler(new AtomicInteger(),null,null),null,PredictionCpuBudget.fixed(8))) {
+            assertFalse(manager.usesVoxyRendering());
+            var pool=(ThreadPoolExecutor)get(manager,"executor");
+            pool.setCorePoolSize(1);pool.setMaximumPoolSize(1);
+            pool.execute(new PredictionTask(null,0,0D,()->{
+                entered.countDown();try {release.await(10,TimeUnit.SECONDS);}
+                catch(InterruptedException e){Thread.currentThread().interrupt();}
+            }));
+            assertTrue(entered.await(5,TimeUnit.SECONDS));
+            var desired=(Set<PredictionTileKey>)get(manager,"desiredKeys");
+            var work=(ArrayDeque<PredictionSchedulePreparation.Request>)get(manager,"preparedWork");
+            for(int x=1;x<=8;x++) {
+                var key=key(x,manager.layout().levelCount()-1);desired.add(key);
+                work.add(new PredictionSchedulePreparation.Request(key,false,0,x*x));
+            }
+            for(int round=0;round<4;round++) {
+                invoke(manager,"serviceGenerationTurn",new Class[]{int.class,int.class,long.class},0,0,Long.MAX_VALUE);
+                assertEquals(round+1,manager.pendingCount(),"One successful admission must finish its generation turn");
+                assertEquals((round+1)%4,get(manager,"nearGenerationAdmissions"),"Fallback work must advance the same fairness counter");
+            }
+            assertEquals(4L,get(manager,"generationEnqueues"));
+            assertEquals(key(8,manager.layout().levelCount()-1),get(pool.getQueue().peek(),"key"),
+                    "The fourth admission must retain the distant fair turn in the executor");
+        } finally {release.countDown();}
+    }
+
+    @Test @SuppressWarnings("unchecked")
     void fairTurnsVisitEveryLaneEvenWhenNearWorkAlwaysEndsInTheSameLane() throws Exception {
-        var entered=new CountDownLatch(5);var release=new CountDownLatch(1);
+        var entered=new CountDownLatch(7);var release=new CountDownLatch(1);
         try(var manager=manager(sampler(new AtomicInteger(),null,null),null,PredictionCpuBudget.fixed(8))) {
             set(manager,"unifiedVoxy",true);
             var pool=(ThreadPoolExecutor)get(manager,"executor");
@@ -171,13 +203,13 @@ class PredictionNearFirstSchedulingTest {
             // Cache restoration now precedes surface generation. Hold both lanes so
             // this test observes admission order rather than racing task completion.
             var cachePool=(ThreadPoolExecutor)get(manager,"cacheExecutor");
-            assertEquals(2,cachePool.getCorePoolSize());
-            for(int worker=0;worker<2;worker++)cachePool.execute(new PredictionTask(null,0,0D,()->{
+            assertEquals(4,cachePool.getCorePoolSize());
+            for(int worker=0;worker<4;worker++)cachePool.execute(new PredictionTask(null,0,0D,()->{
                 entered.countDown();try {release.await(10,TimeUnit.SECONDS);}
                 catch(InterruptedException e){Thread.currentThread().interrupt();}
             }));
             assertTrue(entered.await(5,TimeUnit.SECONDS));
-            var surfaces=(ArrayDeque<PredictionTileKey>)get(manager,"visibleSurfaceWork");
+            var surfaces=(PredictionSurfaceQueue<PredictionTileKey>)get(manager,"visibleSurfaceWork");
             var desired=(Set<PredictionTileKey>)get(manager,"desiredKeys");
             for(int x=1;x<=3;x++) {
                 var key=key(x,0);desired.add(key);surfaces.add(key);
@@ -240,14 +272,15 @@ class PredictionNearFirstSchedulingTest {
             var manager=manager(sampler(calls,null,null),cache,cpu)) {
             assertNotNull(held); set(manager,"unifiedVoxy",true);
             var keys=new ArrayList<PredictionTileKey>();
-            for(int x=1;x<=8;x++){var key=key(x,0);keys.add(key);write(cache,key);}
+            for(int x=1;x<=12;x++){var key=key(x,0);keys.add(key);write(cache,key);}
             ((Set<PredictionTileKey>)get(manager,"desiredKeys")).addAll(keys);
             var candidates=(ArrayDeque<PredictionTileKey>)get(manager,"cacheCandidates"); candidates.addAll(keys);
             var pool=(ThreadPoolExecutor)get(manager,"cacheExecutor");pool.setCorePoolSize(1);pool.setMaximumPoolSize(1);
             pool.execute(()-> {entered.countDown();try{release.await(10,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}});
             assertTrue(entered.await(5,TimeUnit.SECONDS));
             for(int i=0;i<8;i++)invoke(manager,"restoreCached",new Class[]{int.class,int.class},0,0);
-            assertEquals(Set.of(keys.get(0),keys.get(1),keys.get(2),keys.get(7)),get(manager,"cachePending"));
+            assertEquals(Set.of(keys.get(0),keys.get(1),keys.get(2),keys.get(11),
+                    keys.get(3),keys.get(4),keys.get(5),keys.get(10)),get(manager,"cachePending"));
             release.countDown();await(manager);
             assertTrue(manager.renderSnapshot().tiles().keySet().containsAll(keys));
             assertEquals(0,calls.get(),"warm restoration never waits for generation or local parents");
@@ -271,7 +304,7 @@ class PredictionNearFirstSchedulingTest {
             residents.put(key,tile(key,16,manager.layout()));
             invoke(manager,"queueSurfaceCompletion",new Class[]{PredictionTileKey.class},key);
             invoke(manager,"publishVoxyWork",new Class[]{});
-            assertTrue(((ArrayDeque<PredictionTileKey>)get(manager,"visibleSurfaceWork")).contains(key),
+            assertTrue(((PredictionSurfaceQueue<PredictionTileKey>)get(manager,"visibleSurfaceWork")).contains(key),
                     "The input predates terrain completion; its empty surface result must keep the new handoff");
             assertEquals(1,pipeline.details.commits());
             var stages=(Map<String,Object>)manager.demandSnapshot().get("surfacePipeline");
@@ -281,7 +314,7 @@ class PredictionNearFirstSchedulingTest {
             ((Set<PredictionTileKey>)get(manager,"surfaceReady")).add(key);
             assertTrue(pipeline.details.request(before));
             invoke(manager,"publishVoxyWork",new Class[]{});
-            assertTrue(((ArrayDeque<PredictionTileKey>)get(manager,"visibleSurfaceWork")).isEmpty());
+            assertTrue(((PredictionSurfaceQueue<PredictionTileKey>)get(manager,"visibleSurfaceWork")).isEmpty());
         }
     }
 
@@ -290,7 +323,7 @@ class PredictionNearFirstSchedulingTest {
             PredictionMediumCoverage medium,boolean moving,PredictionDiskCache cache,Map<PredictionTileKey,Integer> bands) {
         return new PredictionSchedulePreparation.Input(layout,null,null,0,80,0,1000,-64,320,0,keys,
                 new RenderSnapshot(Level.OVERWORLD,layout,residents,Map.of()),Set.copyOf(keys),surfaces,Set.of(),
-                Set.of(),Set.of(),Set.of(),targets,targets,Map.of(),Map.of(),medium,!medium.paths().isEmpty(),true,false,moving,
+                Set.of(),java.util.Set.of(),Set.of(),Set.of(),targets,targets,Map.of(),Map.of(),medium,!medium.paths().isEmpty(),true,false,moving,
                 bands,Set.of(),Set.of(),Collections.nCopies(layout.levelCount(),8),cache,Map.of(),Map.of(),Map.of(),System.nanoTime(),false);
     }
     private static PredictionTileKey key(int x,int lod) {return new PredictionTileKey(Level.OVERWORLD,x,0,lod);}

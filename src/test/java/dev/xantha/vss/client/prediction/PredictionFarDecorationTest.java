@@ -11,13 +11,16 @@ class PredictionFarDecorationTest {
     @BeforeAll static void bootstrap() { dev.xantha.vss.testutil.TerrainPredictionFixtures.bootstrap(); }
 
     @Test void entireFootprintMustBeBeyondThePromotionBand() {
-        assertFalse(PredictionFarPolicy.outside(0,0,4352,0,64,4096));
-        assertTrue(PredictionFarPolicy.outside(0,0,4353,0,64,4096));
-        assertFalse(PredictionFarPolicy.outside(0,0,4096,0,1024,4096));
-        assertFalse(PredictionFarPolicy.outside(0,0,-4416,0,64,4096));
-        assertTrue(PredictionFarPolicy.outside(0,0,-4417,0,64,4096));
-        assertFalse(PredictionFarPolicy.outside(10000,10000,9984,9984,1024,4096));
-        assertTrue(PredictionFarPolicy.outside(0,0,4096,4096,64,4096));
+        for (int radius : new int[] {1024, 4096}) {
+            int boundary = radius + PredictionFarPolicy.PROMOTION_BLOCKS;
+            assertFalse(PredictionFarPolicy.outside(0,0,boundary,0,64,radius));
+            assertTrue(PredictionFarPolicy.outside(0,0,boundary+1,0,64,radius));
+            assertFalse(PredictionFarPolicy.outside(0,0,radius,0,1024,radius));
+            assertFalse(PredictionFarPolicy.outside(0,0,-boundary-64,0,64,radius));
+            assertTrue(PredictionFarPolicy.outside(0,0,-boundary-65,0,64,radius));
+            assertFalse(PredictionFarPolicy.outside(10000,10000,9984,9984,1024,radius));
+            assertTrue(PredictionFarPolicy.outside(0,0,radius,radius,64,radius));
+        }
     }
 
     static PredictionVoxySource.Tile tile(boolean complete,boolean approximate) {
@@ -96,6 +99,20 @@ class PredictionFarDecorationTest {
                 assertEquals(false,publish.invoke(manager,resident,claim,revision,0L,true,false,false,null),
                         "An old far job must not publish after entering the exact band");
             }
+            // The near-band terrain refresh must get through before exact decoration can run.
+            var columns=new PredictionVoxySource.Column[16];Arrays.fill(columns,far.columns()[0]);
+            var ground=new PredictionVoxySource.Tile(key,5120,0,64,4,16,columns,List.of(),512,false,0).retainFeatures(far);
+            var refreshed=new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
+                    PredictionVoxelData.forVoxy(ground),new PredictionDepthBound(0,72),0,3,4,16);
+            ((Set<Object>)field("dirtyTiles").get(manager)).add(key);
+            try(var claim=memory.tryReserveBuild()) {
+                assertNotNull(claim);
+                assertEquals(true,publish.invoke(manager,refreshed,claim,revision,0L,false,false,false,PredictionRelief.of(refreshed)),
+                        "Retained templates cannot reject a dirty terrain refresh inside the exact band");
+            }
+            call(manager,"refreshFarSurfaces");
+            assertFalse(((Set<?>)field("dirtyTiles").get(manager)).contains(key));
+            assertEquals(true,call(manager,"surfaceBuildReady",key),"Exact decoration becomes eligible after terrain publishes");
             field("cameraBlockX").setDouble(manager,0);
             var exactResident=new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
                     PredictionVoxelData.forVoxy(tile(true,false)),new PredictionDepthBound(0,72),0,2,1,64);
@@ -107,6 +124,74 @@ class PredictionFarDecorationTest {
             }
         } finally { config.predictionFarDecorations=enabled;config.predictionExactDistanceBlocks=radius; }
     }
+
+    @Test @SuppressWarnings("unchecked") void freshCoveragePrecedesFallbackAndSlotsReleaseOnCancellation()throws Exception {
+        var config=dev.xantha.vss.config.VSSClientConfig.CONFIG;
+        boolean enabled=config.predictionFarDecorations;int radius=config.predictionExactDistanceBlocks,workers=config.predictionRefinementWorkers;
+        config.predictionFarDecorations=true;config.predictionExactDistanceBlocks=4096;config.predictionRefinementWorkers=4;
+        var sampler=org.mockito.Mockito.mock(RustTerrainSampler.class);
+        org.mockito.Mockito.when(sampler.profile()).thenReturn(new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                Level.OVERWORLD.location(),42,-64,384,"noise","minecraft:overworld",1));
+        org.mockito.Mockito.when(sampler.decorationContext()).thenReturn(sampler);
+        org.mockito.Mockito.when(sampler.cacheBiomes()).thenReturn(List.of());
+        var held=new ArrayList<AutoCloseable>();
+        try(var manager=new PredictionTileManager(Level.OVERWORLD,sampler,new PredictionMemoryBudget(
+                512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,4),null)) {
+            field("layout").set(manager,VssLodLayout.of(8192,2,true,false));field("unifiedVoxy").setBoolean(manager,true);
+            var executor=(java.util.concurrent.ThreadPoolExecutor)field("executor").get(manager);
+            executor.setMaximumPoolSize(4);executor.setCorePoolSize(4);
+            var ready=(Map<PredictionTileManager.PredictionTileKey,PredictionTileManager.PredictionTile>)field("ready").get(manager);
+            var keys=new ArrayList<PredictionTileManager.PredictionTileKey>();
+            for(int tx:new int[]{80,120}) {
+                var key=new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,tx,0,0);keys.add(key);
+                var columns=new PredictionVoxySource.Column[16*16];Arrays.fill(columns,tile(false,false).columns()[0]);
+                var t=new PredictionVoxySource.Tile(key,tx*64,0,64,16,4,columns,
+                        tx==80?tile(false,false).features():List.of(),2048,false,0,null,tx==80);
+                ready.put(key,new PredictionTileManager.PredictionTile(key,new int[0],new int[0],new ClientColumnSample[0],
+                        PredictionVoxelData.forVoxy(t),new PredictionDepthBound(0,72),0,1,16,4));
+            }
+            field("viewBands").set(manager,Map.of(keys.get(0),PredictionWorkView.VISIBLE,keys.get(1),PredictionWorkView.VISIBLE));
+            call(manager,"queueSurfaceCompletion",keys.get(0));call(manager,"queueSurfaceCompletion",keys.get(1));
+            var queue=(PredictionSurfaceQueue<?>)field("visibleSurfaceWork").get(manager);
+            assertEquals(keys.get(1),queue.peekFirst(),"Uncovered far terrain gets templates before a nearer tile fills slow fallback");
+            var priority=PredictionTileManager.class.getDeclaredMethod("workPriority",PredictionTileManager.PredictionTileKey.class,boolean.class);priority.setAccessible(true);
+            assertTrue((int)priority.invoke(manager,keys.get(1),true)<(int)priority.invoke(manager,keys.get(0),true));
+            var reserve=PredictionTileManager.class.getDeclaredMethod("tryReserveBuildSlots",boolean.class,boolean.class);reserve.setAccessible(true);
+            for(int i=0;i<3;i++) {var slot=(AutoCloseable)reserve.invoke(manager,true,true);assertNotNull(slot);held.add(slot);}
+            assertNull(reserve.invoke(manager,true,true),"Fallback cannot occupy all surface workers");
+            var coverage=(AutoCloseable)reserve.invoke(manager,true,false);assertNotNull(coverage);held.add(coverage);
+            for(var slot:held) {slot.close();slot.close();}held.clear();
+            assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)field("activeFarCompletions").get(manager)).get());
+            assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)field("activeSurfaceBuilds").get(manager)).get());
+        } finally {for(var slot:held)slot.close();config.predictionFarDecorations=enabled;config.predictionExactDistanceBlocks=radius;config.predictionRefinementWorkers=workers;}
+    }
+
+
+    @Test void biomeDensityDoesNotFlattenBambooAndTreeWeightsToOneCandidate() {
+        for(double count:new double[]{.25,9.6,30.1,50.1,58.1,80}) {
+            double expected=count*25/256;long total=0;int samples=100000;
+            for(int i=0;i<samples;i++)total+=PredictionFarDecoration.densityPlacements(expected,PredictionFarDecoration.mix(i));
+            assertEquals(expected,(double)total/samples,.008,"Expected biome counts survive dense template scattering: "+count);
+        }
+        assertEquals(0,PredictionFarDecoration.densityPlacements(0,0));
+        assertEquals(5,PredictionFarDecoration.densityPlacements(5,0));
+        assertEquals(6,PredictionFarDecoration.densityPlacements(5.5,0));
+    }
+    @Test void terrainRefinementRetainsActualDecorationResolutionIncludingEmptyTemplates() {
+        for(boolean empty:new boolean[]{false,true}) {
+            var old=tile(true,true);
+            if(empty)old=new PredictionVoxySource.Tile(old.key(),old.baseX(),old.baseZ(),64,1,64,
+                    old.columns(),List.of(),128,false,0,null,true);
+            var columns=new PredictionVoxySource.Column[64*64];Arrays.fill(columns,old.columns()[0]);
+            var refined=new PredictionVoxySource.Tile(old.key(),old.baseX(),old.baseZ(),64,64,1,
+                    columns,List.of(),16384,false,0).retainFeatures(old);
+            assertTrue(refined.approximateDecorations(),"An empty template result is still a known template stage");
+            assertEquals(64,refined.decorationStep());assertTrue(refined.needsDecorationRefinement());
+            assertEquals(old.templateFeatures(),refined.templateFeatures());
+            assertEquals(old.surfaceComplete(),refined.surfaceComplete());
+        }
+    }
+
     private static java.lang.reflect.Field field(String name)throws Exception {
         var f=PredictionTileManager.class.getDeclaredField(name);f.setAccessible(true);return f;
     }

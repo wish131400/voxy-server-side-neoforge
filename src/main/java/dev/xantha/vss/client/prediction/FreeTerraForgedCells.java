@@ -10,6 +10,7 @@ final class FreeTerraForgedCells implements AutoCloseable {
     private final Object context, cache;
     private final MethodHandle provide, lookup;
     private final boolean tiled;
+    private final FreeTerraForgedRegions regions = new FreeTerraForgedRegions();
 
     FreeTerraForgedCells(Object context) throws ReflectiveOperationException {
         this.context = context;
@@ -33,9 +34,21 @@ final class FreeTerraForgedCells implements AutoCloseable {
 
     boolean tiled() { return tiled; }
 
+    ClientTerrainSampler.SamplingScope request() {
+        // Legacy tile arrays return to an upstream pool and must never be pinned.
+        return tiled ? () -> {} : regions.request(context);
+    }
+
+    String diagnostics() { return regions.diagnostics(); }
+
     Object cellAt(int x, int z) {
         try {
-            Object storage = (Object) provide.invokeExact(x >> 4, z >> 4);
+            long key = (long) (x >> 4) << 32 | (z >> 4) & 0xffffffffL;
+            Object storage = tiled ? null : FreeTerraForgedRegions.get(context, key);
+            if (storage == null) {
+                storage = (Object) provide.invokeExact(x >> 4, z >> 4);
+                if (!tiled) FreeTerraForgedRegions.put(context, key, storage);
+            }
             return (Object) lookup.invokeExact(storage, tiled ? x : x & 15, tiled ? z : z & 15);
         } catch (RuntimeException | Error failure) { throw failure; }
         catch (Throwable failure) { throw new IllegalStateException("FreeTerraForged filtered cell query failed", failure); }

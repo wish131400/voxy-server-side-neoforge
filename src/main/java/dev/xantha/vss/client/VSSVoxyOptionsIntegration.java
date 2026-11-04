@@ -262,12 +262,12 @@ public final class VSSVoxyOptionsIntegration {
                     configBuilder,
                     "vss.voxy_options.group.prediction_limits",
                      sodium08IntOption(configBuilder, "prediction_distance_blocks", "vss.voxy_options.prediction_distance_blocks",
-                             "vss.voxy_options.prediction_distance_blocks.tooltip", "HIGH", 4_096,
-                             VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
-                             VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS, 1_024,
-                             value -> VSSClientConfig.CONFIG.predictionDistanceBlocks = value,
-                             () -> VSSClientConfig.CONFIG.predictionDistanceBlocks,
-                             VSSVoxyOptionsIntegration::formatBlocks, VSSVoxyOptionsIntegration::saveClientConfig)));
+                             "vss.voxy_options.prediction_distance_blocks.tooltip", "HIGH", new VSSClientConfig().getPredictionDistanceChunks(),
+                             VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS / 16,
+                             VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS, 64,
+                             value -> VSSClientConfig.CONFIG.setPredictionDistanceChunks(value),
+                             () -> VSSClientConfig.CONFIG.getPredictionDistanceChunks(),
+                             VSSVoxyOptionsIntegration::formatChunks, VSSVoxyOptionsIntegration::saveClientConfig)));
 
             invokeByName(page, "addOptionGroup", sodium08Group(
                     configBuilder,
@@ -951,12 +951,12 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.prediction_distance_blocks",
                             "vss.voxy_options.prediction_distance_blocks.tooltip",
                             "HIGH",
-                            VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS,
-                            VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS,
-                            1_024,
-                            VSSVoxyOptionsIntegration::formatBlocks,
-                            (VSSClientConfig config, Integer value) -> config.predictionDistanceBlocks = value,
-                            config -> config.predictionDistanceBlocks)));
+                            VSSClientConfig.MIN_PREDICTION_DISTANCE_BLOCKS / 16,
+                            VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS,
+                            64,
+                            VSSVoxyOptionsIntegration::formatChunks,
+                            (VSSClientConfig config, Integer value) -> config.setPredictionDistanceChunks(value),
+                            config -> config.getPredictionDistanceChunks())));
 
             Constructor<?> pageConstructor = Class.forName(OLD_OPTION_PAGE).getConstructor(Component.class, ImmutableList.class);
             return pageConstructor.newInstance(Component.translatable("vss.voxy_options.prediction_title"), ImmutableList.copyOf(groups));
@@ -1305,9 +1305,6 @@ public final class VSSVoxyOptionsIntegration {
         return Component.translatable("vss.voxy_options.chunks", value);
     }
 
-    private static Component formatBlocks(int value) {
-        return Component.translatable("vss.voxy_options.blocks", value);
-    }
 
     private static Component formatKbpsAuto(int value) {
         return value == 0

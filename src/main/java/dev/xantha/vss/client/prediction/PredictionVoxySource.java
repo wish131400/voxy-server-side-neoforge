@@ -19,7 +19,12 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     record Box(int minX, int minY, int minZ, int maxX, int maxY, int maxZ, BlockState state) { }
     record Tile(PredictionTileKey key, int baseX, int baseZ, int span, int axis, int step,
                 Column[] columns, List<Box> features, long terrainBytes, boolean surfaceComplete, int cityFeatures,
-                PredictionVoxyFeatures featureIndex,boolean approximateDecorations) {
+                PredictionVoxyFeatures featureIndex,boolean approximateDecorations,int decorationStep,int templateFeatures) {
+        Tile(PredictionTileKey key,int baseX,int baseZ,int span,int axis,int step,Column[] columns,
+             List<Box> features,long terrainBytes,boolean surfaceComplete,int cityFeatures,PredictionVoxyFeatures featureIndex,boolean approximateDecorations) {
+            this(key,baseX,baseZ,span,axis,step,columns,features,terrainBytes,surfaceComplete,cityFeatures,featureIndex,
+                    approximateDecorations,approximateDecorations?step:1,approximateDecorations?features.size()-cityFeatures:0);
+        }
         Tile(PredictionTileKey key,int baseX,int baseZ,int span,int axis,int step,Column[] columns,
              List<Box> features,long terrainBytes,boolean surfaceComplete,int cityFeatures,PredictionVoxyFeatures featureIndex) {
             this(key,baseX,baseZ,span,axis,step,columns,features,terrainBytes,surfaceComplete,cityFeatures,featureIndex,false);
@@ -44,8 +49,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         Tile retainFeatures(Tile previous) {
             if (surfaceComplete || previous == null || !key.equals(previous.key)
                     || baseX != previous.baseX || baseZ != previous.baseZ || span != previous.span
-                    || !previous.surfaceComplete && !previous.hasVegetation()) return this;
-            if (!previous.surfaceComplete && hasVegetation()) {
+                    || !previous.surfaceComplete && !previous.hasVegetation() && !previous.approximateDecorations) return this;
+            if (!previous.approximateDecorations && !previous.surfaceComplete && hasVegetation()) {
                 var retained=boxes().retainVegetation(cityFeatures,previous.boxes(),previous.cityFeatures);
                 if (retained==features) return this;
                 return new Tile(key,baseX,baseZ,span,axis,step,columns,retained,terrainBytes,false,cityFeatures,null,approximateDecorations || previous.approximateDecorations);
@@ -55,9 +60,11 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             builder.addRange(previous.features,previous.cityFeatures,previous.features.size());
             var retained=builder.build();
             return new Tile(key, baseX, baseZ, span, axis, step, columns, retained,
-                    terrainBytes, previous.surfaceComplete, cityFeatures,null,previous.approximateDecorations);
+                    terrainBytes, previous.surfaceComplete, cityFeatures,null,previous.approximateDecorations,previous.decorationStep,previous.templateFeatures);
         }
 
+        boolean needsDecorationRefinement() { return approximateDecorations && decorationStep > step; }
+        boolean template(int index) { return approximateDecorations && index>=cityFeatures && index<cityFeatures+templateFeatures; }
         boolean hasVegetation() { return features.size() > cityFeatures; }
 
         /** Content identity is decided before manager versions or parent dependencies change. */
@@ -65,13 +72,14 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             if (previous == null || !key.equals(previous.key) || baseX != previous.baseX || baseZ != previous.baseZ
                     || span != previous.span || axis != previous.axis || step != previous.step) return this;
             boolean ground = Arrays.equals(columns, previous.columns);
-            boolean plants = approximateDecorations == previous.approximateDecorations
+            boolean plants = decorationStep == previous.decorationStep && templateFeatures == previous.templateFeatures
+                    && approximateDecorations == previous.approximateDecorations
                     && surfaceComplete == previous.surfaceComplete && cityFeatures == previous.cityFeatures
                     && features.equals(previous.features);
             if (ground && plants) return previous;
             return new Tile(key,baseX,baseZ,span,axis,step,ground ? previous.columns : columns,
                     plants ? previous.features : features,ground ? previous.terrainBytes : terrainBytes,
-                    surfaceComplete,cityFeatures,plants ? previous.featureIndex : featureIndex,approximateDecorations);
+                    surfaceComplete,cityFeatures,plants ? previous.featureIndex : featureIndex,approximateDecorations,decorationStep,templateFeatures);
         }
 
         Tile withVegetation(PredictionVegetation.Tile plants, dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities) {
@@ -114,13 +122,13 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         if (snapshot.isEmpty()) return null;
         var featureTiles=snapshot.stream().filter(Tile::surfaceComplete).toList();
         // Cull boxes once per chunk; do not walk an entire distant forest for each map pixel.
-        record Feature(Box box, boolean city) { }
+        record Feature(Box box, boolean city,boolean template) { }
         var boxes=new IdentityHashMap<Tile,List<Feature>>();
         for (Tile t:snapshot) {
             var selected=new ArrayList<Feature>();
             for (int i:t.featureIndex().intersect(bx-t.baseX(),Integer.MIN_VALUE,bz-t.baseZ(),
                     bx+16-t.baseX(),Integer.MAX_VALUE,bz+16-t.baseZ()))
-                selected.add(new Feature(t.features().get(i),i<t.cityFeatures()));
+                selected.add(new Feature(t.features().get(i),i<t.cityFeatures(),t.template(i)));
             boxes.put(t,selected);
         }
         var pixels=new XaeroPredictionBridge.Pixel[256];
@@ -128,10 +136,11 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         int terrainStep=0, featureStep=0; boolean complete=true;
         for (int x=0;x<16;x++) for (int z=0;z<16;z++) {
             int wx=bx+x,wz=bz+z;
-            Tile owner=null,plants=null;
+            Tile owner=null,plants=null,templates=null;
             for (Tile t:snapshot) if (covers(t,wx,wz)) { owner=t; break; }
             if (owner==null) return null; // never turn unknown portions of a chunk into saved air
             for (Tile t:featureTiles) if (covers(t,wx,wz)) { plants=t; break; }
+            for(Tile t:snapshot) if((t.approximateDecorations() || t.surfaceComplete()) && covers(t,wx,wz)) {templates=t;break;}
             int cx=Math.floorDiv(wx-owner.baseX(),owner.step()), cz=Math.floorDiv(wz-owner.baseZ(),owner.step());
             Column column=owner.columns()[cz*owner.axis()+cx];
             var base=terrainPixels.computeIfAbsent(column,c -> new XaeroPredictionBridge.Pixel(c.runs().stream()
@@ -142,11 +151,11 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             int partialStep=Integer.MAX_VALUE;
             for (int i=snapshot.size()-1;i>=0;i--) {
             Tile t=snapshot.get(i);
-            boolean fallback=plants==null && !t.surfaceComplete() && t.hasVegetation() && covers(t,wx,wz);
+            boolean fallback=!t.surfaceComplete() && t.hasVegetation() && vegetationVisible(t,plants,wx,wz);
             if(fallback)partialStep=Math.min(partialStep,t.step());
             for (Feature f:boxes.get(t)) {
                 Box b=f.box();
-                if (f.city() ? owner!=t : plants!=t && !fallback) continue;
+                if (f.city() ? owner!=t : f.template() ? templates!=t : plants!=t && !fallback) continue;
                 if (wx>=t.baseX()+b.minX() && wx<t.baseX()+b.maxX()
                         && wz>=t.baseZ()+b.minZ() && wz<t.baseZ()+b.maxZ()) {
                     if(runs==null) runs=new ArrayList<>(base.runs());
@@ -168,7 +177,9 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         return x>=t.baseX() && z>=t.baseZ() && x<(long)t.baseX()+t.span() && z<(long)t.baseZ()+t.span();
     }
     private static boolean vegetationVisible(Tile tile,Tile completed,int x,int z) {
-        return completed==tile || completed==null && !tile.surfaceComplete() && covers(tile,x,z);
+        return completed==tile || !tile.surfaceComplete() && covers(tile,x,z)
+                && (completed==null || tile.approximateDecorations()
+                    && (tile.step()<completed.step() || tile.step()==completed.step() && tile.key().lod()<completed.key().lod()));
     }
     record Detail(int x, int z, int lod) {
         @Override public int hashCode() { return PredictionKeyHash.hash(x,z,lod); }
@@ -238,8 +249,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     private static final ThreadLocal<ColumnScratch> COLUMN_SCRATCH=ThreadLocal.withInitial(ColumnScratch::new);
     private static final class VolumeScratch {
         boolean busy;
-        Tile[] owners=new Tile[1024],featureOwners=new Tile[1024];
-        final ArrayList<Tile> featureTiles=new ArrayList<>();
+        Tile[] owners=new Tile[1024],featureOwners=new Tile[1024],templateOwners=new Tile[1024];
+        final ArrayList<Tile> featureTiles=new ArrayList<>(),templateTiles=new ArrayList<>();
         final PredictionVoxyMaterials materials=new PredictionVoxyMaterials();
         final it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap<Column> mappedColumns=
                 new it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap<>();
@@ -260,7 +271,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         }
         void clear() {
             int columns=mappedColumns.size();
-            Arrays.fill(owners,null);Arrays.fill(featureOwners,null);featureTiles.clear();mappedColumns.clear();featureContributors.clear();columnPages.clear();
+            Arrays.fill(owners,null);Arrays.fill(featureOwners,null);Arrays.fill(templateOwners,null);featureTiles.clear();templateTiles.clear();mappedColumns.clear();featureContributors.clear();columnPages.clear();
             materials.clear();mappedRunCount=0;
             if(mappedRuns.length>65536)mappedRuns=new long[4096];
             if(columns>4096)mappedColumns.trim(4096);
@@ -390,6 +401,9 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         synchronized(this) {
             if(closed)return new PredictionVoxyDetailQueue.Changes(List.of(),List.of());
             changed=detailLoading && (observedView==null || !input.layout().equals(observedView.layout())
+                    || Math.floor(input.x()/64)!=Math.floor(observedView.x()/64)
+                    || Math.floor(input.z()/64)!=Math.floor(observedView.z()/64)
+                    || !Objects.equals(input.focus(),observedView.focus())
                     || input.minY()!=observedView.minY() || input.maxY()!=observedView.maxY()
                     || (input.view()==null ? observedView.view()!=null : input.view().changedFrom(observedView.view())));
             if(!detailLoading)observedView=null;
@@ -750,7 +764,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         boolean sameShape=observed!=null && observed.baseX()==tile.baseX() && observed.baseZ()==tile.baseZ()
                 && observed.span()==tile.span() && observed.axis()==tile.axis() && observed.step()==tile.step();
         boolean sameColumns=sameShape && Arrays.equals(observed.columns(),tile.columns());
-        boolean sameFeatures=sameShape && observed.approximateDecorations()==tile.approximateDecorations()
+        boolean sameFeatures=sameShape && observed.decorationStep()==tile.decorationStep() && observed.templateFeatures()==tile.templateFeatures()
+                && observed.approximateDecorations()==tile.approximateDecorations()
                 && observed.surfaceComplete()==tile.surfaceComplete()
                 && observed.cityFeatures()==tile.cityFeatures() && observed.features().equals(tile.features());
         boolean sameContent=sameColumns && sameFeatures;
@@ -767,6 +782,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         // Stable vegetation ownership permits a local update. Completion, first
         // coverage and city/vegetation ownership transitions still cover the tile.
         if(sameColumns && !sameFeatures && observed.surfaceComplete()==tile.surfaceComplete()
+                && observed.approximateDecorations()==tile.approximateDecorations() && observed.decorationStep()==tile.decorationStep()
+                && observed.templateFeatures()==tile.templateFeatures()
                 && observed.cityFeatures()==tile.cityFeatures() && observed.hasVegetation()==tile.hasVegetation()) {
             featureChanges=tile.boxes().changedBounds(observed.boxes());
             if(featureChanges[0]<featureChanges[3])affected=new Footprint(tile.baseX()+featureChanges[0],tile.baseZ()+featureChanges[2],
@@ -774,9 +791,9 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         }
         // Preserve reduced-column identities when only decoration/completion changed.
         if(sameColumns && observed.columns()!=tile.columns())tile=new Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),
-                tile.axis(),tile.step(),observed.columns(),tile.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),tile.featureIndex(),tile.approximateDecorations());
+                tile.axis(),tile.step(),observed.columns(),tile.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),tile.featureIndex(),tile.approximateDecorations(),tile.decorationStep(),tile.templateFeatures());
         if(sameFeatures && observed.features()!=tile.features())tile=new Tile(tile.key(),tile.baseX(),tile.baseZ(),tile.span(),
-                tile.axis(),tile.step(),tile.columns(),observed.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),observed.featureIndex(),tile.approximateDecorations());
+                tile.axis(),tile.step(),tile.columns(),observed.features(),tile.terrainBytes,tile.surfaceComplete(),tile.cityFeatures(),observed.featureIndex(),tile.approximateDecorations(),tile.decorationStep(),tile.templateFeatures());
         Extent prepared = sameContent ? before : extent(tile, observed, before);
         int[] height;ChangeInput input;boolean rangeReduced;
         synchronized(this) {
@@ -1112,6 +1129,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         long bx = (long)VoxyPredictionBridge.x(pos)*span, by = (long)VoxyPredictionBridge.y(pos)*span,
                 bz = (long)VoxyPredictionBridge.z(pos)*span;
         int reach = mapper.hasSkyLight() ? 0 : PredictionVoxyLighting.REACH;
+        if(horizon!=null && !horizon.intersects(bx-reach,bz-reach,span+2*reach))return false;
         for (Tile tile : intersect(bx-reach,bz-reach,span+2*reach)) {
             Extent e = extents.get(tile.key());
             if (by < (long)e.max()+reach && by+span > (long)e.min()-reach) return true;
@@ -1368,16 +1386,21 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         // Only completed placement can own known air. Partial cache results
         // contribute their actual boxes without hiding other known vegetation.
         var featureTiles=scratch.featureTiles;
-        for(var tile:snapshot)if(tile.surfaceComplete())featureTiles.add(tile);
+        for(var tile:snapshot) {
+            if(tile.surfaceComplete())featureTiles.add(tile);
+            if(tile.surfaceComplete() || tile.approximateDecorations())scratch.templateTiles.add(tile);
+        }
         int plane=(face&1)*31;
         int x0=face>=0 && face>>1==0 ? plane : 0,x1=face>=0 && face>>1==0 ? plane+1 : width;
         int z0=face>=0 && face>>1==2 ? plane : 0,z1=face>=0 && face>>1==2 ? plane+1 : width;
         int y0=face>=0 && face>>1==1 ? plane : 0,y1=face>=0 && face>>1==1 ? plane+1 : width;
         int area=(x1-x0)*(z1-z0);
-        if(scratch.owners.length<area) {scratch.owners=new Tile[area];scratch.featureOwners=new Tile[area];}
-        Tile[] owners=scratch.owners,featureOwners=scratch.featureOwners;
+        if(scratch.owners.length<area) {scratch.owners=new Tile[area];scratch.featureOwners=new Tile[area];scratch.templateOwners=new Tile[area];}
+        Tile[] owners=scratch.owners,featureOwners=scratch.featureOwners,templateOwners=scratch.templateOwners;
         selectOwners(snapshot,bx,bz,step,width,x0,x1,z0,z1,owners);
         selectOwners(featureTiles,bx,bz,step,width,x0,x1,z0,z1,featureOwners);
+        // Template coverage knows template absence even while unrelated fallback is unfinished.
+        selectOwners(scratch.templateTiles,bx,bz,step,width,x0,x1,z0,z1,templateOwners);
         for (int z = z0; z < z1; z++) for (int x = x0; x < x1; x++) {
             Tile tile=owners[(z-z0)*(x1-x0)+x-x0];
             if(tile!=null) {
@@ -1428,6 +1451,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             var terrain=owners[i];var plants=featureOwners[i];
             if(terrain!=null && terrain.cityFeatures()>0)contributors.merge(terrain,1,(a,b)->a|b);
             if(plants!=null && plants.hasVegetation())contributors.merge(plants,2,(a,b)->a|b);
+            Tile templates=templateOwners[i];
+            if(templates!=null && templates.hasVegetation())contributors.merge(templates,2,(a,b)->a|b);
         }
         for(Tile tile:snapshot)if(!tile.surfaceComplete() && tile.hasVegetation()) {
             int minX=Math.max(x0,-Math.floorDiv(bx+step/2-tile.baseX(),step));
@@ -1436,7 +1461,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             int maxZ=Math.min(z1,-Math.floorDiv(bz+step/2-tile.baseZ()-tile.span(),step));
             boolean contributes=false;
             for(int z=minZ;z<maxZ && !contributes;z++)for(int x=minX;x<maxX;x++)
-                if(featureOwners[(z-z0)*(x1-x0)+x-x0]==null) {contributes=true;break;}
+                if(vegetationVisible(tile,featureOwners[(z-z0)*(x1-x0)+x-x0],bx+x*step+step/2,bz+z*step+step/2)) {contributes=true;break;}
             if(contributes)contributors.merge(tile,2,(a,b)->a|b);
         }
         // Features retain their horizontal footprint; a one-block trunk must not fill a whole coarse sampling cell.
@@ -1457,7 +1482,8 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             int ex=features.coordinate(featureIndex,3),ey=features.coordinate(featureIndex,4),ez=features.coordinate(featureIndex,5);
             BlockState state=features.state(featureIndex);
             boolean city=featureIndex<tile.cityFeatures();
-            Tile[] selectedOwners = city ? owners : featureOwners;
+            boolean template=tile.template(featureIndex);
+            Tile[] selectedOwners = city ? owners : template ? templateOwners : featureOwners;
             int minX=Math.max(x0,Math.floorDiv(tile.baseX()+fx-bx,step));
             int minZ=Math.max(z0,Math.floorDiv(tile.baseZ()+fz-bz,step));
             int maxX=Math.min(x1,-Math.floorDiv(bx-tile.baseX()-ex,step));
@@ -1473,7 +1499,7 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             for(int z=minZ;z<maxZ;z++) for(int x=minX;x<maxX;x++) {
                 int columnIndex=(z-z0)*(x1-x0)+x-x0;
                 Tile selectedOwner=selectedOwners[columnIndex];
-                if(city ? selectedOwner!=tile : !vegetationVisible(tile,selectedOwner,
+                if(city || template ? selectedOwner!=tile : !vegetationVisible(tile,selectedOwner,
                         bx+x*step+step/2,bz+z*step+step/2))continue;
                 for(int y=minY;y<maxY;y++) {
                     int index=outputIndex(width,face,x,y,z); result[index]=y==surfaceY ? surface : value;

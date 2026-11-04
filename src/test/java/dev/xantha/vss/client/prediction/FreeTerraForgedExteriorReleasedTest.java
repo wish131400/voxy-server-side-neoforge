@@ -77,6 +77,38 @@ final class FreeTerraForgedExteriorReleasedTest {
         verifyConditionalCache(loader);
         verifyCompiledWrapper(mapped);
         benchmark(c);
+        pairedBaseline(c);
+        requestBaseline(c);
+        FreeTerraForgedLoadingReleasedTest.verify(c,context);
+    }
+
+    private static void pairedBaseline(PredictionJavaExteriorTest.Context c) throws Exception {
+        String name=System.getProperty("vss.ftfBaseline");if(name==null)return;
+        Class<?> type=Class.forName(name);var constructor=type.getDeclaredConstructors()[0];constructor.setAccessible(true);
+        var sample=type.getDeclaredMethod("sample",int[].class,int[].class,int.class,int[].class,int[].class,int.class,java.util.function.BooleanSupplier.class);
+        sample.setAccessible(true);
+        int n=64;int[] xs=new int[n],zs=new int[n],low=new int[n],top=new int[n];
+        for(int i=0;i<n;i++){xs[i]=(i%8)*4;zs[i]=(i/8)*4;var col=c.generator().getBaseColumn(xs[i],zs[i],c.heights(),c.random());
+            int high=c.heights().getMaxBuildHeight();while(high>c.heights().getMinBuildHeight()&&col.getBlock(high-1).isAir())high--;top[i]=high;}
+        for(int round=-1;round<4;round++) {
+            long[] elapsed=new long[2];boolean[][][] answers=new boolean[2][][];
+            for(int which:round%2==0?new int[]{0,1}:new int[]{1,0}) {
+                try(var fast=new FreeTerraForgedExterior(c.generator(),c.random(),c.heights());
+                    var old=(AutoCloseable)constructor.newInstance(c.generator(),c.random(),c.heights())) {
+                    long start=System.nanoTime();
+                    for(int depth:new int[]{24,80,160,384}) {
+                        for(int i=0;i<n;i++)low[i]=Math.max(c.heights().getMinBuildHeight(),top[i]-depth);
+                        answers[which]=which==0?(boolean[][])sample.invoke(old,xs,zs,4,low,top,n,(java.util.function.BooleanSupplier)()->true)
+                                :fast.sample(xs,zs,4,low,top,n,()->true);
+                    }
+                    elapsed[which]=System.nanoTime()-start;
+                    if(round>=0 && which==1)System.out.println("FTF_REUSE_COUNTERS "+fast.diagnostics());
+                }
+            }
+            for(int i=0;i<n;i++)assertArrayEquals(answers[0][i],answers[1][i],"same released graph output");
+            if(round>=0)System.out.printf(Locale.ROOT,"FTF_PAIRED round=%d footprints=%d incrementalRanges=4 beforeMs=%.3f afterMs=%.3f speedup=%.3f%n",
+                    round,n,elapsed[0]/1e6,elapsed[1]/1e6,(double)elapsed[0]/elapsed[1]);
+        }
     }
 
     private static void verifyConditionalCache(ClassLoader loader) throws Exception {
@@ -86,6 +118,60 @@ final class FreeTerraForgedExteriorReleasedTest {
         var vertical=(DensityFunction)constructor.newInstance(DensityFunctions.yClampedGradient(-64,320,1,-1));
         assertTrue(FreeTerraForgedExteriorOrder.canBatch(PredictionJavaExteriorTest.router(horizontal)));
         assertFalse(FreeTerraForgedExteriorOrder.canBatch(PredictionJavaExteriorTest.router(vertical)));
+    }
+
+    /** Same released density graph, previous production sampler, and original block occupancy. */
+    private static void requestBaseline(PredictionJavaExteriorTest.Context c) throws Exception {
+        try (var fast=new FreeTerraForgedExterior(c.generator(),c.random(),c.heights());var request=fast.request()) {
+            for(int[] p:List.of(new int[]{0,0},new int[]{12,12},new int[]{4,8},new int[]{8,4},new int[]{0,4})) {
+                var original=c.generator().getBaseColumn(p[0],p[1],c.heights(),c.random());
+                int high=c.heights().getMaxBuildHeight();
+                while(high>c.heights().getMinBuildHeight()&&original.getBlock(high-1).isAir())high--;
+                int low=Math.max(c.heights().getMinBuildHeight(),high-123);
+                assertArrayEquals(c.originalRange(p[0],p[1],4,low,high),fast.sample(new int[]{p[0]},new int[]{p[1]},4,
+                        new int[]{low},new int[]{high},1,()->true)[0],"released graph X rewind "+Arrays.toString(p));
+            }
+            assertEquals(1,fast.contexts(),"released graph shares one task-owned chunk context");
+        }
+        String name=System.getProperty("vss.ftfRequestBaseline");if(name==null)return;
+        var type=Class.forName(name);var constructor=type.getDeclaredConstructors()[0];constructor.setAccessible(true);
+        var sample=type.getDeclaredMethod("sample",int[].class,int[].class,int.class,int[].class,int[].class,int.class,
+                java.util.function.BooleanSupplier.class);sample.setAccessible(true);
+        var bean=(com.sun.management.ThreadMXBean)java.lang.management.ManagementFactory.getThreadMXBean();
+        int n=256,batch=64;int[] xs=new int[n],zs=new int[n],low=new int[n],top=new int[n];
+        // Production-sized 64-point frontiers across a full tile row, then overlapping deeper ranges.
+        for(int i=0;i<n;i++) {
+            xs[i]=(i%64)*4;zs[i]=(i/64)*4;
+            var original=c.generator().getBaseColumn(xs[i],zs[i],c.heights(),c.random());
+            int high=c.heights().getMaxBuildHeight();while(high>c.heights().getMinBuildHeight()&&original.getBlock(high-1).isAir())high--;
+            top[i]=high;
+        }
+        for(int round=-2;round<6;round++) {
+            long[] ns=new long[2],bytes=new long[2];boolean[][][] results=new boolean[2][n][];
+            for(int which:round%2==0?new int[]{0,1}:new int[]{1,0}) {
+                try(var old=(AutoCloseable)constructor.newInstance(c.generator(),c.random(),c.heights());
+                    var fast=new FreeTerraForgedExterior(c.generator(),c.random(),c.heights());var request=fast.request()) {
+                    long allocated=bean.getThreadAllocatedBytes(Thread.currentThread().threadId()),start=System.nanoTime();
+                    for(int depth:new int[]{24,80,160,384}) {
+                        for(int i=0;i<n;i++)low[i]=Math.max(c.heights().getMinBuildHeight(),top[i]-depth);
+                        for(int offset=0;offset<n;offset+=batch) {
+                            int[] xx=Arrays.copyOfRange(xs,offset,offset+batch),zz=Arrays.copyOfRange(zs,offset,offset+batch);
+                            int[] ll=Arrays.copyOfRange(low,offset,offset+batch),tt=Arrays.copyOfRange(top,offset,offset+batch);
+                            var values=which==0?(boolean[][])sample.invoke(old,xx,zz,4,ll,tt,batch,(java.util.function.BooleanSupplier)()->true)
+                                    :fast.sample(xx,zz,4,ll,tt,batch,()->true);
+                            for(int i=0;i<batch;i++)results[which][offset+i]=values[i];
+                        }
+                    }
+                    ns[which]=System.nanoTime()-start;
+                    bytes[which]=bean.getThreadAllocatedBytes(Thread.currentThread().threadId())-allocated;
+                    if(round>=0&&which==1)System.out.println("FTF_REQUEST_COUNTERS "+fast.diagnostics());
+                }
+            }
+            for(int i=0;i<n;i++)assertArrayEquals(results[0][i],results[1][i],"previous production request output");
+            if(round>=0)System.out.printf(Locale.ROOT,
+                    "FTF_REQUEST round=%d beforeMs=%.3f afterMs=%.3f beforeBytes=%d afterBytes=%d%n",
+                    round,ns[0]/1e6,ns[1]/1e6,bytes[0],bytes[1]);
+        }
     }
 
     private static void verifyCompiledWrapper(NoiseRouter mapped) throws Exception {

@@ -5,6 +5,29 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 class VoxyRenderAccessTest {
+    public static class Router {
+        int mask;
+        public int get(long position) { return mask; }
+    }
+    public static class Geometry {
+        int clears; Runnable onClear=()->{};
+        public void clear(long position) {clears++;onClear.run();}
+    }
+    public static class Nodes {
+        private final Router router=new Router();
+        private final Geometry geometryCache=new Geometry();
+    }
+    @Test void unwatchedUpdatesInvalidateNativeCacheWithoutConstructingSections() throws Exception {
+        var nodes=new Nodes();
+        assertTrue(VoxyRenderAccess.invalidateUnwatched(nodes,123));assertEquals(1,nodes.geometryCache.clears);
+        nodes.router.mask=2; // Child occupancy is also live interest, even without a mesh watch.
+        assertFalse(VoxyRenderAccess.invalidateUnwatched(nodes,123));assertEquals(1,nodes.geometryCache.clears);
+        nodes.router.mask=1;assertFalse(VoxyRenderAccess.invalidateUnwatched(nodes,123));
+        nodes.router.mask=0;nodes.geometryCache.onClear=()->nodes.router.mask=3;
+        assertFalse(VoxyRenderAccess.invalidateUnwatched(nodes,123),"A new watch racing cache invalidation must receive the update");
+        assertEquals(2,nodes.geometryCache.clears);
+        assertFalse(VoxyRenderAccess.invalidateUnwatched(new Object(),123),"Unknown community backends retain normal delivery");
+    }
     public static class IntegerConfig { public int sectionRenderDistance = 16; }
     public static class FloatConfig { public float sectionRenderDistance = 16.5f; }
     public static class NeighborWorld {

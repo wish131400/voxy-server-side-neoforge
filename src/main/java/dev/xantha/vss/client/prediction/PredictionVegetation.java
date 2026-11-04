@@ -35,6 +35,11 @@ final class PredictionVegetation {
     static final int REGISTRY_CONTEXT_SETTINGS_VERSION = 1 << 14;
     // Visual ground no longer depends on unrelated exact-cache prefetch order.
     static final int STABLE_GROUND_SETTINGS_VERSION = 1 << 15;
+    // Old FTF records could be marked complete after their dimension predicates threw.
+    static final int DIMENSION_FILTER_SETTINGS_VERSION = 1 << 16;
+    private static final int DIMENSION_FILTER_SETTINGS = ModList.get() != null
+            && (ModList.get().isLoaded("freeterraforged") || ModList.get().isLoaded("reterraforged"))
+            ? DIMENSION_FILTER_SETTINGS_VERSION : 0;
     private static final int PREDICATE_SETTINGS = ModList.get() != null && ModList.get().isLoaded("byepregen")
             ? PREDICATE_SETTINGS_VERSION : 0;
     private static final int MAX_CHUNKS = 512;
@@ -80,7 +85,7 @@ final class PredictionVegetation {
 
     static int runtimeSettings() {
         return STRUCTURE_RUNTIME_SETTINGS_VERSION | REGISTRY_CONTEXT_SETTINGS_VERSION
-                | STABLE_GROUND_SETTINGS_VERSION | PREDICATE_SETTINGS;
+                | STABLE_GROUND_SETTINGS_VERSION | PREDICATE_SETTINGS | DIMENSION_FILTER_SETTINGS;
     }
 
     static int runtimeSettings(net.minecraft.resources.ResourceLocation dimension) {

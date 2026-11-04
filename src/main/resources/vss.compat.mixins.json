@@ -17,6 +17,7 @@
     "minecraft.TrackedEntitySeenByAccessor"
   ],
   "client": [
+    "client.PredictionStructureTerrainMixin",
     "voxy.PredictionVoxyMeshSourceMixin",
     "voxy.PredictionVoxyNeighborSourceMixin",
     "voxy.PredictionVoxyWorldEventMixin",
@@ -32,6 +33,8 @@
     "client.PredictionPauseLimitMixin",
     "client.PredictionFogCaptureMixin",
     "client.FreeTerraForgedPredictionFiltersMixin",
+    "client.FreeTerraForgedPredictionOreMixin",
+    "client.FreeTerraForgedPredictionDimensionMixin",
     "client.ByePregenPredictionPredicateMixin",
     "client.NbtTreePredictionTemplatesMixin",
     "client.ClientPacketListenerServerIdentityMixin",

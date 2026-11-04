@@ -41,6 +41,7 @@ final class PredictionLodSampler extends ClientTerrainSampler {
     @Override public ClientColumnSample sampleForLod(int x, int z, int step) { return source.sample(x, z, step); }
     @Override public ClientColumnSample samplePreview(int x, int z, int step) { return source.preview(x, z, step); }
     @Override public ClientColumnSample samplePreview(int x, int z) { return source.preview(x, z, 1); }
+    @Override boolean supportsLodGrid() { return true; }
     @Override boolean sampleLodGrid(int x, int z, int step, int width, int height,
             ClientColumnSample[] target, int offset, int stride, boolean preview) {
         source.sampleGrid(x, z, step, width, height, target, offset, stride, preview);

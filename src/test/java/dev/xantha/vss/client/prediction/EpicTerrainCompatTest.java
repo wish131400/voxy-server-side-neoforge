@@ -135,6 +135,21 @@ class EpicTerrainCompatTest {
                     Files.readString(Path.of("tools/rust/vss-native-core/tests/fixtures/worldgen/" + color + ".json"))));
             long nativeWorld = RustWorldgenBackend.create(seed, BiomeManager.obfuscateSeed(seed), doc.toString());
             try (var nativeSampler = new RustTerrainSampler(nativeWorld, profile, context)) {
+            // Exercise the Java batch decoder against the released pack's
+            // actual (possibly different) dimension and noise height ranges.
+            int[] xs = {-17,-16,-15,-14,-13,-12,-11,-10};
+            int[] zs = {31,31,31,31,31,31,31,31};
+            int[] bottoms = new int[8], tops = new int[8];
+            for (int i=0; i<8; i++) {
+                tops[i] = nativeSampler.surfaceY(xs[i], zs[i]);
+                bottoms[i] = Math.max(settings.noiseSettings().minY(), tops[i]-64);
+            }
+            for (int step : new int[]{1,2,4}) {
+                var batch = nativeSampler.exteriorFootprints(xs,zs,step,bottoms,tops,8,()->true);
+                for (int i=0; i<8; i++) assertArrayEquals(
+                        nativeSampler.exteriorFootprint(xs[i],zs[i],step,bottoms[i],tops[i],()->true),
+                        batch[i], "Released EpicTerrain batch row="+i+" step="+step);
+            }
             var directRandom = RandomState.create(settings, registries.noiseLookup(), seed);
             var directGenerator = new NoiseBasedChunkGenerator(
                     BiomeSource.CODEC.parse(registries.ops(), generator.get("biome_source")).getOrThrow(), Holder.direct(settings));

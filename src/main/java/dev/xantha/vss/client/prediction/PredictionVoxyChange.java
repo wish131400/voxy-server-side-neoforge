@@ -17,7 +17,7 @@ final class PredictionVoxyChange implements LongPredicate {
     PredictionVoxyChange(Tile before,Tile after,List<Tile> peers,boolean terrain) {
         var owners=new ArrayList<Owner>();
         for(Tile tile:new Tile[]{before,after})if(tile!=null)for(boolean plants:new boolean[]{false,true}) {
-            if(plants ? !tile.surfaceComplete() && !tile.hasVegetation() : !terrain && tile.cityFeatures()==0)continue;
+            if(plants ? !tile.surfaceComplete() && !tile.hasVegetation() && !tile.approximateDecorations() : !terrain && tile.cityFeatures()==0)continue;
             var bySpan=new TreeMap<Integer,Map<Long,List<Tile>>>();
             var all=new HashMap<Integer,List<Tile>>();
             for(Tile peer:peers)if(!peer.key().equals(tile.key()) && precedes(peer,tile,plants)) {
@@ -93,7 +93,7 @@ final class PredictionVoxyChange implements LongPredicate {
             // Only complete placement proves that lower-priority plants cannot
             // contribute. A partial child must not hide its parent's invalidation.
             if(!peer.surfaceComplete())return false;
-            if(peer.surfaceComplete()!=tile.surfaceComplete())return peer.surfaceComplete();
+            if(peer.surfaceComplete()!=tile.surfaceComplete() && !tile.approximateDecorations())return peer.surfaceComplete();
         }
         return peer.step()<tile.step() || peer.step()==tile.step() && peer.key().lod()<tile.key().lod();
     }

@@ -166,6 +166,14 @@ public final class PredictionCpuBudget {
         private boolean released;
         private Reservation(boolean queuedOnly) { this.queuedOnly = queuedOnly; }
         void consume() { close(); }
+        /** Transfer admission without exposing a free slot between queue and execution. */
+        Lease acquire(boolean urgent) {
+            synchronized (PredictionCpuBudget.this) {
+                if (released) return null;
+                close();
+                return tryAcquire(urgent);
+            }
+        }
         @Override public void close() {
             synchronized (PredictionCpuBudget.this) {
                 if (released) return;

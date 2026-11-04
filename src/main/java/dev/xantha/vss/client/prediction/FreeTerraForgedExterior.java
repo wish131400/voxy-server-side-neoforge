@@ -21,8 +21,11 @@ import net.minecraft.world.level.levelgen.*;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import org.apache.commons.lang3.mutable.MutableObject;
 
-/** Sampler-owned exact occupancy. No terrain quality changes and no retained mutable NoiseChunk. */
+/** Sampler-owned exact occupancy; mutable interpolation is bounded and owned by one worker request. */
 final class FreeTerraForgedExterior implements AutoCloseable {
+    // A 66-sample grid at step 4 spans up to 18 chunks on an axis. Keep a frontier's
+    // working set through its neighbour pass without retaining the complete tile or world.
+    private static final int REQUEST_CONTEXTS = 32;
     private final NoiseBasedChunkGenerator generator;
     private final RandomState random;
     private final LevelHeightAccessor heights;
@@ -31,9 +34,12 @@ final class FreeTerraForgedExterior implements AutoCloseable {
     private final int width, minY, maxY, capacity;
     private final boolean batch;
     private final LinkedHashMap<Long, Entry> cells = new LinkedHashMap<>(64, 0.75f, true);
+    private final ThreadLocal<Request> request = new ThreadLocal<>();
     private volatile boolean closed;
     private final LongAdder builds = new LongAdder(), columns = new LongAdder(), hits = new LongAdder();
     private final LongAdder waits = new LongAdder(), rejected = new LongAdder();
+    private final LongAdder contexts = new LongAdder(), evaluated = new LongAdder(), reused = new LongAdder();
+    private final LongAdder contextHits = new LongAdder(), repositions = new LongAdder(), evictions = new LongAdder();
 
     FreeTerraForgedExterior(NoiseBasedChunkGenerator generator, RandomState random, LevelHeightAccessor heights) {
         this.generator = generator; this.random = random; this.heights = heights;
@@ -53,14 +59,31 @@ final class FreeTerraForgedExterior implements AutoCloseable {
     boolean batchesCells() { return batch; }
     long builds() { return builds.sum(); }
     long columns() { return columns.sum(); }
+    long contexts() { return contexts.sum(); }
+    long evaluatedBlocks() { return evaluated.sum(); }
     String diagnostics() {
         int size; synchronized (cells) { size = cells.size(); }
         return "mode=" + (batch ? "cellBatch" : "orderedColumns") + ",builds=" + builds.sum()
                 + ",columns=" + columns.sum() + ",hits=" + hits.sum() + ",waits=" + waits.sum()
-                + ",rejectedRoofs=" + rejected.sum() + ",cells=" + size + ",capacity=" + capacity;
+                + ",rejectedRoofs=" + rejected.sum() + ",cells=" + size + ",capacity=" + capacity
+                + ",contexts=" + contexts.sum() + ",evaluatedBlocks=" + evaluated.sum() + ",reusedBlocks=" + reused.sum()
+                + ",contextHits=" + contextHits.sum() + ",sliceRepositions=" + repositions.sum() + ",evictions=" + evictions.sum();
+    }
+
+    ClientTerrainSampler.SamplingScope request() {
+        if (request.get() != null) return () -> {};
+        Request active = new Request();
+        request.set(active);
+        return active;
     }
 
     boolean[][] sample(int[] xs, int[] zs, int step, int[] bottoms, int[] tops, int count, BooleanSupplier valid) {
+        try (var ignored = request()) {
+            return sampleRequest(xs, zs, step, bottoms, tops, count, valid);
+        }
+    }
+
+    private boolean[][] sampleRequest(int[] xs, int[] zs, int step, int[] bottoms, int[] tops, int count, BooleanSupplier valid) {
         if (step != 1 && step != 2 && step != 4) throw new IllegalArgumentException("exterior footprint step");
         check(valid);
         boolean[][] result = new boolean[count][];
@@ -127,26 +150,35 @@ final class FreeTerraForgedExterior implements AutoCloseable {
     }
 
     private Map<Long, Column> load(Map<Long, Range> requests, BooleanSupplier valid) {
-        Map<Long, Range[]> groups = new HashMap<>();
+        Request active = request.get();
+        active.clearScratch();
+        Map<Long, Range[]> groups = active.groups;
         for (var request : requests.entrySet()) {
             int x = x(request.getKey()), z = z(request.getKey());
             long cell = key(Math.floorDiv(x, width) * width, Math.floorDiv(z, width) * width);
-            Range[] ranges = groups.computeIfAbsent(cell, ignored -> new Range[width * width]);
+            Range[] ranges = groups.computeIfAbsent(cell, ignored -> active.ranges());
             ranges[Math.floorMod(x, width) * width + Math.floorMod(z, width)] = request.getValue();
         }
-        Map<Long, Column> result = new HashMap<>();
-        for (var group : groups.entrySet()) {
+        Map<Long, Column> result = active.result;
+        var ordered = active.ordered;
+        ordered.addAll(groups.entrySet());
+        if (batch) ordered.sort(java.util.Comparator
+                .comparingInt((Map.Entry<Long, Range[]> g) -> Math.floorDiv(x(g.getKey()), 16))
+                .thenComparingInt(g -> Math.floorDiv(z(g.getKey()), 16))
+                .thenComparingInt(g -> x(g.getKey())).thenComparingInt(g -> z(g.getKey())));
+        for (var group : ordered) {
             check(valid);
             Entry entry;
             synchronized (cells) {
                 check(valid);
                 entry = cells.computeIfAbsent(group.getKey(), ignored -> new Entry(width * width));
-                while (cells.size() > capacity) cells.remove(cells.keySet().iterator().next());
+                while (cells.size() > capacity) { cells.remove(cells.keySet().iterator().next()); evictions.increment(); }
             }
             lock(entry, valid);
             try {
                 int bx = x(group.getKey()), bz = z(group.getKey());
-                Range[] wanted = group.getValue(), missing = new Range[wanted.length];
+                Range[] wanted = group.getValue(), missing = active.missing;
+                Arrays.fill(missing, null);
                 boolean compute = false;
                 for (int i = 0; i < wanted.length; i++) {
                     if (wanted[i] == null) continue;
@@ -164,7 +196,8 @@ final class FreeTerraForgedExterior implements AutoCloseable {
                 }
                 if (compute) {
                     // Publish only a completed immutable result; cancellation cannot poison an entry.
-                    Column[] computed = batch ? buildCell(bx, bz, missing, valid) : buildOrdered(bx, bz, missing, valid);
+                    Column[] computed = batch ? buildCell(bx, bz, missing, entry.columns, active, valid)
+                            : buildOrdered(bx, bz, missing, valid);
                     check(valid);
                     for (int i = 0; i < missing.length; i++) if (computed[i] != null) entry.columns[i] = computed[i];
                 }
@@ -175,43 +208,117 @@ final class FreeTerraForgedExterior implements AutoCloseable {
         return result;
     }
 
-    private Column[] buildCell(int x, int z, Range[] ranges, BooleanSupplier valid) {
+    private Column[] buildCell(int x, int z, Range[] ranges, Column[] previous, Request batchWork, BooleanSupplier valid) {
         int low = maxY, high = minY, height = noise.getCellHeight();
-        Column[] output = new Column[ranges.length];
+        Column[] output = batchWork.output;
+        Arrays.fill(output, null);
         for (int i = 0; i < ranges.length; i++) if (ranges[i] != null) {
             low = Math.min(low, ranges[i].low); high = Math.max(high, ranges[i].high);
             output[i] = new Column(ranges[i].low, ranges[i].high); columns.increment();
+            if (previous[i] != null) output[i].copy(previous[i]);
         }
-        Work work = new Work(random, x, z, noise, generator.generatorSettings().value(), fluids);
+        Work work = batchWork.at(x, z, valid);
         builds.increment();
-        boolean started = false;
-        try {
-            started = true; work.initializeForFirstCellX(); work.advanceCellX(0);
-            for (int cy = Math.floorDiv(high - 1, height); cy >= Math.floorDiv(low, height); cy--) {
-                check(valid);
-                work.selectCellYZ(cy - Math.floorDiv(minY, height), 0);
-                for (int y = Math.min(high, (cy + 1) * height) - 1; y >= Math.max(low, cy * height); y--) {
-                    work.updateForY(y, (double) Math.floorMod(y, height) / height);
-                    for (int dx = 0; dx < width; dx++) {
-                        work.updateForX(x + dx, (double) dx / width);
-                        for (int dz = 0; dz < width; dz++) {
-                            Column column = output[dx * width + dz];
-                            if (column == null || y < column.low || y >= column.high) continue;
-                            work.updateForZ(z + dz, (double) dz / width);
-                            BlockState state = work.state();
-                            if (!(state == null ? generator.generatorSettings().value().defaultBlock() : state).isAir()) column.set(y);
-                            else if (ranges[dx * width + dz].rejectAt == y) {
-                                output[dx * width + dz] = column.trimLow(y);
-                                // All remaining requests may now finish above the original floor.
-                                low = maxY;
-                                for (Column active : output) if (active != null) low = Math.min(low, active.low);
-                            }
+        long evaluatedBlocks = 0, reusedBlocks = 0;
+        for (int cy = Math.floorDiv(high - 1, height); cy >= Math.floorDiv(low, height); cy--) {
+            check(valid);
+            work.selectCellYZ(cy - Math.floorDiv(minY, height), batchWork.cellZ(z));
+            for (int y = Math.min(high, (cy + 1) * height) - 1; y >= Math.max(low, cy * height); y--) {
+                work.updateForY(y, (double) Math.floorMod(y, height) / height);
+                for (int dx = 0; dx < width; dx++) {
+                    work.updateForX(x + dx, (double) dx / width);
+                    for (int dz = 0; dz < width; dz++) {
+                        Column column = output[dx * width + dz];
+                        if (column == null || y < column.low || y >= column.high) continue;
+                        Column cached = previous[dx * width + dz];
+                        if (cached != null && y >= cached.low && y < cached.high) { reusedBlocks++; continue; }
+                        work.updateForZ(z + dz, (double) dz / width);
+                        BlockState state = work.state();
+                        evaluatedBlocks++;
+                        if (!(state == null ? generator.generatorSettings().value().defaultBlock() : state).isAir()) column.set(y);
+                        else if (ranges[dx * width + dz].rejectAt == y) {
+                            output[dx * width + dz] = column.trimLow(y);
+                            // All remaining requests may now finish above the original floor.
+                            low = maxY;
+                            for (Column active : output) if (active != null) low = Math.min(low, active.low);
                         }
                     }
                 }
             }
-        } finally { if (started) work.stopInterpolation(); }
+        }
+        evaluated.add(evaluatedBlocks); reused.add(reusedBlocks);
         return output;
+    }
+
+    /** The flood's frontiers and anchor/neighbour passes share a bounded set of exclusive chunk graphs. */
+    private final class Request implements ClientTerrainSampler.SamplingScope {
+        private final LinkedHashMap<Long, Cursor> chunks = new LinkedHashMap<>(8, .75f, true);
+        final Map<Long, Range[]> groups = new HashMap<>();
+        final Map<Long, Column> result = new HashMap<>();
+        final java.util.ArrayList<Map.Entry<Long, Range[]>> ordered = new java.util.ArrayList<>();
+        final java.util.ArrayDeque<Range[]> pool = new java.util.ArrayDeque<>();
+        final Range[] missing = new Range[width * width];
+        final Column[] output = new Column[width * width];
+
+        Range[] ranges() { return pool.isEmpty() ? new Range[width * width] : pool.removeFirst(); }
+        void clearScratch() {
+            for (Range[] ranges : groups.values()) {
+                Arrays.fill(ranges, null);
+                if (pool.size() < 128) pool.addLast(ranges);
+            }
+            groups.clear(); result.clear(); ordered.clear();
+        }
+        Work at(int x, int z, BooleanSupplier valid) {
+            check(valid);
+            long key = key(Math.floorDiv(x, 16), Math.floorDiv(z, 16));
+            Cursor cursor = chunks.get(key);
+            if (cursor == null) {
+                if (chunks.size() == REQUEST_CONTEXTS) {
+                    var oldest = chunks.entrySet().iterator();
+                    oldest.next().getValue().close(); oldest.remove();
+                }
+                cursor = new Cursor(Math.floorDiv(x, 16) * 16, Math.floorDiv(z, 16) * 16);
+                chunks.put(key, cursor);
+            } else contextHits.increment();
+            return cursor.at(x);
+        }
+        int cellZ(int z) { return Math.floorMod(z, 16) / width; }
+        @Override public void close() {
+            try { chunks.values().forEach(Cursor::close); }
+            finally { chunks.clear(); request.remove(); }
+        }
+    }
+
+    private final class Cursor implements AutoCloseable {
+        private final Work work;
+        private final int baseX;
+        private int cellX = -1;
+        private boolean interpolating;
+        Cursor(int x, int z) {
+            baseX = x;
+            work = new Work(16 / width, random, x, z, noise, generator.generatorSettings().value(), fluids);
+            contexts.increment();
+        }
+        Work at(int x) {
+            if (!interpolating) {
+                work.initializeForFirstCellX(); interpolating = true;
+            }
+            int next = (x - baseX) / width;
+            if (next != cellX) {
+                if (next == cellX + 1) {
+                    if (cellX >= 0) work.swapSlices();
+                } else {
+                    // Fill the requested left slice, then its right slice. Do not restart interpolation:
+                    // its monotonically increasing counters invalidate CacheOnce/C2ME memoized values.
+                    work.advanceCellX(next - 1); work.swapSlices(); repositions.increment();
+                }
+                work.advanceCellX(next); cellX = next;
+            }
+            return work;
+        }
+        @Override public void close() {
+            if (interpolating) { interpolating = false; work.stopInterpolation(); }
+        }
     }
 
     private Column[] buildOrdered(int x, int z, Range[] ranges, BooleanSupplier valid) {
@@ -265,10 +372,13 @@ final class FreeTerraForgedExterior implements AutoCloseable {
             return result;
         }
         boolean occupied(int y) { int at = y - low; return y >= low && y < high && (bits[at >>> 6] & 1L << (at & 63)) != 0; }
+        void copy(Column source) {
+            for (int y = Math.max(low, source.low); y < Math.min(high, source.high); y++) if (source.occupied(y)) set(y);
+        }
     }
     private static final class Work extends NoiseChunk {
-        Work(RandomState random, int x, int z, NoiseSettings noise, NoiseGeneratorSettings settings, Aquifer.FluidPicker fluids) {
-            super(1, random, x, z, noise, NO_STRUCTURES, settings, fluids, Blender.empty());
+        Work(int count, RandomState random, int x, int z, NoiseSettings noise, NoiseGeneratorSettings settings, Aquifer.FluidPicker fluids) {
+            super(count, random, x, z, noise, NO_STRUCTURES, settings, fluids, Blender.empty());
         }
         BlockState state() { return getInterpolatedState(); }
     }

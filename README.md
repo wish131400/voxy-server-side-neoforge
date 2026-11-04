@@ -24,7 +24,7 @@ Voxy Server Side（VSS）让服务端读取、生成、缓存并发送真实远�
 
 [安装依赖](docs/user-guide/installation.md) · [配置](docs/user-guide/configuration.md) · [命令与预生成](docs/user-guide/commands.md) · [缓存与排错](docs/user-guide/cache-and-troubleshooting.md)
 
-预测默认距离为 4096 方块，支持本地缓存和望远镜额外加载。预测是生成规则的近似，无法覆盖所有模组后处理或玩家改动；准确内容以服务端真实列为准。Xaero 地图继续接收真实列，预测转地图暂时停用。行为与开关见 [预测与远景](docs/user-guide/prediction.md)。
+各版本的预测默认半径为 512 区块，远区模板装饰默认开启。精确装饰半径为 64 区块，外加 16 区块提前细化带；远处先显示模板植被，再补齐未替代的装饰和结构，靠近后转回精确计算。模板按种子和群系规则散布，位置和形态可能与精确结果不同。旧配置只迁移原默认值，已迁移后手动关闭或自定义的距离继续保留。支持本地缓存和望远镜额外加载。准确内容以服务端真实列为准。详见[预测与远景](docs/user-guide/prediction.md)。
 
 ## 开发与项目
 

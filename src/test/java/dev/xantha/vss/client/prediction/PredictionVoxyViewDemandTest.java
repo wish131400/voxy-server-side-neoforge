@@ -8,6 +8,15 @@ import org.joml.Matrix4f;
 import org.junit.jupiter.api.*;
 
 class PredictionVoxyViewDemandTest {
+
+    @Test void cameraCellMovementRefreshesDemandEvenBeforeTheProjectionIsReplaced() {
+        var before=input(32,80,0,70,0,4096);
+        var after=new PredictionVoxySource.DetailInput(256,0,before.layout(),before.view(),before.dimension(),null,-64,320);
+        try(var source=new PredictionVoxySource()) {
+            source.refreshDetails(before);source.refreshDetails(after);
+            assertEquals(2L,source.diagnostics().get("viewDemandBuilds"));
+        }
+    }
     @BeforeAll static void bootstrap() {ClientTerrainSamplerTest.bootstrapMinecraft();}
     private static PredictionVoxySource.DetailInput input(double x,double y,double z,double fov,double yaw,int radius) {
         var projection=new Matrix4f().perspective((float)Math.toRadians(fov),1.7f,.1f,1024);
