@@ -40,6 +40,10 @@ Rust 样条现在保留数据包内重复/未排序控制点，并按 Minecraft 
 
 这些是各自生成配置的适配结果，不代表 Tectonic、FreeTerraForged 与史诗地形可以同时叠加生成；它们之间的数据包覆盖、TerraBlender 扩展和特定整合包的光影仍需分别验证。复现命令和历史采样验证见 [Epic Terrain 记录](../../tools/prediction/EPIC_TERRAIN_2026-09-09.md)。
 
+## Tectonic 3.0.28 本地兼容测试
+
+本地测试补丁补充了 `ConfigNoise.smootherScaling` 的快照转换，修复按旧版六参数构造方法检查而触发的 `NoSuchMethodException`。同时展开 Lithostitched 包装层内的 multi-noise 群系预设，避免客户端因缺少服务端预设注册表而无法初始化预测。使用真实的 NeoForge 1.21.1 发布 JAR 对照采样与快照编解码；整合包内预测仍需实机验收。范围与复现见 [专项记录](tectonic-3.0.28-test.md)。上表的既有整体验证基线不因此自动扩大。
+
 ## FreeTerraForged / ReTerraForged
 
 已接入 [ETcodehome/FreeTerraForged](https://github.com/ETcodehome/FreeTerraForged) 发布版 `1.0.0-neoforge-1.21.1`，并保留 ReTerraForged `0.0.6005-neoforge-1.21.1` 支持，新增 `1.0.0015–1.0.0023` 九个 NeoForge 1.21.1 构建。上述发行包均已逐版进行实际接口与采样验证；Forge 1.20.1 的共享代码同步不计作这些发行包的跨平台实测。自动识别新旧命名空间，服务器同步实际预设与噪声注册表，客户端按维度设置其初始化上下文，并保留新版地下生物群系设置。两端需使用同次构建的 VSS，并安装对应生成模组。粗模使用模组自己的点估算；更细地形读取逐方块侵蚀缓存，继续沿用近处/望远镜优先调度。河流、湖泊与湿地水面使用模组的水文高度函数；预测专用地形缓存会在工作线程结束后释放。
