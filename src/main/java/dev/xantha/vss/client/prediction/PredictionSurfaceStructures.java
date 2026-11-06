@@ -41,12 +41,14 @@ final class PredictionSurfaceStructures {
 
     PredictionSurfaceStructures(ClientTerrainSampler context) {
         this.context = context;
+        String policyRejection = context.structurePredictionRejection();
+        if (policyRejection != null) lastFailure = policyRejection;
         this.terrain = new PredictionStructureTerrain(context.generatorContext(), context.randomStateContext());
         this.access = context.decorationAccess();
         PredictionStructureTemplates found = null;
         ChunkGeneratorStructureState generation = null;
         List<Holder<StructureSet>> possible = List.of();
-        if (access != null && context.generatorContext() != null
+        if (policyRejection == null && access != null && context.generatorContext() != null
                 && access.registry(Registries.STRUCTURE_SET).isPresent()) {
             try {
                 found = PredictionStructureTemplates.open(context.structureTemplates());

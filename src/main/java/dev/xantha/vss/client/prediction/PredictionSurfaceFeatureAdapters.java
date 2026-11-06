@@ -26,7 +26,8 @@ final class PredictionSurfaceFeatureAdapters {
                       RandomSource random, BlockPos origin) {
         var configured = feature.feature().value();
         boolean adapted = configured.feature() == Feature.END_SPIKE || configured.feature() == Feature.LAKE;
-        if (!adapted && !PredictionPlacementExecutor.available()) {
+        if (!adapted && !PredictionPlacementExecutor.available()
+                && !PredictionConfiguredFeaturePlacement.requiresVirtualPlacement(level)) {
             feature.placeWithBiomeCheck(level, generator, random, origin);
             return;
         }
@@ -37,8 +38,10 @@ final class PredictionSurfaceFeatureAdapters {
             if (configured.feature() == Feature.END_SPIKE)
                 PredictionEndSpikes.place(level,random,(SpikeConfiguration)configured.config(),pos);
             else if (configured.feature() == Feature.LAKE)
-                new ConfiguredFeature<>(LAKE,(LakeFeature.Configuration)configured.config()).place(level,generator,random,pos);
-            else configured.place(level, generator, random, pos);
+                PredictionConfiguredFeaturePlacement.place(
+                        new ConfiguredFeature<>(LAKE,(LakeFeature.Configuration)configured.config()),
+                        level,generator,random,pos);
+            else PredictionConfiguredFeaturePlacement.place(configured, level, generator, random, pos);
         };
         if (PredictionPlacementExecutor.available())
             PredictionPlacementExecutor.visit(feature, context, random, origin, terminal);

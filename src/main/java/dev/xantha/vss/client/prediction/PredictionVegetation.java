@@ -37,6 +37,11 @@ final class PredictionVegetation {
     static final int STABLE_GROUND_SETTINGS_VERSION = 1 << 15;
     // Old FTF records could be marked complete after their dimension predicates threw.
     static final int DIMENSION_FILTER_SETTINGS_VERSION = 1 << 16;
+    // Rebuild old empty NBT-tree decoration and stretched exterior-air voxel records.
+    static final int TEMPLATE_FOOTPRINT_SETTINGS_VERSION = 1 << 17;
+    static final int TREE_HEIGHT_SETTINGS_VERSION = 1 << 18;
+    // Rebuild cached empty decoration only in packs where Streams Reflowing intercepts configured features.
+    static final int STREAMS_VIRTUAL_FEATURE_SETTINGS_VERSION = 1 << 19;
     private static final int DIMENSION_FILTER_SETTINGS = ModList.get() != null
             && (ModList.get().isLoaded("freeterraforged") || ModList.get().isLoaded("reterraforged"))
             ? DIMENSION_FILTER_SETTINGS_VERSION : 0;
@@ -71,6 +76,7 @@ final class PredictionVegetation {
     private final Set<PlacedFeature> missingRegistryFailures = ConcurrentHashMap.newKeySet();
     private final Set<PlacedFeature> unsupportedFeatures = ConcurrentHashMap.newKeySet();
     private volatile String lastFeatureFailure = "none";
+    private final java.util.concurrent.ConcurrentMap<String, String> featureFailureDetails = new ConcurrentHashMap<>();
     private final VssLodSampleCache terrainColumns;
     private int cachedBlocks;
     private final java.util.concurrent.atomic.LongAdder generatedChunks = new java.util.concurrent.atomic.LongAdder();
@@ -85,7 +91,10 @@ final class PredictionVegetation {
 
     static int runtimeSettings() {
         return STRUCTURE_RUNTIME_SETTINGS_VERSION | REGISTRY_CONTEXT_SETTINGS_VERSION
-                | STABLE_GROUND_SETTINGS_VERSION | PREDICATE_SETTINGS | DIMENSION_FILTER_SETTINGS;
+                | STABLE_GROUND_SETTINGS_VERSION | PREDICATE_SETTINGS | DIMENSION_FILTER_SETTINGS
+                | TEMPLATE_FOOTPRINT_SETTINGS_VERSION | TREE_HEIGHT_SETTINGS_VERSION
+                | (PredictionConfiguredFeaturePlacement.streamsPresent()
+                        ? STREAMS_VIRTUAL_FEATURE_SETTINGS_VERSION : 0);
     }
 
     static int runtimeSettings(net.minecraft.resources.ResourceLocation dimension) {
@@ -105,7 +114,8 @@ final class PredictionVegetation {
                 Map.entry("memoryHits",memoryHits.sum()),Map.entry("diskHits",diskHits.sum()),
                 Map.entry("activeChunks",generationJobs.size()),Map.entry("failedFeatures",failedFeatures.sum()),
                 Map.entry("localFailures",localFailures.sum()),Map.entry("unsupportedFeatures",unsupportedFeatures.size()),
-                Map.entry("disabledRegistryFeatures",missingRegistryFailures.size()),Map.entry("lastFailure",lastFeatureFailure),Map.entry("biomePruning",biomePruning.snapshot()));
+                Map.entry("disabledRegistryFeatures",missingRegistryFailures.size()),Map.entry("lastFailure",lastFeatureFailure),
+                Map.entry("featureFailureDetails",Map.copyOf(featureFailureDetails)),Map.entry("biomePruning",biomePruning.snapshot()));
     }
 
     String diagnostics() {
@@ -115,7 +125,8 @@ final class PredictionVegetation {
                 + "," + displayCache.diagnostics()
                 + ",skippedFeatures=" + failedFeatures.sum() + ",disabledRegistryFeatures="
                 + missingRegistryFailures.size() + ",unsupportedFeatures=" + unsupportedFeatures.size()
-                + ",featureFailure=" + lastFeatureFailure + "," + structures.diagnostics()
+                + ",featureFailure=" + lastFeatureFailure + ",featureFailureDetails=" + featureFailureDetails
+                + "," + structures.diagnostics()
                 + (treeModels == null ? "" : "," + treeModels.diagnostics());
     }
 
@@ -402,7 +413,9 @@ final class PredictionVegetation {
             level.beginFeature();
             boolean success = false;
             try {
-                feature.placeWithBiomeCheck(level, context.generatorContext(), random, origin);
+                if (PredictionConfiguredFeaturePlacement.requiresVirtualPlacement(level))
+                    PredictionSurfaceFeatureAdapters.place(feature, level, context.generatorContext(), random, origin);
+                else feature.placeWithBiomeCheck(level, context.generatorContext(), random, origin);
                 success = true;
             } catch (PredictionWorkDeferred | PredictionBiomeCache.LookupFailure | java.util.concurrent.CancellationException cancelled) {
                 throw cancelled;
@@ -467,7 +480,16 @@ final class PredictionVegetation {
                         if (failure instanceof PredictionDecorationLevel.LocalPlacementFailure) localFailures.increment();
                         else if (PredictionMissingRegistry.permanent(failure, access)) missingRegistryFailures.add(feature);
                         else if (failure instanceof UnsupportedOperationException) unsupportedFeatures.add(feature);
-                        lastFeatureFailure = failure.toString();
+                        StackTraceElement caller = java.util.Arrays.stream(failure.getStackTrace())
+                                .filter(frame -> !frame.getClassName().contains("FeatureStampLevel"))
+                                .findFirst().orElse(null);
+                        lastFeatureFailure = failure + (caller == null ? "" : " at " + caller);
+                        if (featureFailureDetails.size() < 32) {
+                            String name = access.registry(net.minecraft.core.registries.Registries.PLACED_FEATURE)
+                                    .map(registry -> registry.getKey(feature)).map(Object::toString)
+                                    .orElse("unregistered-feature");
+                            featureFailureDetails.putIfAbsent(name, lastFeatureFailure);
+                        }
                         failedFeatures.increment();
                         if (VSSClientConfig.CONFIG.debugLogging && loggedFailures.add(feature))
                             VSSLogger.debug("VSS skipped unsupported surface placement: " + feature + ": " + failure);

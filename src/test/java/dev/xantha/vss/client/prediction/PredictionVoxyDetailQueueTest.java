@@ -129,4 +129,35 @@ class PredictionVoxyDetailQueueTest {
         q.request(a,true);assertTrue(q.keys().contains(b));assertEquals(1,q.residents());
     }
 
+    @Test void sameBandBoundaryJitterDoesNotWithdrawAdmittedWork() {
+        var q=new PredictionVoxyDetailQueue(1);
+        var left=new Detail(-2,0,0);var right=new Detail(2,0,0);
+        q.priority(32,0,d->PredictionWorkView.VISIBLE);
+        q.request(left,false);q.request(right,false);q.drainChanges();
+        for(int i=0;i<100;i++) q.priority(i%2==0?36:28,0,d->PredictionWorkView.VISIBLE);
+        assertEquals(Set.of(left),q.keys());assertEquals(0,q.evicted());
+        assertTrue(q.drainChanges().empty());assertEquals(1,q.waiting());
+        q.request(left,true);
+        assertEquals(Set.of(left,right),q.keys(),"Stability must not starve deferred work after completion");
+    }
+    @Test void materialMovementAndVisibilityStillPreemptAtCapacity() {
+        var q=new PredictionVoxyDetailQueue(1);
+        var left=new Detail(-2,0,0);var right=new Detail(2,0,0);
+        q.priority(32,0,d->PredictionWorkView.VISIBLE);q.request(left,false);q.request(right,false);q.drainChanges();
+        q.priority(96,0,d->PredictionWorkView.VISIBLE);
+        assertEquals(Set.of(right),q.keys());assertEquals(1,q.evicted());
+        q.priority(96,0,d->d.equals(left)?PredictionWorkView.VISIBLE:PredictionWorkView.BACKGROUND);
+        assertEquals(Set.of(left),q.keys(),"A better visibility band bypasses distance hysteresis");
+        assertEquals(1,q.waiting());
+    }
+    @Test void asyncBoundaryJitterRetainsIdentityAndAcceptsCompletion() {
+        var jobs=new java.util.ArrayDeque<Runnable>();var q=new PredictionVoxyDetailQueue(1,jobs::add);
+        var left=new Detail(-2,0,0);var right=new Detail(2,0,0);
+        q.priority(32,0,d->0);q.request(left,false);q.request(right,false);q.drainChanges();
+        q.priorityAsync(36,0,d->0);q.request(left,true);
+        jobs.removeFirst().run();q.pollPriority();
+        assertEquals(Set.of(left,right),q.keys());assertEquals(1,q.pending());assertEquals(0,q.waiting());
+        assertFalse(q.drainChanges().removed().contains(left));
+    }
+
 }

@@ -79,6 +79,7 @@ class ClientWorldgenStaticRegistriesTest {
             }
 
             var decoded = ClientWorldgenRegistries.decode(snapshot, network, List.of());
+            assertBiomeSources(server, decoded);
             var restored = decoded.access();
             for (var key : List.of(Registries.NOISE, Registries.DENSITY_FUNCTION, Registries.CONFIGURED_CARVER,
                     Registries.CONFIGURED_FEATURE, Registries.PLACED_FEATURE, Registries.BIOME,
@@ -134,7 +135,61 @@ class ClientWorldgenStaticRegistriesTest {
         }
     }
 
-    private static <T> void bindTags(Registry<T> registry, ResourceManager resources) {
+    private static void assertBiomeSources(RegistryAccess server, ClientWorldgenRegistries client) throws Exception {
+        var ops = server.createSerializationContext(com.mojang.serialization.JsonOps.INSTANCE);
+        assertTrue(client.access().registry(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST).isEmpty());
+        for (var id : List.of("minecraft:overworld", "minecraft:nether")) {
+            var holder = server.registryOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                    .getHolderOrThrow(ResourceKey.create(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST,
+                            ResourceLocation.parse(id)));
+            var source = net.minecraft.world.level.biome.MultiNoiseBiomeSource.createFromPreset(holder);
+            var raw = net.minecraft.world.level.biome.BiomeSource.CODEC.encodeStart(ops, source).getOrThrow();
+            assertTrue(raw.getAsJsonObject().has("preset"));
+            assertTrue(net.minecraft.world.level.biome.BiomeSource.CODEC.parse(client.ops(), raw).error().isPresent(),
+                    "Reproduce the client's missing multi-noise preset registry");
+            var encoded = WorldgenRegistrySnapshotTestBridge.biomeSource(source, server);
+            assertFalse(encoded.getAsJsonObject().has("preset"));
+            var restored = (net.minecraft.world.level.biome.MultiNoiseBiomeSource)
+                    net.minecraft.world.level.biome.BiomeSource.CODEC.parse(client.ops(), encoded).getOrThrow();
+            assertClimateBiomes(source, restored, client);
+
+            // Preserve unrelated preset names and nested wrapper data, including array children.
+            var wrapper = com.google.gson.JsonParser.parseString("""
+                    {"type":"example:wrapper","preset":"example:layout","size":7,"sources":[]}
+                    """).getAsJsonObject();
+            wrapper.getAsJsonArray("sources").add(raw.deepCopy());
+            var nested = new com.google.gson.JsonObject(); nested.add("delegate", raw.deepCopy());
+            wrapper.getAsJsonArray("sources").add(nested);
+            WorldgenRegistrySnapshotTestBridge.resolveBiomePresets(wrapper, server);
+            assertEquals("example:layout", wrapper.get("preset").getAsString());
+            assertEquals(7, wrapper.get("size").getAsInt());
+            assertEquals(encoded, wrapper.getAsJsonArray("sources").get(0));
+            assertEquals(encoded, wrapper.getAsJsonArray("sources").get(1).getAsJsonObject().get("delegate"));
+
+            var missing = raw.deepCopy(); missing.getAsJsonObject().addProperty("preset", "example:absent");
+            assertThrows(IllegalStateException.class,
+                    () -> WorldgenRegistrySnapshotTestBridge.resolveBiomePresets(missing, server),
+                    "Never substitute vanilla biomes for a missing server preset");
+        }
+    }
+
+    static void assertClimateBiomes(net.minecraft.world.level.biome.MultiNoiseBiomeSource expected,
+            net.minecraft.world.level.biome.MultiNoiseBiomeSource actual, ClientWorldgenRegistries client) {
+        var random = new java.util.Random(987654321L);
+        var biomes = client.access().registryOrThrow(Registries.BIOME);
+        for (int i = 0; i < 1024; i++) {
+            var point = net.minecraft.world.level.biome.Climate.target(
+                    random.nextFloat() * 2 - 1, random.nextFloat() * 2 - 1,
+                    random.nextFloat() * 2 - 1, random.nextFloat() * 2 - 1,
+                    random.nextFloat() * 2 - 1, random.nextFloat() * 2 - 1);
+            var wanted = expected.getNoiseBiome(point).unwrapKey().orElseThrow();
+            var received = actual.getNoiseBiome(point);
+            assertEquals(wanted, received.unwrapKey().orElseThrow());
+            assertSame(biomes.getHolderOrThrow(wanted), received, "Use reconstructed snapshot biome holders");
+        }
+    }
+
+    static <T> void bindTags(Registry<T> registry, ResourceManager resources) {
         var tags = new TagLoader<Holder<T>>(id -> registry.getHolder(id).map(holder -> holder),
                 Registries.tagsDirPath(registry.key())).loadAndBuild(resources);
         var resolved = new LinkedHashMap<TagKey<T>, List<Holder<T>>>();

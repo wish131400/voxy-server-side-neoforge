@@ -171,7 +171,7 @@ final class RustWorldgenDocument {
         // Fields below are read-only inputs. Copy the top-level object only; nested generator
         // and registry trees are neither mutated here nor by JNI (which receives a string).
         JsonObject result = new JsonObject();
-        generator.entrySet().stream().filter(entry -> !entry.getKey().equals("vss_generator")
+        RustBiomeSourceProjection.generator(generator).entrySet().stream().filter(entry -> !entry.getKey().equals("vss_generator")
                 && !entry.getKey().equals("vss_generator_error") && !entry.getKey().equals("vss_lod_parameters")
                 && !entry.getKey().equals(dev.xantha.vss.common.worldgen.TerrainPredictionPlan.FIELD))
                 .forEach(entry -> result.add(entry.getKey(), entry.getValue()));
@@ -188,6 +188,7 @@ final class RustWorldgenDocument {
         bounds.addProperty("min_y", context.profile().minY());
         bounds.addProperty("height", context.profile().height());
         result.add("vss_dimension_bounds", bounds);
+        result.addProperty("vss_java_surface_dimension", context.profile().dimension().toString());
         if (compact) {
             result.addProperty("vss_shared_palette", shared.palette());
             return result;

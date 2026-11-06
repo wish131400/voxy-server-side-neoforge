@@ -4,8 +4,9 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 /**
- * Independent ABI 6 for the source-built Rust backend. All numerical work runs
+ * Independent ABI 6 for the source-built Rust backend. Terrain noise runs
  * in Rust; Java supplies effective registries, colormaps and immutable inputs.
+ * Optional mod-owned surface predicates may call back into Java.
  *
  * <p>A surface region is before carvers/structures/decoration and
  * must not be published as a completed generated chunk. Query support before

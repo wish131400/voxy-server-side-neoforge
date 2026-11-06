@@ -171,6 +171,57 @@ class DensityFunctionSnapshotTest {
         }
     }
 
+    @Test
+    @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "vss.tectonicJar", matches = ".+")
+    void installedTectonicSmootherScalingSnapshotsRetainSampledNoise() throws Exception {
+        var url = java.nio.file.Path.of(System.getProperty("vss.tectonicJar")).toUri().toURL();
+        try (var loader = new java.net.URLClassLoader(new java.net.URL[]{url}, getClass().getClassLoader())) {
+            Class<?> type = loader.loadClass("dev.worldgen.tectonic.worldgen.densityfunction.ConfigNoise");
+            var constructor = type.getConstructor(DensityFunction.NoiseHolder.class, DensityFunction.class,
+                    DensityFunction.class, double.class, double.class, double.class, boolean.class);
+            var parameters = new net.minecraft.world.level.levelgen.synth.NormalNoise.NoiseParameters(-3, 1.0);
+            var noise = new DensityFunction.NoiseHolder(Holder.direct(parameters));
+            var seedNoise = new DensityFunction.Visitor() {
+                public DensityFunction apply(DensityFunction value) { return value; }
+                public DensityFunction.NoiseHolder visitNoise(DensityFunction.NoiseHolder value) {
+                    return new DensityFunction.NoiseHolder(value.noiseData(),
+                            net.minecraft.world.level.levelgen.synth.NormalNoise.create(
+                                    new net.minecraft.world.level.levelgen.XoroshiroRandomSource(78123L), value.noiseData().value()));
+                }
+            };
+            for (boolean smoother : new boolean[]{false, true}) {
+                for (double scale : new double[]{0.0, 0.13, -0.37, 1.0}) {
+                    var configured = (DensityFunction) constructor.newInstance(noise,
+                            DensityFunctions.yClampedGradient(-64, 320, -2.5, 3.75),
+                            DensityFunctions.constant(-0.625), scale, 1.25, -0.8, smoother);
+                    for (int shape = 0; shape < 4; shape++) {
+                        DensityFunction graph = switch (shape) {
+                            case 0 -> configured;
+                            case 1 -> new DensityFunctions.HolderHolder(Holder.direct(configured));
+                            case 2 -> DensityFunctions.add(configured, DensityFunctions.constant(0.125));
+                            default -> DensityFunctions.add(configured, configured).clamp(-2.0, 2.0).square();
+                        };
+                        var seeded = graph.mapAll(seedNoise);
+                        var captured = DensityFunctionSnapshot.applied(seeded);
+                        var encoded = DensityFunction.DIRECT_CODEC.encodeStart(JsonOps.INSTANCE,
+                                DensityFunctionSnapshot.applied(graph)).getOrThrow();
+                        assertFalse(encoded.toString().contains("tectonic:"), "snapshot must use supported vanilla nodes");
+                        var restored = DensityFunction.DIRECT_CODEC.parse(JsonOps.INSTANCE, encoded).getOrThrow().mapAll(seedNoise);
+                        for (int i = -64; i <= 64; i++) {
+                            var point = new DensityFunction.SinglePointContext(i * 137, i * 3, -i * 79);
+                            // Distributing scale over the coordinate and shift can change
+                            // the final bits of floating-point noise coordinates.
+                            assertEquals(seeded.compute(point), captured.compute(point), 1e-10,
+                                    "initialized noise, smoother=" + smoother + ", shape=" + shape);
+                            assertEquals(seeded.compute(point), restored.compute(point), 1e-10,
+                                    "decoded noise, smoother=" + smoother + ", shape=" + shape);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private static void assertRoundTrip(DensityFunction graph) {
         var encoded = DensityFunction.DIRECT_CODEC.encodeStart(JsonOps.INSTANCE,
                 DensityFunctionSnapshot.applied(graph)).getOrThrow();

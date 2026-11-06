@@ -705,4 +705,28 @@ class PredictionVoxySourceTest {
         }
     }
 
+    @Test void localCaveEvidenceCannotOpenCoarserCellsAndTrueInteriorRemainsOpen() {
+        var base = new ClientColumnSample(72,72,0,PredictionMaterialPalette.grassBlockIndex(),0,0,0,0,
+                0,ClientColumnSample.FLAG_SURFACE_ONLY,0,PredictionMaterialPalette.dirtIndex(),
+                PredictionMaterialPalette.stoneIndex(),68,64,-64,-64);
+        var volume = PredictionColumnVolume.ofRuns(new int[]{-64,64,PredictionMaterialPalette.stoneIndex(),0,
+                68,72,PredictionMaterialPalette.stoneIndex(),0});
+        var profiled = PredictionExteriorColumns.withProfile(base,volume,-64,1);
+        for(int step:new int[]{1,2,4,8,16,32}) {
+            var runs=new ArrayList<PredictionVoxySource.Run>();
+            PredictionVoxySource.terrain(runs,profiled,step,-64);
+            boolean filled=runs.stream().anyMatch(r->r.bottom()<=65 && r.top()>65);
+            assertEquals(step>1,filled,"Only the measured footprint may retain local cave air, step="+step);
+            assertTrue(runs.stream().anyMatch(r->r.state().is(Blocks.GRASS_BLOCK) && r.top()==72));
+        }
+        var broad = PredictionExteriorColumns.withProfile(base,volume,-64,4);
+        for(int step:new int[]{1,2,4}) {
+            var runs=new ArrayList<PredictionVoxySource.Run>();PredictionVoxySource.terrain(runs,broad,step,-64);
+            assertFalse(runs.stream().anyMatch(r->r.bottom()<=65 && r.top()>65));
+        }
+        var runs=new ArrayList<PredictionVoxySource.Run>();
+        PredictionVoxySource.terrain(runs,volume.asSample(),32,-64);
+        assertFalse(runs.stream().anyMatch(r->r.bottom()<=65 && r.top()>65),"Full interior volumes retain genuine air at all LODs");
+    }
+
 }

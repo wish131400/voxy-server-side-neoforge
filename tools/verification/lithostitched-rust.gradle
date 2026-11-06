@@ -1,0 +1,21 @@
+// CPU compatibility checks; released mod JARs are optional, never copied into production.
+allprojects { afterEvaluate {
+    tasks.register('lithostitchedRustTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs
+        classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform(); maxHeapSize='3G'; maxParallelForks=1; forkEvery=1
+        include '**/PredictionVoxyDetailQueueTest.class', '**/PredictionWorldgenCapabilitiesTest.class'
+        include '**/JavaSurfaceConditionsTest.class', '**/DensityFunctionSnapshotTest.class'
+        include '**/LithostitchedBiomeSourceSnapshotTest.class', '**/TectonicNativeTest.class'
+        doFirst {
+            ['vssTectonicJar':'vss.tectonicJar', 'vssLithostitchedJar':'vss.lithostitchedJar',
+             'vssTestNativeLibrary':'vss.testNativeLibrary'].each { property, system ->
+                if(project.hasProperty(property)) systemProperty system, project.file(project.property(property)).absolutePath
+            }
+            def agent=configurations.testRuntimeClasspath.files.find { it.name == 'mockito-core-5.14.2.jar' }
+            if(agent!=null) jvmArgs('-javaagent:'+agent.absolutePath)
+        }
+        testLogging { events 'failed','skipped'; exceptionFormat 'full' }
+    }
+} }

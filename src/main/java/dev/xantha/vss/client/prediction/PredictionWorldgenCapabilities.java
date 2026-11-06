@@ -15,6 +15,9 @@ final class PredictionWorldgenCapabilities {
             // dimension whose surface rules use it (including the overworld)
             // stays on the Java sampler.
             "alexscaves:ac_simplex",
+            // Positional/config-dependent predicate is delegated to the installed mod.
+            // Native initialization verifies that adapter before publishing its world.
+            "alexscaves:ac_biome",
             // TerraBlender's namespace-dispatching surface rule and
             // Youkaishomecoming's four-corner noise condition. A live capture of
             // the overworld reported exactly these two as the last blockers.
@@ -56,6 +59,7 @@ final class PredictionWorldgenCapabilities {
 
     /** Decoration codecs run in Java and are not dependencies of the Rust terrain graph. */
     static String nativeTerrainRejection(JsonObject generator, JsonObject registries) {
+        generator = RustBiomeSourceProjection.generator(generator);
         var plan = dev.xantha.vss.common.worldgen.TerrainPredictionPlan.read(generator);
         if (!plan.nativeCompatible()) return "terrain plan requires its original Java/source evaluator: " + plan.backend();
         String reason = nativeRejection(generator, "generator");

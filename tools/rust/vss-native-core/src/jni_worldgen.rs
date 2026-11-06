@@ -214,6 +214,7 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
                 .cloned().ok_or("closed/invalid palette handle")?),
             None => None,
         };
+        crate::java_surface::prepare(&mut e, &document)?;
         let world = Arc::new(World::new_with_palette(seed, zoom, document, palette)?);
         let mut map = worlds().lock().map_err(|_| "world lock")?;
         if map.len() >= 4 {

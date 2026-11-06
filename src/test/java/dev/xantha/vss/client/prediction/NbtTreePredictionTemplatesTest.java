@@ -49,6 +49,23 @@ class NbtTreePredictionTemplatesTest {
         assertEquals(1, forwarded.get());
     }
 
+    @Test void distantFlatCaptureUsesTheVerifiedManagerWithoutExposingLiveServer() throws Exception {
+        var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"),42,-64,384,"noise","minecraft:overworld",1);
+        var sampler=new ClientTerrainSampler(42,profile);
+        var level=new PredictionTemplateStampLevel(42,sampler,net.minecraft.world.level.block.Blocks.GRASS_BLOCK.defaultBlockState());
+        var world=NbtTreePredictionTemplatesMixin.class.getDeclaredMethod("vss$avoidLiveWorld",WorldGenLevel.class);
+        var templates=NbtTreePredictionTemplatesMixin.class.getDeclaredMethod("vss$verifiedTreeTemplates",ServerLevel.class,FeaturePlaceContext.class);
+        world.setAccessible(true);templates.setAccessible(true);
+        var mixin=new MixinInstance();
+        var context=new FeaturePlaceContext<>(Optional.empty(),level,null,RandomSource.create(42),BlockPos.ZERO,NoneFeatureConfiguration.INSTANCE);
+        assertTrue(PredictionTemplateAccess.virtual(level));
+        assertNull(world.invoke(mixin,level));
+        assertSame(level.templateManager(),templates.invoke(mixin,null,context));
+        assertEquals(profile.dimension(),level.predictionDimension());
+        assertThrows(UnsupportedOperationException.class,level::getLevel,"Template support must not expose a real world");
+    }
+
     @Test void bothReleasedTreeVersionsHaveExactlyTheRedirectedManagerChain() throws Exception {
         String path = System.getProperty("vss.nbtTreeJar");
         assumeTrue(path != null, "Supply the released OTTYG JAR with -PvssNbtTreeJar");

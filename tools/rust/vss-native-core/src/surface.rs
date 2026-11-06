@@ -46,6 +46,7 @@ enum Condition {
     /// band. Its noise is a stock Gustavson table (no world seeding), but the
     /// scaling in `ACMath` and the coordinate truncation here are f32, so the
     /// arithmetic is reproduced in `crate::ac_simplex`.
+    AcBiome { seed: i64, offset: i32, overworld: bool },
     AcSimplex {
         min: f32,
         max: f32,
@@ -711,6 +712,10 @@ impl Condition {
                 };
                 depth <= 1 + offset + if *add { c.depth } else { 0 } + extra
             }
+            Self::AcBiome { seed, offset, overworld } => {
+                *overworld && c.p[1] <= 50 && *seed != 0
+                    && crate::java_surface::alex_caves(*seed, c.p, *offset)
+            }
             Self::AcSimplex {
                 min,
                 max,
@@ -825,6 +830,15 @@ fn parse_condition(
                 radius: number(v, "radius")?,
                 threshold: number(v, "threshold")?,
             })
+        }
+        "alexscaves:ac_biome" => {
+            let offset = integer(v, "rarity_offset")?;
+            if !(0..=100).contains(&offset) { return Err("ac_biome rarity_offset outside 0..100".into()); }
+            let dimension = doc["vss_java_surface_dimension"].as_str()
+                .ok_or("ac_biome requires a dimension context")?;
+            let overworld = dimension == "minecraft:overworld";
+            if overworld { crate::java_surface::require_bridge()?; }
+            return Ok(Condition::AcBiome { seed: g.seed, offset, overworld });
         }
         "alexscaves:ac_simplex" => {
             return Ok(Condition::AcSimplex {

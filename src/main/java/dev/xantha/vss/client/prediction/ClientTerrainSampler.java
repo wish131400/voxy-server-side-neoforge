@@ -45,6 +45,7 @@ public class ClientTerrainSampler implements AutoCloseable {
     private net.minecraft.core.RegistryAccess decorationAccess;
     private net.minecraft.world.level.dimension.DimensionType decorationDimensionType;
     private com.google.gson.JsonObject structureTemplates = new com.google.gson.JsonObject();
+    private String structurePredictionRejection;
     private final int floorY;
     private final int ceilingY;
     private final TerrainFunction customSurface;
@@ -179,6 +180,7 @@ public class ClientTerrainSampler implements AutoCloseable {
         this.decorationAccess = source.decorationAccess;
         this.decorationDimensionType = source.decorationDimensionType;
         this.structureTemplates = source.structureTemplates;
+        this.structurePredictionRejection = source.structurePredictionRejection;
         this.floorY = source.floorY;
         this.ceilingY = source.ceilingY;
         this.customSurface = surface;
@@ -227,6 +229,7 @@ public class ClientTerrainSampler implements AutoCloseable {
         this.biomeIndices = Map.copyOf(indices);
         this.decorationAccess = registries == null ? access : registries.access();
         if (registries != null) this.structureTemplates = registries.templates();
+        this.structurePredictionRejection = registries == null ? null : registries.structurePredictionRejection();
         this.floorY = heights.getMinBuildHeight();
         this.ceilingY = heights.getMaxBuildHeight() - 1;
         this.customSurface = null;
@@ -539,6 +542,7 @@ public class ClientTerrainSampler implements AutoCloseable {
     @Override public void close() { cancelDensityCompilation(); }
 
     com.google.gson.JsonObject structureTemplates() { return structureTemplates; }
+    String structurePredictionRejection() { return structurePredictionRejection; }
 
     net.minecraft.core.RegistryAccess decorationAccess() {
         return decorationAccess;

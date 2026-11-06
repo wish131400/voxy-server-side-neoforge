@@ -654,7 +654,11 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
 
     static void terrain(List<Run> runs, ClientColumnSample s, int step, int minY) {
         if (s == null) return;
-        if (s.volume() != null) {
+        // Local exterior air is valid only for the footprint that was actually probed.
+        // Parent reductions can retain a finer column: stretching its cave across a
+        // larger tile cell opens false seams. Full interior/floating volumes stay exact.
+        if (s.volume() != null && (!PredictionExteriorColumns.profiled(s)
+                || PredictionWallEvidence.hasInterior(s, step))) {
             for (int i = 0; i < s.volume().size(); i++) {
                 int block = s.volume().block(i);
                 runs.add(new Run(s.volume().bottom(i), s.volume().top(i), state(block)));
@@ -668,11 +672,12 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
             // The exterior heightfield is closed, as in PredictionWallEvidence.intervals.
             // Only explicit spans/volumes prove an underside or an underground air gap.
             // This approximation belongs to the render overlay, never the real world store.
-            int bottom = s.floating() ? s.surfaceBottom() : minY;
+            int bottom = !PredictionExteriorColumns.profiled(s) && s.floating() ? s.surfaceBottom() : minY;
             add(runs, bottom, Math.max(bottom, top - 4), state(s.deepBlockIndex()));
             add(runs, Math.max(bottom, top - 4), top - 1, state(s.underBlockIndex()));
             add(runs, Math.max(bottom, top - 1), top, state(s.topBlockIndex()));
-            if (s.hasLowerSpan()) add(runs, s.lowerBottom(), s.lowerTop(), state(s.deepBlockIndex()));
+            if (!PredictionExteriorColumns.profiled(s) && s.hasLowerSpan())
+                add(runs, s.lowerBottom(), s.lowerTop(), state(s.deepBlockIndex()));
         }
         if (s.hasFluid()) {
             add(runs, Math.max(minY, s.surfaceY()), s.fluidY(),

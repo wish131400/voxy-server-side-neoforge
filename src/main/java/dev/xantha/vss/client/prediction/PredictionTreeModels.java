@@ -38,6 +38,7 @@ final class PredictionTreeModels {
     private int retainedBlocks;
     private final LongAdder builds = new LongAdder(), hits = new LongAdder(), fallbacks = new LongAdder();
     private final LongAdder placed = new LongAdder(), buildNanos = new LongAdder();
+    private volatile String lastFailure = "none";
 
     PredictionTreeModels(RegistryAccess access, ChunkGenerator generator) {
         this.access = access;
@@ -139,9 +140,9 @@ final class PredictionTreeModels {
         if (level instanceof PredictionDecorationLevel decoration) {
             boolean display = decoration.usesDisplayTerrain();
             decoration.useDisplayTerrain(false);
-            try { feature.place(level,generator,random,pos); }
+            try { PredictionConfiguredFeaturePlacement.place(feature,level,generator,random,pos); }
             finally { decoration.useDisplayTerrain(display); }
-        } else feature.place(level,generator,random,pos);
+        } else PredictionConfiguredFeaturePlacement.place(feature,level,generator,random,pos);
     }
 
     private List<Cell> model(ConfiguredFeature<?, ?> feature, BlockState ground, int variant) {
@@ -193,13 +194,18 @@ final class PredictionTreeModels {
                 if (tree.forceDirt) builder.forceDirt();
                 feature = new ConfiguredFeature<>(Feature.TREE, builder.build());
             }
-            if (!feature.place(level, generator, RandomSource.create(seed), MODEL_ORIGIN)
+            if (!PredictionConfiguredFeaturePlacement.place(feature, level, generator,
+                    RandomSource.create(seed), MODEL_ORIGIN)
                     || level.placed().size() > 4096) return List.of();
             return level.placed().entrySet().stream().filter(e -> !e.getValue().isAir())
                     .map(e -> new Cell(e.getKey().subtract(MODEL_ORIGIN), e.getValue()))
                     .sorted(Comparator.comparingInt((Cell c) -> c.offset.getY())
                             .thenComparingInt(c -> c.offset.getZ()).thenComparingInt(c -> c.offset.getX())).toList();
         } catch (UnsupportedOperationException unsupported) {
+            StackTraceElement caller = java.util.Arrays.stream(unsupported.getStackTrace())
+                    .filter(frame -> !frame.getClassName().contains("FeatureStampLevel"))
+                    .findFirst().orElse(null);
+            lastFailure = unsupported + (caller == null ? "" : " at " + caller);
             return List.of();
         }
     }
@@ -254,7 +260,7 @@ final class PredictionTreeModels {
         synchronized (models) {
             return "treeModels={built=" + builds.sum() + ",hits=" + hits.sum() + ",fallback=" + fallbacks.sum()
                     + ",placed=" + placed.sum() + ",buildMs=" + buildNanos.sum() / 1_000_000
-                    + ",models=" + models.size() + ",blocks=" + retainedBlocks + "}";
+                    + ",models=" + models.size() + ",blocks=" + retainedBlocks + ",lastFailure=" + lastFailure + "}";
         }
     }
 
