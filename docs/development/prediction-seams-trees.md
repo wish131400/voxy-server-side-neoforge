@@ -3,7 +3,8 @@
 Build: `prediction-seams-trees-compat-4`, Minecraft 1.21.1 NeoForge / Java 21.
 Includes the previous Tectonic, Lithostitched and Rust surface-adapter fixes.
 This batch changes Java prediction only; the five native libraries are byte-identical
-to `tectonic-lithostitched-rust-compat-3`. Source changes remain local, without a new PR push.
+to `tectonic-lithostitched-rust-compat-3`. The combined PR also includes the earlier
+Rust compatibility changes and their rebuilt native libraries.
 Forge 1.20.1 is outside this build's requested and verified scope.
 
 ## Reproduced faults
