@@ -161,4 +161,32 @@ class PredictionWorldgenCapabilitiesTest {
         assertNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator, registries),
                 "vss_ payload sections must not be scanned for codec types");
     }
+    @Test void lithostitchedDelegateIsProjectedWithoutChangingJavaOrUnknownContracts() {
+        var generator=JsonParser.parseString("""
+                {"settings":{},"biome_source":{"type":"lithostitched:injector","delegate":
+                  {"type":"lithostitched:injector","delegate":{"type":"minecraft:multi_noise","biomes":[]}}}}
+                """).getAsJsonObject();
+        String original=generator.toString();
+        var projected=RustBiomeSourceProjection.generator(generator);
+        assertEquals("minecraft:multi_noise",projected.getAsJsonObject("biome_source").get("type").getAsString());
+        assertNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator,new com.google.gson.JsonObject()));
+        assertEquals(original,generator.toString());
+        generator.getAsJsonObject("biome_source").addProperty("unknown_injection",true);
+        assertSame(generator,RustBiomeSourceProjection.generator(generator));
+        assertNotNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator,new com.google.gson.JsonObject()));
+    }
+    @Test void malformedAndOverdeepLithostitchedWrappersRemainRejected() {
+        for(String delegate:new String[]{"null","17","[]"}) {
+            var generator=JsonParser.parseString("{\"settings\":{},\"biome_source\":{\"type\":\"lithostitched:injector\",\"delegate\":"+delegate+"}}").getAsJsonObject();
+            assertSame(generator,RustBiomeSourceProjection.generator(generator));
+            assertNotNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator,new com.google.gson.JsonObject()));
+        }
+        var generator=JsonParser.parseString("{\"settings\":{},\"biome_source\":{\"type\":\"minecraft:fixed\"}}").getAsJsonObject();
+        for(int i=0;i<17;i++) {
+            var wrapper=new com.google.gson.JsonObject();wrapper.addProperty("type","lithostitched:injector");
+            wrapper.add("delegate",generator.get("biome_source"));generator.add("biome_source",wrapper);
+        }
+        assertSame(generator,RustBiomeSourceProjection.generator(generator));
+        assertNotNull(PredictionWorldgenCapabilities.nativeTerrainRejection(generator,new com.google.gson.JsonObject()));
+    }
 }

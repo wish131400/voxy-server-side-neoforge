@@ -271,7 +271,7 @@ final class PredictionFarDecoration {
             templateAttempts++;
             long seed=mix(0x4652415254454d50L+variant);
             var soils=new LinkedHashSet<GroundCondition>();
-            var level=new FeatureStampLevel(seed,context.decorationAccess(),Blocks.GRASS_BLOCK.defaultBlockState()) {
+            var level=new PredictionTemplateStampLevel(seed,context,Blocks.GRASS_BLOCK.defaultBlockState()) {
                 @Override public net.minecraft.resources.ResourceLocation predictionDimension() { return context.profile().dimension(); }
                 @Override public boolean isStateAtPosition(BlockPos p,java.util.function.Predicate<BlockState> predicate) {
                     boolean result=super.isStateAtPosition(p,predicate);
@@ -287,7 +287,8 @@ final class PredictionFarDecoration {
                 }
             };
             try {
-                boolean success=feature.place(level,context.generatorContext(),RandomSource.create(seed),new BlockPos(0,64,0));
+                boolean success=PredictionConfiguredFeaturePlacement.place(feature,level,
+                        context.generatorContext(),RandomSource.create(seed),new BlockPos(0,64,0));
                 var cells=level.placed().entrySet().stream()
                         .filter(e->!e.getValue().isAir() && e.getKey().getY()>=64 && PredictionVegetation.renderable(e.getValue()))
                         .map(e->new Cell(e.getKey().getX(),e.getKey().getY()-64,e.getKey().getZ(),e.getValue()))

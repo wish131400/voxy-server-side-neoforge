@@ -86,6 +86,8 @@ final class WorldgenCodecSnapshot {
         root.add("structures", structures);
         root.add("structure_sets", filterStructureSets(structures, encodeOptional(
                 access, ops, Registries.STRUCTURE_SET, StructureSet.DIRECT_CODEC)));
+        JsonObject structurifyPolicy = StructurifyPredictionSnapshot.capture();
+        if (structurifyPolicy != null) root.add("vss_structure_policy", structurifyPolicy);
         root.add("processor_lists", encodeOptional(access, ops, Registries.PROCESSOR_LIST,
                 net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType.DIRECT_CODEC));
         root.add("template_pools", encodeOptional(access, ops, Registries.TEMPLATE_POOL,
@@ -393,26 +395,15 @@ final class WorldgenCodecSnapshot {
      * generator to a client. A client connection does not expose the
      * multi_noise_biome_source_parameter_list registry, so leaving
      * {"preset":"minecraft:overworld"} in the payload makes BiomeSource's
-     * codec fail and silently selects VSS's deterministic fallback sampler.
+     * codec fail and prevents prediction from initializing. Wrappers such as
+     * Lithostitched's injector encode their source inside a delegate field.
      */
     @SuppressWarnings({"rawtypes", "unchecked"})
     static JsonElement encodeBiomeSource(BiomeSource source, RegistryAccess access,
                                          RegistryOps<JsonElement> ops) {
         JsonObject encoded = BiomeSource.CODEC.encodeStart(ops, source)
                 .getOrThrow().getAsJsonObject();
-        if (encoded.has("preset")) {
-            ResourceLocation presetId = ResourceLocation.parse(encoded.get("preset").getAsString());
-            MultiNoiseBiomeSourceParameterList preset = access
-                    .registryOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
-                    .get(presetId);
-            if (preset == null) {
-                throw new IllegalStateException("Unknown multi-noise preset " + presetId);
-            }
-            JsonObject resolved = MultiNoiseBiomeSource.DIRECT_CODEC.codec()
-                    .encodeStart(ops, preset.parameters()).getOrThrow().getAsJsonObject();
-            resolved.addProperty("type", "minecraft:multi_noise");
-            return resolved;
-        }
+        resolveMultiNoisePresets(encoded, access, ops);
         // Convert HolderSet encodings to stable biome ids. This keeps the
         // payload independent of client-side holder internals and mirrors the
         // handling used for inline multi-noise biome lists.
@@ -432,6 +423,30 @@ final class WorldgenCodecSnapshot {
             encoded.add("biomes", ids);
         }
         return encoded;
+    }
+
+    /** Mutates only the freshly encoded snapshot, preserving wrapper fields and routing. */
+    static void resolveMultiNoisePresets(JsonElement encoded, RegistryAccess access,
+                                         RegistryOps<JsonElement> ops) {
+        if (encoded.isJsonArray()) {
+            for (JsonElement child : encoded.getAsJsonArray()) resolveMultiNoisePresets(child, access, ops);
+        } else if (encoded.isJsonObject()) {
+            JsonObject object = encoded.getAsJsonObject();
+            // A mod's own `preset` field need not describe a vanilla biome source.
+            if (object.has("type") && object.get("type").isJsonPrimitive()
+                    && object.get("type").getAsString().equals("minecraft:multi_noise")
+                    && object.has("preset")) {
+                ResourceLocation presetId = ResourceLocation.parse(object.get("preset").getAsString());
+                MultiNoiseBiomeSourceParameterList preset = access
+                        .registryOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST).get(presetId);
+                if (preset == null) throw new IllegalStateException("Unknown multi-noise preset " + presetId);
+                JsonObject resolved = MultiNoiseBiomeSource.DIRECT_CODEC.codec()
+                        .encodeStart(ops, preset.parameters()).getOrThrow().getAsJsonObject();
+                object.remove("preset");
+                object.add("biomes", resolved.get("biomes"));
+            }
+            for (var child : object.entrySet()) resolveMultiNoisePresets(child.getValue(), access, ops);
+        }
     }
 
     private static boolean containsInlineBiome(JsonArray biomes) {

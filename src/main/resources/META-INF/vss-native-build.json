@@ -1,21 +1,22 @@
 {
   "schema": 1,
-  "commit": "463eb9f058b1421e431c63bde1026392614f0f6d",
+  "commit": "4656eb13a5cd005762fe8e6a0de2548ddb76b9be",
   "workingTreeModified": true,
-  "buildKind": "local-cross",
-  "sourceSha256": "b08a79a0f381275c0d7036dbb553b750f6d95a403c5f292dbc0380932c954559",
+  "buildKind": "linux-cross",
+  "sourceSha256": "0008d767054972fee42b7ee3d749c43134451160b72fb76719afed063422ff4c",
   "libraries": {
-    "windows-x86_64/vss_native_core.dll": "f2d61781181ff144775af78bf9cdf2682a8ad0012b21946519fd1a2331346521",
-    "linux-x86_64/libvss_native_core.so": "8e27e46c701c117dda4bdeb9f31de9fdbb115b34f532532ff3b30166e7c25940",
-    "linux-aarch64/libvss_native_core.so": "27175da7f484ceab35c18d04d061b8affd845d8fa5db15fd38f8519fd5be0b15",
-    "macos-x86_64/libvss_native_core.dylib": "e9a8b6048896fbfd797018263d4e942809ca5da2fa616c79f4eff28937f9cd26",
-    "macos-aarch64/libvss_native_core.dylib": "3eb65f417e1acb3cd92634cca81dd120ad1c75bb1fd89bdafaa5de1153a5f5b5"
+    "linux-aarch64/libvss_native_core.so": "250c02475755ad2a36359e742ea6a26b0b98ba852404ada787173bdbb487154d",
+    "linux-x86_64/libvss_native_core.so": "ff4f3604443574315d78d2fee9f9d347634c7151820c80dc44a45dfb3bb91bee",
+    "macos-aarch64/libvss_native_core.dylib": "f5706f28ab69da63f6655e895dad7b2efa69c82b97ee8bb90f0b92035f62d13e",
+    "macos-x86_64/libvss_native_core.dylib": "3c15dc79b234e80746ab61fcc9efa03dd6cb9907e0786f7e56338cf234279c1e",
+    "windows-x86_64/vss_native_core.dll": "0d7f7a457ba1969d6eb36a9a53ac98c231f76dc18c2487487d5632ab099fcdf2"
   },
   "validation": {
-    "buildId": "20261104-exterior-layout",
-    "executedPlatform": "windows-x86_64",
-    "regressionScope": "Java/Rust scalar and batch exterior parity; compact/full descriptions; different dimension/noise heights and minima; interior columns and production cliff enrichment",
-    "otherPlatforms": "Cross compiled; JNI exports, architectures, dependencies and package hashes audited. No Linux/macOS/ARM execution.",
-    "gameplay": "No new live game validation"
+    "buildId": "tectonic-lithostitched-rust-compat-3",
+    "executedPlatform": "linux-x86_64",
+    "regressionScope": "416 capture positions / 6240 density values exact; JNI surface callback arguments, materials, exception propagation and handle closure; CPU planning/module regressions",
+    "otherPlatforms": "Windows x86_64 GNU (47 JNI exports and system imports audited), Linux aarch64 and both macOS architectures cross compiled; no Windows/macOS/ARM execution.",
+    "gameplay": "No new live game validation; full Alexs Caves mod runtime not exercised offline.",
+    "rustTests": "88 passed, 5 pre-existing ignored; 1 existing exhaustive exterior batch test interrupted after exceeding the validation time budget."
   }
 }

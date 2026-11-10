@@ -199,4 +199,39 @@ class PredictionFarDecorationTest {
         var types=args.length==0?new Class<?>[0]:new Class<?>[]{PredictionTileManager.PredictionTileKey.class};
         var m=PredictionTileManager.class.getDeclaredMethod(name,types);m.setAccessible(true);return m.invoke(target,args);
     }
+    @Test void templateCaptureCanReadVerifiedResourcesAndKeepsWoodAndLeaves() throws Exception {
+        var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                Level.OVERWORLD.location(),42,-64,384,"noise","minecraft:overworld",1);
+        var sampler=org.mockito.Mockito.mock(ClientTerrainSampler.class);
+        var placed=new net.minecraft.core.MappedRegistry<net.minecraft.world.level.levelgen.placement.PlacedFeature>(
+                net.minecraft.core.registries.Registries.PLACED_FEATURE,com.mojang.serialization.Lifecycle.stable());
+        var access=new net.minecraft.core.RegistryAccess.ImmutableRegistryAccess(java.util.List.of(placed.freeze()));
+        org.mockito.Mockito.when(sampler.decorationContext()).thenReturn(sampler);
+        org.mockito.Mockito.when(sampler.decorationAccess()).thenReturn(access);
+        org.mockito.Mockito.when(sampler.profile()).thenReturn(profile);
+        org.mockito.Mockito.when(sampler.structureTemplates()).thenReturn(new com.google.gson.JsonObject());
+        org.mockito.Mockito.when(sampler.cacheBiomes()).thenReturn(java.util.List.of());
+        var feature=new net.minecraft.world.level.levelgen.feature.Feature<net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration>(
+                net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.CODEC) {
+            @Override public boolean place(net.minecraft.world.level.levelgen.feature.FeaturePlaceContext<net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration> placement) {
+                assertTrue(PredictionTemplateAccess.virtual(placement.level()));
+                assertNotNull(PredictionTemplateAccess.manager(placement.level()));
+                placement.level().setBlock(placement.origin(),Blocks.OAK_LOG.defaultBlockState(),2);
+                placement.level().setBlock(placement.origin().above(),Blocks.OAK_LEAVES.defaultBlockState(),2);
+                return true;
+            }
+        };
+        var configured=new net.minecraft.world.level.levelgen.feature.ConfiguredFeature<>(feature,
+                net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.INSTANCE);
+        var far=new PredictionFarDecoration(sampler,false,4,()->true);
+        var capture=PredictionFarDecoration.class.getDeclaredMethod("capture",net.minecraft.world.level.levelgen.feature.ConfiguredFeature.class);
+        capture.setAccessible(true);
+        @SuppressWarnings("unchecked") var models=(java.util.List<PredictionFarDecoration.Template>)capture.invoke(far,configured);
+        assertEquals(3,models.size());assertEquals(0,far.templateFailures);
+        for(var model:models) {
+            assertTrue(model.spans().stream().anyMatch(span->span.state().is(Blocks.OAK_LOG)));
+            assertTrue(model.spans().stream().anyMatch(span->span.state().is(Blocks.OAK_LEAVES)));
+        }
+    }
+
 }

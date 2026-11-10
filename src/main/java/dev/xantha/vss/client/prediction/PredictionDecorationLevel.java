@@ -31,6 +31,8 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     private final ClientTerrainSampler context;
     private PredictionStructureTemplates templateManager;
 
+    net.minecraft.world.level.chunk.ChunkGenerator predictionGenerator() { return context.generatorContext(); }
+
     PredictionStructureTemplates templateManager() {
         if (templateManager == null) {
             try { templateManager = PredictionStructureTemplates.open(context.structureTemplates()); }

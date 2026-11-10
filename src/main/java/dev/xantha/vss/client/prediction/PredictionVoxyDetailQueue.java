@@ -113,11 +113,19 @@ final class PredictionVoxyDetailQueue {
     private void rebalance() {
         while(entries.size()<capacity && !deferredOrder.isEmpty())promote(deferredOrder.first());
         while(!deferredOrder.isEmpty() && !order.isEmpty()
-                && RANK_ORDER.compare(deferredOrder.first(),order.last())<0) {
+                && displaces(deferredOrder.first(),order.last())) {
             var best=deferredOrder.first();var worst=order.pollLast();entries.remove(worst.key());
             deferredEntries.put(worst.key(),worst);deferredOrder.add(worst);
             membership(worst.key(),false);evicted++;promote(best);
         }
+    }
+    private static boolean displaces(Rank waiting, Rank admitted) {
+        if(waiting.band()!=admitted.band())return waiting.band()<admitted.band();
+        // Camera motion near a full queue's boundary otherwise repeatedly withdraws
+        // equally relevant work. Keep its identity until another target is at least
+        // half a tile closer; newly visible bands still preempt immediately.
+        double margin=(64L<<Math.min(waiting.key().lod(),admitted.key().lod()))*.5;
+        return Math.sqrt(waiting.distance())+margin<Math.sqrt(admitted.distance());
     }
     boolean request(Detail key,boolean ready) {
         long before=membershipRevision;
@@ -136,7 +144,7 @@ final class PredictionVoxyDetailQueue {
         if(entries.containsKey(key) || deferredEntries.containsKey(key))return false;
         dormant.remove(key);
         var rank=rank(key);
-        if(entries.size()==capacity && RANK_ORDER.compare(rank,order.last())>=0)deferred++;
+        if(entries.size()==capacity && !displaces(rank,order.last()))deferred++;
         deferredEntries.put(key,rank);deferredOrder.add(rank);
         changedPriority(key);
         rebalance();

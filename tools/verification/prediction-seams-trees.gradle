@@ -1,0 +1,19 @@
+allprojects { afterEvaluate {
+ tasks.register('predictionSeamsTreesTest',Test) {
+  dependsOn tasks.named('testClasses')
+  testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+  useJUnitPlatform();maxHeapSize='3G';maxParallelForks=1;forkEvery=1
+  include '**/PredictionVoxySourceTest.class','**/PredictionFarDecorationTest.class','**/NbtTreePredictionTemplatesTest.class'
+  include '**/PredictionWallEvidenceTest.class','**/PredictionJavaExteriorTest.class','**/PredictionVoxelCacheTest.class'
+  include '**/PredictionParentLod*Test.class'
+  include '**/StructurifyPredictionSnapshotTest.class','**/StructurePredictionPolicyTest.class'
+  include '**/NbtTreeHeightLimitTest.class'
+  include '**/PredictionConfiguredFeaturePlacementTest.class'
+  doFirst {
+   def agent=configurations.testRuntimeClasspath.files.find {it.name=='mockito-core-5.14.2.jar'}
+   if(agent!=null)jvmArgs('-javaagent:'+agent.absolutePath)
+   if(project.hasProperty('vssNbtTreeJar'))systemProperty 'vss.nbtTreeJar',project.file(project.property('vssNbtTreeJar')).absolutePath
+  }
+  testLogging {events 'failed','skipped';exceptionFormat 'full'}
+ }
+} }

@@ -93,3 +93,22 @@ fn weighted_rules_keep_cold_secondary_and_biome_predicates_on_full_path() {
         assert_eq!(surface.rule(&surface.rule,&terrain.graph,&context),Some(palette.named(if cold{"minecraft:snow_block"}else{"minecraft:granite"}).unwrap()));
     }
 }
+
+#[test]
+fn ac_biome_rejects_unknown_context_and_preserves_dimension_and_y_guards() {
+    let mut doc=document();
+    let rule=json!({"type":"alexscaves:ac_biome","rarity_offset":2});
+    let mut terrain=Terrain::from_document(42,&doc).unwrap();
+    assert!(parse_condition(&rule,&mut terrain.graph,&doc,-64,384,0).is_err());
+    doc["vss_java_surface_dimension"]=json!("minecraft:the_nether");
+    let condition=parse_condition(&rule,&mut terrain.graph,&doc,-64,384,0).unwrap();
+    let mut context=Context {p:[-1,20,-5],biome:"minecraft:plains",cold:false,steep:false,
+        depth:3,secondary:0.,above:1,below:10,water:i32::MIN,min_surface:-64};
+    assert!(!condition.matches(&terrain.graph,&context));
+    context.p[1]=51;
+    assert!(!Condition::AcBiome {seed:42,offset:2,overworld:true}.matches(&terrain.graph,&context));
+    context.p[1]=20;
+    assert!(!Condition::AcBiome {seed:0,offset:2,overworld:true}.matches(&terrain.graph,&context));
+    assert!(parse_condition(&json!({"type":"alexscaves:ac_biome","rarity_offset":101}),
+        &mut terrain.graph,&doc,-64,384,0).is_err());
+}

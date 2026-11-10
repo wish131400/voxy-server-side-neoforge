@@ -94,6 +94,21 @@ final class ClientWorldgenRegistries {
         return decode(root, fallback, net.neoforged.neoforge.registries.DataPackRegistriesHooks.getDataPackRegistries());
     }
 
+    /** A missing marker is the unchanged vanilla/VSS prediction path. */
+    String structurePredictionRejection() {
+        if (snapshotRoot == null || !snapshotRoot.has("vss_structure_policy")) return null;
+        var policy = snapshotRoot.get("vss_structure_policy");
+        if (!policy.isJsonObject()) return "Invalid structure prediction policy";
+        var value = policy.getAsJsonObject();
+        if (value.has("prediction_supported") && value.get("prediction_supported").isJsonPrimitive()
+                && value.get("prediction_supported").getAsJsonPrimitive().isBoolean()
+                && value.get("prediction_supported").getAsBoolean()) return null;
+        if (value.has("reason") && value.get("reason").isJsonPrimitive()
+                && value.get("reason").getAsString().length() < 256)
+            return value.get("reason").getAsString();
+        return "Structure prediction is unavailable for server worldgen rules";
+    }
+
     static ClientWorldgenRegistries decode(JsonObject root, RegistryAccess fallback,
             List<net.minecraft.resources.RegistryDataLoader.RegistryData<?>> codecs) {
         ClientWorldgenRegistries registries = new ClientWorldgenRegistries(fallback);

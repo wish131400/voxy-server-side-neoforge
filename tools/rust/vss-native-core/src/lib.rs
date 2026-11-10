@@ -22,6 +22,7 @@ pub mod freeterraforged_filters;
 pub mod freeterraforged_noise;
 mod jni_noise;
 mod jni_worldgen;
+mod java_surface;
 pub mod lithostitched;
 pub mod noise;
 pub mod providers;
