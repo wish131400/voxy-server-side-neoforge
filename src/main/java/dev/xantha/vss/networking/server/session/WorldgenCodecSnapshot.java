@@ -198,15 +198,23 @@ final class WorldgenCodecSnapshot {
             for (var variant : FreeTerraForgedVariant.values()) mods.getModContainerById(variant.namespace)
                     .ifPresent(mod -> root.addProperty("vss_freeterraforged_release", mod.getModInfo().getVersion().toString()));
         }
+        BiomeSource regionSource = mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
+                ? TerraBlenderRegionSource.regionSource(noise.getBiomeSource()) : noise.getBiomeSource();
+        boolean unwrappedRegions = regionSource != noise.getBiomeSource();
         if (mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
-                && noise.getBiomeSource() instanceof MultiNoiseBiomeSource) {
+                && regionSource instanceof MultiNoiseBiomeSource) {
             // TerraBlender's positional region grid and per-region climate
             // points live outside the vanilla codecs. Snapshot them so the
             // client backend can replay the routing; untagged dimensions are
             // never initialized by TerraBlender and keep vanilla behavior.
             JsonObject regions = TerraBlenderRegionSnapshot.capture(terrablenderRegionType, access);
             if (regions != null && inheritedNoise) {
+                if (unwrappedRegions) TerraBlenderRegionSource.markUnwrapped(regions, noise.getBiomeSource());
+                TerraBlenderRegionSource.markSurfaceRoute(regions, regionSource);
                 root.add("vss_terrablender", regions);
+            } else if (regions == null && unwrappedRegions) {
+                // Before the injector root was read this generator had no region snapshot and no refusal.
+                VSSLogger.warn("VSS TerraBlender region capture returned nothing for the root of Lithostitched's injector; the wrapped source is sent without regions");
             } else if (regions == null) {
                 root.addProperty("vss_unsupported_reason",
                         "TerraBlender positional regions require a registered prediction backend");
@@ -237,6 +245,13 @@ final class WorldgenCodecSnapshot {
         root.add(TerrainPredictionPlan.FIELD, plan.encode());
         if (generator.getClass() != NoiseBasedChunkGenerator.class) snapshotActualGenerator(root, generator, access, dependencies);
         Encoded encoded = compress(root);
+        if (unwrappedRegions && root.get("vss_terrablender") instanceof JsonObject regions
+                && regions.has(TerraBlenderRegionSource.SOURCE_MARKER) && exceedsHeadroom(encoded)) {
+            // The unwrapped region section is the optional part: without it the snapshot is what it was before.
+            root.remove("vss_terrablender");
+            VSSLogger.warn("VSS TerraBlender region section from Lithostitched's injector root exceeds the generator snapshot budget; sent without it");
+            encoded = compress(root);
+        }
         if (root.has("vss_generator") && exceedsHeadroom(encoded)) {
             root.remove("vss_generator");
             root.addProperty("vss_generator_error", "Optional generator codec exceeds snapshot budget");
