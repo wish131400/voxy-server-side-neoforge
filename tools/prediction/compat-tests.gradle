@@ -6,6 +6,9 @@ allprojects {
         if (providers.gradleProperty('vssMostructuresJar').isPresent()) {
             systemProperty 'vss.mostructuresJar', providers.gradleProperty('vssMostructuresJar').get()
         }
+        if (providers.gradleProperty('vssTheBeyondJar').isPresent()) {
+            systemProperty 'vss.theBeyondJar', providers.gradleProperty('vssTheBeyondJar').get()
+        }
         if (providers.gradleProperty('vssLiveSnapshot').isPresent()) {
             systemProperty 'vss.liveSnapshot', providers.gradleProperty('vssLiveSnapshot').get()
         }

@@ -36,6 +36,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/PredictionDemandLifecycleTest.class', '**/PredictionViewRefinementTest.class'
     include '**/FreeTerraForgedSamplesTest.class', '**/PredictionSchedulingConcurrencyTest.class'
     include '**/PredictionFarDecorationTest.class', '**/PredictionFarDecorationNativeTest.class', '**/PredictionFarPlacementCountTest.class'
+    include '**/TheBeyondStructureStartGuardTest.class'
     // These fixtures configure static loader / Minecraft registries. Isolate test classes,
     // rather than making the result depend on the order in which classes run.
     maxHeapSize = '3G'

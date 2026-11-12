@@ -1,0 +1,13 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "dev.xantha.vss.mixin.thebeyond",
+  "plugin": "dev.xantha.vss.mixin.thebeyond.TheBeyondMixinPlugin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "StructureStartPredictionEndMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
