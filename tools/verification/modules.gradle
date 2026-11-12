@@ -33,6 +33,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'
     include '**/PredictionLoadingReadSetTest.class'
     include '**/PredictionCoarsePlanHandoffTest.class', '**/PredictionTeleportLoadingTest.class'
+    include '**/SurfaceBiomeZoomTest.class'
     include '**/PredictionDemandLifecycleTest.class', '**/PredictionViewRefinementTest.class'
     include '**/FreeTerraForgedSamplesTest.class', '**/PredictionSchedulingConcurrencyTest.class'
     include '**/PredictionFarDecorationTest.class', '**/PredictionFarDecorationNativeTest.class', '**/PredictionFarPlacementCountTest.class'
