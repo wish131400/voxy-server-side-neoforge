@@ -103,7 +103,13 @@ public final class VoxyPredictionBridge {
     private static final java.util.concurrent.atomic.AtomicLong EPOCH = new java.util.concurrent.atomic.AtomicLong();
     private static final Map<Object, BuildStamp> BUILDS = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, BuildStamp> SNAPSHOTS = Collections.synchronizedMap(new WeakHashMap<>());
-    private record BuildStamp(Context context, long position, long version) { }
+    /** Stamps can outlive their renderer in the weak maps' reference queues or a worker's thread-local,
+     * so they must not keep a retired context, its renderer and its world reachable. */
+    private record BuildStamp(java.lang.ref.WeakReference<Context> owner, long position, long version) {
+        BuildStamp(Context context, long position, long version) { this(context.self(), position, version); }
+        /** Null once a retired context has been collected; callers treat that as closed. */
+        Context context() { return owner.get(); }
+    }
     private static final ThreadLocal<BuildStamp> ACQUIRED = new ThreadLocal<>();
     private VoxyPredictionBridge() { }
 
@@ -383,14 +389,14 @@ public final class VoxyPredictionBridge {
             if (overlay) {
                 // Model-bake retries can reuse held sections without acquiring them again.
                 BuildStamp acquired=ACQUIRED.get();
-                if(acquired==null || acquired.context!=ctx || acquired.position!=pos || acquired.version!=ctx.version(pos))
+                if(acquired==null || acquired.context()!=ctx || acquired.position!=pos || acquired.version!=ctx.version(pos))
                     source.requestMeshDetail(pos,ctx);
                 ctx.requested.computeIfAbsent(pos, ignored -> new java.util.concurrent.atomic.AtomicLong(EPOCH.incrementAndGet()));
             }
             long version = ctx == null ? -1 : ctx.version(pos);
             BuildStamp heldStamp = SNAPSHOTS.get(held);
             if (ctx != null && !ctx.closed && (heldStamp != null
-                    ? heldStamp.context != ctx || heldStamp.version != version || !overlay : overlay)) {
+                    ? heldStamp.context() != ctx || heldStamp.version != version || !overlay : overlay)) {
                 fresh = compose(engine, pos, ctx.acquireReal.invoke(engine, pos));
                 if (fresh == null) fresh = ctx.empty(pos);
             }
@@ -409,15 +415,17 @@ public final class VoxyPredictionBridge {
             BuildStamp stamp = BUILDS.remove(mesh);
             if(stamp==null) stamp=ACQUIRED.get();
             if (stamp == null) { consumer.accept(mesh); return; }
+            // A collected owner was closed before it became unreachable: discard its mesh like a closed one.
+            Context owner = stamp.context();
             // Serialize native queue publication with display-state revocation. An old
             // mesh must be enqueued before withdrawal, or rejected after the toggle.
-            synchronized (stamp.context) {
-                if (stamp.context.closed || !stamp.context.supported
-                        || !enabled() || stamp.version != stamp.context.version(stamp.position)) {
+            synchronized (owner == null ? stamp : owner) {
+                if (owner == null || owner.closed || !owner.supported
+                        || !enabled() || stamp.version != owner.version(stamp.position)) {
                     try {
                         if (mesh instanceof StrictVoxyPipeline.Mesh tracked && tracked.vss$work() != null) tracked.vss$work().uploaded();
                         invoke(mesh.getClass().getMethod("free"), mesh);
-                        if (!stamp.context.closed && stamp.context.supported)
+                        if (owner != null && !owner.closed && owner.supported)
                             invoke(service.getClass().getMethod("enqueueTask", long.class), service, stamp.position);
                     } catch (ReflectiveOperationException e) { throw new IllegalStateException(e); }
                     return;
@@ -439,7 +447,7 @@ public final class VoxyPredictionBridge {
                 BuildStamp stamp = SNAPSHOTS.get(borrowed);
                 // Synthetic updates already carry the composed data and its change version.
                 // Re-composing here both copies the section twice and invalidates in-flight meshes again.
-                boolean composedEvent = stamp != null && stamp.context == ctx || NOTIFICATION_SECTION.get() == borrowed;
+                boolean composedEvent = stamp != null && stamp.context() == ctx || NOTIFICATION_SECTION.get() == borrowed;
                 int watched = ((Number) invoke(router.getClass().getMethod("get", long.class), router, pos)).intValue();
                 if (!composedEvent) {
                     if((flags&1)!=0)ctx.revokeNeighborInputs(pos,ctx.voxels.read(borrowed));
@@ -539,8 +547,8 @@ public final class VoxyPredictionBridge {
             WORLDS.remove(ctx.engine, ctx);
             ctx.close();
             if (current == ctx) current = null;
-            synchronized (BUILDS) { BUILDS.values().removeIf(stamp -> stamp.context == ctx); }
-            synchronized (SNAPSHOTS) { SNAPSHOTS.values().removeIf(stamp -> stamp.context == ctx); }
+            synchronized (BUILDS) { BUILDS.values().removeIf(stamp -> stamp.context() == ctx); }
+            synchronized (SNAPSHOTS) { SNAPSHOTS.values().removeIf(stamp -> stamp.context() == ctx); }
         }
     }
 
@@ -911,6 +919,7 @@ public final class VoxyPredictionBridge {
         final Map<BlockState, Integer> blocks = new ConcurrentHashMap<>();
         final Map<String, Integer> biomes = new ConcurrentHashMap<>();
         final LinkedHashMap<Long, CachedSection> cachedSections = new LinkedHashMap<>(64, .75f, true);
+        private volatile java.lang.ref.WeakReference<Context> self;
         Context(Object engine, Object nodes, net.minecraft.client.multiplayer.ClientLevel level) throws ReflectiveOperationException {
             this.engine = engine; this.nodes = nodes; this.level = level; this.dimension = level.dimension();
             VoxyRealCoverage.of(engine).verticalRange(level.getMinSection(),level.getSectionsCount());
@@ -933,6 +942,12 @@ public final class VoxyPredictionBridge {
             refAcquire.invoke(engine); worldHeld = true;
         }
         float configDistance() throws IllegalAccessException { return ((Number) configDistance.get(config)).floatValue(); }
+        /** One weak owner shared by all stamps of this context; a racing duplicate is equivalent. */
+        java.lang.ref.WeakReference<Context> self() {
+            var reference = self;
+            if (reference == null) self = reference = new java.lang.ref.WeakReference<>(this);
+            return reference;
+        }
         synchronized void close() {
             if (closed) return;
             closed = true;
