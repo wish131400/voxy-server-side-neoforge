@@ -37,6 +37,16 @@ public final class WorldgenRegistryDependencies implements RegistryOps.RegistryI
 
     public RegistryOps<JsonElement> ops() { return ops; }
 
+    RegistryAccess access() { return access; }
+
+    /** The live set of custom registries the snapshot will carry. */
+    Set<ResourceKey<? extends Registry<?>>> requested() { return requested; }
+
+    Set<ResourceKey<? extends Registry<?>>> catalogKeys() { return catalog.keySet(); }
+
+    /** A new instance over the same registries and the same catalog, with nothing requested by a codec yet. */
+    WorldgenRegistryDependencies detached() { return new WorldgenRegistryDependencies(access, List.copyOf(catalog.values())); }
+
     /** Runtime dependencies (such as RTF's preset) need not appear in a holder codec. */
     public void require(net.minecraft.resources.ResourceLocation id) {
         var key = ResourceKey.createRegistryKey(id);
@@ -57,12 +67,19 @@ public final class WorldgenRegistryDependencies implements RegistryOps.RegistryI
         while (true) {
             var pending = requested.stream().filter(key -> !result.has(key.location().toString())).toList();
             if (pending.isEmpty()) return result;
-            for (var key : pending) result.add(key.location().toString(), encode(catalog.get(key)));
+            for (var key : pending) {
+                var data = catalog.get(key);
+                result.add(key.location().toString(), WorldgenSectionCache.custom(this, key, owner -> owner.encode(data)));
+            }
         }
     }
 
     /** Tags accompany the registry values without changing the legacy custom-registry entry map. */
     public JsonObject encodeTags() {
+        return WorldgenSectionCache.tags(this, this::encodeTagsUncached);
+    }
+
+    private JsonObject encodeTagsUncached() {
         // These are the dynamic registries carried by WorldgenCodecSnapshot. Static
         // blocks/items keep the client's own tags; they are never rebound by VSS.
         Set<String> snapshotKeys = Set.of(

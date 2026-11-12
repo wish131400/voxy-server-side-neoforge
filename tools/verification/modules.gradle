@@ -29,7 +29,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/CancelableTaskCallbacksTest.class', '**/StrictLodVisibilityHandoffTest.class'
     include '**/VSSClientNetworkingTest.class', '**/OptionalClientNetworkingTest.class'
     include '**/ClientLodSessionAdapterTest.class', '**/ClientConnectionIdentityTest.class'
-    include '**/StrictVoxyNodeIndexTest.class'
+    include '**/StrictVoxyNodeIndexTest.class', '**/WorldgenProfileCacheTest.class'
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'
     include '**/PredictionLoadingReadSetTest.class'
     include '**/PredictionCoarsePlanHandoffTest.class', '**/PredictionTeleportLoadingTest.class'
