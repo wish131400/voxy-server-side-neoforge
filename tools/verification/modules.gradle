@@ -32,6 +32,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/StrictVoxyNodeIndexTest.class'
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'
     include '**/PredictionLoadingReadSetTest.class'
+    include '**/PredictionCaptureCancellationTest.class'
     include '**/PredictionCoarsePlanHandoffTest.class', '**/PredictionTeleportLoadingTest.class'
     include '**/PredictionDemandLifecycleTest.class', '**/PredictionViewRefinementTest.class'
     include '**/FreeTerraForgedSamplesTest.class', '**/PredictionSchedulingConcurrencyTest.class'
