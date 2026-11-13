@@ -239,7 +239,12 @@ final class PredictionCapturedTerrain {
     private void save(PredictionDiskCache.Key key, Node node) {
         // Persist before eviction: dropping a decoded leaf must not drop the only real copy.
         if (disk != null) try (var lease = disk.lease(key)) {
-            if (!disk.writeCapturedNode(lease, node)) throw new IllegalStateException("capture persistence failed");
+            if (!disk.writeCapturedNode(lease, node)) {
+                // Closing the tile manager interrupts this worker and releases the cache's leases mid-write.
+                if (Thread.currentThread().isInterrupted() || !lease.valid())
+                    throw new java.util.concurrent.CancellationException("capture persistence cancelled");
+                throw new IllegalStateException("capture persistence failed");
+            }
         }
         synchronized (this) {
             regions.put(regionKey(key), true);
