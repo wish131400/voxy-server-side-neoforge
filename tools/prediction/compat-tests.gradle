@@ -21,6 +21,12 @@ allprojects {
         if (providers.gradleProperty('vssFreeTerraForgedJar').isPresent()) {
             systemProperty 'vss.freeTerraForgedJar', providers.gradleProperty('vssFreeTerraForgedJar').get()
         }
+        if (providers.gradleProperty('vssReTerraForgedJar').isPresent()) {
+            systemProperty 'vss.reTerraForgedJar', providers.gradleProperty('vssReTerraForgedJar').get()
+        }
+        if (providers.gradleProperty('vssTerraBlenderJar').isPresent()) {
+            systemProperty 'vss.terraBlenderJar', providers.gradleProperty('vssTerraBlenderJar').get()
+        }
         if (providers.gradleProperty('vssLithostitchedJar').isPresent()) {
             systemProperty 'vss.lithostitchedJar', providers.gradleProperty('vssLithostitchedJar').get()
         }

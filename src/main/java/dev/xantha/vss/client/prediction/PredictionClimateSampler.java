@@ -15,6 +15,7 @@ final class PredictionClimateSampler implements AutoCloseable {
         roots = compilation.roots();
         sampler = new Climate.Sampler(roots[0], roots[1], roots[2], roots[3], roots[4], roots[5], source.spawnTarget());
         FreeTerraForgedCompat.copyClimateContext(source, sampler);
+        RtfTerraBlenderRegions.carry(source, sampler);
         FabricBiomeCompat.copyClimateContext(source, sampler);
     }
 

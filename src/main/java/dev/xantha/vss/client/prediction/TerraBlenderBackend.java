@@ -181,8 +181,24 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
             VSSLogger.warn("VSS TerraBlender region snapshot has " + unresolved
                     + " biomes missing from the client registry; affected columns use the base region");
         }
-        return new RoutingSource(base,
+        var routing = new RoutingSource(base,
                 TerrablenderUniqueness.build(seed, regionSize, weighted), trees);
+        bindRtfRegions(routing, section, worldgen);
+        return routing;
+    }
+
+    /** With ReTerraForged installed, its region rule replaces TerraBlender's index where RTF's own redirect does. */
+    private static void bindRtfRegions(RoutingSource routing, JsonObject section, ClientWorldgenRegistries worldgen) {
+        if (!RtfTerraBlenderRegions.available()) return;
+        try {
+            var mods = net.neoforged.fml.ModList.get();
+            RtfTerraBlenderRegions.Rule rule = RtfTerraBlenderRegions.bind(section, worldgen.access(),
+                    id -> mods != null && mods.isLoaded(id));
+            routing.rtfRegions = rule;
+            RtfTerraBlenderRegions.logBinding(rule, section);
+        } catch (RuntimeException | LinkageError failure) {
+            RtfTerraBlenderRegions.report("TerraBlender region selection binding", failure);
+        }
     }
 
     /** Rebuilds a point from the 13 unquantized floats (six ranges plus offset). */
@@ -215,6 +231,8 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
         private final TerrablenderUniqueness.Tree uniqueness;
         private final Climate.ParameterList<Holder<Biome>>[] trees;
         private final Set<Holder<Biome>> possible;
+        /** ReTerraForged's region rule; null keeps VSS's replay of TerraBlender's own index. */
+        volatile RtfTerraBlenderRegions.Rule rtfRegions;
 
         @SuppressWarnings("unchecked")
         RoutingSource(BiomeSource base, TerrablenderUniqueness.Tree uniqueness,
@@ -250,6 +268,11 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
 
         @Override
         public Holder<Biome> getNoiseBiome(int x, int y, int z, Climate.Sampler sampler) {
+            RtfTerraBlenderRegions.Rule rule = rtfRegions;
+            if (rule != null) {
+                Holder<Biome> rtf = rtfRegion(rule, x, y, z, sampler);
+                if (rtf != null) return rtf;
+            }
             int index = uniqueness.get(x, z);
             if (index >= 0 && index < trees.length) {
                 Climate.ParameterList<Holder<Biome>> tree = trees[index];
@@ -258,6 +281,33 @@ public final class TerraBlenderBackend implements PredictionTerrainBackend {
                     if (found != null) {
                         return found;
                     }
+                }
+            }
+            return base.getNoiseBiome(x, y, z, sampler);
+        }
+
+        /** Null where RTF keeps TerraBlender's index; sampling and routing stay VSS's own, only the region index is RTF's. */
+        private Holder<Biome> rtfRegion(RtfTerraBlenderRegions.Rule rule, int x, int y, int z, Climate.Sampler sampler) {
+            Climate.TargetPoint target;
+            int index;
+            try {
+                boolean carried = RtfTerraBlenderRegions.carried(sampler) && RtfTerraBlenderRegions.needsTarget(rule, y);
+                target = carried ? sampler.sample(x, y, z) : null;
+                double value = target == null ? Double.NaN : RtfTerraBlenderRegions.uniqueness(target);
+                float depth = target == null ? 0F : Climate.unquantizeCoord(target.depth());
+                index = RtfTerraBlenderRegions.select(rule, value, depth, x, y, z);
+            } catch (RuntimeException | LinkageError failure) {
+                RtfTerraBlenderRegions.report("TerraBlender region selection", failure);
+                rtfRegions = null;
+                return null;
+            }
+            if (index == RtfTerraBlenderRegions.KEEP) return null;
+            if (target == null) target = sampler.sample(x, y, z);
+            if (index >= 0 && index < trees.length) {
+                Climate.ParameterList<Holder<Biome>> tree = trees[index];
+                if (tree != null) {
+                    Holder<Biome> found = tree.findValue(target);
+                    if (found != null) return found;
                 }
             }
             return base.getNoiseBiome(x, y, z, sampler);
