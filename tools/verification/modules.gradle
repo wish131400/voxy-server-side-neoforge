@@ -31,6 +31,7 @@ tasks.register('moduleRegressionTest', Test) {
     include '**/ClientLodSessionAdapterTest.class', '**/ClientConnectionIdentityTest.class'
     include '**/StrictVoxyNodeIndexTest.class'
     include '**/PredictionPlanningPipelineTest.class', '**/PredictionPlanningValidityTest.class'
+    include '**/CappedProcessorPredictionSeedTest.class'
     include '**/PredictionLoadingReadSetTest.class'
     include '**/PredictionCoarsePlanHandoffTest.class', '**/PredictionTeleportLoadingTest.class'
     include '**/PredictionDemandLifecycleTest.class', '**/PredictionViewRefinementTest.class'

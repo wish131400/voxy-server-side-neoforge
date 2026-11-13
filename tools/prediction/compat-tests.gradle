@@ -24,6 +24,9 @@ allprojects {
         if (providers.gradleProperty('vssLithostitchedJar').isPresent()) {
             systemProperty 'vss.lithostitchedJar', providers.gradleProperty('vssLithostitchedJar').get()
         }
+        if (providers.gradleProperty('vssRoadweaverJar').isPresent()) {
+            systemProperty 'vss.roadweaverJar', providers.gradleProperty('vssRoadweaverJar').get()
+        }
         if (providers.gradleProperty('vssTectonicJar').isPresent()) {
             systemProperty 'vss.tectonicJar', providers.gradleProperty('vssTectonicJar').get()
         }

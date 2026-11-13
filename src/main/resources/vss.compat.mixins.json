@@ -18,6 +18,8 @@
   ],
   "client": [
     "client.PredictionStructureTerrainMixin",
+    "client.CappedProcessorPredictionSeedMixin",
+    "client.RoadWeaverPredictionRoadQueryMixin",
     "voxy.PredictionVoxyMeshSourceMixin",
     "voxy.PredictionVoxyNeighborSourceMixin",
     "voxy.PredictionVoxyWorldEventMixin",
