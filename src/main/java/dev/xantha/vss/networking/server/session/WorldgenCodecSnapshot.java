@@ -12,6 +12,7 @@ import dev.xantha.vss.common.worldgen.DensityFunctionReferences;
 import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import dev.xantha.vss.common.worldgen.FreeTerraForgedRuntime;
 import dev.xantha.vss.common.worldgen.WorldgenRegistryDependencies;
+import dev.xantha.vss.common.worldgen.WorldgenSectionCache;
 import dev.xantha.vss.common.worldgen.GeneratorTerrainCapabilities;
 import dev.xantha.vss.common.worldgen.TerrainPredictionPlan;
 import dev.xantha.vss.api.worldgen.TerrainSnapshots;
@@ -66,31 +67,31 @@ final class WorldgenCodecSnapshot {
                                     DensityFunctionReferences references, WorldgenRegistryDependencies dependencies) {
         RegistryOps<JsonElement> ops = dependencies.ops();
         JsonObject root = new JsonObject();
-        root.add("density_functions", encodeDensities(access, ops, references));
+        root.add("density_functions", WorldgenSectionCache.densities(access, dependencies, references, WorldgenCodecSnapshot::encodeDensities));
         for (var entry : references.definitions().entrySet()) {
             root.getAsJsonObject("density_functions").add(entry.getKey(), entry.getValue());
         }
-        root.add("noises", encodeRegistry(
-                access, ops, Registries.NOISE, NormalNoise.NoiseParameters.DIRECT_CODEC));
+        root.add("noises", WorldgenSectionCache.section(
+                access, dependencies, Registries.NOISE, NormalNoise.NoiseParameters.DIRECT_CODEC, WorldgenCodecSnapshot::encodeRegistry));
         // Keep the same worldgen inputs as the WorldgenDump.  The
         // client can then run feature/structure probes without asking the
         // server for another metadata round trip.
-        root.add("biomes", encodeOptional(access, ops, Registries.BIOME, Biome.DIRECT_CODEC));
-        root.add("configured_carvers", encodeOptional(
-                access, ops, Registries.CONFIGURED_CARVER, ConfiguredWorldCarver.DIRECT_CODEC));
-        root.add("placed_features", encodeOptional(
-                access, ops, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
-        root.add("configured_features", encodeOptional(
-                access, ops, Registries.CONFIGURED_FEATURE, ConfiguredFeature.DIRECT_CODEC));
-        JsonObject structures = encodeOptional(access, ops, Registries.STRUCTURE, Structure.DIRECT_CODEC);
+        root.add("biomes", optional(access, dependencies, Registries.BIOME, Biome.DIRECT_CODEC));
+        root.add("configured_carvers", optional(
+                access, dependencies, Registries.CONFIGURED_CARVER, ConfiguredWorldCarver.DIRECT_CODEC));
+        root.add("placed_features", optional(
+                access, dependencies, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
+        root.add("configured_features", optional(
+                access, dependencies, Registries.CONFIGURED_FEATURE, ConfiguredFeature.DIRECT_CODEC));
+        JsonObject structures = optional(access, dependencies, Registries.STRUCTURE, Structure.DIRECT_CODEC);
         root.add("structures", structures);
-        root.add("structure_sets", filterStructureSets(structures, encodeOptional(
-                access, ops, Registries.STRUCTURE_SET, StructureSet.DIRECT_CODEC)));
+        root.add("structure_sets", filterStructureSets(structures, optional(
+                access, dependencies, Registries.STRUCTURE_SET, StructureSet.DIRECT_CODEC)));
         JsonObject structurifyPolicy = StructurifyPredictionSnapshot.capture();
         if (structurifyPolicy != null) root.add("vss_structure_policy", structurifyPolicy);
-        root.add("processor_lists", encodeOptional(access, ops, Registries.PROCESSOR_LIST,
+        root.add("processor_lists", optional(access, dependencies, Registries.PROCESSOR_LIST,
                 net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType.DIRECT_CODEC));
-        root.add("template_pools", encodeOptional(access, ops, Registries.TEMPLATE_POOL,
+        root.add("template_pools", optional(access, dependencies, Registries.TEMPLATE_POOL,
                 net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool.DIRECT_CODEC));
         if (resources != null) root.add("structure_templates", encodeTemplates(resources));
         root.add("custom_registries", dependencies.encode());
@@ -104,6 +105,12 @@ final class WorldgenCodecSnapshot {
             logEntryHashes("processor_lists", root.getAsJsonObject("processor_lists"));
         }
         return compress(root);
+    }
+
+    /** Registry sections between two builds of one server come from WorldgenSectionCache. */
+    private static <T> JsonObject optional(RegistryAccess access, WorldgenRegistryDependencies dependencies,
+                                           ResourceKey<? extends Registry<T>> key, Codec<T> codec) {
+        return WorldgenSectionCache.section(access, dependencies, key, codec, WorldgenCodecSnapshot::encodeOptional);
     }
 
     private static void logEntryHashes(String section, JsonObject entries) {

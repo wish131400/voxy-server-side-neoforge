@@ -1,6 +1,7 @@
 package dev.xantha.vss.networking.server.session;
 
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.worldgen.WorldgenSectionCache;
 import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload;
 import net.minecraft.server.MinecraftServer;
 
@@ -38,16 +39,20 @@ public final class WorldgenProfileHolder {
             return cached;
         }
         long started = System.nanoTime();
-        WorldgenProfileS2CPayload built = WorldgenProfileBuilder.build(server, revision, dimension);
+        WorldgenProfileS2CPayload built = WorldgenProfileCache.build(server, revision, dimension);
+        long millis = (System.nanoTime() - started) / 1_000_000L;
         owner = server;
         payloads.put(dimension, built);
-        while (payloads.size() > 4) payloads.remove(payloads.keySet().iterator().next());
+        // Bounded by payload bytes, not by four dimensions: with more dimensions in rotation every arrival was a build.
+        while (WorldgenProfileCache.overBound(payloads)) payloads.remove(payloads.keySet().iterator().next());
+        WorldgenProfileCache.summary(dimension, millis, built, payloads);
         VSSLogger.info("VSS built worldgen profile for " + built.dimensions().size()
                 + " dimensions in " + ((System.nanoTime() - started) / 1_000_000L) + " ms");
         return built;
     }
 
     public static synchronized void clear() {
+        WorldgenSectionCache.clear();
         owner = null;
         payloads.clear();
         StructureTemplateService.clear();

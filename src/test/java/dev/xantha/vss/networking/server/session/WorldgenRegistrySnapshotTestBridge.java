@@ -24,9 +24,16 @@ public final class WorldgenRegistrySnapshotTestBridge {
     }
 
     public static JsonObject encode(RegistryAccess server) throws Exception {
-        var encoded = WorldgenCodecSnapshot.encodeRegistries(server, null, new DensityFunctionReferences(),
-                new WorldgenRegistryDependencies(server, List.of()));
-        return JsonParser.parseString(new String(LodByteCompression.decompress(encoded.bytes(), encoded.compression(),
-                encoded.rawSize(), 64 * 1024 * 1024), StandardCharsets.UTF_8)).getAsJsonObject();
+        return encode(server, new WorldgenRegistryDependencies(server, List.of()));
+    }
+
+    public static JsonObject encode(RegistryAccess server, WorldgenRegistryDependencies dependencies) throws Exception {
+        return JsonParser.parseString(new String(encodeBytes(server, dependencies), StandardCharsets.UTF_8)).getAsJsonObject();
+    }
+
+    /** The uncompressed registry section bytes exactly as a profile build sends them. */
+    public static byte[] encodeBytes(RegistryAccess server, WorldgenRegistryDependencies dependencies) throws Exception {
+        var encoded = WorldgenCodecSnapshot.encodeRegistries(server, null, new DensityFunctionReferences(), dependencies);
+        return LodByteCompression.decompress(encoded.bytes(), encoded.compression(), encoded.rawSize(), 64 * 1024 * 1024);
     }
 }
