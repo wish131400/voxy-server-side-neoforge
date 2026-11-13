@@ -15,6 +15,7 @@ final class FreeTerraForgedCompat {
         if (!isState(state)) return state.router();
         try {
             var api = new Api(state.getClass().getClassLoader(), variant(state));
+            if (api.legacyRtf) LegacyRtfRuntime.validateRouter(api.stateType, state);
             return FreeTerraForgedDensity.map(api.context.invoke(state), state.router());
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("FreeTerraForged prediction density context unavailable", failure);
@@ -149,6 +150,8 @@ final class FreeTerraForgedCompat {
         final Method initialize;
         final Method context;
         final boolean epochBased;
+        /** ReTerraForged: its state initializes only from a ServerLevel, so VSS runs LegacyRtfRuntime instead. */
+        final boolean legacyRtf;
 
         Api(ClassLoader loader) throws ReflectiveOperationException {
             this(loader, FreeTerraForgedVariant.detect(loader));
@@ -160,13 +163,21 @@ final class FreeTerraForgedCompat {
             stateType = loader.loadClass(variant.stateClass());
             Method initializer;
             boolean epoch;
+            boolean legacy = false;
             try { initializer = stateType.getMethod("initialize", RegistryAccess.class); epoch = false; }
             catch (NoSuchMethodException epochRelease) {
-                initializer = stateType.getMethod("initialize", loader.loadClass(variant.worldgenClass("runtime.WorldgenEpoch")));
-                epoch = true;
+                if (variant == FreeTerraForgedVariant.LEGACY && LegacyRtfRuntime.legacyState(stateType)) {
+                    initializer = null;
+                    epoch = false;
+                    legacy = true;
+                } else {
+                    initializer = stateType.getMethod("initialize", loader.loadClass(variant.worldgenClass("runtime.WorldgenEpoch")));
+                    epoch = true;
+                }
             }
             initialize = initializer;
             epochBased = epoch;
+            legacyRtf = legacy;
             ThreadLocal<Boolean> dimensionContext;
             try {
                 dimensionContext = (ThreadLocal<Boolean>) loader.loadClass(variant.worldgenClass(variant.abbreviation + "WorldGenContext"))
@@ -181,6 +192,11 @@ final class FreeTerraForgedCompat {
         }
 
         void initialize(Object state, RegistryAccess registries) {
+            if (legacyRtf) {
+                boolean bound = Boolean.TRUE.equals(overworld.get());
+                LegacyRtfRuntime.initialize(stateType, state, registries, bound, "minecraft:overworld");
+                return;
+            }
             try {
                 if (!stateType.isInstance(state)) throw new IllegalStateException("FreeTerraForged RandomState mixin is not active");
                 initialize.invoke(state, registries);

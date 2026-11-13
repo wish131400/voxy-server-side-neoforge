@@ -65,6 +65,8 @@ final class WorldgenCodecSnapshot {
     static Encoded encodeRegistries(RegistryAccess access, net.minecraft.server.packs.resources.ResourceManager resources,
                                     DensityFunctionReferences references, WorldgenRegistryDependencies dependencies) {
         RegistryOps<JsonElement> ops = dependencies.ops();
+        // ReTerraForged's structure rules filter structure placement; a client predicting its structures needs them.
+        dependencies.requireIfPresent(ResourceLocation.parse("reterraforged:worldgen/structure_rule"));
         JsonObject root = new JsonObject();
         root.add("density_functions", encodeDensities(access, ops, references));
         for (var entry : references.definitions().entrySet()) {
