@@ -59,6 +59,48 @@ class LegacyRtfRuntimeTest {
         };
     }
 
+    /** A GeneratorContext with both factories, as in RTF 0.0.7; each call is answered by the delegate. */
+    public static final class BackgroundAndCachedContext {
+        public static Object makeBackground(Object preset, HolderGetter<?> noises, int seed, int tileSize, int batchCount, boolean queue) {
+            return List.of("background", preset, noises, seed, tileSize, batchCount, queue);
+        }
+        public static Object makeCached(Object preset, HolderGetter<?> noises, int seed, int tileSize, int batchCount, boolean queue) {
+            return List.of("cached", preset, noises, seed, tileSize, batchCount, queue);
+        }
+    }
+
+    /** A GeneratorContext without makeBackground, as in RTF builds other than 0.0.7. */
+    public static final class CachedOnlyContext {
+        static volatile java.util.function.Function<Object[], Object> delegate;
+        public static Object makeCached(Object preset, HolderGetter<?> noises, int seed, int tileSize, int batchCount, boolean queue) {
+            Object[] arguments = {preset, noises, seed, tileSize, batchCount, queue};
+            var target = delegate;
+            return target != null ? target.apply(arguments) : List.of("cached", preset, noises, seed, tileSize, batchCount, queue);
+        }
+        public static Object makeUncached(Object preset, HolderGetter<?> noises, int seed, int tileSize, int tileBorder, int batchCount) {
+            throw new AssertionError("not a prediction factory");
+        }
+    }
+
+    public static final class NoFactoryContext {
+        public static Object makeUncached(Object preset, HolderGetter<?> noises, int seed, int tileSize, int tileBorder, int batchCount) {
+            throw new AssertionError("not a prediction factory");
+        }
+    }
+
+    @Test
+    void contextFactoryPrefersMakeBackgroundAndFallsBackToMakeCachedWithTheSameArguments() {
+        HolderGetter<?> noises = new MappedRegistry<Object>(LegacyRtfRuntime.NOISES, Lifecycle.stable()).createRegistrationLookup();
+        assertEquals(List.of("background", "P", noises, 7, 256, 4, true),
+                LegacyRtfRuntime.generatorContext(BackgroundAndCachedContext.class, "P", noises, 7, 256, 4, true));
+        assertEquals(List.of("cached", "P", noises, 7, 256, 4, true),
+                LegacyRtfRuntime.generatorContext(CachedOnlyContext.class, "P", noises, 7, 256, 4, true),
+                "without makeBackground the context is built by makeCached from the same arguments");
+        var refused = assertThrows(IllegalStateException.class,
+                () -> LegacyRtfRuntime.generatorContext(NoFactoryContext.class, "P", noises, 7, 256, 4, true));
+        assertTrue(refused.getMessage().contains("makeBackground and makeCached are unavailable"), refused.getMessage());
+    }
+
     @Test
     void boundLevelWrapsRoutesBindsThePresetAndBuildsAContextOnlyForMarkers() {
         var calls = new ArrayList<String>();
@@ -252,13 +294,30 @@ class LegacyRtfRuntimeTest {
                     .invoke(null, preset, access.lookupOrThrow(LegacyRtfRuntime.NOISES), (int) seed,
                             config.getMethod("tileSize").invoke(defaults), config.getMethod("batchCount").invoke(defaults), false);
             contexts.add(own);
+            // An RTF build without makeBackground: VSS's factory lookup takes RTF's own makeCached.
+            Method makeCached = generatorContext.getMethod("makeCached", preset.getClass(), HolderGetter.class, int.class, int.class, int.class, boolean.class);
+            CachedOnlyContext.delegate = arguments -> {
+                try { return makeCached.invoke(null, arguments); }
+                catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+            };
+            Object fallback;
+            try {
+                fallback = LegacyRtfRuntime.generatorContext(CachedOnlyContext.class, preset, access.lookupOrThrow(LegacyRtfRuntime.NOISES), (int) seed,
+                        (int) config.getMethod("tileSize").invoke(defaults), (int) config.getMethod("batchCount").invoke(defaults), false);
+            } finally {
+                CachedOnlyContext.delegate = null;
+            }
+            assertTrue(generatorContext.isInstance(fallback));
+            contexts.add(fallback);
             var predicted = FreeTerraForgedDensity.map(context, mapped.getFirst()).finalDensity();
             var reference = FreeTerraForgedDensity.map(own, mapped.getFirst()).finalDensity();
+            var fromFallback = FreeTerraForgedDensity.map(fallback, mapped.getFirst()).finalDensity();
             for (int i = 0; i < 16; i++) {
                 var point = new DensityFunction.SinglePointContext(i * 37 - 300, 80, -i * 53 + 200);
                 double expected = reference.compute(point);
                 assertTrue(Double.isFinite(expected));
                 assertEquals(expected, predicted.compute(point), 0.0, "sample " + i);
+                assertEquals(expected, fromFallback.compute(point), 0.0, "makeCached fallback sample " + i);
             }
 
             Object nether = newState(type, loader, seed, markedRouter(loader), mapped);

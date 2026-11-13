@@ -24,7 +24,7 @@ import net.minecraft.world.level.levelgen.DensityFunction;
  *
  * The initializer order and rules reproduce ReTerraForged's MixinRandomState (MIT, github.com/Campione01/ReterraForged,
  * branch rtf-0.0.7); the context uses GeneratorContext.makeBackground so prediction does not compete with world
- * generation threads.
+ * generation threads, and makeCached in RTF builds without it.
  */
 final class LegacyRtfRuntime {
     static final String STATE = "raccoonman.reterraforged.world.worldgen.RTFRandomState";
@@ -90,7 +90,7 @@ final class LegacyRtfRuntime {
                 int tileSize = (int) invoke(config, read, "tileSize");
                 int batchCount = (int) invoke(config, read, "batchCount");
                 boolean queue = (int) invoke(load(loader, "concurrent.ThreadPools"), null, "availableProcessors") > 4;
-                Object context = makeBackground(load(loader, "world.worldgen.GeneratorContext"), preset, noises, (int) seed, tileSize, batchCount, queue);
+                Object context = generatorContext(load(loader, "world.worldgen.GeneratorContext"), preset, noises, (int) seed, tileSize, batchCount, queue);
                 VSSLogger.info("Legacy RTF prediction context: seedInt=" + (int) seed + ", tileSize=" + tileSize
                         + ", batchCount=" + batchCount + ", queue=" + queue);
                 return context;
@@ -105,16 +105,37 @@ final class LegacyRtfRuntime {
         if (stateType.isInstance(state)) LegacyRtfInitialization.validate(new StateView(stateType, state));
     }
 
-    private static Object makeBackground(Class<?> context, Object preset, Object noises, int seed, int tileSize, int batchCount, boolean queue) {
-        for (Method method : context.getMethods()) {
-            if (!method.getName().equals("makeBackground") || !Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 6) continue;
+    /**
+     * GeneratorContext's static six-argument factory: makeBackground where RTF has it (0.0.7), else makeCached, which
+     * takes the same arguments and builds the same context on RTF's shared pool. Null when neither can be read.
+     */
+    private static final ClassValue<Method> CONTEXT_FACTORY = new ClassValue<>() {
+        @Override protected Method computeValue(Class<?> type) {
+            Method cached = null;
             try {
-                return method.invoke(null, preset, noises, seed, tileSize, batchCount, queue);
-            } catch (ReflectiveOperationException failure) {
-                throw LegacyRtfInitialization.failure("RTF generator context could not be built: " + cause(failure));
+                for (Method method : type.getMethods()) {
+                    if (!Modifier.isStatic(method.getModifiers()) || method.getParameterCount() != 6) continue;
+                    if (method.getName().equals("makeBackground")) return method;
+                    if (method.getName().equals("makeCached")) cached = method;
+                }
+            } catch (LinkageError unreadable) {
+                return null;
             }
+            return cached;
         }
-        throw LegacyRtfInitialization.failure("RTF GeneratorContext.makeBackground is unavailable");
+    };
+    private static final java.util.concurrent.atomic.AtomicBoolean CACHED_FALLBACK_LOGGED = new java.util.concurrent.atomic.AtomicBoolean();
+
+    static Object generatorContext(Class<?> context, Object preset, Object noises, int seed, int tileSize, int batchCount, boolean queue) {
+        Method factory = CONTEXT_FACTORY.get(context);
+        if (factory == null) throw LegacyRtfInitialization.failure("RTF GeneratorContext.makeBackground and makeCached are unavailable");
+        if (!factory.getName().equals("makeBackground") && CACHED_FALLBACK_LOGGED.compareAndSet(false, true))
+            VSSLogger.info("RTF GeneratorContext.makeBackground is absent in this ReTerraForged build; prediction builds its context with makeCached");
+        try {
+            return factory.invoke(null, preset, noises, seed, tileSize, batchCount, queue);
+        } catch (ReflectiveOperationException failure) {
+            throw LegacyRtfInitialization.failure("RTF generator context could not be built: " + cause(failure));
+        }
     }
 
     private static Class<?> load(ClassLoader loader, String name) {
