@@ -63,6 +63,7 @@ sourceSets {
             include 'vss.compat.mixins.json'
             include 'vss.strict.mixins.json'
             include 'vss.lostcities.mixins.json'
+            include 'vss.thebeyond.mixins.json'
             include 'assets/vss/**'
         }
     }
@@ -119,7 +120,7 @@ tasks.named('jar', Jar).configure {
                 'VSS-Column-Filter-API'   : (file('src/main/java/dev/xantha/vss/api/column/ColumnFilterApi.java').text =~ /VERSION = (\d+)/)[0][1],
                 'VSS-Column-Coverage-API' : (file('src/main/java/dev/xantha/vss/api/column/ColumnCoverageApi.java').text =~ /VERSION = (\d+)/)[0][1],
                 'VSS-Build-Id'            : providers.gradleProperty('vssBuildId').getOrElse('dev'),
-                'MixinConfigs'            : 'vss.compat.mixins.json,vss.strict.mixins.json,vss.lostcities.mixins.json'
+                'MixinConfigs'            : 'vss.compat.mixins.json,vss.strict.mixins.json,vss.lostcities.mixins.json,vss.thebeyond.mixins.json'
         ])
     }
 }

@@ -18,6 +18,7 @@ import org.spongepowered.asm.service.*;
 /** Real Sponge application in an isolated test JVM; no game or resource-owning Voxy constructors. */
 public final class VoxyMixinHarness extends MixinServiceAbstract implements IClassProvider, IClassBytecodeProvider {
     private final Map<String, byte[]> classes = new HashMap<>();
+    private final Map<String, String> configurations = new LinkedHashMap<>();
     private final String configuration;
     private IMixinTransformer transformer;
 
@@ -48,6 +49,7 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
             MixinBootstrap.init();
             MixinEnvironment.getCurrentEnvironment().setSide(MixinEnvironment.Side.CLIENT);
             Mixins.addConfiguration("vss.ingest.test.mixins.json");
+            for (String name : configurations.keySet()) Mixins.addConfiguration(name);
             var constructor = Class.forName("org.spongepowered.asm.mixin.transformer.MixinTransformer")
                     .getDeclaredConstructor();
             constructor.setAccessible(true);
@@ -63,6 +65,13 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
         }
         if (bytes == null) throw new ClassNotFoundException(name);
         return transformer.transformClass(MixinEnvironment.getCurrentEnvironment(), name, bytes);
+    }
+
+    /** A host mod's own configuration applied beside the VSS one, such as the mixin a VSS patch repairs. */
+    public VoxyMixinHarness addConfiguration(String name, String json) {
+        if (transformer != null) throw new IllegalStateException("Mixin already prepared");
+        configurations.put(name, json);
+        return this;
     }
 
     /** Fixture variants are installed before Sponge prepares any target metadata. */
@@ -84,6 +93,8 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
     @Override public InputStream getResourceAsStream(String name) {
         if (name.equals("vss.ingest.test.mixins.json"))
             return new ByteArrayInputStream(configuration.getBytes(StandardCharsets.UTF_8));
+        if (configurations.containsKey(name))
+            return new ByteArrayInputStream(configurations.get(name).getBytes(StandardCharsets.UTF_8));
         byte[] bytes = classes.get(name);
         return bytes != null ? new ByteArrayInputStream(bytes) : getClass().getClassLoader().getResourceAsStream(name);
     }
