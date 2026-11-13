@@ -104,6 +104,60 @@ class VoxyPredictionNotificationTest {
         public final Engine worldIn;
         Renderer(Engine engine){worldIn=engine;}
     }
+    @Test void retiredRendererContextIsNotKeptReachableByOutstandingBuildStamps() throws Exception {
+        var retired=usePlainContext();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long position,VoxyPredictionBridge.Mapper mapper) {return new long[32768];}
+            public VoxyPredictionBridge.Retention retainSection(long bytes) {return ()->{};}
+        });
+        // The borrowed snapshot keeps its map entry live and the mesh attempt keeps its thread stamp:
+        // both outlive the renderer, as entries enqueued after reset() or a stale thread stamp do.
+        var borrowed=(Section)VoxyPredictionBridge.meshSection(new MeshService(engine),pos,null);
+        try {retireAndCollect(retired);}
+        finally {VoxyPredictionBridge.meshAttemptFinished();borrowed.release();}
+    }
+    @Test void meshBuiltForACollectedContextIsFreedWithoutRequeue() throws Exception {
+        var retired=usePlainContext();
+        set("source",new VoxyPredictionBridge.Source() {
+            public long[] section(long position,VoxyPredictionBridge.Mapper mapper) {return new long[32768];}
+            public VoxyPredictionBridge.Retention retainSection(long bytes) {return ()->{};}
+        });
+        var service=new QueueService(engine);var accepted=new ArrayList<Object>();
+        var consumer=VoxyPredictionBridge.meshConsumer(service,accepted::add);
+        var borrowed=(Section)VoxyPredictionBridge.meshSection(service,pos,null);
+        try {
+            retireAndCollect(retired);
+            var mesh=new BuiltMesh();consumer.accept(mesh);
+            assertEquals(1,mesh.frees);assertTrue(accepted.isEmpty());
+            assertEquals(0,service.requeued,"A collected renderer must not requeue its position");
+        } finally {VoxyPredictionBridge.meshAttemptFinished();borrowed.release();}
+    }
+    /** Mockito's own bookkeeping may hold a mock; reachability needs a plain instance with the same state. */
+    private java.lang.ref.WeakReference<Object> usePlainContext() throws Exception {
+        var unsafeField=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");unsafeField.setAccessible(true);
+        Object plain=((sun.misc.Unsafe)unsafeField.get(null)).allocateInstance(context.getClass());
+        for(Field field:context.getClass().getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())) {
+            field.setAccessible(true);field.set(plain,field.get(context));
+        }
+        worlds().put(engine,plain);context=plain;
+        return new java.lang.ref.WeakReference<>(plain);
+    }
+    private void retireAndCollect(java.lang.ref.WeakReference<Object> retired) throws Exception {
+        VoxyPredictionBridge.renderClosed(new Renderer(engine));
+        assertFalse(worlds().containsKey(engine));
+        boolean originalEnabled=enabled,originalLayout=faceLayout;setup();enabled=originalEnabled;faceLayout=originalLayout;
+        for(int attempt=0;attempt<100 && retired.get()!=null;attempt++) {System.gc();Thread.sleep(10);}
+        assertNull(retired.get(),"A retired overlay context, its renderer and world must not stay reachable from build stamps");
+    }
+    public static final class QueueService {
+        final Engine world;int requeued;
+        QueueService(Engine world) {this.world=world;}
+        public void enqueueTask(long position) {requeued++;}
+    }
+    public static final class BuiltMesh {
+        int frees;
+        public void free() {frees++;}
+    }
     @Test void meshAcquisitionRecordsDemandEvenWithACachedSnapshotAndNoSubdivisionRequest() throws Exception {
         var requests=new ArrayList<Long>();
         set("source",new VoxyPredictionBridge.Source() {
