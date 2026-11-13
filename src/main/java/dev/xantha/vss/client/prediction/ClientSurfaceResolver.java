@@ -12,6 +12,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ProtoChunk;
@@ -34,6 +35,12 @@ final class ClientSurfaceResolver {
     private final PredictionBiomeCache previewBiomeCache;
     private final ThreadLocal<Worker> workers = new ThreadLocal<>();
     private final ThreadLocal<Worker> previewWorkers = new ThreadLocal<>();
+    /** Twilight Forest's biome source; its written surface was measured against the seeded zoom below. */
+    static final String TWILIGHT_BIOME_SOURCE = "twilightforest:twilight_biomes";
+    /** Null keeps the raw quart lookup; bound for profiles whose surface follows the seeded zoom. */
+    private volatile BiomeZoom zoom;
+
+    private record BiomeZoom(BiomeManager ordinary, BiomeManager preview) { }
 
     ClientSurfaceResolver(NoiseBasedChunkGenerator generator, RandomState randomState,
                           LevelHeightAccessor heights, Registry<Biome> biomes) {
@@ -49,6 +56,23 @@ final class ClientSurfaceResolver {
         this.biomes = biomes;
         this.biomeCache = biomeCache;
         this.previewBiomeCache = new PredictionBiomeCache(generator.getBiomeSource(), randomState.sampler());
+    }
+
+    /** True for a generator whose surface was measured against vanilla's seeded biome zoom: Twilight Forest's source. */
+    static boolean seededZoomSurface(com.google.gson.JsonObject generatorRoot) {
+        if (generatorRoot == null || !(generatorRoot.get("biome_source") instanceof com.google.gson.JsonObject source)) return false;
+        var type = source.get("type");
+        return type != null && type.isJsonPrimitive() && type.getAsJsonPrimitive().isString()
+                && TWILIGHT_BIOME_SOURCE.equals(type.getAsString());
+    }
+
+    /**
+     * Surface rules of written terrain read biomes through the region's BiomeManager, which selects a quart per block
+     * with a seeded fuzzy offset; the raw quart lookup differs near every biome edge. Workers made afterwards use it.
+     */
+    void bindBiomeZoom(long seed) {
+        long zoomSeed = BiomeManager.obfuscateSeed(seed);
+        zoom = new BiomeZoom(new BiomeManager(biomeCache::get, zoomSeed), new BiomeManager(previewBiomeCache::get, zoomSeed));
     }
 
     ClientColumnSample resolve(ClientColumnSample sample, int x, int z,
@@ -164,10 +188,13 @@ final class ClientSurfaceResolver {
         private int z;
         private int columns;
         private final boolean preview;
+        private final BiomeManager zoom;
 
         @SuppressWarnings("unchecked")
         private Worker(boolean preview) throws ReflectiveOperationException {
             this.preview = preview;
+            BiomeZoom bound = ClientSurfaceResolver.this.zoom;
+            this.zoom = bound == null ? null : preview ? bound.preview() : bound.ordinary();
             NoiseGeneratorSettings settings = generator.generatorSettings().value();
             ProtoChunk chunk = new ProtoChunk(new ChunkPos(0, 0), UpgradeData.EMPTY, heights, biomes, null) {
                 @Override public int getHeight(Heightmap.Types type, int localX, int localZ) {
@@ -197,6 +224,7 @@ final class ClientSurfaceResolver {
         }
 
         private Holder<Biome> biomeAt(BlockPos pos) {
+            if (zoom != null) return zoom.getBiome(pos);
             return (preview ? previewBiomeCache : biomeCache).get(pos.getX() >> 2, pos.getY() >> 2, pos.getZ() >> 2);
         }
 

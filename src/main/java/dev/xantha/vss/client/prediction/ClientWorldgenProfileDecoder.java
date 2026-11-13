@@ -360,7 +360,9 @@ final class ClientWorldgenProfileDecoder {
             sampler.bindDimensionType(generatorRoot);
             // Epic Terrain uses height-dependent cache_2d nodes. Its surface needs
             // NoiseChunk's evaluation order, including when no native library loads.
-            return registries.hasDensityNamespace("etn") ? new MinecraftColumnTerrainSampler(sampler) : sampler;
+            ClientTerrainSampler result = registries.hasDensityNamespace("etn") ? new MinecraftColumnTerrainSampler(sampler) : sampler;
+            if (ClientSurfaceResolver.seededZoomSurface(generatorRoot)) result.bindSurfaceBiomeZoom(profile.seed());
+            return result;
         } catch (ReflectiveOperationException | RuntimeException | Error failure) {
             if (owner != null) try { owner.close(); }
             catch (Exception cleanup) { failure.addSuppressed(cleanup); }

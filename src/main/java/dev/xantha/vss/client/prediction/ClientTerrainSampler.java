@@ -548,6 +548,11 @@ public class ClientTerrainSampler implements AutoCloseable {
         return decorationAccess;
     }
 
+    /** See ClientSurfaceResolver.bindBiomeZoom; the resolver is shared with samplers derived from this one. */
+    void bindSurfaceBiomeZoom(long seed) {
+        if (surfaceMaterials != null) surfaceMaterials.bindBiomeZoom(seed);
+    }
+
     void bindDimensionType(com.google.gson.JsonObject generatorRoot) {
         if (generatorRoot != null && generatorRoot.has("vss_dimension_type"))
             decorationContext().decorationDimensionType = net.minecraft.world.level.dimension.DimensionType.DIRECT_CODEC
