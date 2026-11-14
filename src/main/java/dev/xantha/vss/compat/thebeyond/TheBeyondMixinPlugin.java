@@ -1,4 +1,4 @@
-package dev.xantha.vss.mixin.thebeyond;
+package dev.xantha.vss.compat.thebeyond;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,6 +16,9 @@ import org.spongepowered.asm.service.MixinService;
  * mixin of the target finished all passes, so the handler is already merged when {@link BeyondHandlerPatch} looks for
  * it. Nothing here loads a game class: the decision reads class bytes as a resource, the patch works on the ClassNode
  * only, and FML's mod list is read for the log text.
+ * <p>The plugin, its {@link Report} and {@link BeyondHandlerPatch} live outside every mixin package: Mixin refuses to
+ * load a class from a registered mixin package, and these are loaded only at postApply, after the packages are
+ * registered (r35 boot: IllegalClassLoadError for BeyondHandlerPatch).
  */
 public final class TheBeyondMixinPlugin implements IMixinConfigPlugin {
     static final String TARGET = BeyondHandlerPatch.TARGET.replace('/', '.');

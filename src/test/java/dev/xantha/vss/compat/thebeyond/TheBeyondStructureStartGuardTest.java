@@ -1,4 +1,4 @@
-package dev.xantha.vss.mixin.thebeyond;
+package dev.xantha.vss.compat.thebeyond;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
