@@ -1,4 +1,4 @@
-package dev.xantha.vss.mixin.thebeyond;
+package dev.xantha.vss.compat.thebeyond;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
