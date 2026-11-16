@@ -45,7 +45,7 @@ class PredictionVegetationSettingsTest {
         var config = normalized(gson.fromJson("{\"predictionTrees\":false,\"predictionStructures\":false,"
                 + "\"predictionFineDistanceBlocks\":1,\"predictionSurfaceDistanceBlocks\":1,"
                 + "\"predictionVegetationDensity\":\"low\",\"predictionDistanceBlocks\":65536}", VSSClientConfig.class));
-        assertEquals(65536, config.predictionDistanceBlocks);
+        assertEquals(VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS, config.predictionDistanceBlocks);
         String saved = gson.toJson(config);
         for (String field : List.of("predictionTrees", "predictionStructures", "predictionFineDistanceBlocks",
                 "predictionSurfaceDistanceBlocks", "predictionVegetationDensity")) {

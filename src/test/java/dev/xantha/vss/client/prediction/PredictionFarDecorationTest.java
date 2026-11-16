@@ -157,8 +157,15 @@ class PredictionFarDecorationTest {
             var priority=PredictionTileManager.class.getDeclaredMethod("workPriority",PredictionTileManager.PredictionTileKey.class,boolean.class);priority.setAccessible(true);
             assertTrue((int)priority.invoke(manager,keys.get(1),true)<(int)priority.invoke(manager,keys.get(0),true));
             var reserve=PredictionTileManager.class.getDeclaredMethod("tryReserveBuildSlots",boolean.class,boolean.class);reserve.setAccessible(true);
-            for(int i=0;i<3;i++) {var slot=(AutoCloseable)reserve.invoke(manager,true,true);assertNotNull(slot);held.add(slot);}
-            assertNull(reserve.invoke(manager,true,true),"Fallback cannot occupy all surface workers");
+            // Pool size does not override the CPU-derived refinement allowance.
+            int surfaceLimit=(int)call(manager,"refinementLimit");
+            int fallbackLimit=Math.max(1,surfaceLimit-1);
+            for(int i=0;i<fallbackLimit;i++) {var slot=(AutoCloseable)reserve.invoke(manager,true,true);assertNotNull(slot);held.add(slot);}
+            assertNull(reserve.invoke(manager,true,true),"Fallback must respect the effective surface allowance");
+            if(surfaceLimit==1) {
+                assertNull(reserve.invoke(manager,true,false),"A single surface worker cannot run two jobs at once");
+                var fallback=held.remove(0);fallback.close();fallback.close();
+            }
             var coverage=(AutoCloseable)reserve.invoke(manager,true,false);assertNotNull(coverage);held.add(coverage);
             for(var slot:held) {slot.close();slot.close();}held.clear();
             assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)field("activeFarCompletions").get(manager)).get());

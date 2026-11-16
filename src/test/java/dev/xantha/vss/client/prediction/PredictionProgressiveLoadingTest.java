@@ -258,14 +258,15 @@ class PredictionProgressiveLoadingTest {
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var blockOnce = new AtomicBoolean(true);
-        config.predictionDistanceBlocks = surface ? 65536 : 1024;
+        int fixtureDistance = surface ? VSSClientConfig.MAX_PREDICTION_DISTANCE_BLOCKS : 1024;
+        config.predictionDistanceBlocks = fixtureDistance;
         var sampler = new ClientTerrainSampler(PROFILE.seed(), PROFILE) {
             @Override public ClientColumnSample sample(int x, int z) {
                 return source.sample(x, z);
             }
             @Override ClientTerrainSampler decorationContext() { return source; }
             @Override public ClientColumnSample sampleForLod(int x, int z, int step) {
-                if (x > (surface ? 65536 : 1024) && blockOnce.compareAndSet(true, false)) {
+                if (x > fixtureDistance && blockOnce.compareAndSet(true, false)) {
                     entered.countDown();
                     try {
                         if (!release.await(20, TimeUnit.SECONDS)) throw new IllegalStateException("blocked root timed out");
@@ -286,7 +287,7 @@ class PredictionProgressiveLoadingTest {
             executor.setMaximumPoolSize(2);
             {
                 // Start one unrelated root before applying the telescope's
-                // priority. This fixture must not build a 64 km medium world
+                // priority. This fixture must not build the whole distant horizon
                 // merely to exercise a single decoration publication.
                 var root=key(1,manager.layout().levelCount()-1);
                 var desiredField=PredictionTileManager.class.getDeclaredField("desiredKeys");desiredField.setAccessible(true);
@@ -294,11 +295,8 @@ class PredictionProgressiveLoadingTest {
                 var enqueue=PredictionTileManager.class.getDeclaredMethod("enqueue",PredictionTileManager.PredictionTileKey.class,int.class,int.class,boolean.class);
                 enqueue.setAccessible(true);enqueue.invoke(manager,root,0,0,false);
             }
-            long planDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
-            while (entered.getCount()>0 && System.nanoTime()<planDeadline) {
-                replan(manager,surface); entered.await(10,TimeUnit.MILLISECONDS);
-            }
-            assertEquals(0,entered.getCount(), "fixture must keep one far horizon job unfinished");
+            // Confirm the unrelated job is running before replanning can cancel it.
+            assertTrue(entered.await(5,TimeUnit.SECONDS), "fixture must keep one far horizon job unfinished");
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12);
             while (!hasNearDetail(manager, surface) && System.nanoTime() < deadline) {
                 replan(manager,surface);
