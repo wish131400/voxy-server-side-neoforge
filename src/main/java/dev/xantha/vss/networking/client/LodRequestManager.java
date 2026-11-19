@@ -629,11 +629,12 @@ public final class LodRequestManager {
                 return;
             }
 
-            if ((generationRequest || sessionConfig != null && !sessionConfig.generationEnabled())
+            if ((generationRequest || sessionConfig != null && !sessionConfig.generationEnabled()
+                    && (!cacheProbeRequest || cacheOnlyReload.isActive()))
                     && !strictSections.containsKey(strictSectionsKey(packed))) {
-                // A cache miss alone still needs near-first generation. Only
-                // an unavailable generation result (or generation disabled)
-                // settles the hole; retries can later supply its real data.
+                // A cache probe cannot establish that the real chunk is absent.
+                // Settle the hole only after a full read/generation attempt,
+                // or when this pass explicitly asks for cached LOD only.
                 strictUnavailableColumns.add(packed);
                 dev.xantha.vss.compat.StrictLodVisibility.workChanged();
             }
@@ -728,24 +729,26 @@ public final class LodRequestManager {
     }
 
     /**
-     * A cache probe deliberately asks the server not to generate. Only after
-     * the server confirms that no cached column exists do we hand the column
-     * back to the normal generation candidate queue.
+     * A probe checks VSS caches, not existing Minecraft chunks. Its miss must
+     * reach the normal read path even when generation is disabled. The server
+     * reads existing chunk NBT before considering the generation flag.
      */
     private void handleCacheProbeMiss(long packed) {
         generationDiagnostics.record("probeMiss");
         columnTimestamps.remove(packed);
         clearBackoff(packed);
         deferredColumns.remove(packed);
-        if (generationAllowed() && shouldPromoteNotGeneratedToGeneration(packed)) {
+        boolean readOnlyFallback = !generationAllowed() && !cacheOnlyReload.isActive();
+        if (readOnlyFallback || shouldPromoteNotGeneratedToGeneration(packed)) {
             diskMissedColumns.add(packed);
             deferColumn(packed);
             generationDiagnostics.record(deferredColumns.contains(packed)
-                    ? "probePromoted" : "probePromotionQueueFull");
+                    ? (readOnlyFallback ? "probeReadOnlyQueued" : "probePromoted")
+                    : "probePromotionQueueFull");
             return;
         }
         generationDiagnostics.record(cacheOnlyReload.isActive() ? "probeBlockedCacheOnly"
-                : !generationAllowed() ? "probeBlockedGenerationDisabled" : "probeBlockedFrontierOrPlayer");
+                : "probeBlockedFrontierOrPlayer");
         clearMissState(packed);
     }
 
@@ -897,24 +900,20 @@ public final class LodRequestManager {
         for (long packed : cancelled) {
             requestTracker.cancel(packed);
             diskMissedColumns.add(packed);
-            columnTimestamps.put(packed, 0L);
+            columnTimestamps.remove(packed);
             clearBackoff(packed);
+            deferColumn(packed);
         }
 
-        LongOpenHashSet deferredGeneration = new LongOpenHashSet();
+        // These candidates still need an existing-chunk read. Disabling new
+        // worldgen changes their request flag/quota, not their availability.
         for (long packed : deferredColumns) {
             if (!dirtyColumns.contains(packed) && diskMissedColumns.contains(packed)) {
-                deferredGeneration.add(packed);
+                columnTimestamps.remove(packed);
+                clearBackoff(packed);
             }
         }
-        for (long packed : deferredGeneration) {
-            deferredColumns.remove(packed);
-            columnTimestamps.put(packed, 0L);
-            clearBackoff(packed);
-        }
-        if (!deferredGeneration.isEmpty()) {
-            deferredColumns.compact();
-        }
+        requestScanPending = true;
     }
 
     private void resumeGenerationCandidatesNearPlayer() {
@@ -1538,6 +1537,7 @@ public final class LodRequestManager {
         return sessionConfig != null
                 && sessionConfig.enabled()
                 && columnTimestamps.get(packed) <= 0L
+                && !diskMissedColumns.contains(packed)
                 && !hasKnownColumn(packed);
     }
 

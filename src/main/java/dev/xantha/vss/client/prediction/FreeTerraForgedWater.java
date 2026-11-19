@@ -10,15 +10,25 @@ final class FreeTerraForgedWater {
     private final Method scale, hydrology, river, lake, wetland;
     private final Field terrain, riverLevel, waterTable, continentScale, continentModifier;
     private final float ocean;
+    private final Field ultraLevel;
+    private final int ultraSeaLevel;
 
     FreeTerraForgedWater(Object context) throws ReflectiveOperationException {
         ClassLoader loader = context.getClass().getClassLoader();
-        String prefix = FreeTerraForgedVariant.fromClass(context.getClass()).worldgenClass("cell.");
+        var variant = FreeTerraForgedVariant.fromClass(context.getClass());
+        String prefix = variant.worldgenClass("cell.");
         levels = context.getClass().getField("levels").get(context);
         scale = levels.getClass().getMethod("scale", float.class);
         ocean = levels.getClass().getField("water").getFloat(levels);
         Class<?> cell = loader.loadClass(prefix + "Cell");
         terrain = cell.getField("terrain");
+        ultraLevel = variant == FreeTerraForgedVariant.ULTRA ? cell.getField("waterLevel") : null;
+        ultraSeaLevel = ultraLevel == null ? 0 : levels.getClass().getField("waterY").getInt(levels);
+        if (ultraLevel != null) {
+            riverLevel = waterTable = continentScale = continentModifier = null;
+            river = lake = wetland = hydrology = null;
+            return;
+        }
         Field waterLevel;
         try {
             waterLevel = cell.getField("riverWaterLevel");
@@ -49,6 +59,12 @@ final class FreeTerraForgedWater {
     }
 
     int surfaceY(Object cell) throws ReflectiveOperationException {
+        if (ultraLevel != null) {
+            float level = ultraLevel.getFloat(cell);
+            if (level <= 0) return Integer.MIN_VALUE;
+            int y = (int) scale.invoke(levels, level);
+            return y > ultraSeaLevel ? y + 1 : Integer.MIN_VALUE;
+        }
         if (riverLevel == null) return Integer.MIN_VALUE;
         Object kind = terrain.get(cell);
         if (kind == null || riverLevel.getFloat(cell) <= 0

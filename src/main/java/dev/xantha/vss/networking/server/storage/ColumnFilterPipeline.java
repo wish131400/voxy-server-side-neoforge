@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.server.storage;
 
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.api.column.ColumnDecision;
 import dev.xantha.vss.api.column.ColumnFilters;
 import dev.xantha.vss.api.column.ColumnInput;
@@ -78,7 +79,7 @@ public final class ColumnFilterPipeline {
                 ys.add(y);
                 lengths.add(body.writerIndex() - start);
             }
-            if (ys.size() > 64) throw new IllegalArgumentException("Filtered column exceeds 64 wire sections");
+            if (ys.size() > VSSConstants.MAX_COLUMN_SECTIONS) throw new IllegalArgumentException("Filtered column exceeds wire section limit");
             output.writeVarInt(ys.size());
             output.writeBytes(body);
             byte[] bytes = new byte[output.readableBytes()];
@@ -98,9 +99,8 @@ public final class ColumnFilterPipeline {
         FriendlyByteBuf input = new FriendlyByteBuf(Unpooled.wrappedBuffer(bytes));
         try {
             int count = input.readVarInt();
-            // Source dimensions may contain more than 64 sections. The policy
-            // may select a smaller band; enforce the wire limit on that output.
-            if (count < 0 || count > 256 || count > context.maxSectionY() - context.minSectionY())
+            // Source and filtered manifests share the signed-byte section height range.
+            if (count < 0 || count > VSSConstants.MAX_COLUMN_SECTIONS || count > context.maxSectionY() - context.minSectionY())
                 throw new IllegalArgumentException("Invalid source section count");
             Map<Integer, ParsedSection> sections = new HashMap<>();
             for (int i = 0; i < count; i++) {

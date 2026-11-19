@@ -10,9 +10,11 @@ import dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionPro
 
 /** Ensures density and biome queries can see FreeTerraForged's filtered tiles. */
 final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implements AutoCloseable {
+    @Override boolean supportsFarDecorations() { return !interiorTerrain(); }
     private final FreeTerraForgedCells cells;
     private final AutoCloseable runtimeOwner;
     private final FreeTerraForgedWater water;
+    private final FreeTerraForgedSurfaceRules previewRules;
     private final FreeTerraForgedSamples exactSamples = new FreeTerraForgedSamples(32768);
     private final FreeTerraForgedSamples previewSamples = new FreeTerraForgedSamples(8192);
     private volatile FreeTerraForgedExterior exterior;
@@ -30,11 +32,14 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
         super(profile.seed(), profile, generator, randomState, heights,
                 generator.generatorSettings().value().seaLevel(), registries, clientRegistries);
         try {
-            var api = new FreeTerraForgedCompat.Api(getClass().getClassLoader());
+            var api = new FreeTerraForgedCompat.Api(randomState.getClass().getClassLoader(),
+                    FreeTerraForgedCompat.variant(randomState));
             Object context = api.context.invoke(randomState);
             cells = context == null ? null : new FreeTerraForgedCells(context);
             this.runtimeOwner = runtimeOwner;
             water = context == null ? null : new FreeTerraForgedWater(context);
+            previewRules = context != null && api.variant == dev.xantha.vss.common.worldgen.FreeTerraForgedVariant.ULTRA
+                    ? new FreeTerraForgedSurfaceRules(context) : null;
             dev.xantha.vss.common.VSSLogger.info("VSS FreeTerraForged adapter ready: dimension="
                     + profile.dimension() + ", filteredTerrain=" + (cells != null)
                     + ", storage=" + (cells == null ? "inactive" : cells.tiled() ? "tile" : "chunk"));
@@ -66,7 +71,12 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
 
     @Override SamplingScope exteriorRequest() { return exterior().request(); }
 
-    @Override SamplingScope terrainRequest() { return cells == null ? super.terrainRequest() : cells.request(); }
+    @Override SamplingScope terrainRequest() {
+        var surface = super.terrainRequest();
+        if (cells == null) return surface;
+        var region = cells.request();
+        return () -> { try { region.close(); } finally { surface.close(); } };
+    }
 
     @Override ClientColumnSample retainAfterCapture(ClientColumnSample sample) {
         // Captures, area mips and city summaries belong to mutable inputs. Seed-only
@@ -95,12 +105,24 @@ final class FreeTerraForgedTerrainSampler extends ClientTerrainSampler implement
         return sampleSurface(x, z);
     }
 
+    @Override ClientColumnSample sampleDisplay(int x, int z) { return samplePreview(x, z); }
+
     @Override public ClientColumnSample sampleSurface(int x, int z) {
         return exactSamples.get(x, z, () -> FreeTerraForgedDensity.coarse(false, () -> super.sampleSurface(x, z)));
     }
 
+    @Override int previewSurfaceY(int x, int z) {
+        // Density and biome preview work run in coarse mode, but their geometry must
+        // use the same filtered cells as exact terrain (including opaque compiled routers).
+        return FreeTerraForgedDensity.coarse(false, () -> {
+            prepare(x, z);
+            return super.previewSurfaceY(x, z);
+        });
+    }
+
     @Override public ClientColumnSample samplePreview(int x, int z) {
-        return previewSamples.get(x, z, () -> FreeTerraForgedDensity.coarse(true, () -> super.samplePreview(x,z)));
+        return previewSamples.get(x, z, () -> FreeTerraForgedDensity.coarse(true, () -> previewRules == null
+                ? super.samplePreview(x,z) : previewRules.preview(() -> super.samplePreview(x,z))));
     }
 
     @Override boolean supportsLodGrid() { return true; }

@@ -6,6 +6,7 @@
   "refmap": "vss.refmap.json",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
+    "worldgen.LithostitchedBiomeInjectorMixin",
     "ftbessentials.TeleportCommandsNoBlockingMixin",
     "minecraft.ChunkMapEntityTrackingAccessor",
     "minecraft.LevelBlockEntityTickerCompactionMixin",
@@ -35,6 +36,12 @@
     "client.FreeTerraForgedPredictionFiltersMixin",
     "client.FreeTerraForgedPredictionOreMixin",
     "client.FreeTerraForgedPredictionDimensionMixin",
+    "client.FreeTerraForgedPredictionDecorationMixin",
+    "client.UltraTerraForgedPredictionTasksMixin",
+    "client.UltraTerraForgedPredictionTileCacheMixin",
+    "client.SurfaceRulesContextAccessor",
+    "client.UltraTerraForgedPredictionNearGroundMixin",
+    "client.UltraTerraForgedPredictionCellConditionMixin",
     "client.ByePregenPredictionPredicateMixin",
     "client.NbtTreePredictionTemplatesMixin",
     "client.ClientPacketListenerServerIdentityMixin",
@@ -49,7 +56,9 @@
     "voxy.PredictionFogShaderMixin",
     "voxy.VoxyClientInstanceStoragePathMixin",
     "voxy.VoxyRenderSystemDefaultFramebufferMixin",
-    "voxy.VoxyRenderDistanceMixin"
+    "voxy.VoxyRenderDistanceMixin",
+    "client.LegacyPredictionThreadOptionsMixin",
+    "client.SodiumPredictionThreadOptionsMixin"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -38,9 +38,19 @@ final class PredictionWorkOrder {
      * Distant horizon work keeps distance ordering instead of imposing a global
      * coverage barrier. View bands, focus and fair turns remain caller-owned. */
     static int coveragePriority(double distanceSquared, int residentAxis, boolean surface, int screenPriority) {
+        return coveragePriority(distanceSquared, residentAxis, surface, screenPriority, false);
+    }
+
+    static int coveragePriority(double distanceSquared, int residentAxis, boolean surface, int screenPriority,
+                                boolean nearbyDetail) {
         int priority = nearPriority(distanceSquared, residentAxis, surface, screenPriority);
-        return residentAxis == 0 && !surface && distanceSquared <= 2048.0 * 2048
+        return !surface && (residentAxis == 0 && distanceSquared <= 2048.0 * 2048 || nearbyDetail)
                 ? priority - 5_000 : priority;
+    }
+
+    static boolean nearbyVisibleDetail(PredictionTileKey key, VssLodLayout layout, double distanceSquared, int band) {
+        double radius = PredictionDetailBands.fineRadius(layout.maxDistanceBlocks(), key.dimension());
+        return key.lod() <= 2 && band == PredictionWorkView.VISIBLE && distanceSquared <= radius * radius;
     }
 
     static int initialCellAxis(int lod) {

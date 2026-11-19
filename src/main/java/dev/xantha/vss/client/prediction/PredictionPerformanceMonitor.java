@@ -26,8 +26,8 @@ public final class PredictionPerformanceMonitor {
     private static final PredictionPerformanceFrames frames = new PredictionPerformanceFrames();
     private static final PredictionPerformanceService service = new PredictionPerformanceService();
     private static Object levelIdentity;
-    private static long lastFrame, lastSample, epoch;
-    private static boolean enabled, gameplayBefore, hud;
+    private static long lastFrame, lastSample, epoch, captureStartedNanos;
+    private static boolean enabled, gameplayBefore, hud, autoStarted;
     private static String label = "default", previousMode = "";
     private static Map<String, Object> previousLoading = Map.of(), previousStages = Map.of(), previousSystem = Map.of();
     private static Map<String, Object> latest = Map.of();
@@ -39,7 +39,7 @@ public final class PredictionPerformanceMonitor {
     /** Client-thread command. Endpoint creation performs disk/network work off-thread. */
     public static CompletableFuture<Path> start() {
         if (Minecraft.getInstance() == null) return CompletableFuture.failedFuture(new IllegalStateException("Client unavailable"));
-        enabled = true; history.clear(); latest = Map.of(); label = "default"; reset(); publish(false);
+        captureStartedNanos = System.nanoTime(); enabled = true; history.clear(); latest = Map.of(); label = "default"; reset(); publish(false);
         return service.start(directory());
     }
     /** Stops capture and endpoint; keeps last history available for explicit export. */
@@ -49,11 +49,13 @@ public final class PredictionPerformanceMonitor {
     /** Explicit local A/B control. Does not change detail, distance or loading. */
 
     static void frame() {
-        if (!enabled) return;
+        if (!enabled && (!PredictionAcceptanceSettings.autoCapture() || autoStarted)) return;
         var client = Minecraft.getInstance(); Object world = client == null ? null : client.level;
         if (levelIdentity != world) { reset(); levelIdentity = world; }
         long now = System.nanoTime(), gap = lastFrame == 0 ? 0 : now - lastFrame; lastFrame = now;
-        boolean gameplay = world != null && client.screen == null && !client.isPaused() && client.isWindowActive();
+        if (!enabled && PredictionAcceptanceSettings.autoCapture() && world != null) { autoStarted = true; start(); }
+        boolean gameplay = PredictionAcceptanceSettings.gameplay(world != null, client.screen != null,
+                client.isPaused(), client.isWindowActive());
         if (!gameplay) {
             if (gameplayBefore) { resetInterval(); publish(false); }
             gameplayBefore = false; return;
@@ -69,8 +71,10 @@ public final class PredictionPerformanceMonitor {
         var counters = ClientPredictionState.demandSnapshot(client.level.dimension());
         var stages = PredictionRenderTimings.snapshot(); var system = service.system();
         var row = new java.util.LinkedHashMap<String, Object>(frames.snapshot());
-        row.put("time", Instant.now().toString()); row.put("epoch", epoch);
+        row.put("captureStartedNanos", captureStartedNanos); row.put("sampleMonotonicNanos", now); row.put("time", Instant.now().toString()); row.put("epoch", epoch);
         row.put("dimension", client.level.dimension().location().toString()); row.put("label", label); row.put("mode", mode);
+        row.put("acceptance", PredictionAcceptanceSettings.metadata());
+        row.put("windowActive", client.isWindowActive()); row.put("paused", client.isPaused());
         row.put("predictionEnabled", config.enablePrediction); row.put("loadingEnabled", config.isPredictionLoadingEnabled());
         row.put("intervalSeconds", seconds);
         var position = client.gameRenderer.getMainCamera().getPosition();

@@ -101,12 +101,12 @@ final class PredictionCapturedTerrain {
                 summary = Summary.columns(columns); bytes = size;
             } else { summary = Summary.combine(children); bytes = 1024; }
         }
-        void write(DataOutputStream output, PredictionCacheMappings mappings) throws IOException {
+        void write(DataOutputStream output, PredictionCacheMappings mappings, PredictionBlockMappings blockMappings) throws IOException {
             output.writeBoolean(columns != null);
             ClientColumnSample[] samples = columns != null ? columns
                     : Arrays.stream(children).filter(java.util.Objects::nonNull).map(Summary::material)
                             .toArray(ClientColumnSample[]::new);
-            writeSamples(output, samples, mappings);
+            writeSamples(output, samples, mappings, blockMappings);
             if (columns == null) for (Summary child : children) {
                 output.writeBoolean(child != null);
                 if (child != null) {
@@ -115,9 +115,9 @@ final class PredictionCapturedTerrain {
                 }
             }
         }
-        static Node read(DataInputStream input, PredictionCacheMappings mappings) throws IOException {
+        static Node read(DataInputStream input, PredictionCacheMappings mappings, PredictionBlockMappings blockMappings) throws IOException {
             boolean leaf = input.readBoolean();
-            ClientColumnSample[] columns = readSamples(input, mappings);
+            ClientColumnSample[] columns = readSamples(input, mappings, blockMappings);
             if (leaf) {
                 if (columns.length != 256) throw new IOException("capture column count");
                 return new Node(columns, null);
@@ -289,7 +289,7 @@ final class PredictionCapturedTerrain {
     synchronized void clear() { generation++;cache.clear(); regions.clear();decoding.clear(); bytes = 0; }
 
     private static void writeSamples(DataOutputStream out, ClientColumnSample[] samples,
-                                     PredictionCacheMappings mappings) throws IOException {
+                                     PredictionCacheMappings mappings, PredictionBlockMappings blockMappings) throws IOException {
         out.writeInt(samples.length);
         Map<Integer, Integer> blocks = new LinkedHashMap<>(), biomes = new LinkedHashMap<>();
         for (var s : samples) {
@@ -302,18 +302,18 @@ final class PredictionCapturedTerrain {
         out.writeBoolean(mappings != null); out.writeInt(biomes.size());
         for (int biome : biomes.keySet()) { if (mappings == null) out.writeInt(biome); else out.writeUTF(mappings.biomeName(biome)); }
         out.writeInt(blocks.size());
-        for (int block : blocks.keySet()) out.writeUTF(PredictionCacheMappings.blockName(block));
+        for (int block : blocks.keySet()) out.writeUTF(blockMappings.name(block));
         for (var sample : samples) PredictionSampleStore.writeSample(out,
                 PredictionSampleStore.remap(sample, biomes::get, blocks::get));
     }
-    private static ClientColumnSample[] readSamples(DataInputStream in, PredictionCacheMappings mappings) throws IOException {
+    private static ClientColumnSample[] readSamples(DataInputStream in, PredictionCacheMappings mappings, PredictionBlockMappings blockMappings) throws IOException {
         int count = bound(in.readInt(), 256);
         boolean named = in.readBoolean();
         if (named && mappings == null) throw new IOException("capture biome mapping unavailable");
         int[] biomes = new int[bound(in.readInt(), 256)];
         for (int i = 0; i < biomes.length; i++) biomes[i] = named ? mappings.biomeId(in.readUTF()) : in.readInt();
         int[] blocks = new int[bound(in.readInt(), 65536)];
-        for (int i = 0; i < blocks.length; i++) blocks[i] = PredictionCacheMappings.blockId(in.readUTF());
+        for (int i = 0; i < blocks.length; i++) blocks[i] = blockMappings.id(in.readUTF());
         ClientColumnSample[] result = new ClientColumnSample[count];
         PredictionSampleStore.IdMapper biome=id->biomes[index(id,biomes.length)],block=id->blocks[index(id,blocks.length)];
         for (int i = 0; i < count; i++) {

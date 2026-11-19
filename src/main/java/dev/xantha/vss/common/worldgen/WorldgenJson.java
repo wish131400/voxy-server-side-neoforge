@@ -37,6 +37,29 @@ public final class WorldgenJson {
         }
     }
 
+    /** Runtime reconstruction retains paths/epochs; persistent cache identity compares their content. */
+    public static String cacheSha256(JsonElement value) {
+        if (value == null || !value.isJsonObject()) return sha256(value == null ? JsonNull.INSTANCE : value);
+        var root=value.getAsJsonObject();
+        var runtime=root.get("vss_freeterraforged_runtime");
+        if (runtime == null || !runtime.isJsonObject()) return sha256(value);
+        var epoch=runtime.getAsJsonObject();
+        if (!epoch.has("schema") || epoch.get("schema").getAsInt()!=1) return sha256(value);
+        var stable=root.deepCopy();
+        epoch=stable.getAsJsonObject("vss_freeterraforged_runtime");
+        if (epoch.has("tag_fingerprint")) epoch.remove("tag_sequence");
+        var replacement=epoch.get("biome_replacement");
+        if (replacement != null && replacement.isJsonObject()) {
+            var config=replacement.getAsJsonObject();
+            if (config.has("fingerprint") && config.has("content")) {
+                config.remove("path");config.remove("revision");
+            }
+        }
+        // FTF resource_fingerprint includes upstream revision/pack provenance. Preserve it:
+        // the current snapshot cannot independently prove that all external resources match.
+        return sha256(stable);
+    }
+
     private static void write(JsonWriter writer, JsonElement value) throws IOException {
         if (value.isJsonObject()) {
             writer.beginObject();

@@ -30,6 +30,13 @@ final class ClientCaptureExtractor {
     /** Extracts all 256 columns from one authoritative chunk in a single pass. */
     static ClientColumnSample[] extractAll(int chunkX, int chunkZ, VoxelColumnData data,
                                            ClientTerrainSampler sampler) {
+        try (var request = sampler.terrainRequest()) {
+            return extractInRequest(chunkX, chunkZ, data, sampler);
+        }
+    }
+
+    private static ClientColumnSample[] extractInRequest(int chunkX, int chunkZ, VoxelColumnData data,
+                                                        ClientTerrainSampler sampler) {
         int minY = sampler.profile().minY();
         int maxY = minY + sampler.profile().height() - 1;
         SectionAccess access = new SectionAccess(data == null ? new VoxelColumnData.SectionData[0]

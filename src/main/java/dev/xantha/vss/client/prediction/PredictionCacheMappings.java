@@ -2,11 +2,10 @@ package dev.xantha.vss.client.prediction;
 
 import java.io.IOException;
 import java.util.*;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
 
 /** Resource names survive registry reordering; legacy numbers are accepted only with a saved mapping. */
 final class PredictionCacheMappings {
+    final PredictionBlockMappings blocks = PredictionBlockMappings.capture();
     private final List<String> biomes;
     private final Map<String, Integer> biomeIds;
     private final List<String> legacyBiomes, legacyBlocks;
@@ -53,17 +52,7 @@ final class PredictionCacheMappings {
 
     boolean hasLegacyBlocks() { return !legacyBlocks.isEmpty(); }
 
-    static String blockName(int id) throws IOException {
-        if (id == ClientColumnSample.NO_BLOCK) return "";
-        var block = BuiltInRegistries.BLOCK.byId(id);
-        if (block == null) throw new IOException("Invalid block index: " + id);
-        return BuiltInRegistries.BLOCK.getKey(block).toString();
-    }
+    String blockName(int id) throws IOException { return blocks.name(id); }
 
-    static int blockId(String name) throws IOException {
-        if (name.isEmpty()) return ClientColumnSample.NO_BLOCK;
-        ResourceLocation id = ResourceLocation.tryParse(name);
-        if (id == null || !BuiltInRegistries.BLOCK.containsKey(id)) throw new IOException("Block unavailable: " + name);
-        return BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.get(id));
-    }
+    int blockId(String name) throws IOException { return blocks.id(name); }
 }

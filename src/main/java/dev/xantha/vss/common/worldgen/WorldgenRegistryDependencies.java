@@ -56,6 +56,14 @@ public final class WorldgenRegistryDependencies implements RegistryOps.RegistryI
         requested.add(key);
     }
 
+    /** As require, for a runtime dependency of an optional mod: false when the mod's registry is not there. */
+    public boolean requireIfPresent(net.minecraft.resources.ResourceLocation id) {
+        var key = ResourceKey.createRegistryKey(id);
+        if (!catalog.containsKey(key) || access.registry(key).isEmpty()) return false;
+        requested.add(key);
+        return true;
+    }
+
     @Override
     public <T> Optional<RegistryOps.RegistryInfo<T>> lookup(ResourceKey<? extends Registry<? extends T>> key) {
         if (catalog.containsKey(key)) requested.add((ResourceKey<? extends Registry<?>>) key);

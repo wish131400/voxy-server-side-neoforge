@@ -25,9 +25,26 @@ class PredictionFarGroundTest {
         for (int i = 0; i < 5; i++) ground.at(-1, -1, () -> {});
         assertEquals(64, calls.get());
         ground.at(0, 0, () -> {});
-        assertEquals(128, calls.get());
+        assertEquals(65, calls.get(), "a new Java point must not construct its 63 unused neighbours");
         org.mockito.Mockito.verify(sampler).sampleForLod(ground.x(-1, ground.root(-1, -1)), ground.z(-1, ground.root(-1, -1)), 1);
         assertThrows(java.util.concurrent.CancellationException.class,
                 () -> ground.at(0, 0, () -> { throw new java.util.concurrent.CancellationException(); }));
+    }
+
+    @Test void displayGroundUsesPreviewWithoutCallingExactTerrain() {
+        var sampler=org.mockito.Mockito.mock(FreeTerraForgedTerrainSampler.class,
+                org.mockito.Mockito.CALLS_REAL_METHODS);
+        var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                net.minecraft.resources.ResourceLocation.tryParse("minecraft:overworld"),42L,-64,384,"noise","minecraft:overworld",123L);
+        org.mockito.Mockito.doReturn(profile).when(sampler).profile();
+        org.mockito.Mockito.doReturn(PredictionVoxelFixtures.sample(72)).when(sampler).samplePreview(
+                org.mockito.ArgumentMatchers.anyInt(),org.mockito.ArgumentMatchers.anyInt());
+        var ground=new PredictionFarGround(sampler);
+        var first=ground.at(-1,2,()->{});
+        assertSame(first,ground.at(-1,2,()->{}));
+        long root=ground.root(-1,2);
+        org.mockito.Mockito.verify(sampler).samplePreview(ground.x(-1,root),ground.z(2,root));
+        org.mockito.Mockito.verify(sampler,org.mockito.Mockito.never()).sampleSurface(
+                org.mockito.ArgumentMatchers.anyInt(),org.mockito.ArgumentMatchers.anyInt());
     }
 }

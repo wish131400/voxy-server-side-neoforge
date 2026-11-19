@@ -13,6 +13,8 @@
     "voxy.StrictVoxyBatchMixin",
     "voxy.StrictVoxyMeshWorkMixin",
     "voxy.PredictionVoxyStorageMixin",
+    "voxy.PredictionVoxyStorageSaveMixin",
+    "voxy.PredictionVoxyStorageCodecMixin",
     "voxy.PredictionVoxyStorageIdentityMixin"
   ],
   "injectors": {

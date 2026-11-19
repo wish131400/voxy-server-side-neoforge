@@ -199,7 +199,8 @@ public final class ClientPredictionState {
                     var early = earlyManager.get();
                     if (early != null && early.acceptsGeneration(sampler)) {
                         sampler.bindCacheFingerprint(early.sampler().cacheFingerprint());
-                        var vegetation = new PredictionVegetation(sampler, early.diskCache(), true);
+                        // Placement is prepared by its first admitted worker, independently of terrain startup.
+                        PredictionVegetation vegetation = null;
                         minecraft.execute(() -> {
                             if (!active.getAsBoolean() || minecraft.level == null
                                     || !minecraft.level.dimension().equals(dimension) || MANAGERS.get(dimension) != early
@@ -737,6 +738,9 @@ public final class ClientPredictionState {
         PredictionTileManager manager = MANAGERS.get(dimension);
         return manager == null ? "unavailable" : manager.surfaceDiagnostics();
     }
+
+    /** Internal explicit acceptance context; never publishes a sampler over HTTP. */
+    static PredictionTileManager acceptanceManager(ResourceKey<Level> dimension) { return MANAGERS.get(dimension); }
 
     static java.util.Map<String,Object> demandSnapshot(ResourceKey<Level> dimension) {
         PredictionTileManager manager = MANAGERS.get(dimension);

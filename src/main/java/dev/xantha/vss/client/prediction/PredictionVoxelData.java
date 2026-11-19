@@ -9,8 +9,10 @@ public final class PredictionVoxelData {
     volatile byte[] cacheContentIdentity;
     int retainedSampleObjects = -1;
     long retainedVolumeBytes;
+    // Task-owned grid becomes immutable on publication; retains progress including the halo.
+    ClientColumnSample[] surfaceRefinement;
     private PredictionVoxelData(PredictionVoxySource.Tile tile) { voxyTile = java.util.Objects.requireNonNull(tile); }
     static PredictionVoxelData forVoxy(PredictionVoxySource.Tile tile) { return new PredictionVoxelData(tile); }
     public int cellAxis() { return voxyTile.axis(); }
-    long retainedHeapBytes() { return 64L + voxyTile.bytes(); }
+    long retainedHeapBytes() { return 64L + voxyTile.bytes() + (surfaceRefinement==null?0:16L+4L*surfaceRefinement.length); }
 }

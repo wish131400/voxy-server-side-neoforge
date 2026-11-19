@@ -33,8 +33,41 @@ final class ClientSurfaceResolver {
     private final Registry<Biome> biomes;
     private final PredictionBiomeCache biomeCache;
     private final PredictionBiomeCache previewBiomeCache;
-    private final ThreadLocal<Worker> workers = new ThreadLocal<>();
-    private final ThreadLocal<Worker> previewWorkers = new ThreadLocal<>();
+    private static final int WORKERS_PER_THREAD = 8;
+    private final ThreadLocal<java.util.LinkedHashMap<Long, Worker>> workers =
+            ThreadLocal.withInitial(() -> new java.util.LinkedHashMap<>(WORKERS_PER_THREAD, 0.75f, true));
+    private final ThreadLocal<java.util.LinkedHashMap<Long, Worker>> previewWorkers =
+            ThreadLocal.withInitial(() -> new java.util.LinkedHashMap<>(WORKERS_PER_THREAD, 0.75f, true));
+    private final ThreadLocal<Boolean> requestActive = new ThreadLocal<>();
+
+    ClientTerrainSampler.SamplingScope request() {
+        if (Boolean.TRUE.equals(requestActive.get())) return () -> {};
+        requestActive.set(true);
+        return () -> {
+            // Rules may hold an upstream pooled tile. Retain them only for the
+            // current prediction task, never in an idle worker across worlds.
+            workers.remove();
+            previewWorkers.remove();
+            requestActive.remove();
+        };
+    }
+
+    private Worker worker(int x, int z, ClientTerrainSampler.TerrainFunction terrain, boolean preview)
+            throws ReflectiveOperationException {
+        var cache = (preview ? previewWorkers : workers).get();
+        long key = ChunkPos.asLong(x >> 4, z >> 4);
+        Worker worker = cache.get(key);
+        if (worker == null || worker.columns >= 4096) {
+            worker = new Worker(preview, new ChunkPos(x >> 4, z >> 4), x, z, terrain);
+            cache.put(key, worker);
+            if (cache.size() > WORKERS_PER_THREAD) cache.remove(cache.keySet().iterator().next());
+        }
+        worker.columns++;
+        worker.x = x;
+        worker.z = z;
+        worker.terrain = terrain;
+        return worker;
+    }
     /** Twilight Forest's biome source; its written surface was measured against the seeded zoom below. */
     static final String TWILIGHT_BIOME_SOURCE = "twilightforest:twilight_biomes";
     /** Null keeps the raw quart lookup; bound for profiles whose surface follows the seeded zoom. */
@@ -91,12 +124,7 @@ final class ClientSurfaceResolver {
         var volume = sample.volume();
         if (volume == null || volume.size() == 0) return sample;
         try {
-            Worker worker = workers.get();
-            if (worker == null || worker.columns >= 4096) {
-                worker = new Worker(false);
-                workers.set(worker);
-            }
-            worker.columns++; worker.x = x; worker.z = z; worker.terrain = terrain;
+            Worker worker = worker(x, z, terrain, false);
             Access.UPDATE_XZ.invokeExact(worker.context, x, z);
             int min = volume.minY(), height = volume.maxY() - min;
             int[] blocks = new int[height];
@@ -140,18 +168,7 @@ final class ClientSurfaceResolver {
     private ClientColumnSample resolve(ClientColumnSample sample, int x, int z,
                                 ClientTerrainSampler.TerrainFunction terrain, boolean preview) {
         try {
-            var local = preview ? previewWorkers : workers;
-            Worker worker = local.get();
-            // NoiseChunk caches preliminary heights. Bound its lifetime even when
-            // a worker travels indefinitely through coarse tiles.
-            if (worker == null || worker.columns >= 4096) {
-                worker = new Worker(preview);
-                local.set(worker);
-            }
-            worker.columns++;
-            worker.x = x;
-            worker.z = z;
-            worker.terrain = terrain;
+            Worker worker = worker(x, z, terrain, preview);
             Access.UPDATE_XZ.invokeExact(worker.context, x, z);
             int top = worker.material(sample, 0);
             int under = worker.material(sample, 1);
@@ -191,12 +208,18 @@ final class ClientSurfaceResolver {
         private final BiomeManager zoom;
 
         @SuppressWarnings("unchecked")
-        private Worker(boolean preview) throws ReflectiveOperationException {
+        private Worker(boolean preview, ChunkPos position, int blockX, int blockZ,
+                       ClientTerrainSampler.TerrainFunction initialTerrain) throws ReflectiveOperationException {
             this.preview = preview;
+            this.x = blockX;
+            this.z = blockZ;
+            this.terrain = initialTerrain;
             BiomeZoom bound = ClientSurfaceResolver.this.zoom;
             this.zoom = bound == null ? null : preview ? bound.preview() : bound.ordinary();
             NoiseGeneratorSettings settings = generator.generatorSettings().value();
-            ProtoChunk chunk = new ProtoChunk(new ChunkPos(0, 0), UpgradeData.EMPTY, heights, biomes, null) {
+            // Modded rules may bind terrain cells during apply(context), before
+            // updateXZ. The chunk and NoiseChunk must share the queried position.
+            ProtoChunk chunk = new ProtoChunk(position, UpgradeData.EMPTY, heights, biomes, null) {
                 @Override public int getHeight(Heightmap.Types type, int localX, int localZ) {
                     return preview ? terrain.surfaceY(x,z) - 1
                             : terrain.surfaceY((x & ~15) + (localX & 15), (z & ~15) + (localZ & 15)) - 1;
@@ -204,7 +227,7 @@ final class ClientSurfaceResolver {
             };
             Aquifer.FluidStatus fluid = new Aquifer.FluidStatus(settings.seaLevel(), settings.defaultFluid());
             NoiseChunk noise = preview
-                    ? new NoiseChunk(1, randomState, 0, 0, settings.noiseSettings(), NO_STRUCTURES,
+                    ? new NoiseChunk(1, randomState, position.getMinBlockX(), position.getMinBlockZ(), settings.noiseSettings(), NO_STRUCTURES,
                             settings, (bx,by,bz) -> fluid, Blender.empty()) {
                         @Override public int preliminarySurfaceLevel(int bx, int bz) {
                             // One stable anchor per surface cell replaces four

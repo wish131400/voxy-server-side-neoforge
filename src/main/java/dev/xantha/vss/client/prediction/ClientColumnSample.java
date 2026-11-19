@@ -48,6 +48,9 @@ public record ClientColumnSample(
     public static final int FLAG_APPROXIMATE = 1 << 27;
     /** Interpolated-density display surface, distinct from the raw first preview. */
     public static final int FLAG_DISPLAY = 1 << 26;
+    /** Basic coverage has not executed runtime surface hooks, even at the final grid resolution. */
+    public static final int FLAG_SURFACE_PENDING = 1 << 16;
+    public boolean surfacePending() { return !captured() && (flags & FLAG_SURFACE_PENDING) != 0; }
     /**
      * Same-source column mip, never an exact worldgen/capture sample.
      * Bit 25 belongs to persisted wall evidence; parent mips are transient and
@@ -80,7 +83,7 @@ public record ClientColumnSample(
                 && groundFeatureKind == 0 && underBlockIndex == deepBlockIndex && volume == null;
     }
     boolean reusableFor(boolean preview) {
-        return (flags & (FLAG_PARENT_LOD | FLAG_CAPTURE_MIP)) == 0 && !cityGround() && (preview || captured() || (!approximate() && (flags & FLAG_DISPLAY) == 0));
+        return (flags & (FLAG_PARENT_LOD | FLAG_CAPTURE_MIP)) == 0 && !cityGround() && (preview || captured() || (!surfacePending() && !approximate() && (flags & FLAG_DISPLAY) == 0));
     }
     boolean reusableForDisplay() { return (flags & (FLAG_PARENT_LOD | FLAG_CAPTURE_MIP)) == 0 && !cityGround() && (!approximate() || captured() || (flags & FLAG_DISPLAY) != 0); }
 

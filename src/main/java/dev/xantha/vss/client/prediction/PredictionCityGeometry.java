@@ -126,7 +126,8 @@ final class PredictionCityGeometry {
             int stone = BuiltInRegistries.BLOCK.getId(Blocks.STONE);
             result[i] = new ClientColumnSample(hint.ground() + 1, ClientColumnSample.NO_SPAN,
                     sample.biomeIndex(), block, sample.structureIndex(), 0, 0, 0, 0,
-                    ClientColumnSample.FLAG_SURFACE_ONLY | ClientColumnSample.FLAG_CITY_GROUND, 0, stone, stone,
+                    ClientColumnSample.FLAG_SURFACE_ONLY | ClientColumnSample.FLAG_CITY_GROUND
+                            | (sample.flags() & ClientColumnSample.FLAG_SURFACE_PENDING), 0, stone, stone,
                     ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN,
                     ClientColumnSample.NO_SPAN);
         }

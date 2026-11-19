@@ -218,11 +218,15 @@ final class FreeTerraForgedExterior implements AutoCloseable {
             if (previous[i] != null) output[i].copy(previous[i]);
         }
         Work work = batchWork.at(x, z, valid);
+        // UTF may shorten this chunk's interpolation arrays during construction.
+        // Occupancy outside that actual domain stays air, including rejected roofs.
+        low = Math.max(low, work.firstY());
+        high = Math.min(high, work.endY());
         builds.increment();
         long evaluatedBlocks = 0, reusedBlocks = 0;
         for (int cy = Math.floorDiv(high - 1, height); cy >= Math.floorDiv(low, height); cy--) {
             check(valid);
-            work.selectCellYZ(cy - Math.floorDiv(minY, height), batchWork.cellZ(z));
+            work.selectCellYZ(cy - Math.floorDiv(work.firstY(), height), batchWork.cellZ(z));
             for (int y = Math.min(high, (cy + 1) * height) - 1; y >= Math.max(low, cy * height); y--) {
                 work.updateForY(y, (double) Math.floorMod(y, height) / height);
                 for (int dx = 0; dx < width; dx++) {
@@ -241,6 +245,7 @@ final class FreeTerraForgedExterior implements AutoCloseable {
                             // All remaining requests may now finish above the original floor.
                             low = maxY;
                             for (Column active : output) if (active != null) low = Math.min(low, active.low);
+                            low = Math.max(low, work.firstY());
                         }
                     }
                 }
@@ -381,6 +386,8 @@ final class FreeTerraForgedExterior implements AutoCloseable {
             super(count, random, x, z, noise, NO_STRUCTURES, settings, fluids, Blender.empty());
         }
         BlockState state() { return getInterpolatedState(); }
+        int firstY() { return cellNoiseMinY * cellHeight(); }
+        int endY() { return (cellNoiseMinY + cellCountY) * cellHeight(); }
     }
     private static final DensityFunctions.BeardifierOrMarker NO_STRUCTURES = new DensityFunctions.BeardifierOrMarker() {
         @Override public double compute(DensityFunction.FunctionContext point) { return 0; }

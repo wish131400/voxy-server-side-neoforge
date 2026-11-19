@@ -104,7 +104,8 @@ final class PredictionLoadingPreparation {
                 for (var ancestor = key; ancestor.lod() < layout.levelCount(); ancestor = new PredictionTileKey(
                         dimension, ancestor.tileX() >> 1, ancestor.tileZ() >> 1, ancestor.lod() + 1)) {
                     var coarse = ready.get(ancestor);
-                    if (coarse != null && !coarse.scopeOnly() && !dirtyTiles.contains(ancestor)) { covered++; break; }
+                    // A refresh leaves the published tile drawable until its replacement commits.
+                    if (coarse != null && !coarse.scopeOnly()) { covered++; break; }
                 }
             } else if (tile != null && !tile.scopeOnly() && tile.cellAxis() >= 32) covered++;
         }
@@ -115,12 +116,13 @@ final class PredictionLoadingPreparation {
             if (voxyOwnedTiles.contains(key)) continue;
             var tile = ready.get(key);
             int target = ordinaryTargets.getOrDefault(key, layout.cellAxis(key.lod()));
-            boolean current = tile != null && !tile.scopeOnly() && !dirtyTiles.contains(key);
+            boolean resident = tile != null && !tile.scopeOnly();
+            boolean current = resident && !dirtyTiles.contains(key);
             boolean complete = current && tile.cellAxis() >= target;
             if (PredictionWorkOrder.distanceSquared(key, layout, x, z) <= radius * radius) {
                 near++;
-                if (current && tile.cellAxis() >= Math.min(64, target)) nearReady++;
-                if (complete) targetReady++;
+                if (resident && tile.cellAxis() >= Math.min(64, target)) nearReady++;
+                if (resident && tile.cellAxis() >= target) targetReady++;
             }
             if (tracking && viewBand(key) == PredictionWorkView.VISIBLE) {
                 visible++;

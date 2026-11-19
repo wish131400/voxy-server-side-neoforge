@@ -439,7 +439,8 @@ class PredictionVoxyLoadingIntegrationTest {
                 var parent = PredictionVoxelFixtures.tile(0, 0, lod + 1, manager.layout());
                 ((Map<PredictionTileKey, PredictionTileManager.PredictionTile>) field("ready").get(manager)).put(parent.key(), parent);
                 setup(manager, key);
-                var vegetation = (PredictionVegetation) field("vegetation").get(manager);
+                var vegetation = (PredictionVegetation) invoke(manager,"vegetationForBuild",new Class[]{int.class},
+                        field("surfaceSettings").getInt(manager));
                 var chunksField = PredictionVegetation.class.getDeclaredField("chunks"); chunksField.setAccessible(true);
                 var chunks = (Map<Long, Map<net.minecraft.core.BlockPos, net.minecraft.world.level.block.state.BlockState>>) chunksField.get(vegetation);
                 chunks.put(0L, Map.of(
@@ -934,7 +935,13 @@ class PredictionVoxyLoadingIntegrationTest {
         assertTrue(tile.cellAxis()>0);
         var source=(PredictionVoxySource)field("voxySource").get(manager);
         var tiles=PredictionVoxySource.class.getDeclaredField("tiles");tiles.setAccessible(true);
-        assertSame(tile.data().voxyTile,((Map<?,?>)tiles.get(source)).get(key));
+        var window = (PredictionDecorationRange) field("decorationRange").get(manager);
+        var expected = window.display(tile.data().voxyTile);
+        var displayed = (PredictionVoxySource.Tile) ((Map<?,?>)tiles.get(source)).get(key);
+        assertNotNull(displayed);
+        assertSame(expected.columns(),displayed.columns());
+        assertEquals(expected.features(),displayed.features());
+        assertEquals(expected.surfaceComplete(),displayed.surfaceComplete());
         int x=Math.floorDiv(tile.baseBlockX(),512),z=Math.floorDiv(tile.baseBlockZ(),512);
         long[] data=source.section(VoxyPredictionBridge.position(4,x,0,z),(s,b)->1L<<27);
         assertNotNull(data); assertTrue(Arrays.stream(data).anyMatch(v->(v&(0xfffffL<<27))!=0));

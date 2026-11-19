@@ -1,0 +1,16 @@
+allprojects { afterEvaluate {
+    tasks.register('predictionSessionMappingsTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        include '**/PredictionSessionRegistryTest.class'
+        include '**/PredictionPersistentMappingsTest.class'
+        include '**/PredictionSampleStoreTest.class'
+        include '**/PredictionBackendSelectionTest.class'
+        maxParallelForks = 1
+        forkEvery = 1
+        maxHeapSize = '2G'
+        testLogging { events 'failed'; exceptionFormat 'full' }
+    }
+} }

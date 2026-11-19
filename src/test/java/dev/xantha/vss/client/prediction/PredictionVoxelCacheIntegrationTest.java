@@ -98,6 +98,37 @@ class PredictionVoxelCacheIntegrationTest {
         assertEquals(0,budget.usedBytes());assertEquals(0,budget.activeBuildCount());
     }
 
+    @Test void completedCoarseTerrainCanPublishAndAccumulateTheNextSurfaceResolution() throws Exception {
+        var key=new PredictionTileKey(PROFILE.levelKey(),-1,-1,1);
+        var calls=new AtomicInteger();
+        var sampler=new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
+            @Override boolean stagedSurface(){return true;}
+            @Override boolean interiorTerrain(){return true;}
+            @Override boolean basicInteriorTerrain(){return false;}
+            @Override public ClientColumnSample samplePreview(int x,int z,int step){return PredictionSurfaceRefinement.basic(PredictionVoxelFixtures.sample(64));}
+            @Override ClientColumnSample sampleInterior(int x,int z){
+                calls.incrementAndGet();
+                return PredictionColumnVolume.sample(-64,128,y->y<64?PredictionMaterialPalette.stoneIndex():-1,id->0).asSample();
+            }
+        };
+        try(var manager=new PredictionTileManager(PROFILE.levelKey(),sampler,
+                new PredictionMemoryBudget(512L*PredictionMemoryBudget.MIB,0,()->Long.MAX_VALUE,System::nanoTime,1),null,PredictionCpuBudget.fixed(1))) {
+            setup(manager,key,32);
+            @SuppressWarnings("unchecked") var residents=(Map<PredictionTileKey,PredictionTile>)field("ready").get(manager);
+            residents.put(key,PredictionVoxelCacheTest.tile(key,16,false));
+            enqueue(manager,key,false);await(manager);
+            var refined=residents.get(key);
+            assertEquals(32,refined.cellAxis(),"A completed coarse grid must admit finer bounded surface slices");
+            assertTrue(calls.get()>0);
+            int before=calls.get();
+            for(int turn=0;turn<40 && PredictionSurfaceRefinement.pending(residents.get(key));turn++) {
+                enqueue(manager,key,false);await(manager);
+            }
+            assertFalse(PredictionSurfaceRefinement.pending(residents.get(key)),"Each accepted slice must accumulate progress");
+            assertTrue(calls.get()>=before);
+        }
+    }
+
     private static ClientTerrainSampler sampler(AtomicInteger calls) {
         return new ClientTerrainSampler(PROFILE.seed(),PROFILE) {
             @Override public ClientColumnSample sample(int x,int z) {calls.incrementAndGet();return PredictionVoxelFixtures.sample(64);}

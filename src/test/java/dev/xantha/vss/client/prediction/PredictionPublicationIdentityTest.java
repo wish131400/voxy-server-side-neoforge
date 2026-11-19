@@ -43,6 +43,39 @@ class PredictionPublicationIdentityTest {
             assertTrue(dirty.contains(parentKey),"Real terrain changes must still enter parent refresh");
         }
     }
+    @SuppressWarnings("unchecked")
+    @Test void haloOnlyProgressKeepsGeometryButInvalidatesThePersistedContentIdentity() throws Exception {
+        var samplerMethod=PredictionFirstCoverageTest.class.getDeclaredMethod("sampler",AtomicInteger.class,
+                java.util.concurrent.CountDownLatch.class,java.util.concurrent.CountDownLatch.class);samplerMethod.setAccessible(true);
+        var sampler=(ClientTerrainSampler)samplerMethod.invoke(null,new AtomicInteger(),null,null);
+        var create=PredictionFirstCoverageTest.class.getDeclaredMethod("manager",ClientTerrainSampler.class,PredictionDiskCache.class);create.setAccessible(true);
+        try(var manager=(PredictionTileManager)create.invoke(null,sampler,null)) {
+            var key=new PredictionTileKey(Level.OVERWORLD,0,0,0);
+            var old=PredictionParentLodTest.tile(key,90,64);
+            old.data().surfaceRefinement=new ClientColumnSample[(old.cellAxis()+2)*(old.cellAxis()+2)];
+            Arrays.fill(old.data().surfaceRefinement,PredictionSurfaceRefinement.basic(old.samples()[0]));
+            var ready=(Map<PredictionTileKey,PredictionTile>)field(manager,"ready");ready.put(key,old);
+            ((Set<PredictionTileKey>)field(manager,"desiredKeys")).add(key);
+            var publish=PredictionTileManager.class.getDeclaredMethod("publishTile",PredictionTile.class,PredictionMemoryBudget.Reservation.class,
+                    long.class,long.class,boolean.class,boolean.class,boolean.class,PredictionRelief.class);publish.setAccessible(true);
+            var budget=(PredictionMemoryBudget)field(manager,"memoryBudget");
+            for(int i=0;i<2;i++) {
+                var identity=new byte[]{1,2,3};old.data().cacheContentIdentity=identity;
+                var next=PredictionParentLodTest.tile(key,100+i,64);
+                next.data().surfaceRefinement=old.data().surfaceRefinement.clone();
+                if(i==0) next.data().surfaceRefinement[0]=old.samples()[0];
+                var reservation=budget.tryReserveBuild();assertNotNull(reservation);
+                assertTrue((boolean)publish.invoke(manager,next,reservation,0L,0L,false,true,false,PredictionRelief.of(next)));
+                reservation.completeBuild(next.retainedHeapBytes(),0,false);
+                assertSame(old.data().voxyTile,next.data().voxyTile,"Halo progress does not require rebuilding visible geometry");
+                assertEquals(old.terrainRevision(),next.terrainRevision());
+                if(i==0) assertNull(next.data().cacheContentIdentity,"Completed halo samples must be persisted even when geometry is unchanged");
+                else assertSame(identity,next.data().cacheContentIdentity,"An unchanged halo may reuse the existing persisted identity");
+                old=next;
+            }
+        }
+    }
+
     private static Object field(Object target,String name)throws Exception {
         var f=target.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(target);
     }

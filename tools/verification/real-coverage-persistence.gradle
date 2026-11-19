@@ -1,6 +1,28 @@
 allprojects { afterEvaluate {
+    def rows = []
+    if (project.hasProperty('vssCoverageVoxyMatrixRoot') || project.hasProperty('vssCoverageVoxyMatrices')) {
+        def paths = project.hasProperty('vssCoverageVoxyMatrixRoot')
+            ? ['matrix-neoforge.json', 'matrix-forge.json'].collect { new File(project.property('vssCoverageVoxyMatrixRoot'), it).path }
+            : project.property('vssCoverageVoxyMatrices').split(/[|]/).toList()
+        rows = paths.collectMany { path -> new groovy.json.JsonSlurper().parse(new File(path)) }
+    }
+    // Sponge caches prepared targets per JVM. Exercise the production config
+    // against each backend separately, including its already-loaded config storage.
+    def applicationChecks = rows.collect { row ->
+        tasks.register('voxyStorage_' + row.id, Test) {
+            dependsOn tasks.named('testClasses')
+            testClassesDirs = sourceSets.test.output.classesDirs
+            classpath = sourceSets.test.runtimeClasspath
+            useJUnitPlatform()
+            include '**/VoxyStorageMixinApplicationTest.class'
+            maxHeapSize = '512M'
+            systemProperty 'vss.voxyJar', row.jar
+            testLogging { events 'failed', 'skipped'; exceptionFormat 'full' }
+        }
+    }
     tasks.register('realCoveragePersistenceTest', Test) {
         dependsOn tasks.named('testClasses')
+        dependsOn applicationChecks
         testClassesDirs = sourceSets.test.output.classesDirs
         classpath = sourceSets.test.runtimeClasspath
         useJUnitPlatform()
@@ -9,13 +31,7 @@ allprojects { afterEvaluate {
         maxHeapSize = '512M'
         maxParallelForks = 1
         forkEvery = 1
-        if (project.hasProperty('vssCoverageVoxyMatrixRoot') || project.hasProperty('vssCoverageVoxyMatrices')) {
-            def paths = project.hasProperty('vssCoverageVoxyMatrixRoot')
-                ? ['matrix-neoforge.json', 'matrix-forge.json'].collect { new File(project.property('vssCoverageVoxyMatrixRoot'), it).path }
-                : project.property('vssCoverageVoxyMatrices').split(/[|]/).toList()
-            def rows = paths.collectMany { path ->
-                new groovy.json.JsonSlurper().parse(new File(path))
-            }
+        if (!rows.isEmpty()) {
             systemProperty 'vss.coverageVoxyJars', rows.collect { it.jar }.join('|')
             systemProperty 'vss.voxyJar', rows.first().jar
         }

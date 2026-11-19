@@ -1,0 +1,14 @@
+allprojects { afterEvaluate {
+    tasks.register('farSurfaceTest', Test) {
+        dependsOn tasks.named('testClasses')
+        testClassesDirs=sourceSets.test.output.classesDirs;classpath=sourceSets.test.runtimeClasspath
+        useJUnitPlatform();maxHeapSize='3G';maxParallelForks=1
+        include '**/PredictionChunkTerrainTest.class','**/PredictionFarReuseTest.class'
+        include '**/PredictionFarDecorationTest.class','**/PredictionFarPlacementCountTest.class'
+        include '**/PredictionSurfaceRefinementTest.class','**/PredictionPublicationIdentityTest.class'
+        include '**/PredictionLivePipelineTest.class','**/PredictionNearFirstSchedulingTest.class'
+        include '**/PredictionVoxySourceTest.class','**/PredictionSharedCacheTest.class'
+        include '**/FreeTerraForgedFarPlacementTest.class'
+        testLogging {events 'failed','skipped';exceptionFormat='full'}
+    }
+} }

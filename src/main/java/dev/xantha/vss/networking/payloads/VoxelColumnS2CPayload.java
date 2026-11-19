@@ -21,11 +21,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
     public static final StreamCodec<RegistryFriendlyByteBuf, VoxelColumnS2CPayload> STREAM_CODEC =
             VSSPayloadCodecs.codec(VoxelColumnS2CPayload::encode, VoxelColumnS2CPayload::decode);
 
-    private static final int MAX_SECTIONS_SIZE = 0x200000;
+    private static final int MAX_SECTIONS_SIZE = VSSConstants.MAX_COLUMN_PART_BYTES;
     private static final int MAX_ENCODED_SECTIONS_SIZE = MAX_SECTIONS_SIZE + 65536;
     private static final int MAX_DIMENSION_STRING_LENGTH = 256;
-    private static final int MAX_REPLACEMENT_SECTION_COUNT = 64;
-    public static final int MAX_TRANSFER_PARTS = 64;
+    private static final int MAX_REPLACEMENT_SECTION_COUNT = VSSConstants.MAX_COLUMN_SECTIONS;
+    public static final int MAX_TRANSFER_PARTS = VSSConstants.MAX_COLUMN_SECTIONS;
 
     private final int requestId;
     private final long transferId;
@@ -295,7 +295,7 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
         try {
             return encodedSectionBytes != null
-                    ? LodByteCompression.decompress(encodedSectionBytes, encodedCompression, encodedRawSize, MAX_SECTIONS_SIZE)
+                    ? LodByteCompression.decompress(encodedSectionBytes, encodedCompression, encodedRawSize, VSSConstants.MAX_COLUMN_BYTES)
                     : new byte[0];
         } catch (IOException e) {
             throw new IllegalStateException("Invalid encoded voxel column payload", e);
@@ -452,6 +452,10 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
             buf.writeByte(sectionY);
         }
         LodByteCompression.Result encoded = encodedForClient(payload, networkCompressionEnabled);
+        validateEncodedSections(encoded.method(), encoded.originalLength(), encoded.bytes().length);
+        if (encoded.bytes().length > MAX_ENCODED_SECTIONS_SIZE) {
+            throw new IllegalArgumentException("Encoded LOD fragment exceeds wire limit");
+        }
         if (encoded.method() == LodByteCompression.METHOD_ZSTD && !payload.allowZstdEncoding) {
             throw new IllegalStateException("Cannot send Zstd LOD column to a client without Zstd capability");
         }
@@ -640,6 +644,11 @@ public final class VoxelColumnS2CPayload implements CustomPacketPayload {
         }
         int[] sanitized = Arrays.copyOf(sectionYs, sectionYs.length);
         Arrays.sort(sanitized);
+        for (int sectionY : sanitized) {
+            if (sectionY < Byte.MIN_VALUE || sectionY > Byte.MAX_VALUE) {
+                throw new IllegalArgumentException("Replacement section Y outside wire range: " + sectionY);
+            }
+        }
         for (int i = 1; i < sanitized.length; i++) {
             if (sanitized[i] == sanitized[i - 1]) {
                 throw new IllegalArgumentException("Duplicate replacement section: " + sanitized[i]);

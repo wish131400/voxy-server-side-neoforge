@@ -206,8 +206,10 @@ public class ClientTerrainSampler implements AutoCloseable {
         // Both router roots share one memo. Minecraft's density graph is a DAG,
         // so a subexpression common to the initial and final density is reached
         // again from a sibling parent and a single-slot memo catches it.
-        DensityFunction[] roots = DensityMemo.wrapRoots(
-                router.finalDensity(), router.initialDensityWithoutJaggedness());
+        DensityFunction[] roots = DensityMemo.wrapRoots(PredictionDensityReplacements.apply(
+                new dev.xantha.vss.api.worldgen.DensityFunctionReplacements.Context(seed,
+                        registries == null ? access : registries.access(), randomState),
+                router.finalDensity(), router.initialDensityWithoutJaggedness()));
         var rawProperties = new PredictionRawDensity();
         this.cacheExactHeights = !"off".equals(System.getProperty("vss.javaHeightCache"))
                 && rawProperties.inspect(roots[0]).pure() && rawProperties.inspect(roots[1]).pure();
@@ -239,6 +241,16 @@ public class ClientTerrainSampler implements AutoCloseable {
 
     ClientColumnSample resolveSurface(ClientColumnSample sample, int x, int z, TerrainFunction terrain) {
         return surfaceMaterials == null ? sample : surfaceMaterials.resolve(sample, x, z, terrain);
+    }
+
+    ClientColumnSample resolvePreviewSurface(ClientColumnSample sample, int x, int z, TerrainFunction terrain) {
+        return surfaceMaterials == null ? sample : surfaceMaterials.resolvePreview(sample, x, z, terrain);
+    }
+
+    int previewGroundBlock(int x, int floor, int z) {
+        var biome = previewBiome(x, floor - 1, z);
+        String path = biome.unwrapKey().map(key -> key.location().getPath()).orElse("");
+        return PredictionMaterialPalette.representativeBlock(path, false, lavaOcean, false);
     }
 
     public DimensionProfile profile() {
@@ -364,6 +376,22 @@ public class ClientTerrainSampler implements AutoCloseable {
     }
 
     /** Ceiling worlds need occupancy throughout the column, not an exterior heightfield. */
+    boolean stagedSurface() { return false; }
+    /** Display templates are independent of the full-volume surface implementation. */
+    boolean supportsFarDecorations() { return false; }
+
+    void refineSurfaceChunk(int baseX,int baseZ,int step,int grid,ClientColumnSample[] samples,
+                            int fromX,int toX,int fromZ,int toZ,java.util.function.BooleanSupplier current) {
+        for(int z=fromZ;z<toZ;z++)for(int x=fromX;x<toX;x++) {
+            int i=z*grid+x;
+            if(!PredictionSurfaceRefinement.required(samples[i]))continue;
+            if(!current.getAsBoolean() || Thread.currentThread().isInterrupted())throw new java.util.concurrent.CancellationException();
+            samples[i]=sampleInterior(baseX+(x-VssLodLayout.SAMPLE_MARGIN)*step,baseZ+(z-VssLodLayout.SAMPLE_MARGIN)*step);
+        }
+    }
+    boolean basicInteriorTerrain() { return interiorTerrain(); }
+    ClientColumnSample sampleBasicInterior(int x, int z) { return sampleInterior(x,z); }
+
     boolean interiorTerrain() {
         return profile.dimension().equals(net.minecraft.world.level.Level.NETHER.location());
     }
@@ -421,7 +449,7 @@ public class ClientTerrainSampler implements AutoCloseable {
     SamplingScope exteriorRequest() { return () -> {}; }
 
     /** Own backend scratch across terrain, biome, exterior and decoration phases of one task. */
-    SamplingScope terrainRequest() { return () -> {}; }
+    SamplingScope terrainRequest() { return surfaceMaterials == null ? () -> {} : surfaceMaterials.request(); }
 
     /** A backend may retain immutable seed terrain when authoritative captures change. */
     ClientColumnSample retainAfterCapture(ClientColumnSample sample) { return null; }
@@ -435,7 +463,11 @@ public class ClientTerrainSampler implements AutoCloseable {
     }
 
     ClientColumnSample resolveInterior(ClientColumnSample sample, int x, int z) {
-        return surfaceMaterials == null ? sample : surfaceMaterials.resolveInterior(sample, x, z, this::surfaceY);
+        return resolveInterior(sample,x,z,this::surfaceY);
+    }
+
+    ClientColumnSample resolveInterior(ClientColumnSample sample, int x, int z, TerrainFunction terrain) {
+        return surfaceMaterials == null ? sample : surfaceMaterials.resolveInterior(sample,x,z,terrain);
     }
 
     ClientColumnSample sampleInterior(int x, int z) {
@@ -607,6 +639,9 @@ public class ClientTerrainSampler implements AutoCloseable {
      * Prediction displays the outer surface at every LOD. Placed features
      * generate decoration separately; neither stage needs underground spans.
      */
+    /** Stable display-only ground; exact placement and captured terrain use their own samples. */
+    ClientColumnSample sampleDisplay(int x, int z) { return sampleForLod(x, z, 1); }
+
     public ClientColumnSample sampleForLod(int blockX, int blockZ, int stepBlocks) {
         return sampleSurface(blockX, blockZ);
     }
@@ -651,22 +686,9 @@ public class ClientTerrainSampler implements AutoCloseable {
         var cache = previewHeights.get();
         Integer cached = cache.get(key);
         if (cached != null) return cached;
-        int air = ceilingY + 1, y = ceilingY, floor = floorY;
-        while (true) {
-            if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
-            if (solid(x, y, z)) {
-                int solid = y;
-                while (air - solid > 4) {
-                    int middle = solid + (air - solid) / 2;
-                    if (solid(x, middle, z)) solid = middle; else air = middle;
-                }
-                floor = solid + 1;
-                break;
-            }
-            if (y == floorY) break;
-            air = y;
-            y = Math.max(floorY, y - 16);
-        }
+        // Sparse vertical probes can skip an upper terrain layer and keep a cave floor.
+        // Reuse the initial-density guided solver; preview still skips full surface/decoration work.
+        int floor = densitySurfaceY(x, z);
         cache.put(key, floor);
         while (cache.size() > 4096) cache.remove(cache.keySet().iterator().next());
         return floor;

@@ -47,6 +47,91 @@ class VoxyRealCoveragePersistenceTest {
     }
     byte[] image(int variant) { byte[] data = new byte[128]; Arrays.fill(data, (byte) variant); return data; }
 
+    void stage(Object batch, Session session, byte[] bytes) {
+        var section = new Section(session.engine, 0, 0, 0, 0);
+        Object token = VoxyRealCoveragePersistence.beginBatch(batch, section);
+        assertNotNull(token);
+        VoxyRealCoveragePersistence.captureCodec(ByteBuffer.wrap(bytes), section, true);
+        VoxyRealCoveragePersistence.stageBatch(batch, token, true);
+    }
+
+    @Test void batchedCoveragePublishesOnlyAfterSuccessfulNativeCommitAndClearsFailedImages() throws Exception {
+        Session source = session("batched");
+        VoxyRealCoveragePersistence.committed(source.engine, 0, 0, 0);
+        Object batch = new Object();
+        assertSame(batch, VoxyRealCoveragePersistence.trackBatch(batch, source.storage));
+        stage(batch, source, image(1));
+        Session reader = session("batched");
+        image(reader, 0, 0, 0, 0, image(1), false, true);
+        assertFalse(VoxyRealCoveragePersistence.contains(reader.engine, 0, 0, 0, 0));
+        VoxyRealCoveragePersistence.completeBatch(batch, false);
+        VoxyRealCoveragePersistence.completeBatch(batch, true); // failed data cannot leak into a later commit
+        image(reader, 0, 0, 0, 0, image(1), false, true);
+        assertFalse(VoxyRealCoveragePersistence.contains(reader.engine, 0, 0, 0, 0));
+        stage(batch, source, image(2));
+        stage(batch, source, image(3)); // one native batch keeps its last staged image for this key
+        VoxyRealCoveragePersistence.completeBatch(batch, true);
+        Session reopened = session("batched");
+        image(reopened, 0, 0, 0, 0, image(2), false, true);
+        assertFalse(VoxyRealCoveragePersistence.contains(reopened.engine, 0, 0, 0, 0));
+        image(reopened, 0, 0, 0, 0, image(3), false, true);
+        assertTrue(VoxyRealCoveragePersistence.contains(reopened.engine, 0, 0, 0, 0));
+    }
+
+    @Test void stagedBatchesReleaseStripeLocksBeforeCollectingAnotherSection() throws Exception {
+        Session source = session("unlocked-batch");
+        VoxyRealCoveragePersistence.committed(source.engine, 0, 0, 0);
+        Object batch = VoxyRealCoveragePersistence.trackBatch(new Object(), source.storage);
+        stage(batch, source, image(1));
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try { worker.submit(() -> stage(batch, source, image(2))).get(3, TimeUnit.SECONDS); }
+        finally { worker.shutdownNow(); }
+        VoxyRealCoveragePersistence.completeBatch(batch, true);
+        Session reader = session("unlocked-batch");
+        image(reader, 0, 0, 0, 0, image(2), false, true);
+        assertTrue(VoxyRealCoveragePersistence.contains(reader.engine, 0, 0, 0, 0));
+    }
+
+    @Test void codecObserversIgnoreOtherSectionsAndTheWrongIoDirection() {
+        Session source = session("codec-scope");
+        VoxyRealCoveragePersistence.committed(source.engine, 0, 0, 0);
+        var section = new Section(source.engine, 0, 0, 0, 0);
+        Object token = VoxyRealCoveragePersistence.begin(source.storage, section, true);
+        VoxyRealCoveragePersistence.captureCodec(ByteBuffer.wrap(image(1)), new Section(source.engine, 0, 0, 0, 0), true);
+        VoxyRealCoveragePersistence.captureCodec(ByteBuffer.wrap(image(2)), section, false);
+        VoxyRealCoveragePersistence.finish(token, true);
+        Session reader = session("codec-scope");
+        for (int variant : new int[]{1, 2}) {
+            image(reader, 0, 0, 0, 0, image(variant), false, true);
+            assertFalse(VoxyRealCoveragePersistence.contains(reader.engine, 0, 0, 0, 0));
+        }
+    }
+
+    @Test void groupedRuntimeCoverageMatchesIndividualCellsAcrossSignedBoundaries() {
+        var engine=new Object();var coverage=VoxyRealCoverage.of(engine);
+        for(int y=-40;y<40;y++)if(Math.floorMod(y,5)!=1)coverage.mark(-3,y,5);
+        for(int start=-42;start<=42;start++)for(int count=0;count<=32;count++) {
+            int expected=0;
+            for(int i=0;i<count;i++)if(coverage.containsSection(-3,start+i,5))expected|=1<<i;
+            assertEquals(expected,coverage.coverageMask(-3,start,5,count,0));
+            assertEquals(0,coverage.coverageMask(-2,start,5,count,0));
+        }
+    }
+    @Test void groupedSavedCoverageMatchesIndividualCellsAcrossAllLods() {
+        Session original=session("grouped-masks");
+        for(int y=-36;y<36;y++)if(Math.floorMod(y,5)!=1)VoxyRealCoveragePersistence.committed(original.engine,-3,y,5);
+        for(int lod=0;lod<=4;lod++)for(int y=-36;y<36;y+=1<<(lod+1))
+            image(original,lod,-3,y,5,image(lod),true,true);
+        VoxyRealCoveragePersistence.reset();Session restored=session("grouped-masks");
+        for(int lod=0;lod<=4;lod++)for(int y=-36;y<36;y+=1<<(lod+1))
+            image(restored,lod,-3,y,5,image(lod),false,true);
+        for(int lod=0;lod<=4;lod++)for(int start=-42;start<=42;start++)for(int count=0;count<=32;count++) {
+            int expected=0;
+            for(int i=0;i<count;i++)if(VoxyRealCoveragePersistence.contains(restored.engine,-3,start+i,5,lod))expected|=1<<i;
+            assertEquals(expected,VoxyRealCoveragePersistence.coverageMask(restored.engine,-3,start,5,count,lod));
+        }
+    }
+
     @Test void reopeningRestoresOnlyTheIndividuallyVerifiedLodAndCovered16Cube() {
         Session a = session("world-overworld");
         assertEquals(31, VoxyRealCoveragePersistence.committed(a.engine, -3, 2, 5));

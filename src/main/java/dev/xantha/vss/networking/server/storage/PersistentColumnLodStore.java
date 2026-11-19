@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.server.storage;
 
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.api.column.ColumnFilters;
 import dev.xantha.vss.common.processing.ColumnCoverage;
@@ -34,11 +35,11 @@ public final class PersistentColumnLodStore {
     private static final int FILE_MAGIC = 0x5653534C;
     private static final int FILE_VERSION_CURRENT = 8;
     private static final int INDEX_MAGIC = 0x56535349;
-    private static final int INDEX_VERSION_CURRENT = 3;
+    private static final int INDEX_VERSION_CURRENT = 4;
     private static final int REGION_SIZE = 32;
     private static final int REGION_SLOT_COUNT = REGION_SIZE * REGION_SIZE;
     private static final int REGION_BITMAP_LONGS = REGION_SLOT_COUNT / Long.SIZE;
-    private static final int MAX_COLUMN_BYTES = 2 * 1024 * 1024;
+    private static final int MAX_COLUMN_BYTES = VSSConstants.MAX_COLUMN_BYTES;
     private static final int MAX_ENCODED_COLUMN_BYTES = MAX_COLUMN_BYTES + 65536;
     private static final int MIN_REGION_INDEX_CACHE_ENTRIES = 512;
     private static final int MAX_REGION_INDEX_CACHE_ENTRIES = 8192;
@@ -469,7 +470,7 @@ public final class PersistentColumnLodStore {
     private static boolean validSectionManifest(IndexSlot slot) {
         int[] sectionYs = slot.sectionYs();
         int[] sectionLengths = slot.sectionLengths();
-        if (sectionYs.length != sectionLengths.length || sectionYs.length > 64) {
+        if (sectionYs.length != sectionLengths.length || sectionYs.length > VSSConstants.MAX_COLUMN_SECTIONS) {
             return false;
         }
         long rawSize = varIntSize(sectionYs.length);
@@ -762,8 +763,10 @@ public final class PersistentColumnLodStore {
 
         try (InputStream fileIn = Files.newInputStream(path);
              DataInputStream in = new DataInputStream(fileIn)) {
-            if (in.readInt() != INDEX_MAGIC
-                    || in.readInt() != INDEX_VERSION_CURRENT
+            int magic = in.readInt();
+            int indexVersion = in.readInt();
+            if (magic != INDEX_MAGIC
+                    || (indexVersion != 3 && indexVersion != INDEX_VERSION_CURRENT)
                     || in.readInt() != FILE_VERSION_CURRENT
                     || in.readInt() != EncodedColumnData.SCHEMA_VERSION
                     || in.readInt() != key.regionX()
@@ -786,7 +789,7 @@ public final class PersistentColumnLodStore {
                 int method = in.readInt();
                 int rawSize = in.readInt();
                 int schemaVersion = in.readInt();
-                int sectionCount = in.readUnsignedByte();
+                int sectionCount = indexVersion == 3 ? in.readUnsignedByte() : in.readUnsignedShort();
                 SectionManifest manifest = readSectionManifest(in, sectionCount);
                 int encodedCrc32c = in.readInt();
                 int length = in.readInt();
@@ -1064,7 +1067,7 @@ public final class PersistentColumnLodStore {
     }
 
     private static SectionManifest readSectionManifest(DataInputStream in, int sectionCount) throws IOException {
-        if (sectionCount < 0 || sectionCount > 64) {
+        if (sectionCount < 0 || sectionCount > VSSConstants.MAX_COLUMN_SECTIONS) {
             throw new IOException("Invalid persistent LOD section manifest size: " + sectionCount);
         }
         int[] sectionYs = new int[sectionCount];
@@ -1196,7 +1199,7 @@ public final class PersistentColumnLodStore {
                 out.writeInt(slot.method());
                 out.writeInt(slot.rawSize());
                 out.writeInt(slot.schemaVersion());
-                out.writeByte(slot.sectionYs().length);
+                out.writeShort(slot.sectionYs().length);
                 int[] sectionYs = slot.sectionYs();
                 int[] sectionLengths = slot.sectionLengths();
                 for (int sectionIndex = 0; sectionIndex < sectionYs.length; sectionIndex++) {

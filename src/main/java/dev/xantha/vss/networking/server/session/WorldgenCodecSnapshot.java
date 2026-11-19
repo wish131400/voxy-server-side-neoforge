@@ -66,6 +66,8 @@ final class WorldgenCodecSnapshot {
     static Encoded encodeRegistries(RegistryAccess access, net.minecraft.server.packs.resources.ResourceManager resources,
                                     DensityFunctionReferences references, WorldgenRegistryDependencies dependencies) {
         RegistryOps<JsonElement> ops = dependencies.ops();
+        // ReTerraForged's structure rules filter structure placement; a client predicting its structures needs them.
+        dependencies.requireIfPresent(ResourceLocation.parse("reterraforged:worldgen/structure_rule"));
         JsonObject root = new JsonObject();
         root.add("density_functions", WorldgenSectionCache.densities(access, dependencies, references, WorldgenCodecSnapshot::encodeDensities));
         for (var entry : references.definitions().entrySet()) {
@@ -169,8 +171,8 @@ final class WorldgenCodecSnapshot {
             RegistryAccess access, DensityFunctionReferences references, WorldgenRegistryDependencies dependencies,
             String terrablenderRegionType, java.util.Optional<dev.xantha.vss.api.worldgen.TerrainSnapshot> extension) {
         boolean freeTerraRuntime = FreeTerraForgedRuntime.supports(generator);
-        boolean inheritedNoise = freeTerraRuntime || GeneratorTerrainCapabilities.inheritsImplementation(
-                generator.getClass(), NoiseBasedChunkGenerator.class);
+        var stages = dev.xantha.vss.common.worldgen.GeneratorStageCapabilities.inspect(generator.getClass());
+        boolean inheritedNoise = freeTerraRuntime || stages.isolated() && !stages.originalStages();
         RegistryOps<JsonElement> ops = dependencies.ops();
         JsonObject root = new JsonObject();
         NoiseGeneratorSettings settings = noise.generatorSettings().value();
@@ -179,13 +181,25 @@ final class WorldgenCodecSnapshot {
                 .encodeStart(ops, settings)
                 .getOrThrow().getAsJsonObject();
         root.add("settings", requiresAppliedDensityGraph() ? references.settings(encodedSettings) : encodedSettings);
-        if (!inheritedNoise) {
-            root.addProperty("vss_unsupported_reason", "Custom noise generator requires a registered backend: "
+        if (!freeTerraRuntime && !stages.isolated()) {
+            root.addProperty("vss_unsupported_reason", "Generator requires an initialized world/region stage: "
                     + generator.getClass().getName());
+        } else if (!inheritedNoise) {
+            root.addProperty("vss_original_stages", true);
+            root.addProperty("vss_original_generator_class", generator.getClass().getName());
         }
         BiomeSource snapshotSource = freeTerraRuntime
                 ? FreeTerraForgedRuntime.acquisitionSource(generator) : noise.getBiomeSource();
         root.add("biome_source", encodeBiomeSource(snapshotSource, access, ops));
+        dev.xantha.vss.common.worldgen.LithostitchedBiomeSnapshot.write(root, snapshotSource);
+        var runtimeBiomes=dev.xantha.vss.common.worldgen.BiolithWorldgenContext.capture(snapshotSource,ops);
+        if(runtimeBiomes!=null) {
+            root.add("vss_biolith",runtimeBiomes);
+            root.addProperty("vss_java_biomes",true);
+        }
+        if(dev.xantha.vss.common.worldgen.WorldgenRuntimeHooks.changed(net.minecraft.world.level.levelgen.SurfaceSystem.class))
+            root.addProperty("vss_surface_stage",true);
+
         if (freeTerraRuntime) {
             root.add(FreeTerraForgedRuntime.FIELD, FreeTerraForgedRuntime.snapshot(generator));
             dependencies.require(ResourceLocation.parse("freeterraforged:worldgen/biome_modifier"));
@@ -200,18 +214,31 @@ final class WorldgenCodecSnapshot {
         if (!noiseSeeds.isEmpty()) root.add("noise_seed_aliases", noiseSeeds);
         snapshotFreeTerraForged(root, access, dependencies, id -> mods != null && mods.isLoaded(id));
         if (root.has("vss_freeterraforged") && mods != null) {
-            for (var variant : FreeTerraForgedVariant.values()) mods.getModContainerById(variant.namespace)
+            if (root.get("vss_freeterraforged_variant").getAsString().equals(FreeTerraForgedVariant.LEGACY.namespace)) {
+                root.addProperty("vss_rtf_overworld_settings", access.registryOrThrow(Registries.NOISE_SETTINGS)
+                        .getHolder(NoiseGeneratorSettings.OVERWORLD).map(Holder::value).orElse(null)
+                        == noise.generatorSettings().value());
+            }
+            mods.getModContainerById(root.get("vss_freeterraforged_variant").getAsString())
                     .ifPresent(mod -> root.addProperty("vss_freeterraforged_release", mod.getModInfo().getVersion().toString()));
         }
+        BiomeSource regionSource = mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
+                ? TerraBlenderRegionSource.regionSource(noise.getBiomeSource()) : noise.getBiomeSource();
+        boolean unwrappedRegions = regionSource != noise.getBiomeSource();
         if (mods != null && mods.isLoaded("terrablender") && terrablenderRegionType != null
-                && noise.getBiomeSource() instanceof MultiNoiseBiomeSource) {
+                && regionSource instanceof MultiNoiseBiomeSource) {
             // TerraBlender's positional region grid and per-region climate
             // points live outside the vanilla codecs. Snapshot them so the
             // client backend can replay the routing; untagged dimensions are
             // never initialized by TerraBlender and keep vanilla behavior.
             JsonObject regions = TerraBlenderRegionSnapshot.capture(terrablenderRegionType, access);
             if (regions != null && inheritedNoise) {
+                if (unwrappedRegions) TerraBlenderRegionSource.markUnwrapped(regions, noise.getBiomeSource());
+                TerraBlenderRegionSource.markSurfaceRoute(regions, regionSource);
                 root.add("vss_terrablender", regions);
+            } else if (regions == null && unwrappedRegions) {
+                // Before the injector root was read this generator had no region snapshot and no refusal.
+                VSSLogger.warn("VSS TerraBlender region capture returned nothing for the root of Lithostitched's injector; the wrapped source is sent without regions");
             } else if (regions == null) {
                 root.addProperty("vss_unsupported_reason",
                         "TerraBlender positional regions require a registered prediction backend");
@@ -237,11 +264,19 @@ final class WorldgenCodecSnapshot {
         }
         TerrainPredictionPlan plan = root.has("vss_unsupported_reason")
                 ? TerrainPredictionPlan.unavailable(root.get("vss_unsupported_reason").getAsString())
-                : TerrainPredictionPlan.noise("vss:noise_graph", 1, true);
+                : TerrainPredictionPlan.noise(root.has("vss_original_stages") ? "vss:original_stages" : "vss:noise_graph", 1,
+                        !root.has("vss_original_stages"));
         plan = applyExtension(root, plan, extension);
         root.add(TerrainPredictionPlan.FIELD, plan.encode());
         if (generator.getClass() != NoiseBasedChunkGenerator.class) snapshotActualGenerator(root, generator, access, dependencies);
         Encoded encoded = compress(root);
+        if (unwrappedRegions && root.get("vss_terrablender") instanceof JsonObject regions
+                && regions.has(TerraBlenderRegionSource.SOURCE_MARKER) && exceedsHeadroom(encoded)) {
+            // The unwrapped region section is the optional part: without it the snapshot is what it was before.
+            root.remove("vss_terrablender");
+            VSSLogger.warn("VSS TerraBlender region section from Lithostitched's injector root exceeds the generator snapshot budget; sent without it");
+            encoded = compress(root);
+        }
         if (root.has("vss_generator") && exceedsHeadroom(encoded)) {
             root.remove("vss_generator");
             root.addProperty("vss_generator_error", "Optional generator codec exceeds snapshot budget");
@@ -330,10 +365,22 @@ final class WorldgenCodecSnapshot {
                         .encodeStart(dependencies.ops(), settings).getOrThrow());
                 encoded.getAsJsonObject().add("biome_source", encodeBiomeSource(noise.getBiomeSource(), access, dependencies.ops()));
             }
+            if (root.has("vss_original_stages")) {
+                var rebuilt = ChunkGenerator.CODEC.parse(dependencies.ops(), encoded).getOrThrow();
+                if (rebuilt == generator || rebuilt.getClass() != generator.getClass())
+                    throw new IllegalArgumentException("Generator codec cannot reconstruct " + generator.getClass().getName());
+                if ((Object) rebuilt instanceof AutoCloseable owner) try { owner.close(); }
+                catch (Exception failure) { throw new IllegalStateException("Generator validation cleanup failed",failure); }
+            }
             root.add("vss_generator", encoded);
         } catch (java.util.concurrent.CancellationException cancelled) {
             throw cancelled;
         } catch (RuntimeException | LinkageError failure) {
+            if (root.has("vss_original_stages")) {
+                String reason = "Generator codec cannot reconstruct " + generator.getClass().getName();
+                root.addProperty("vss_unsupported_reason", reason);
+                root.add(TerrainPredictionPlan.FIELD, TerrainPredictionPlan.unavailable(reason).encode());
+            }
             root.addProperty("vss_generator_error", failure.getClass().getSimpleName());
             VSSLogger.debug("VSS optional generator codec unavailable for " + generator.getClass().getName() + ": " + failure);
         }
@@ -355,7 +402,14 @@ final class WorldgenCodecSnapshot {
             // Cell markers do not serialize the preset/noise lookups made by RandomState.
             dependencies.require(ResourceLocation.parse(variant.namespace + ":worldgen/preset"));
             dependencies.require(ResourceLocation.parse(variant.namespace + ":worldgen/noise"));
+            for (String path : variant.additionalRuntimeRegistries()) {
+                var id = ResourceLocation.parse(variant.namespace + ":" + path);
+                // Earlier releases may not declare this registry at all. When
+                // present, copy even an empty registry: the runtime calls registryOrThrow.
+                if (access.registry(ResourceKey.createRegistryKey(id)).isPresent()) dependencies.require(id);
+            }
             root.addProperty("vss_freeterraforged", true);
+            root.addProperty("vss_freeterraforged_variant", variant.namespace);
             return;
         }
     }

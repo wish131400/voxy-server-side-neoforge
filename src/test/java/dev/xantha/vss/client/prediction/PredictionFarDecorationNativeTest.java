@@ -60,7 +60,8 @@ class PredictionFarDecorationNativeTest {
             org.mockito.Mockito.doReturn(generator).when(context).generatorContext();
             var proxy=org.mockito.Mockito.spy(terrain);
             org.mockito.Mockito.doReturn(context).when(proxy).decorationContext();
-            var models=new PredictionFarDecoration(proxy,true,8,()->true);
+            var models=new PredictionFarDecoration(proxy,true,8);
+            models.initialize(()->true);
             assertFalse(models.replaced.contains(broken),"A failed rule must remain on original placement");
             assertFalse(models.replaced.isEmpty(),"One mod callback cannot disable all remaining templates");
         }
@@ -87,10 +88,11 @@ class PredictionFarDecorationNativeTest {
 
     @Test void completeProductionPathIsStableAndActuallyReplacesFeatures()throws Exception {
         try(var sampler=sampler()) {
-            var models=new PredictionFarDecoration(sampler,true,8,()->true);
+            var models=new PredictionFarDecoration(sampler,true,8);
+            models.initialize(()->true);
             assertFalse(models.replaced.isEmpty(),models.initialization().toString());
             assertTrue(models.templates.values().stream().flatMap(List::stream).anyMatch(PredictionFarDecoration.Template::woody),models.initialization().toString());
-            assertThrows(CancellationException.class,()->new PredictionFarDecoration(sampler,true,8,()->false));
+            assertThrows(CancellationException.class,()->new PredictionFarDecoration(sampler,true,8).initialize(()->false));
             var base=ground(sampler,8192,-8192,128,4);
             var service=new PredictionFarDecorations(sampler);
             long previewStarted=System.nanoTime();
@@ -194,7 +196,8 @@ class PredictionFarDecorationNativeTest {
     @Test void bambooBiomeRetainsItsDenseStemsInFirstVisibleTemplates()throws Exception {
         try(var terrain=sampler(Biomes.BAMBOO_JUNGLE,42)) {
             var base=ground(terrain,8192,-8192,128,4);
-            var models=new PredictionFarDecoration(terrain,true,8,()->true);
+            var models=new PredictionFarDecoration(terrain,true,8);
+            models.initialize(()->true);
             var bambooRule=models.biomeRules.values().stream().flatMap(List::stream).filter(r->r.choices().stream()
                     .anyMatch(c->c.models().stream().anyMatch(t->t.spans().stream().anyMatch(v->v.state().is(net.minecraft.world.level.block.Blocks.BAMBOO)))))
                     .findFirst().orElseThrow();
@@ -361,7 +364,8 @@ class PredictionFarDecorationNativeTest {
                         .tileForRendering(9216,-11264,128,1,true,p->false,()->true),null,true);
                 var far=new PredictionFarDecorations(sampler).build(base,null,true,p->false,()->true);
                 var expected=woodyVoxels(exact,4);var actual=woodyVoxels(far,4);
-                var models=new PredictionFarDecoration(sampler,true,8,()->true);
+                var models=new PredictionFarDecoration(sampler,true,8);
+                models.initialize(()->true);
                 List<Long> anchors=null;
                 for(int step:new int[]{4,8,16}) {
                     var session=models.session();

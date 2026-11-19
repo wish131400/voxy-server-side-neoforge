@@ -59,10 +59,14 @@ final class PredictionWorldgenCapabilities {
 
     /** Decoration codecs run in Java and are not dependencies of the Rust terrain graph. */
     static String nativeTerrainRejection(JsonObject generator, JsonObject registries) {
+        if (generator.has("vss_freeterraforged_variant")
+                && "ultraterraforged".equals(generator.get("vss_freeterraforged_variant").getAsString()))
+            return "UltraTerraForged requires its original Java terrain and tile filters";
         generator = RustBiomeSourceProjection.generator(generator);
         var plan = dev.xantha.vss.common.worldgen.TerrainPredictionPlan.read(generator);
         if (!plan.nativeCompatible()) return "terrain plan requires its original Java/source evaluator: " + plan.backend();
-        String reason = nativeRejection(generator, "generator");
+        if (generator.has("vss_force_java") && generator.get("vss_force_java").getAsBoolean()) return "generator.vss_force_java";
+        String reason = nativeRejection(terrainInputs(generator), "generator");
         if (reason != null) return reason;
         if (registries.has("vss_force_java") && registries.get("vss_force_java").getAsBoolean()) {
             return "registries.vss_force_java";
@@ -73,14 +77,13 @@ final class PredictionWorldgenCapabilities {
     /** Only terrain dependencies participate in terrain codec compatibility checks. */
     static JsonObject terrainDocument(JsonObject generator, JsonObject registries) {
         JsonObject root = new JsonObject();
-        for (String name : new String[]{"settings", "biome_source"})
-            if (generator.has(name)) root.add(name, generator.get(name));
+        terrainInputs(generator).entrySet().forEach(entry -> root.add(entry.getKey(), entry.getValue()));
         for (String name : new String[]{"noises", "biomes"})
             if (registries.has(name)) root.add(name, registries.get(name).deepCopy());
         JsonObject densities = new JsonObject();
         if (registries.has("density_functions")) {
             var definitions = registries.getAsJsonObject("density_functions");
-            collectDensityDependencies(generator, definitions, densities);
+            collectDensityDependencies(terrainInputs(generator), definitions, densities);
         }
         root.add("density_functions", densities);
         if (root.has("biomes")) for (JsonElement value : root.getAsJsonObject("biomes").asMap().values()) {
@@ -100,6 +103,18 @@ final class PredictionWorldgenCapabilities {
             value.getAsJsonObject().remove("effects");
         }
         return root;
+    }
+
+    private static JsonObject terrainInputs(JsonObject generator) {
+        var result = new JsonObject();
+        if (generator.has("biome_source")) result.add("biome_source", generator.get("biome_source"));
+        if (generator.has("settings")) {
+            var settings = generator.getAsJsonObject("settings").deepCopy();
+            settings.remove("surface_rule");
+            settings.remove("material_rule");
+            result.add("settings", settings);
+        }
+        return result;
     }
 
     private static void collectDensityDependencies(JsonElement value, JsonObject definitions, JsonObject result) {

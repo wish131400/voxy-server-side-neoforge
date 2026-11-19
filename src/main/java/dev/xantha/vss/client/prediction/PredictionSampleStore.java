@@ -79,7 +79,7 @@ public final class PredictionSampleStore implements AutoCloseable {
             if (magic == MAGIC) {
                 if (mappings == null) return;
                 biomes = readPalette(input, mappings::biomeId);
-                blocks = readPalette(input, PredictionCacheMappings::blockId);
+                blocks = readPalette(input, mappings::blockId);
             }
             for (int i = 0; i < count; i++) {
                 long key = input.readLong();
@@ -223,7 +223,7 @@ public final class PredictionSampleStore implements AutoCloseable {
                     output.writeInt(biomes.size());
                     for (int id : biomes.keySet()) output.writeUTF(mappings.biomeName(id));
                     output.writeInt(blocks.size());
-                    for (int id : blocks.keySet()) output.writeUTF(PredictionCacheMappings.blockName(id));
+                    for (int id : blocks.keySet()) output.writeUTF(mappings.blockName(id));
                 }
                 for (Map.Entry<Long, ClientColumnSample> entry : entries.entrySet()) {
                     output.writeLong(entry.getKey());

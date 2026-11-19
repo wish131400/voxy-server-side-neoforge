@@ -16,7 +16,8 @@ public final class FreeTerraForgedNativeFilters {
     private static final Map<Object, Binding> BINDINGS = Collections.synchronizedMap(new WeakHashMap<>());
 
     static void register(Object context) throws ReflectiveOperationException {
-        if (context == null || !RustTerrainSampler.available()) return;
+        if (context == null) return;
+        if (!FreeTerraForgedVariant.fromClass(context.getClass()).usesNativeTileFilters() || !RustTerrainSampler.available()) return;
         Object generator = context.getClass().getField("generator").get(context);
         var field = generator.getClass().getDeclaredField("filters"); field.setAccessible(true);
         Object filters = field.get(generator);

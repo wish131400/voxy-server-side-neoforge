@@ -238,7 +238,23 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.performance_tier",
                             "vss.voxy_options.performance_tier.tooltip",
                             "HIGH",
-                            VSSVoxyOptionsIntegration::saveClientConfig)));
+                            VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08IntOption(configBuilder, "prediction_worker_threads",
+                            "vss.voxy_options.prediction_worker_threads", "vss.voxy_options.prediction_worker_threads.tooltip",
+                            "HIGH", predictionThreads(), 1, maximumPredictionThreads(), 1,
+                            value -> VSSClientConfig.CONFIG.predictionWorkerThreads = value,
+                            VSSVoxyOptionsIntegration::predictionThreads, VSSVoxyOptionsIntegration::formatPredictionThreads,
+                             VSSVoxyOptionsIntegration::saveClientConfig),
+                     sodium08IntOption(configBuilder, "prediction_core_mode", "vss.voxy_options.prediction_core_mode",
+                             "vss.voxy_options.prediction_core_mode.tooltip", "HIGH", 0, 0, 3, 1,
+                             value -> VSSClientConfig.CONFIG.predictionCoreMode = coreMode(value).configName(),
+                             () -> dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.fromName(VSSClientConfig.CONFIG.predictionCoreMode).ordinal(),
+                             VSSVoxyOptionsIntegration::formatCoreMode, VSSVoxyOptionsIntegration::saveClientConfig),
+                     sodium08IntOption(configBuilder, "prediction_reserved_cores", "vss.voxy_options.prediction_reserved_cores",
+                             "vss.voxy_options.prediction_reserved_cores.tooltip", "HIGH", 2, 0, maximumPredictionThreads(), 1,
+                             value -> VSSClientConfig.CONFIG.predictionReservedCores = value,
+                             () -> VSSClientConfig.CONFIG.predictionReservedCores,
+                             VSSVoxyOptionsIntegration::formatReservedCores, VSSVoxyOptionsIntegration::saveClientConfig)));
 
             if (canEditLocalServerConfig()) {
                 invokeByName(predictionPage, "addOptionGroup", sodium08Group(
@@ -253,6 +269,16 @@ public final class VSSVoxyOptionsIntegration {
             invokeByName(predictionPage, "addOptionGroup", sodium08Group(
                     configBuilder,
                     "vss.voxy_options.group.prediction_detail",
+                    sodium08BooleanOption(configBuilder, "prediction_decorations", "vss.voxy_options.prediction_decorations",
+                            "vss.voxy_options.prediction_decorations.tooltip", "HIGH", true,
+                            value -> VSSClientConfig.CONFIG.predictionDecorations = value,
+                            () -> VSSClientConfig.CONFIG.predictionDecorations, VSSVoxyOptionsIntegration::saveClientConfig),
+                    sodium08IntOption(configBuilder, "prediction_decoration_distance", "vss.voxy_options.prediction_decoration_distance",
+                            "vss.voxy_options.prediction_decoration_distance.tooltip", "HIGH", 0,
+                            0, VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS, 1,
+                            value -> VSSClientConfig.CONFIG.predictionDecorationDistanceChunks = value,
+                            () -> VSSClientConfig.CONFIG.predictionDecorationDistanceChunks,
+                            VSSVoxyOptionsIntegration::formatDecorationDistance, VSSVoxyOptionsIntegration::saveClientConfig),
                     sodium08BooleanOption(configBuilder, "prediction_spyglass_loading", "vss.voxy_options.prediction_spyglass_loading",
                             "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH", true,
                             value -> VSSClientConfig.CONFIG.predictionSpyglassLoading = value,
@@ -569,29 +595,61 @@ public final class VSSVoxyOptionsIntegration {
         invokeByName(builder, "setTooltip", Component.translatable(tooltipKey));
         invokeByName(builder, "setImpact", enumConstant(SODIUM08_OPTION_IMPACT, impact));
         invokeByName(builder, "setDefaultValue", 1);
-        invokeByName(builder, "setRange", 0, 2, 1);
+        invokeByName(builder, "setRange", 0, 3, 1);
         invokeByName(builder, "setValueFormatter", sodium08Formatter(VSSVoxyOptionsIntegration::formatTierIndex));
         invokeByName(builder, "setStorageHandler", sodium08StorageHandler(save));
         invokeByName(builder, "setBinding",
                 (java.util.function.Consumer<Integer>) value -> VSSClientConfig.CONFIG.performanceTier =
-                        value <= 0 ? "low" : value == 1 ? "medium" : "high",
+                        dev.xantha.vss.client.prediction.PredictionPerformanceProfile.values()[Math.max(0, Math.min(3, value))].configName(),
                 (java.util.function.Supplier<Integer>) () -> {
                     int ordinal = dev.xantha.vss.client.prediction.PredictionPerformanceProfile
                             .fromName(VSSClientConfig.CONFIG.performanceTier).ordinal();
-                    return Math.max(0, Math.min(2, ordinal));
+                    return Math.max(0, Math.min(3, ordinal));
                 });
         return builder;
     }
 
     private static Component formatTierIndex(int index) {
-        return Component.translatable(switch (index) {
-            case 0 -> "vss.voxy_options.tier_low";
-            case 2 -> "vss.voxy_options.tier_high";
-            default -> "vss.voxy_options.tier_medium";
-        });
+        var profile = dev.xantha.vss.client.prediction.PredictionPerformanceProfile.values()[Math.max(0, Math.min(3, index))];
+        Component label = Component.translatable("vss.voxy_options.tier_" + profile.configName());
+        return profile == dev.xantha.vss.client.prediction.PredictionPerformanceProfile.CUSTOM ? label
+                : Component.translatable("vss.voxy_options.tier_threads", label, profile.poolSize(maximumPredictionThreads()));
     }
 
+    private static int maximumPredictionThreads() {
+        return dev.xantha.vss.client.prediction.PredictionPerformanceProfile.maximumWorkers();
+    }
 
+    private static int predictionThreads() {
+        return dev.xantha.vss.client.prediction.PredictionPerformanceProfile.workers(VSSClientConfig.CONFIG, maximumPredictionThreads());
+    }
+
+    private static dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode coreMode(int index) {
+         return dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.values()[Math.max(0, Math.min(3, index))];
+     }
+
+     private static Component formatCoreMode(int value) {
+         var mode = coreMode(value);
+         var info = dev.xantha.vss.client.prediction.PredictionCoreAffinity.diagnostics();
+         Component label = Component.translatable("vss.voxy_options.core_mode_" + mode.configName());
+        if (mode == dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.SYSTEM
+                && !Boolean.TRUE.equals(info.get("supported"))) return label;
+         if (mode != dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.SYSTEM
+                 && (!Boolean.TRUE.equals(info.get("supported"))
+                     || mode == dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.EFFICIENCY
+                         && !Boolean.TRUE.equals(info.get("hybrid"))))
+             return Component.translatable("vss.voxy_options.core_mode_unavailable", label);
+         return Component.translatable("vss.voxy_options.core_mode_topology", label,
+                 info.get("performanceCores"), info.get("efficiencyCores"));
+     }
+
+     private static Component formatReservedCores(int value) {
+         return Component.translatable("vss.voxy_options.reserved_cores", value);
+     }
+
+     private static Component formatPredictionThreads(int value) {
+        return Component.translatable("vss.voxy_options.threads_of_max", value, maximumPredictionThreads());
+    }
 
     private static Object sodium08Group(Object configBuilder, String nameKey, Object... options) throws ReflectiveOperationException {
         Object group = invokeByName(configBuilder, "createOptionGroup");
@@ -909,6 +967,16 @@ public final class VSSVoxyOptionsIntegration {
         try {
             List<Object> groups = new ArrayList<>();
             Object clientStorage = oldStorage(VSSClientConfig.CONFIG, VSSVoxyOptionsIntegration::saveClientConfig);
+            Object tierOption = oldEnumOption(clientStorage, "vss.voxy_options.performance_tier",
+                    "vss.voxy_options.performance_tier.tooltip", "HIGH",
+                    (VSSClientConfig config, dev.xantha.vss.client.prediction.PredictionPerformanceProfile value) -> config.performanceTier = value.configName(),
+                    config -> dev.xantha.vss.client.prediction.PredictionPerformanceProfile.fromName(config.performanceTier));
+            Object threadOption = oldIntOption(clientStorage, "vss.voxy_options.prediction_worker_threads",
+                    "vss.voxy_options.prediction_worker_threads.tooltip", "HIGH", 1, maximumPredictionThreads(), 1,
+                    VSSVoxyOptionsIntegration::formatPredictionThreads,
+                    (VSSClientConfig config, Integer value) -> config.predictionWorkerThreads = value,
+                    config -> dev.xantha.vss.client.prediction.PredictionPerformanceProfile.workers(config, maximumPredictionThreads()));
+            VSSPredictionThreadOptions.registerPair(tierOption, threadOption);
 
             groups.add(oldGroup(
                     oldBooleanOption(
@@ -922,14 +990,15 @@ public final class VSSVoxyOptionsIntegration {
                             "vss.voxy_options.prediction_loading.tooltip", "HIGH",
                             (VSSClientConfig config, Boolean value) -> config.enablePredictionLoading = value,
                             config -> config.enablePredictionLoading),
-                    oldEnumOption(
-                            clientStorage,
-                            "vss.voxy_options.performance_tier",
-                            "vss.voxy_options.performance_tier.tooltip",
-                            "HIGH",
-                            (VSSClientConfig config, dev.xantha.vss.client.prediction.PredictionPerformanceProfile value) ->
-                                    config.performanceTier = value.configName(),
-                            config -> dev.xantha.vss.client.prediction.PredictionPerformanceProfile.fromName(config.performanceTier))));
+                    tierOption, threadOption,
+                     oldIntOption(clientStorage, "vss.voxy_options.prediction_core_mode", "vss.voxy_options.prediction_core_mode.tooltip",
+                             "HIGH", 0, 3, 1, VSSVoxyOptionsIntegration::formatCoreMode,
+                             (VSSClientConfig config, Integer value) -> config.predictionCoreMode = coreMode(value).configName(),
+                             config -> dev.xantha.vss.client.prediction.PredictionCoreAffinity.Mode.fromName(config.predictionCoreMode).ordinal()),
+                     oldIntOption(clientStorage, "vss.voxy_options.prediction_reserved_cores", "vss.voxy_options.prediction_reserved_cores.tooltip",
+                             "HIGH", 0, maximumPredictionThreads(), 1, VSSVoxyOptionsIntegration::formatReservedCores,
+                             (VSSClientConfig config, Integer value) -> config.predictionReservedCores = value,
+                             config -> config.predictionReservedCores)));
 
             if (canEditLocalServerConfig()) {
                 Object serverStorage = oldStorage(VSSServerConfig.CONFIG, VSSVoxyOptionsIntegration::saveServerConfig);
@@ -940,6 +1009,15 @@ public final class VSSVoxyOptionsIntegration {
             }
 
             groups.add(oldGroup(
+                    oldBooleanOption(clientStorage, "vss.voxy_options.prediction_decorations",
+                            "vss.voxy_options.prediction_decorations.tooltip", "HIGH",
+                            (VSSClientConfig config, Boolean value) -> config.predictionDecorations = value,
+                            config -> config.predictionDecorations),
+                    oldIntOption(clientStorage, "vss.voxy_options.prediction_decoration_distance",
+                            "vss.voxy_options.prediction_decoration_distance.tooltip", "HIGH",
+                            0, VSSClientConfig.MAX_LOD_DISTANCE_CHUNKS, 1, VSSVoxyOptionsIntegration::formatDecorationDistance,
+                            (VSSClientConfig config, Integer value) -> config.predictionDecorationDistanceChunks = value,
+                            config -> config.predictionDecorationDistanceChunks),
                     oldBooleanOption(clientStorage, "vss.voxy_options.prediction_spyglass_loading",
                             "vss.voxy_options.prediction_spyglass_loading.tooltip", "HIGH",
                             (VSSClientConfig config, Boolean value) -> config.predictionSpyglassLoading = value,
@@ -987,9 +1065,7 @@ public final class VSSVoxyOptionsIntegration {
     private static Object oldCyclingControl(Object option) {
         return oldCyclingControl(option, dev.xantha.vss.client.prediction.PredictionPerformanceProfile.class,
                 new Component[]{
-                        Component.translatable("vss.voxy_options.tier_low"),
-                        Component.translatable("vss.voxy_options.tier_medium"),
-                        Component.translatable("vss.voxy_options.tier_high")});
+                        formatTierIndex(0), formatTierIndex(1), formatTierIndex(2), formatTierIndex(3)});
     }
 
 
@@ -1293,6 +1369,10 @@ public final class VSSVoxyOptionsIntegration {
             return text.getString();
         }
         return String.valueOf(component);
+    }
+
+    private static Component formatDecorationDistance(int value) {
+        return value == 0 ? Component.translatable("vss.voxy_options.decoration_distance_auto") : formatChunks(value);
     }
 
     private static Component formatChunksAuto(int value) {

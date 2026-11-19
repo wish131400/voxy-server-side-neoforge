@@ -9,7 +9,6 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.WeakHashMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
@@ -23,7 +22,7 @@ import org.spongepowered.asm.mixin.transformer.meta.MixinMerged;
 
 /** Depth-first placement keeps each candidate's terminal random draws before the next candidate. */
 final class PredictionPlacementExecutor {
-    private static final Map<PlacedFeature, Plan> PLANS = new WeakHashMap<>();
+    private static final PredictionIdentityPlans<PlacedFeature, Plan> PLANS = new PredictionIdentityPlans<>();
     private static final ClassValue<Boolean> PRISTINE = new ClassValue<>() {
         @Override protected Boolean computeValue(Class<?> type) { return unmodified(type); }
     };
@@ -40,15 +39,7 @@ final class PredictionPlacementExecutor {
 
     static void visit(PlacedFeature feature, PlacementContext context, RandomSource random,
                       BlockPos origin, Consumer<BlockPos> terminal) {
-        Plan plan;
-        synchronized (PLANS) {
-            plan = PLANS.get(feature);
-            if (plan == null) {
-                var modifiers = List.copyOf(feature.placement());
-                plan = compile(modifiers, PRISTINE::get);
-                PLANS.put(feature, plan);
-            }
-        }
+        Plan plan = PLANS.get(feature, () -> compile(feature.placement(), PRISTINE::get));
         plan.visit(context, random, origin, terminal);
     }
 

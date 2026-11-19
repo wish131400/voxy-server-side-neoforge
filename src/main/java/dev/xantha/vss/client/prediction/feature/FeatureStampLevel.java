@@ -57,7 +57,7 @@ import net.minecraft.world.ticks.LevelTickAccess;
  * block mutation contract as world generation, but no chunks, entities,
  * sounds, ticks or server state are touched.
  */
-public class FeatureStampLevel implements WorldGenLevel {
+public class FeatureStampLevel implements WorldGenLevel, dev.xantha.vss.client.prediction.PredictionFeatureContext {
     public static final int GROUND_Y = 64;
     public static final int SEA_LEVEL = 63;
     private static final int MIN_Y = -64;

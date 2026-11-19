@@ -12,8 +12,6 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.InflaterInputStream;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.state.BlockState;
 
 /** Compressed generation results. Deferred snapshots are bounded and encoded on the serial IO worker. */
@@ -84,6 +82,7 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Path root;
     private final long fingerprint;
     private final PredictionCacheMappings mappings;
+    private final PredictionBlockMappings blockMappings;
     private final byte[] templateIdentity;
     private final Shared shared;
     private volatile boolean closed;
@@ -113,7 +112,22 @@ final class PredictionDiskCache implements AutoCloseable {
     private final Map<Key, Integer> terrainWriteColumns = new LinkedHashMap<>(256, .75F, true);
     private record VoxelIdentity(int settings, String content) { }
     private final Map<Key, VoxelIdentity> voxelWriteIdentities = new LinkedHashMap<>(256, .75F, true);
-    private record VoxelWrite(VoxelIdentity identity, byte[] content, CompletableFuture<Boolean> result) { }
+    private static final class VoxelWrite {
+        final VoxelIdentity identity;
+        final java.lang.ref.WeakReference<PredictionVoxelData> payload;
+        final java.lang.ref.WeakReference<PredictionTileManager.PredictionTile> tile;
+        volatile byte[] savedContent;
+        final CompletableFuture<Boolean> result;
+        VoxelWrite(VoxelIdentity identity, byte[] content, PredictionTileManager.PredictionTile tile, CompletableFuture<Boolean> result) {
+            this.identity=identity; this.savedContent=content;
+            this.tile=new java.lang.ref.WeakReference<>(tile);
+            this.payload=new java.lang.ref.WeakReference<>(tile==null?null:tile.data()); this.result=result;
+        }
+        byte[] content() {
+            var value=payload.get(); return value != null && value.cacheContentIdentity != null
+                    ? value.cacheContentIdentity : savedContent;
+        }
+    }
     private final Map<Key,VoxelWrite> voxelWrites = new LinkedHashMap<>(256,.75F,true);
     private final LongAdder unchangedVoxelWrites = new LongAdder();
 
@@ -243,7 +257,7 @@ final class PredictionDiskCache implements AutoCloseable {
             byte[] header = shared.regions.header(key);
             if (header != null) try (var input = new DataInputStream(new ByteArrayInputStream(header))) {
                 int magic=input.readInt(), version=input.readInt();
-                if (magic == MAGIC && (version == PredictionVoxelCache.VERSION || version == 10)
+                if (magic == MAGIC && (version == PredictionVoxelCache.VERSION || version == 11 || version == 10)
                         && input.readLong() == fingerprint && input.readInt() == 4
                         && input.readInt() == key.x && input.readInt() == key.z && input.readInt() == key.detail) {
                     int axis = input.readInt();
@@ -263,9 +277,9 @@ final class PredictionDiskCache implements AutoCloseable {
             if(!lease.valid())return null;
             if (data != null) {
                 rememberVoxelIdentity(lease.key,settings,identity);
-                rememberWriteColumns(lease.key,data.voxels().axis()*2 + (data.voxels().surfaceComplete() ? 1 : 0));
+                rememberWriteColumns(lease.key,PredictionVoxelCache.quality(data));
                 var namespace=new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
-                voxelWrites.putIfAbsent(lease.key,new VoxelWrite(namespace,data.cacheIdentity(),CompletableFuture.completedFuture(true)));
+                voxelWrites.putIfAbsent(lease.key,new VoxelWrite(namespace,data.cacheIdentity(),null,CompletableFuture.completedFuture(true)));
                 while(voxelWrites.size()>32768)voxelWrites.remove(voxelWrites.keySet().iterator().next());
             } else if(observed!=null && observed.result.isDone()) {
                 voxelWrites.remove(lease.key,observed);
@@ -283,32 +297,34 @@ final class PredictionDiskCache implements AutoCloseable {
         var voxels = tile.data().voxyTile;
         if (voxels.features().size() > PredictionVoxelCache.MAX_FEATURES) return CompletableFuture.completedFuture(false);
         long bytes = tile.retainedHeapBytes();
-        var snapshot = PredictionVoxelCache.Data.snapshot(tile);
         byte[] content=tile.data().cacheContentIdentity;
-        if(content==null)tile.data().cacheContentIdentity=content=PredictionVoxelCache.contentIdentity(snapshot,0,new byte[32],null,this);
         var namespace=new VoxelIdentity(settings,java.util.HexFormat.of().formatHex(identity));
         final byte[] digest=content;
         synchronized (pendingLock) {
             synchronized (shared) {
                 if(!lease.valid() || finishing || !current.getAsBoolean()) return CompletableFuture.completedFuture(false);
                 var previous=voxelWrites.get(lease.key);
-                if(previous!=null && previous.identity.equals(namespace) && Arrays.equals(previous.content,digest)) {
+                if(previous!=null && previous.identity.equals(namespace) && (previous.payload.get() == tile.data() || PredictionVoxelCache.sameContent(previous.tile.get(),tile) || digest != null && Arrays.equals(previous.content(),digest))) {
                     unchangedVoxelWrites.increment(); return previous.result;
                 }
                 rememberVoxelIdentity(lease.key,settings,identity);
             }
-            var result=defer(lease,bytes,voxels.axis()*2+(voxels.surfaceComplete() ? 1 : 0), () -> {
+            var result=defer(lease,bytes,PredictionVoxelCache.quality(tile), () -> {
+                var snapshot = PredictionVoxelCache.Data.snapshot(tile);
                 return new PendingWrite(retain(lease),PredictionVoxelCache.VERSION,
-                        output -> PredictionVoxelCache.write(output,snapshot,settings,identity,templateIdentity,this),bytes);
+                        output -> PredictionVoxelCache.writeAndDigest(output,snapshot,settings,identity,templateIdentity,this,tile.data()),bytes);
             });
-            var stamp=new VoxelWrite(namespace,digest,result);
+            var stamp=new VoxelWrite(namespace,digest,tile,result);
             synchronized(shared) {
                 if(lease.valid()) {
                     voxelWrites.put(lease.key,stamp);
                     while(voxelWrites.size()>32768)voxelWrites.remove(voxelWrites.keySet().iterator().next());
                 }
             }
-            result.thenAccept(written->{if(!written)synchronized(shared){voxelWrites.remove(lease.key,stamp);}});
+            result.thenAccept(written->{
+                if(written)stamp.savedContent=tile.data().cacheContentIdentity;
+                else synchronized(shared){voxelWrites.remove(lease.key,stamp);}
+            });
             return result;
         }
     }
@@ -340,6 +356,7 @@ final class PredictionDiskCache implements AutoCloseable {
         this.root = root.toAbsolutePath().normalize();
         this.fingerprint = fingerprint;
         this.mappings = mappings;
+        this.blockMappings = mappings == null ? PredictionBlockMappings.capture() : mappings.blocks;
         this.templateIdentity = catalog == null ? null : java.util.HexFormat.of().parseHex(catalog);
         if (templateIdentity != null && templateIdentity.length != 32)
             throw new IllegalArgumentException("Invalid surface template identity");
@@ -386,14 +403,14 @@ final class PredictionDiskCache implements AutoCloseable {
 
     PredictionCapturedTerrain.Node readCapturedNode(Lease lease) {
         return read(lease, (input, version) -> {
-            var node = PredictionCapturedTerrain.Node.read(input, mappings);
+            var node = PredictionCapturedTerrain.Node.read(input, mappings, blockMappings);
             if ((lease.key.detail() == 0) != (node.columns != null)) throw new IOException("capture node level");
             return node;
         });
     }
 
     boolean writeCapturedNode(Lease lease, PredictionCapturedTerrain.Node node) {
-        return write(lease, 6, output -> node.write(output, mappings));
+        return write(lease, 6, output -> node.write(output, mappings, blockMappings));
     }
 
     record TerrainData(ClientColumnSample[] samples, long colorFingerprint,
@@ -423,7 +440,7 @@ final class PredictionDiskCache implements AutoCloseable {
         }
         if (data != null) synchronized (shared) {
             if (lease.valid()) {
-                rememberWriteColumns(lease.key, data.samples().length);
+                rememberWriteColumns(lease.key, PredictionSurfaceRefinement.quality(data.samples()));
                 rememberTerrain(lease.key, (int)Math.sqrt(data.samples().length)-2);
             }
         }
@@ -436,10 +453,7 @@ final class PredictionDiskCache implements AutoCloseable {
         int paletteSize = bounded(input.readInt(), MAX_COLUMNS * 3);
         int[] palette = new int[paletteSize];
         for (int i = 0; i < paletteSize; i++) {
-            String name = input.readUTF();
-            ResourceLocation id = name.isEmpty() ? null : ResourceLocation.tryParse(name);
-            if (!name.isEmpty() && (id == null || !BuiltInRegistries.BLOCK.containsKey(id))) throw new IOException("block unavailable: " + name);
-            palette[i] = name.isEmpty() ? ClientColumnSample.NO_BLOCK : BuiltInRegistries.BLOCK.getId(BuiltInRegistries.BLOCK.get(id));
+            palette[i] = blockMappings.id(input.readUTF());
         }
         int[] biomes = null;
         if (version >= 6) {
@@ -501,7 +515,7 @@ final class PredictionDiskCache implements AutoCloseable {
             return CompletableFuture.completedFuture(false);
         long bytes = bytesOf(terrain);
         boolean colors = terrain.colorsMatch(terrain.colorFingerprint());
-        return defer(lease, bytes, terrain.samples().length, () -> {
+        return defer(lease, bytes, PredictionSurfaceRefinement.quality(terrain.samples()), () -> {
             var snapshot = new TerrainData(terrain.samples().clone(), terrain.colorFingerprint(),
                     colors ? terrain.surfaceTints().clone() : null, colors ? terrain.foliageTints().clone() : null,
                     colors ? terrain.waterTints().clone() : null);
@@ -534,8 +548,7 @@ final class PredictionDiskCache implements AutoCloseable {
         }
         output.writeInt(samples.length);
         output.writeInt(palette.size());
-        for (int block : palette.keySet()) output.writeUTF(block == ClientColumnSample.NO_BLOCK ? ""
-                : BuiltInRegistries.BLOCK.getKey(BuiltInRegistries.BLOCK.byId(block)).toString());
+        for (int block : palette.keySet()) output.writeUTF(blockMappings.name(block));
         Map<Integer, Integer> biomes = new LinkedHashMap<>();
         if (mappings != null) {
             for (var sample : samples) biomes.computeIfAbsent(sample.biomeIndex(), ignored -> biomes.size());
@@ -774,7 +787,7 @@ final class PredictionDiskCache implements AutoCloseable {
             if (input.readInt() != MAGIC) { missCorrupt.increment(); throw new IOException("cache magic mismatch"); }
             int version=input.readInt();
             boolean templateRecord = (lease.key.kind == 1 || lease.key.kind == 2) && templateIdentity != null;
-            boolean validVersion = lease.key.kind == 4 ? version == PredictionVoxelCache.VERSION || version == 10
+            boolean validVersion = lease.key.kind == 4 ? version == PredictionVoxelCache.VERSION || version == 11 || version == 10
                     : templateRecord ? version == 7 || version == 8
                     : version == schema(lease.key) || lease.key.kind == 3 && version == 6 || version == 5 || version == 4 || version == 3
                     || lease.key.kind == 0 && (version == 1 || version == 2);

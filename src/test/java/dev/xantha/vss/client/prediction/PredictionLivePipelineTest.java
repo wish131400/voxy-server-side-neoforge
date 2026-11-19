@@ -56,7 +56,7 @@ class PredictionLivePipelineTest {
         var far=new PredictionTileKey(Level.OVERWORLD,40,0,0);
         var input=new PredictionVoxyWorkPreparation.Input(layout,null,null,0,80,0,1000,-64,384,8192,1,1,
                 Set.of(done.key(),near,far),Set.of(done.key()),Set.of(),Set.of(),
-                new RenderSnapshot(Level.OVERWORLD,layout,Map.of(done.key(),done),Map.of()),Map.of());
+                new RenderSnapshot(Level.OVERWORLD,layout,Map.of(done.key(),done),Map.of()),Map.of(),0);
         var result=PredictionVoxyWorkPreparation.build(input);
         assertEquals(List.of(near,far),result.terrain());assertEquals(List.of(done.key()),result.surfaces());
     }

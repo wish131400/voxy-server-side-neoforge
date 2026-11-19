@@ -67,7 +67,10 @@ final class PredictionParentLod {
         // them here after capture admitted them repeatedly resamples the parent.
         // aggregate preserves provenance and always adds FLAG_PARENT_LOD, so
         // these columns remain unusable for exact terrain and decoration.
-        for (var child : input.children()) for (var sample : child.samples()) if (sample == null) return null;
+        for (var child : input.children()) {
+            if(PredictionSurfaceRefinement.pending(child))return null;
+            for (var sample : child.samples()) if (sample == null) return null;
+        }
         int axis = input.axis(), grid = axis + 2;
         int span = input.children()[0].spanBlocks() * 2, step = span / axis;
         ClientColumnSample[] result = new ClientColumnSample[grid * grid];

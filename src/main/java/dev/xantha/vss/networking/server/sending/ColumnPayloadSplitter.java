@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.server.sending;
 
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.BandwidthProfile;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.networking.payloads.VoxelColumnS2CPayload;
@@ -37,7 +38,8 @@ public final class ColumnPayloadSplitter {
                 1,
                 replacementSectionYs);
         int targetWireBytes = targetWireBytes(effectiveBandwidthBytesPerSecond);
-        if (normalized.estimatedWireBytes(networkCompressionEnabled) <= targetWireBytes) {
+        if (normalized.rawSectionBytesLength() <= VSSConstants.MAX_COLUMN_PART_BYTES
+                && normalized.estimatedWireBytes(networkCompressionEnabled) <= targetWireBytes) {
             return List.of(normalized);
         }
 
@@ -116,7 +118,7 @@ public final class ColumnPayloadSplitter {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(rawSections));
         try {
             int sectionCount = buf.readVarInt();
-            if (sectionCount < 0 || sectionCount > 64) {
+            if (sectionCount < 0 || sectionCount > VSSConstants.MAX_COLUMN_SECTIONS) {
                 return ParsedSections.invalid();
             }
 

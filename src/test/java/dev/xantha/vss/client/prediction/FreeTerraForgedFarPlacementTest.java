@@ -15,6 +15,24 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 /** Reproduces the released FTF count wrapper, then runs the production density sampler through it. */
 @EnabledIfSystemProperty(named="vss.freeTerraForgedJar",matches=".+")
 class FreeTerraForgedFarPlacementTest {
+    @Test void releasedPoissonDensityUsesOriginalCoordinateOverloadWithoutWorldGeneration() throws Exception {
+        TerrainPredictionFixtures.bootstrap();
+        try(var loader=new URLClassLoader(new URL[]{Path.of(System.getProperty("vss.freeTerraForgedJar")).toUri().toURL()},getClassLoader())) {
+            var type=loader.loadClass("etcodehome.freeterraforged.world.worldgen.feature.placement.poisson.FastPoissonModifier");
+            var modifier=(PlacementModifier)type.getConstructor(int.class,float.class,float.class,float.class,int.class,float.class)
+                    .newInstance(7,.25f,.3f,.1f,150,.75f);
+            var result=PredictionFarPlacementCount.distantDensity(modifier,42,()->{});
+            assertTrue(result.isPresent());assertTrue(result.getAsDouble()>0);
+            var original=Arrays.stream(type.getDeclaredMethods()).filter(m->m.getParameterCount()==5).findFirst().orElseThrow();
+            original.setAccessible(true);long expected=0;
+            for(int i=0;i<64;i++) {
+                int x=(int)PredictionFarDecoration.mix(i*0x9e3779b97f4a7c15L)&16383;
+                int z=(int)PredictionFarDecoration.mix(i*0xc2b2ae3d27d4eb4fL)&16383;
+                try(var points=(java.util.stream.Stream<?>)original.invoke(modifier,234565,42L,x,z,null)){expected+=points.count();}
+            }
+            assertEquals(expected/64.0,result.getAsDouble());
+        }
+    }
     @Test void releasedDynamicOreMixinCannotBreakTemplateCountInitialization() throws Exception {
         TerrainPredictionFixtures.bootstrap();
         String jar=System.getProperty("vss.freeTerraForgedJar");

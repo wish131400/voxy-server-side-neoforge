@@ -49,6 +49,8 @@ public final class RustWorldgenBackend {
     public static native int density(long world, String routerNode, ByteBuffer xyz, ByteBuffer output, int count);
     /** XZ int32 input; record = four int32 (surface, floor, fluid, height), then height int32 state IDs. */
     public static native int columns(long world, ByteBuffer xz, ByteBuffer output, int count);
+    /** Dense raw chunk in X,Z,Y order. Shares noise cells; no Java or native surface rules. Optional ABI 6 entry. */
+    public static native int rawChunk(long world,int chunkX,int chunkZ,ByteBuffer output);
     /** Exact non-air union of a 1/2/4-block footprint over [bottom,top), one byte per Y.
      * Returns zero for an unoccupied anchor roof, -2 to use state-ID columns. Additive ABI 6 entry point. */
     public static native int exteriorFootprint(long world, int x, int z, int step,

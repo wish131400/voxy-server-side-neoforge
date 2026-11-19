@@ -602,6 +602,12 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
     static Tile build(PredictionTileKey key, ClientColumnSample[] samples, int grid, int step,
                       ClientTerrainSampler sampler, PredictionVegetation.Tile plants,
                       dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities, boolean surfaceComplete) {
+        return build(key,samples,grid,step,sampler,plants,cities,surfaceComplete,null,null);
+    }
+    static Tile build(PredictionTileKey key,ClientColumnSample[] samples,int grid,int step,
+                      ClientTerrainSampler sampler,PredictionVegetation.Tile plants,
+                      dev.xantha.vss.common.worldgen.LostCityPreview.Tile cities,boolean surfaceComplete,
+                      Tile previous,ClientColumnSample[] previousSamples) {
         int axis = grid - 2, span = axis * step, bx = key.tileX() * span, bz = key.tileZ() * span;
         Column[] columns = new Column[axis * axis];
         var features = new PredictionVoxyBoxes.Builder();
@@ -612,10 +618,15 @@ final class PredictionVoxySource implements VoxyPredictionBridge.Source, XaeroPr
         for (int z=0;z<=axis;z++) for(int x=0;x<=axis;x++) display[z*(axis+1)+x]=samples[(z+1)*grid+x+1];
         display = PredictionCityGeometry.ground(display,cities,bx,bz,step,axis+1,null).samples();
         PredictionCityGeometry city = cities == null ? null : new PredictionCityGeometry(cities, bx, bz, axis, step, display);
+        boolean reuse=city==null && previous!=null && key.equals(previous.key()) && axis==previous.axis()
+                && step==previous.step() && previousSamples!=null && previousSamples.length==display.length;
         for (int z = 0; z < axis; z++) for (int x = 0; x < axis; x++) {
             if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
             int cell = z * axis + x;
             var sample = display[z*(axis+1)+x];
+            if(reuse && sample.equals(previousSamples[z*(axis+1)+x])) {
+                columns[cell]=palette.retain(previous.columns()[cell]);continue;
+            }
             var runs = new ArrayList<Run>();
             terrain(runs, sample, step, sampler.profile().minY());
             if (city != null && !sample.captured()) {

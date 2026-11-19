@@ -36,7 +36,7 @@ public final class PredictionCpuBudget {
 
     private static PredictionCpuBudget runtimeBudget() {
         int processors = Runtime.getRuntime().availableProcessors();
-        return new PredictionCpuBudget(() -> PredictionPerformanceProfile.current().poolSize(processors),
+        return new PredictionCpuBudget(() -> PredictionCoreAffinity.capWorkers(PredictionPerformanceProfile.workers(dev.xantha.vss.config.VSSClientConfig.CONFIG, processors)),
                 System::nanoTime);
     }
 

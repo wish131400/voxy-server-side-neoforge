@@ -35,7 +35,7 @@ class LodRequestManagerCacheProbeMissTest {
     }
 
     @Test
-    void disabledGenerationDoesNotQueueUnknownCacheMiss() throws Exception {
+    void disabledGenerationQueuesExistingChunkReadAfterCacheMiss() throws Exception {
         ClientRequestTracker tracker = new ClientRequestTracker(ignored -> {
         });
         LodRequestManager manager = new LodRequestManager("test", tracker);
@@ -50,7 +50,8 @@ class LodRequestManagerCacheProbeMissTest {
         assertEquals(0, tracker.generationSize());
         Field deferred = LodRequestManager.class.getDeclaredField("deferredColumns");
         deferred.setAccessible(true);
-        assertEquals(0, ((DeferredColumnQueue) deferred.get(manager)).queuedEntries());
+        assertEquals(1, ((DeferredColumnQueue) deferred.get(manager)).queuedEntries());
+        assertFalse(manager.strictColumnReady(-8, 17), "a VSS cache miss does not prove the real chunk is absent");
     }
 
     private static void disableGeneration(LodRequestManager manager) throws Exception {

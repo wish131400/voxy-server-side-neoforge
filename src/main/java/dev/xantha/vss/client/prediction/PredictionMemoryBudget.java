@@ -63,7 +63,7 @@ final class PredictionMemoryBudget {
         var collectors = java.lang.management.ManagementFactory.getGarbageCollectorMXBeans();
         return adaptive(runtime.maxMemory(),
                 () -> runtime.maxMemory() - runtime.totalMemory() + runtime.freeMemory(),
-                System::nanoTime, workerCount(runtime.availableProcessors()),
+                System::nanoTime, Math.max(1, runtime.availableProcessors()),
                 () -> {
                     long count = 0;
                     for (var collector : collectors) count += Math.max(0, collector.getCollectionCount());
@@ -79,7 +79,7 @@ final class PredictionMemoryBudget {
     }
 
     static int workerCount(int logicalProcessors) {
-        return PredictionPerformanceProfile.current().poolSize(logicalProcessors);
+        return PredictionCoreAffinity.capWorkers(PredictionPerformanceProfile.workers(dev.xantha.vss.config.VSSClientConfig.CONFIG, logicalProcessors));
     }
 
     synchronized Reservation tryReserveBuild() {
@@ -87,7 +87,7 @@ final class PredictionMemoryBudget {
     }
 
     synchronized Reservation tryReserveBuild(BuildKind kind) {
-        if (activeBuilders >= maxBuilders) return null;
+        if (activeBuilders >= buildLimit()) return null;
         Reservation reservation = tryReserve(buildBytes(kind));
         if (reservation != null) {
             reservation.building = true;
@@ -148,7 +148,7 @@ final class PredictionMemoryBudget {
     }
 
     synchronized int availableBuildSlots() {
-        return paused() ? 0 : (int) Math.min(maxBuilders - activeBuilders, availableBytes() / BUILD_BYTES);
+        return paused() ? 0 : (int) Math.max(0, Math.min(buildLimit() - activeBuilders, availableBytes() / BUILD_BYTES));
     }
 
     synchronized long reclaimTargetBytes() {
@@ -196,7 +196,7 @@ final class PredictionMemoryBudget {
         return "mode=" + (adaptive ? "adaptive" : "fixed") + ",accountedMiB=" + used / MIB
                 + ",heapMaxMiB=" + limit / MIB + ",heapFreeMiB=" + freeHeap.getAsLong() / MIB
                 + ",safetyMiB=" + minimumFree / MIB + ",workspaceMiB=" + workingBytes / MIB
-                + ",workerLimit=" + maxBuilders + ",availableBuildSlots=" + availableBuildSlots();
+                + ",workerLimit=" + buildLimit() + ",availableBuildSlots=" + availableBuildSlots();
     }
 
     synchronized String costDiagnostics() {
@@ -218,7 +218,7 @@ final class PredictionMemoryBudget {
     }
 
     int buildLimit() {
-        return maxBuilders;
+        return this == SHARED ? Math.min(maxBuilders, workerCount(Runtime.getRuntime().availableProcessors())) : maxBuilders;
     }
 
     synchronized long usedBytes() {

@@ -29,6 +29,13 @@ final class PredictionDecorationLevel extends FeatureStampLevel {
     private static final int BIOME_QUERY_CACHE_SIZE = 1 << 15;
     private final ClientTerrainSampler terrain;
     private final ClientTerrainSampler context;
+    net.minecraft.world.level.levelgen.RandomState predictionRandomState() {
+        return context.randomStateContext();
+    }
+    @Override public ClientTerrainSampler predictionContext() { return context; }
+    byte[] featureTemplateBytes(net.minecraft.resources.ResourceLocation resource) {
+        return FreeTerraForgedDecorationContext.templateBytes(context.structureTemplates(), resource);
+    }
     private PredictionStructureTemplates templateManager;
 
     net.minecraft.world.level.chunk.ChunkGenerator predictionGenerator() { return context.generatorContext(); }

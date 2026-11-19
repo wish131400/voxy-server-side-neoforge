@@ -413,6 +413,33 @@ pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend
         }
     }
 }
+/// A complete raw chunk shares NoiseChunk cells and aquifer context. No surface rules.
+#[no_mangle]
+pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_rawChunk(
+    mut e: JNIEnv, _c: JClass, id: jlong, chunk_x: jint, chunk_z: jint, out: JByteBuffer,
+) -> jint {
+    let result = guarded(|| {
+        let w = world(id)?;
+        w.check_active()?;
+        if !(-1_874_999..=1_874_999).contains(&chunk_x) || !(-1_874_999..=1_874_999).contains(&chunk_z) {
+            return Err("raw chunk coordinates out of range".into());
+        }
+        let height=w.terrain.height as usize;
+        buffer(&mut e,&out,256*height*4,true)?;
+        let (x0,z0)=(chunk_x*16,chunk_z*16);
+        let mut data=vec![0u8;256*height*4];
+        let mut job=w.terrain.job(x0,z0,false)?;
+        job.fill_chunk(x0,z0,|x,y,z,block| {
+            let at=(((x-x0) as usize*16+(z-z0) as usize)*height+(y-w.terrain.min_y) as usize)*4;
+            data[at..at+4].copy_from_slice(&w.base_ids[block as usize].to_le_bytes());
+        });
+        w.check_active()?;
+        put(&mut e,&out,&data)?;
+        Ok(256)
+    });
+    match result { Ok(n)=>n,Err(err)=>{fail(&mut e,err);-1} }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_dev_xantha_vss_client_prediction_RustWorldgenBackend_exteriorFootprint(
     mut e: JNIEnv, _c: JClass, id: jlong, x: jint, z: jint, step: jint,

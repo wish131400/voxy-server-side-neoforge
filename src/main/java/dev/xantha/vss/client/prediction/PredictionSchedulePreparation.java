@@ -104,7 +104,7 @@ final class PredictionSchedulePreparation {
         boolean retry(){return input.retry(key);}
         boolean defer(boolean surface){return input.view()!=null&&band()>=PredictionWorkView.RECENT&&(surface||axis>0)
                 &&!required(surface)&&!(!surface&&dependency);}
-        boolean surfaceTerrainReady(){return tile!=null&&(tile.data()!=null&&tile.data().voxyTile!=null||axis==input.layout().cellAxis(key.lod()));}
+        boolean surfaceTerrainReady(){return tile!=null&&!PredictionSurfaceRefinement.pending(tile)&&(tile.data()!=null&&tile.data().voxyTile!=null||axis==input.layout().cellAxis(key.lod()));}
     }
     private record Reclaim(PredictionTileKey key,int priority,double distance) { }
     static Result build(Input i) {
@@ -119,7 +119,7 @@ final class PredictionSchedulePreparation {
             var hint = new Hint(f.priority(false), f.priority(true), distance); hints.put(key, hint);
             if (i.pending().contains(key)) continue;
             boolean retry=f.retry();
-            if (retry && !f.defer(false) && (f.dirty || f.axis < f.target()))
+            if (retry && !f.defer(false) && (f.dirty || f.axis < f.target() || f.tile != null && PredictionSurfaceRefinement.pending(f.tile)))
                 work.add(new Request(key, false, hint.terrain(), distance));
             if (retry && !f.defer(true) && i.surfaceDesired().contains(key)
                     && f.surfaceTerrainReady() && !f.dirty && !i.surfaceReady().contains(key))

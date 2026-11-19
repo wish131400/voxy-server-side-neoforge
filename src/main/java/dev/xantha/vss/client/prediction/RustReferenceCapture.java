@@ -24,6 +24,13 @@ public final class RustReferenceCapture {
 
     public static void capture(Path directory, DimensionProfile profile, byte[] generator, byte[] registries,
                                ClientTerrainSampler context, int originX, int originZ) throws Exception {
+        try (var request = context.terrainRequest()) {
+            captureInRequest(directory, profile, generator, registries, context, originX, originZ);
+        }
+    }
+
+    private static void captureInRequest(Path directory, DimensionProfile profile, byte[] generator, byte[] registries,
+                                         ClientTerrainSampler context, int originX, int originZ) throws Exception {
         Files.createDirectories(directory);
         for (String color : List.of("grass", "foliage")) {
             Path target = directory.resolve(color + "-colormap.png");

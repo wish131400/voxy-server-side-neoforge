@@ -134,9 +134,56 @@ class LodRequestManagerDeferredProgressTest {
         Fixture f = new Fixture();
         field("sessionConfig").set(f.manager, config(false));
         f.defer(40, true);
-        assertEquals(1, f.drain(window(2, 1), 96));
+        assertEquals(1, f.drain(new RequestWindow(0, 1, 0, 0, 0, 0, 0), 96));
         assertFalse(f.allowGeneration[0]);
-        assertTrue(f.probes[0]);
+        assertFalse(f.probes[0]);
+    }
+
+    @Test
+    void readOnlyFallbackUsesSyncQuotaAndDoesNotRepeatCacheProbe() throws Exception {
+        Fixture f = new Fixture();
+        field("sessionConfig").set(f.manager, config(false));
+        long near = PositionUtil.packPosition(2, 0);
+        long far = PositionUtil.packPosition(40, 0);
+        for (long packed : new long[] {far, near}) {
+            int id = f.tracker.track(packed, false, true, false, 1_000_000_000L, f.now);
+            f.manager.onColumnNotGenerated(id);
+        }
+        assertEquals(0, f.drain(window(0, 2), 96), "probe slots cannot pay for NBT fallback");
+        assertEquals(2, f.queue.queuedEntries());
+        assertEquals(1, f.drain(new RequestWindow(1, 0, 0, 0, 0, 0, 0), 96));
+        assertEquals(near, f.positions[0]);
+        assertFalse(f.probes[0]);
+        assertFalse(f.allowGeneration[0]);
+        assertTrue(f.queue.contains(far));
+
+        int id = f.tracker.requestIdFor(near);
+        f.manager.onColumnNotGenerated(id);
+        assertEquals(0L, f.manager.requestTimestampFor(near), "only a full read miss settles the column");
+        assertFalse(f.queue.contains(near));
+        assertEquals(1, f.drain(new RequestWindow(0, 1, 0, 0, 0, 0, 0), 96));
+        assertEquals(far, f.positions[0]);
+        assertFalse(f.probes[0]);
+        assertFalse(f.allowGeneration[0]);
+        assertEquals(0, f.tracker.generationSize());
+    }
+
+    @Test
+    void disablingGenerationPreservesCandidatesAsReadOnlyRequests() throws Exception {
+        Fixture f = new Fixture();
+        long deferred = f.defer(3, true);
+        long active = PositionUtil.packPosition(40, 0);
+        int old = f.tracker.track(active, true, false, false, 1_000_000_000L, f.now);
+        assertFalse(f.manager.onSessionConfig(config(false)));
+        assertFalse(f.tracker.matches(old, active));
+        assertTrue(f.queue.contains(active));
+        assertTrue(f.queue.contains(deferred));
+        assertEquals(2, f.drain(new RequestWindow(1, 1, 0, 0, 0, 0, 0), 96));
+        assertArrayEquals(new long[] {deferred, active}, java.util.Arrays.copyOf(f.positions, 2));
+        for (int i = 0; i < 2; i++) {
+            assertFalse(f.allowGeneration[i]);
+            assertFalse(f.probes[i]);
+        }
     }
 
     @Test

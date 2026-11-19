@@ -53,7 +53,7 @@ class NbtTreePredictionTemplatesTest {
         var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 net.minecraft.resources.ResourceLocation.withDefaultNamespace("overworld"),42,-64,384,"noise","minecraft:overworld",1);
         var sampler=new ClientTerrainSampler(42,profile);
-        var level=new PredictionTemplateStampLevel(42,sampler,net.minecraft.world.level.block.Blocks.GRASS_BLOCK.defaultBlockState());
+        var level=new PredictionTemplateStampLevel(42,sampler,net.minecraft.world.level.block.Blocks.GRASS_BLOCK.defaultBlockState(),true);
         var world=NbtTreePredictionTemplatesMixin.class.getDeclaredMethod("vss$avoidLiveWorld",WorldGenLevel.class);
         var templates=NbtTreePredictionTemplatesMixin.class.getDeclaredMethod("vss$verifiedTreeTemplates",ServerLevel.class,FeaturePlaceContext.class);
         world.setAccessible(true);templates.setAccessible(true);

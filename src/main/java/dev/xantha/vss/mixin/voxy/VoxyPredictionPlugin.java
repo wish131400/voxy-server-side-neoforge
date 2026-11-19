@@ -62,6 +62,13 @@ public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
         return node.methods.stream().anyMatch(m -> m.name.equals(name) && m.desc.equals(desc));
     }
     @Override public boolean shouldApplyMixin(String target, String mixin) {
+        if (mixin.endsWith(".LithostitchedBiomeInjectorMixin")) {
+            try {
+                var node = MixinService.getService().getBytecodeProvider().getClassNode(target);
+                return node.methods.stream().anyMatch(m -> m.name.equals("applyBiomeInjectors")
+                        && org.objectweb.asm.Type.getArgumentTypes(m.desc).length >= 3);
+            } catch (Exception absent) { return false; }
+        }
         if (mixin.endsWith(".VoxyTraversalCapacityMixin") || mixin.endsWith(".VoxyTraversalQueueShaderMixin")) {
             if (capacity == null) {
                 try { capacity = supportsCapacity(name -> MixinService.getService().getBytecodeProvider().getClassNode(name.replace('/', '.'))); }
@@ -151,6 +158,8 @@ public final class VoxyPredictionPlugin implements IMixinConfigPlugin {
             "e525a19803d0589d9c2a7c03d7e797e67b0bd4489d063600801cffc8e812790e",
             "37eedd25cbbb473b74d026e99bf657688d1ba77202e69df4edb00d974cc3b039");
     @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) {
+        if(mixin.endsWith(".FreeTerraForgedPredictionDecorationMixin"))
+            dev.xantha.vss.compat.transform.FreeTerraForgedDecorationTransformer.instrument(node);
         if(mixin.endsWith(".PredictionVoxyNeighborSourceMixin"))
             dev.xantha.vss.compat.VoxyFaceData.nativeLayoutVerified=supportsFaceLayout(node);
     }

@@ -298,7 +298,7 @@ class PredictionNearFirstSchedulingTest {
             set(manager,"planning",pipeline);
             var before=new PredictionVoxyWorkPreparation.Input(manager.layout(),null,null,
                     0,80,0,1000,-64,384,512,0,0,Set.of(),Set.of(key),Set.of(),Set.of(),
-                    manager.renderSnapshot(),Map.of());
+                    manager.renderSnapshot(),Map.of(),0);
             assertTrue(pipeline.details.request(before));
             var residents=(Map<PredictionTileKey,PredictionTile>)get(manager,"ready");
             residents.put(key,tile(key,16,manager.layout()));
@@ -315,6 +315,36 @@ class PredictionNearFirstSchedulingTest {
             assertTrue(pipeline.details.request(before));
             invoke(manager,"publishVoxyWork",new Class[]{});
             assertTrue(((PredictionSurfaceQueue<PredictionTileKey>)get(manager,"visibleSurfaceWork")).isEmpty());
+        }
+    }
+
+    @Test @SuppressWarnings("unchecked")
+    void farDetailLeavesTheNextSlotForWaitingNearTerrainAndReleasesItAfterward() throws Exception {
+        try(var manager=manager(sampler(new AtomicInteger(),null,null),null,PredictionCpuBudget.fixed(4))) {
+            var pool=(ThreadPoolExecutor)get(manager,"executor");
+            pool.setMaximumPoolSize(4);pool.setCorePoolSize(4);
+            set(manager,"unifiedVoxy",true);
+            var near=key(0,0);var far=key(100,0);
+            ((Set<PredictionTileKey>)get(manager,"desiredKeys")).addAll(List.of(near,far));
+            ((Set<PredictionTileKey>)get(manager,"voxyDetailTargets")).addAll(List.of(near,far));
+            ((ArrayDeque<PredictionTileKey>)get(manager,"voxyDetailWork")).add(near);
+            var reserve=manager.getClass().getDeclaredMethod("tryReserveBuildSlots",PredictionTileKey.class,boolean.class,boolean.class);
+            reserve.setAccessible(true);
+            var slots=new ArrayList<AutoCloseable>();
+            try {
+                for(int i=0;i<3;i++) {
+                    var slot=(AutoCloseable)reserve.invoke(manager,far,false,false);
+                    assertNotNull(slot);slots.add(slot);
+                }
+                assertNull(reserve.invoke(manager,far,false,false),"far work cannot refill the reserved nearby slot");
+                var local=(AutoCloseable)reserve.invoke(manager,near,false,false);
+                assertNotNull(local,"near terrain still fits at the same global detail limit");slots.add(local);
+                local.close();
+                ((ArrayDeque<PredictionTileKey>)get(manager,"voxyDetailWork")).clear();
+                var distant=(AutoCloseable)reserve.invoke(manager,far,false,false);
+                assertNotNull(distant,"without waiting nearby work distant tasks can use every slot");slots.add(distant);
+            } finally {for(var slot:slots)slot.close();}
+            assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)get(manager,"activeDetailBuilds")).get());
         }
     }
 

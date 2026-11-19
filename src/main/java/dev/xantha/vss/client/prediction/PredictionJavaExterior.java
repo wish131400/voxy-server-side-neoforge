@@ -67,19 +67,25 @@ final class PredictionJavaExterior {
                 check(valid);
                 int bx=cx*cellWidth,bz=cz*cellWidth;
                 var work=workspace(bx,bz);
+                int first=Math.max(bottom,work.firstY()),end=Math.min(top,work.endY());
+                if (cx==Math.floorDiv(x,cellWidth) && cz==Math.floorDiv(z,cellWidth)
+                        && (top>work.endY() || top<=work.firstY())) {
+                    if(cacheRejectedRoofs)rejectedRoofs.get().put(x,z,top);
+                    return null;
+                }
                 boolean started=false;
                 try {
                     work.reset(false);
                     started=true;
                     work.initializeForFirstCellX();
                     work.advanceCellX(0);
-                    for(int cy=Math.floorDiv(top-1,cellHeight);cy>=Math.floorDiv(bottom,cellHeight);cy--) {
+                    for(int cy=Math.floorDiv(end-1,cellHeight);cy>=Math.floorDiv(first,cellHeight);cy--) {
                         check(valid);
                         int low=Math.max(bottom,cy*cellHeight),high=Math.min(top,(cy+1)*cellHeight);
                         boolean needed=false;
                         for(int y=low;y<high;y++)if(!occupied[y-bottom]){needed=true;break;}
                         if(!needed)continue;
-                        work.selectCellYZ(cy-minCell,0);
+                        work.selectCellYZ(cy-Math.floorDiv(work.firstY(),cellHeight),0);
                         for(int y=high-1;y>=low;y--) {
                             if(occupied[y-bottom])continue;
                             work.updateForY(y,(double)Math.floorMod(y,cellHeight)/cellHeight);
@@ -131,7 +137,7 @@ final class PredictionJavaExterior {
     /** Replays the vanilla column iterator, including cells above the requested roof. */
     private void replay(Work work,int x,int z,Probe probe,BooleanSupplier valid) {
         int height=noise.getCellHeight(),width=noise.getCellWidth();
-        int minCell=Math.floorDiv(noise.minY(),height),count=noise.height()/height;
+        int minCell=Math.floorDiv(work.firstY(),height),count=(work.endY()-work.firstY())/height;
         double fx=(double)Math.floorMod(x,width)/width,fz=(double)Math.floorMod(z,width)/width;
         boolean started=false;
         try {
@@ -141,6 +147,8 @@ final class PredictionJavaExterior {
             started=true;
             work.initializeForFirstCellX();
             work.advanceCellX(0);
+            // Probe counts absolute Y, including the air omitted by a shortened chunk.
+            while(probe.y>=work.endY())if(probe.test(net.minecraft.world.level.block.Blocks.AIR.defaultBlockState()))return;
             for(int cy=count-1;cy>=0;cy--) {
                 check(valid);work.selectCellYZ(cy,0);
                 for(int dy=height-1;dy>=0;dy--) {
@@ -218,6 +226,8 @@ final class PredictionJavaExterior {
         }
     }
     private static final class Work extends NoiseChunk {
+        int firstY() { return cellNoiseMinY * cellHeight(); }
+        int endY() { return (cellNoiseMinY + cellCountY) * cellHeight(); }
         // wrap() is called from NoiseChunk's constructor, before our initializers.
         private ArrayList<NodeReset> resets;
         private NodeReset ownReset;

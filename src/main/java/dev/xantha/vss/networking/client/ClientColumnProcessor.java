@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.client;
 
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.api.VoxelColumnData;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.config.VSSClientConfig;
@@ -34,7 +35,7 @@ final class ClientColumnProcessor {
     static final long MAX_QUEUED_BYTES = 32L * 1024L * 1024L;
     private static final int MAX_COLUMNS_PER_DRAIN = 64;
     private static final int MAX_SECTIONS_DISPATCHED_PER_DRAIN = 768;
-    private static final int MAX_SECTIONS_PER_COLUMN = 64;
+    private static final int MAX_SECTIONS_PER_COLUMN = VSSConstants.MAX_COLUMN_SECTIONS;
     private static final long TRANSFER_IDLE_TIMEOUT_NANOS = dev.xantha.vss.common.VSSConstants.COLUMN_QUEUE_IDLE_TIMEOUT_NANOS;
     private static final long DROP_WARN_INTERVAL_MS = 5000L;
 
@@ -191,10 +192,15 @@ final class ClientColumnProcessor {
             Registry<Biome> biomeRegistry) {
         ArrayList<VoxelColumnData.SectionData> decodedSections = new ArrayList<>();
         Set<Integer> sectionYs = new HashSet<>();
+        long decodedBytes = 0L;
         for (VoxelColumnS2CPayload part : column.parts()) {
             byte[] decompressed = part.decompressedSections();
             if (decompressed == null || decompressed.length == 0) {
                 throw new IllegalArgumentException("Empty serialized section body");
+            }
+            decodedBytes += decompressed.length;
+            if (decodedBytes > VSSConstants.MAX_COLUMN_BYTES) {
+                throw new IllegalArgumentException("Assembled LOD column exceeds byte limit");
             }
             FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(decompressed));
             try {

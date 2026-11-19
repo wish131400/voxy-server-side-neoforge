@@ -51,7 +51,8 @@ final class FreeTerraForgedLoadingReleasedTest {
             System.out.println("Released FTF grid/exterior/Voxy: "+sampler.densityCompilerDiagnostics());
             // Use a real forest registry and the Java/FTF environment path. No Rust handle exists.
             FarVanillaTags.bootstrap();
-            var models=new PredictionFarDecoration(sampler,true,8,()->true);
+            var models=new PredictionFarDecoration(sampler,true,8);
+            models.initialize(()->true);
             assertFalse(models.replaced.isEmpty(),models.initialization().toString());
             var service=new PredictionFarDecorations(sampler);
             // This test invokes far generation directly; policy distance is covered by manager regressions.

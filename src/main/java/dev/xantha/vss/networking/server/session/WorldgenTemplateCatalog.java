@@ -3,6 +3,7 @@ package dev.xantha.vss.networking.server.session;
 import com.google.gson.JsonObject;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.common.worldgen.StructureTemplateDigest;
+import dev.xantha.vss.common.worldgen.WorldgenTemplateResources;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -45,6 +46,22 @@ public final class WorldgenTemplateCatalog {
                 catalogHash.update((id + "\n" + digest.sha256() + "\n" + digest.bytes() + "\n").getBytes(StandardCharsets.UTF_8));
             } catch (IOException | RuntimeException failure) {
                 VSSLogger.debug("VSS template identity unavailable: " + id + ": " + failure);
+            }
+        }
+        // FTF's original template manager consumes full resource paths, including its plural directory.
+        for (var resource : resources.listResources("structures", id -> WorldgenTemplateResources.freeTerraForged(id)
+                && id.getPath().endsWith(".nbt")).entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+            ResourceLocation id = WorldgenTemplateResources.key(resource.getKey());
+            try (var input = resource.getValue().open()) {
+                var digest = StructureTemplateDigest.inspect(input, scratch);
+                entries.put(id, new Entry(digest, resource.getValue()));
+                var descriptor = new JsonObject();
+                descriptor.addProperty("sha256", digest.sha256());
+                descriptor.addProperty("bytes", digest.bytes());
+                manifest.add(id.toString(), descriptor);
+                catalogHash.update((id + "\n" + digest.sha256() + "\n" + digest.bytes() + "\n").getBytes(StandardCharsets.UTF_8));
+            } catch (IOException | RuntimeException failure) {
+                VSSLogger.debug("VSS feature template identity unavailable: " + id + ": " + failure);
             }
         }
         String identity = java.util.HexFormat.of().formatHex(catalogHash.digest());

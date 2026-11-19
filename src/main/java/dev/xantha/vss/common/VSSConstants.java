@@ -4,7 +4,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class VSSConstants {
     public static final String MOD_ID = "vss";
-    public static final int PROTOCOL_VERSION = 53;
+    public static final int PROTOCOL_VERSION = 62;
 
     public static final int CAPABILITY_VOXEL_COLUMNS = 1;
     public static final int CAPABILITY_ZSTD_COLUMNS = 1 << 1;
@@ -13,6 +13,11 @@ public final class VSSConstants {
     public static final int CAPABILITY_STRICT_LOD_ORDER = 1 << 3;
     public static final int CAPABILITY_QUEUED_ACKNOWLEDGEMENTS = 1 << 4;
     public static final long COLUMN_QUEUE_IDLE_TIMEOUT_NANOS = 120_000_000_000L;
+    /** All distinct signed-byte section heights supported by the column format. */
+    public static final int MAX_COLUMN_SECTIONS = Byte.MAX_VALUE - Byte.MIN_VALUE + 1;
+    /** Whole columns may be taller than one bounded network fragment. */
+    public static final int MAX_COLUMN_BYTES = 8 * 1024 * 1024;
+    public static final int MAX_COLUMN_PART_BYTES = 2 * 1024 * 1024;
     public static final int MAX_BATCH_CHUNK_REQUESTS = 1024;
     public static final int MAX_BATCH_RESPONSES = 4096;
     public static final int MAX_DIRTY_COLUMN_POSITIONS = 10240;

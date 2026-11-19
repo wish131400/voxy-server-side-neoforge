@@ -1,5 +1,6 @@
 package dev.xantha.vss.networking.client;
 
+import dev.xantha.vss.common.VSSConstants;
 import dev.xantha.vss.common.PositionUtil;
 import dev.xantha.vss.common.VSSLogger;
 import dev.xantha.vss.compat.ModCompat;
@@ -26,7 +27,7 @@ import net.minecraft.world.level.Level;
 final class ClientLodPresenceCache {
     private static final int FILE_MAGIC = 0x56535043;
     // Versions before 3 did not store the section manifest needed to detect partial columns.
-    private static final int FILE_VERSION = 4;
+    private static final int FILE_VERSION = 5;
     private static final int MAX_SCOPES = 64;
     private static final int MAX_DIMENSIONS_PER_SCOPE = 16;
     private static final int MAX_REGIONS_PER_DIMENSION = 262_144;
@@ -334,13 +335,18 @@ final class ClientLodPresenceCache {
         }
         loaded = true;
         lastSaveNanos = System.nanoTime();
-        Path path = cachePath();
+        readCache(cachePath());
+    }
+
+    private static void readCache(Path path) {
         if (!Files.isRegularFile(path)) {
             return;
         }
         try (InputStream fileIn = Files.newInputStream(path);
              DataInputStream in = new DataInputStream(fileIn)) {
-            if (in.readInt() != FILE_MAGIC || in.readInt() != FILE_VERSION) {
+            int magic = in.readInt();
+            int fileVersion = in.readInt();
+            if (magic != FILE_MAGIC || (fileVersion != 4 && fileVersion != FILE_VERSION)) {
                 return;
             }
             int scopeCount = Math.min(Math.max(0, in.readInt()), MAX_SCOPES);
@@ -359,8 +365,8 @@ final class ClientLodPresenceCache {
                         for (int c = 0; c < columnCount; c++) {
                             int slot = in.readUnsignedShort();
                             long timestamp = in.readLong();
-                            int sectionCount = in.readUnsignedByte();
-                            if (sectionCount > 64) {
+                            int sectionCount = fileVersion == 4 ? in.readUnsignedByte() : in.readUnsignedShort();
+                            if (sectionCount > VSSConstants.MAX_COLUMN_SECTIONS) {
                                 throw new IllegalArgumentException("Invalid cached section manifest length");
                             }
                             byte[] sectionManifest = new byte[sectionCount];
@@ -512,7 +518,7 @@ final class ClientLodPresenceCache {
                                     out.writeShort(slot);
                                     out.writeLong(timestamp);
                                     byte[] sectionManifest = sectionManifests[slot];
-                                    out.writeByte(sectionManifest.length);
+                                    out.writeShort(sectionManifest.length);
                                     out.write(sectionManifest);
                                 }
                             }
@@ -553,7 +559,7 @@ final class ClientLodPresenceCache {
         if (sectionYs == null || sectionYs.length == 0) {
             return new byte[0];
         }
-        if (sectionYs.length > 64) {
+        if (sectionYs.length > VSSConstants.MAX_COLUMN_SECTIONS) {
             throw new IllegalArgumentException("Too many sections in LOD presence manifest");
         }
         int[] sorted = Arrays.copyOf(sectionYs, sectionYs.length);

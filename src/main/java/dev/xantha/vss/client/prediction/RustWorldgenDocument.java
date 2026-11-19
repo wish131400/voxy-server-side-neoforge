@@ -168,6 +168,7 @@ final class RustWorldgenDocument {
     private static JsonObject snapshot(JsonObject generator, JsonObject registries, ClientTerrainSampler context,
             SharedInputs shared, boolean compact) {
         shared.prepare();
+        generator = PredictionExecutionPlan.resolve(generator, registries).nativeGenerator(generator);
         // Fields below are read-only inputs. Copy the top-level object only; nested generator
         // and registry trees are neither mutated here nor by JNI (which receives a string).
         JsonObject result = new JsonObject();

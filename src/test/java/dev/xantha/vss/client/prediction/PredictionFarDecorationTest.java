@@ -66,6 +66,7 @@ class PredictionFarDecorationTest {
         int radius=config.predictionExactDistanceBlocks;
         config.predictionFarDecorations=true;config.predictionExactDistanceBlocks=4096;
         var sampler=org.mockito.Mockito.mock(RustTerrainSampler.class);
+        org.mockito.Mockito.when(sampler.supportsFarDecorations()).thenReturn(true);
         org.mockito.Mockito.when(sampler.profile()).thenReturn(new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 Level.OVERWORLD.location(),42,-64,384,"noise","minecraft:overworld",1));
         org.mockito.Mockito.when(sampler.decorationContext()).thenReturn(sampler);
@@ -130,6 +131,7 @@ class PredictionFarDecorationTest {
         boolean enabled=config.predictionFarDecorations;int radius=config.predictionExactDistanceBlocks,workers=config.predictionRefinementWorkers;
         config.predictionFarDecorations=true;config.predictionExactDistanceBlocks=4096;config.predictionRefinementWorkers=4;
         var sampler=org.mockito.Mockito.mock(RustTerrainSampler.class);
+        org.mockito.Mockito.when(sampler.supportsFarDecorations()).thenReturn(true);
         org.mockito.Mockito.when(sampler.profile()).thenReturn(new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
                 Level.OVERWORLD.location(),42,-64,384,"noise","minecraft:overworld",1));
         org.mockito.Mockito.when(sampler.decorationContext()).thenReturn(sampler);
@@ -156,17 +158,17 @@ class PredictionFarDecorationTest {
             assertEquals(keys.get(1),queue.peekFirst(),"Uncovered far terrain gets templates before a nearer tile fills slow fallback");
             var priority=PredictionTileManager.class.getDeclaredMethod("workPriority",PredictionTileManager.PredictionTileKey.class,boolean.class);priority.setAccessible(true);
             assertTrue((int)priority.invoke(manager,keys.get(1),true)<(int)priority.invoke(manager,keys.get(0),true));
-            var reserve=PredictionTileManager.class.getDeclaredMethod("tryReserveBuildSlots",boolean.class,boolean.class);reserve.setAccessible(true);
+            var reserve=PredictionTileManager.class.getDeclaredMethod("tryReserveBuildSlots",PredictionTileManager.PredictionTileKey.class,boolean.class,boolean.class);reserve.setAccessible(true);
             // Pool size does not override the CPU-derived refinement allowance.
             int surfaceLimit=(int)call(manager,"refinementLimit");
             int fallbackLimit=Math.max(1,surfaceLimit-1);
-            for(int i=0;i<fallbackLimit;i++) {var slot=(AutoCloseable)reserve.invoke(manager,true,true);assertNotNull(slot);held.add(slot);}
-            assertNull(reserve.invoke(manager,true,true),"Fallback must respect the effective surface allowance");
+            for(int i=0;i<fallbackLimit;i++) {var slot=(AutoCloseable)reserve.invoke(manager,keys.get(0),true,true);assertNotNull(slot);held.add(slot);}
+            assertNull(reserve.invoke(manager,keys.get(0),true,true),"Fallback must respect the effective surface allowance");
             if(surfaceLimit==1) {
-                assertNull(reserve.invoke(manager,true,false),"A single surface worker cannot run two jobs at once");
+                assertNull(reserve.invoke(manager,keys.get(1),true,false),"A single surface worker cannot run two jobs at once");
                 var fallback=held.remove(0);fallback.close();fallback.close();
             }
-            var coverage=(AutoCloseable)reserve.invoke(manager,true,false);assertNotNull(coverage);held.add(coverage);
+            var coverage=(AutoCloseable)reserve.invoke(manager,keys.get(1),true,false);assertNotNull(coverage);held.add(coverage);
             for(var slot:held) {slot.close();slot.close();}held.clear();
             assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)field("activeFarCompletions").get(manager)).get());
             assertEquals(0,((java.util.concurrent.atomic.AtomicInteger)field("activeSurfaceBuilds").get(manager)).get());
@@ -230,7 +232,8 @@ class PredictionFarDecorationTest {
         };
         var configured=new net.minecraft.world.level.levelgen.feature.ConfiguredFeature<>(feature,
                 net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.INSTANCE);
-        var far=new PredictionFarDecoration(sampler,false,4,()->true);
+        var far=new PredictionFarDecoration(sampler,false,4);
+        far.initialize(()->true);
         var capture=PredictionFarDecoration.class.getDeclaredMethod("capture",net.minecraft.world.level.levelgen.feature.ConfiguredFeature.class);
         capture.setAccessible(true);
         @SuppressWarnings("unchecked") var models=(java.util.List<PredictionFarDecoration.Template>)capture.invoke(far,configured);

@@ -1,5 +1,6 @@
 package dev.xantha.vss.common.processing;
 
+import dev.xantha.vss.common.VSSConstants;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.zip.CRC32C;
@@ -142,6 +143,9 @@ public record EncodedColumnData(
     private static int[] immutableSectionYs(int[] sectionYs) {
         if (sectionYs == null || sectionYs.length == 0) {
             return new int[0];
+        }
+        if (sectionYs.length > VSSConstants.MAX_COLUMN_SECTIONS) {
+            throw new IllegalArgumentException("Too many sections in column manifest: " + sectionYs.length);
         }
         int[] copy = Arrays.copyOf(sectionYs, sectionYs.length);
         for (int i = 0; i < copy.length; i++) {

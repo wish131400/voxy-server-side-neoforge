@@ -2,8 +2,6 @@ package dev.xantha.vss.client.prediction;
 
 import dev.xantha.vss.common.worldgen.FreeTerraForgedVariant;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.util.IdentityHashMap;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.NoiseRouter;
@@ -24,24 +22,20 @@ final class FreeTerraForgedDensity {
     static NoiseRouter map(Object context, NoiseRouter router) throws ReflectiveOperationException {
         if (context == null) return router;
         var cells = new FreeTerraForgedCells(context);
-        if (cells.tiled()) FreeTerraForgedNativeFilters.register(context);
         var loader = context.getClass().getClassLoader();
         var variant = FreeTerraForgedVariant.fromClass(context.getClass());
+        // UTF's tile generator keeps its own complete erosion and water filters.
+        if (cells.tiled() && variant.usesNativeTileFilters()) FreeTerraForgedNativeFilters.register(context);
         var cellType = loader.loadClass(variant.worldgenClass("densityfunction.CellSampler"));
         var fieldMethod = cellType.getMethod("field");
-        var lookup = context.getClass().getField("lookup").get(context);
-        Object heightmap = lookup.getClass().getMethod("getHeightmap").invoke(lookup);
-        var handles = MethodHandles.publicLookup();
+        var fields = new FreeTerraForgedFieldReader(context, fieldMethod.getReturnType(), cells.tiled());
         var mapped = new IdentityHashMap<DensityFunction, DensityFunction>();
         return router.mapAll(function -> {
             if (!cellType.isInstance(function)) return function;
             return mapped.computeIfAbsent(function, original -> {
                 try {
                     Object field = fieldMethod.invoke(original);
-                    MethodHandle read = handles.unreflect(fieldMethod.getReturnType().getMethod(cells.tiled() ? "read" : "readFinite",
-                            loader.loadClass(variant.worldgenClass("cell.Cell")), heightmap.getClass()))
-                            .bindTo(field).asType(MethodType.methodType(float.class, Object.class, Object.class));
-                    return new ExactCell(original, heightmap, cells, read);
+                    return new ExactCell(original, fields.heightmap, cells, fields.bind(field));
                 } catch (ReflectiveOperationException failure) {
                     throw new IllegalStateException("FreeTerraForged cell-field API unavailable", failure);
                 }

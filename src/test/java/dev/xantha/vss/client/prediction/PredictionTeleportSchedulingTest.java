@@ -99,7 +99,7 @@ class PredictionTeleportSchedulingTest {
         var near=key(2,0);var middle=key(16,0);var far=key(60,0);
         var input=new PredictionVoxyWorkPreparation.Input(layout,null,null,0,80,0,1000,-64,320,768,0,0,
                 Set.of(near,middle,far),Set.of(),Set.of(),Set.of(),
-                new RenderSnapshot(Level.OVERWORLD,layout,Map.of(near,tile(layout,near,32)),Map.of()),Map.of());
+                new RenderSnapshot(Level.OVERWORLD,layout,Map.of(near,tile(layout,near,32)),Map.of()),Map.of(),0);
         assertEquals(List.of(middle,near,far),PredictionVoxyWorkPreparation.build(input).terrain());
     }
 

@@ -7,6 +7,7 @@ import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.DynamicOps;
 import dev.xantha.vss.common.VSSLogger;
+import dev.xantha.vss.common.worldgen.BlueprintSnapshotEncoding;
 import dev.xantha.vss.common.worldgen.WorldgenJson;
 import java.lang.reflect.Field;
 import net.minecraft.core.RegistryAccess;
@@ -94,10 +95,17 @@ final class BlueprintBiomeSnapshot {
             section.addProperty("slices_seed", (Long) field(type, "slicesSeed").get(source));
             section.addProperty("slices_zoom_seed", (Long) field(type, "slicesZoomSeed").get(source));
 
-            int bytes = WorldgenJson.bytes(section).length;
+            byte[] raw = WorldgenJson.bytes(section);
+            int bytes = raw.length;
             if (bytes > MAX_SECTION_BYTES) {
+                JsonObject packed = BlueprintSnapshotEncoding.pack(raw);
+                if (packed != null) {
+                    VSSLogger.debug("VSS packed Blueprint biome slices: " + slices.length + " slices, "
+                            + bytes + " B expanded, " + packed.get("deflate_v1").getAsString().length() + " encoded characters");
+                    return packed;
+                }
                 VSSLogger.debug("VSS Blueprint slice snapshot too large: " + slices.length
-                        + " slices, " + (bytes / 1024 / 1024) + " MiB; prediction stays unavailable");
+                        + " slices, " + bytes + " B; prediction stays unavailable");
                 return null;
             }
             VSSLogger.debug("VSS Blueprint slice snapshot: " + slices.length

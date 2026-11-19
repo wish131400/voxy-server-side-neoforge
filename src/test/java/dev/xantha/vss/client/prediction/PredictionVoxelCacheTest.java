@@ -115,16 +115,90 @@ class PredictionVoxelCacheTest {
             for(int invalid:new int[]{0,-1,3,PredictionVoxelCache.FEATURE_PAGE_SIZE+1,Integer.MAX_VALUE}) {
                 var corrupt=raw.clone();java.nio.ByteBuffer.wrap(corrupt).putInt(pageAt,invalid);
                 try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(corrupt))) {
-                    assertThrows(java.io.IOException.class,()->PredictionVoxelCache.read(in,key,3,identity,null,disk,11));
+                    assertThrows(java.io.IOException.class,()->PredictionVoxelCache.read(in,key,3,identity,null,disk,PredictionVoxelCache.VERSION));
                 }
             }
-            var legacy=new byte[raw.length-4];System.arraycopy(raw,0,legacy,0,pageAt);
-            System.arraycopy(raw,pageAt+4,legacy,pageAt,raw.length-pageAt-4);
+            try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(Arrays.copyOf(raw,raw.length-1)))) {
+                var restored=PredictionVoxelCache.read(in,key,3,identity,null,disk,11);
+                assertEquals(original.data().voxyTile.features(),restored.voxels().features());
+                assertNull(restored.refinement());
+                assertArrayEquals(PredictionVoxelCache.contentIdentity(restored,0,new byte[32],null,disk),restored.cacheIdentity());
+            }
+            var legacy=new byte[raw.length-5];System.arraycopy(raw,0,legacy,0,pageAt);
+            System.arraycopy(raw,pageAt+4,legacy,pageAt,raw.length-pageAt-5);
             try(var in=new java.io.DataInputStream(new java.io.ByteArrayInputStream(legacy))) {
                 var restored=PredictionVoxelCache.read(in,key,3,identity,null,disk,10);
                 assertEquals(original.data().voxyTile.features(),restored.voxels().features());
                 assertEquals(-1,in.read());
             }
+        }
+    }
+
+    @Test void stagedVoxelsRestoreHaloProgressAndRejectLateLowerQualityWrites() throws Exception {
+        var original=tile(key,8,false);
+        var progress=new ClientColumnSample[100];
+        Arrays.fill(progress,PredictionSurfaceRefinement.basic(original.samples()[0]));
+        // Completion in the halo is invisible in the cropped samples, but must survive reload.
+        progress[0]=original.samples()[0];original.data().surfaceRefinement=progress;
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            assertTrue(disk.writeVoxelsLater(lease,original,3,identity).get(5,TimeUnit.SECONDS));
+            var restored=disk.readVoxels(lease,key,3,identity).restore(2,false);
+            assertTrue(PredictionSurfaceRefinement.pending(restored));
+            assertArrayEquals(progress,restored.data().surfaceRefinement);
+            assertFalse(restored.data().surfaceRefinement[0].surfacePending());
+            assertTrue(restored.data().surfaceRefinement[1].surfacePending());
+            var regressed=tile(key,8,false);
+            regressed.data().surfaceRefinement=progress.clone();
+            regressed.data().surfaceRefinement[0]=progress[1];
+            assertFalse(disk.writeVoxelsLater(lease,regressed,3,identity).get(5,TimeUnit.SECONDS));
+        }
+    }
+
+    @Test void warmRestoreKeepsTerrainFromAProvisionalDecorationTile() throws Exception {
+        var original = tile(key,8,true);
+        var voxels = original.data().voxyTile;
+        original.data().voxyTile = new PredictionVoxySource.Tile(key,voxels.baseX(),voxels.baseZ(),voxels.span(),
+                voxels.axis(),voxels.step(),voxels.columns(),voxels.features(),voxels.terrainBytes(),true,1,null,true);
+        var window = new PredictionDecorationRange(true,8192,0,0);
+        var saved = PredictionVoxelCache.persistable(original,window);
+        try (var disk = new PredictionDiskCache(directory,77); var lease = disk.lease(diskKey())) {
+            assertTrue(disk.writeVoxelsLater(lease,saved,3,identity).get(5,TimeUnit.SECONDS));
+        }
+        assertNull(original.data().cacheContentIdentity);
+        assertEquals(2,original.data().voxyTile.features().size());
+        try (var disk = new PredictionDiskCache(directory,77); var lease = disk.lease(diskKey())) {
+            var restored = disk.readVoxels(lease,key,3,identity).restore(2,false);
+            assertArrayEquals(voxels.columns(),restored.data().voxyTile.columns());
+            assertArrayEquals(original.heights(),restored.heights());
+            assertArrayEquals(original.groundHeights(),restored.groundHeights());
+            assertEquals(List.of(voxels.features().get(0)),restored.data().voxyTile.features());
+            assertFalse(restored.data().voxyTile.surfaceComplete());
+            assertFalse(PredictionSurfaceRefinement.pending(restored));
+        }
+    }
+
+    @Test void sameAxisRestorePrefersFinishedTerrainOverCompletedDecoration() {
+        var resident = tile(key,8,true);
+        resident.data().surfaceRefinement = new ClientColumnSample[100];
+        Arrays.fill(resident.data().surfaceRefinement,PredictionSurfaceRefinement.basic(resident.samples()[0]));
+        var complete = tile(key,8,false);
+        var cached = PredictionVoxelCache.Data.snapshot(complete);
+        assertTrue(PredictionVoxelCache.improves(cached,resident));
+        assertFalse(PredictionVoxelCache.improves(PredictionVoxelCache.Data.snapshot(resident),complete));
+        var restored = cached.restore(2,false,resident);
+        assertFalse(PredictionSurfaceRefinement.pending(restored));
+        assertTrue(restored.data().voxyTile.surfaceComplete());
+    }
+
+    @Test void completedCroppedGridOutranksNearlyCompleteHaloAtTheSameResolution() throws Exception {
+        try(var disk=new PredictionDiskCache(directory,77);var lease=disk.lease(diskKey())) {
+            assertTrue(disk.writeVoxelsLater(lease,tile(key,8,false),3,identity).get(5,TimeUnit.SECONDS));
+            var pending=tile(key,8,false);
+            pending.data().surfaceRefinement=new ClientColumnSample[100];
+            Arrays.fill(pending.data().surfaceRefinement,pending.samples()[0]);
+            pending.data().surfaceRefinement[0]=PredictionSurfaceRefinement.basic(pending.samples()[0]);
+            assertFalse(disk.writeVoxelsLater(lease,pending,3,identity).get(5,TimeUnit.SECONDS));
+            assertFalse(PredictionSurfaceRefinement.pending(disk.readVoxels(lease,key,3,identity).restore(2,false)));
         }
     }
 

@@ -14,6 +14,33 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class ClientCaptureExtractorTest {
+    @Test void captureReleasesTerrainWorkspaceAfterSuccessAndCancellation() {
+        var base = sampler();
+        for (boolean cancel : new boolean[]{false, true}) {
+            boolean[] active = {false};
+            int[] columns = {0};
+            var scoped = new ClientTerrainSampler(42L, base.profile()) {
+                @Override SamplingScope terrainRequest() {
+                    assertFalse(active[0]); active[0] = true;
+                    return () -> active[0] = false;
+                }
+                @Override public ClientColumnSample sample(int x, int z) {
+                    assertTrue(active[0], "capture metadata must use a task-owned workspace");
+                    columns[0]++;
+                    if (cancel) throw new java.util.concurrent.CancellationException();
+                    return base.sample(x, z);
+                }
+            };
+            if (cancel) assertThrows(java.util.concurrent.CancellationException.class,
+                    () -> ClientCaptureExtractor.extractAll(5, -7, null, scoped));
+            else {
+                assertEquals(256, ClientCaptureExtractor.extractAll(5, -7, null, scoped).length);
+                assertEquals(256, columns[0]);
+            }
+            assertFalse(active[0], "capture completion or cancellation must release bound rules");
+        }
+    }
+
     @BeforeAll
     static void bootstrap() {
         ClientTerrainSamplerTest.bootstrapMinecraft();

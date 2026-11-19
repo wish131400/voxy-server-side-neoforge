@@ -11,7 +11,7 @@ final class PredictionVoxyWorkPreparation {
                  int surfaceRadius, long revision, long navigation,
                  Set<PredictionTileKey> targets, Set<PredictionTileKey> surfaces,
                  Set<PredictionTileKey> surfaceReady, Set<PredictionTileKey> dirty,
-                 RenderSnapshot residents, Map<PredictionTileKey,Integer> bands) {
+                 RenderSnapshot residents, Map<PredictionTileKey,Integer> bands, int farRadius) {
         int band(PredictionTileKey key) {
             if (PredictionWorkOrder.scoped(key,layout,focus)) return PredictionWorkView.VISIBLE;
             // Native requests outlive a planning snapshot. Rank against the current projection.
@@ -28,8 +28,9 @@ final class PredictionVoxyWorkPreparation {
             if (key.lod()<0 || key.lod()>=input.layout().levelCount()) continue;
             var tile=input.residents().tiles().get(key);
             boolean dirty=input.dirty().contains(key), detail=input.targets().contains(key);
-            boolean needsTerrain=detail && (tile==null || dirty || tile.cellAxis()<input.layout().cellAxis(key.lod()));
-            boolean needsSurface=tile!=null && !dirty && !input.surfaceReady().contains(key)
+            boolean needsTerrain=detail && (tile==null || dirty || tile.cellAxis()<input.layout().cellAxis(key.lod()) || PredictionSurfaceRefinement.pending(tile));
+            boolean farPreview=tile!=null && PredictionFarPolicy.preview(tile.data().voxyTile,input.x(),input.z(),input.farRadius());
+            boolean needsSurface=tile!=null && (!PredictionSurfaceRefinement.pending(tile) || farPreview) && !dirty && !input.surfaceReady().contains(key)
                     && (input.surfaces().contains(key) || detail && PredictionWorkOrder.surfaceEligible(key,
                         input.layout(),input.view(),input.focus(),input.x(),input.y(),input.z(),
                         input.surfaceRadius(),input.pixels(),input.minY(),input.maxY()));
@@ -37,7 +38,8 @@ final class PredictionVoxyWorkPreparation {
             int band=input.band(key);
             double distance=PredictionWorkOrder.distanceSquared(key,input.layout(),input.x(),input.z());
             var ranked=new Ranked(key,band,PredictionWorkOrder.coveragePriority(distance,
-                    tile==null ? 0 : tile.cellAxis(),false,0),distance);
+                    tile==null ? 0 : tile.cellAxis(),false,0,
+                    needsTerrain && PredictionWorkOrder.nearbyVisibleDetail(key,input.layout(),distance,band)),distance);
             if(needsTerrain)terrain.add(ranked);
             if(needsSurface && band<=PredictionWorkView.BUFFER)surfaces.add(ranked);
         }

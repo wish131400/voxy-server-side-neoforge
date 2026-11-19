@@ -9,6 +9,11 @@ import json
 import re
 from pathlib import Path
 import zipfile
+from core_affinity import verify_core_affinity
+from high_world_columns import verify_high_world_columns
+from session_block_mappings import verify_session_block_mappings
+from runtime_worldgen import verify_runtime_worldgen
+from staged_worldgen import verify_staged_worldgen
 
 
 def class_references(data):
@@ -113,6 +118,11 @@ def verify(jar, platform, build_id, source):
             raise ValueError(message)
 
     with zipfile.ZipFile(jar) as archive:
+        verify_runtime_worldgen(archive, class_references)
+        verify_core_affinity(archive, class_references)
+        verify_high_world_columns(archive)
+        verify_session_block_mappings(archive, class_references)
+        verify_staged_worldgen(archive, class_references)
         require(archive.testzip() is None, "Corrupt JAR")
         names = set(archive.namelist())
         manifest = archive.read("META-INF/MANIFEST.MF").decode().replace("\r\n ", "")
@@ -136,6 +146,16 @@ def verify(jar, platform, build_id, source):
                 require(symbol.encode() in data, "Missing reference: " + name + ": " + symbol)
             return data
 
+        check_class("config/VSSClientConfig", "predictionWorkerThreads", "custom")
+        check_class("client/prediction/PredictionPerformanceProfile", "CUSTOM", "customWorkers", "workers")
+        check_class("client/prediction/PredictionTileManager", "refreshWorkerAllocation", "setCorePoolSize", "setMaximumPoolSize")
+        check_class("client/prediction/PredictionMemoryBudget", "buildLimit", "workers")
+        check_class("client/prediction/PredictionCpuBudget", "workers")
+        check_class("client/VSSPredictionThreadOptions", "registerPair", "registerSodium08", "changed")
+        check_class("client/VSSVoxyOptionsIntegration", "prediction_worker_threads", "registerPair")
+        for hook in ("LegacyPredictionThreadOptionsMixin", "SodiumPredictionThreadOptionsMixin"):
+            check_class("mixin/client/" + hook, "changed")
+            require("client." + hook in archive.read("vss.compat.mixins.json").decode(), "Thread UI hook unregistered: " + hook)
         check_class("mixin/client/FreeTerraForgedPredictionOreMixin", "FeatureStampLevel", "activation")
         require("client.FreeTerraForgedPredictionOreMixin" in archive.read("vss.compat.mixins.json").decode(),
                 "FTF non-ore compatibility is not registered")
@@ -151,12 +171,30 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionFarPlacementCount", "java/lang/invoke/MethodHandle", "ClassValue")
         count_refs = class_references(scatter)
         require(any(ref[:2] == (prefix + "PredictionFarPlacementCount", "sample")
-                    for (method, _), entries in count_refs.items() if method == "parsePlaced" for ref in entries),
+                    for (method, _), entries in count_refs.items() if method == "parsePlacedNew" for ref in entries),
                 "Template count still executes live-world placement wrappers")
         references = class_references(scatter)
         require(any(ref[0] == prefix + "PredictionFarDecoration" and ref[1] == "densityPlacements"
-                    for (method, _), entries in references.items() if method == "generate" for ref in entries),
+                    for (method, _), entries in references.items() if method == "selectPage" for ref in entries),
                 "Far decoration still caps biome density at one candidate per cell")
+        # Validate the integrated entry points and shared work, not unused pool symbols.
+        for cls, method, owner, called in [
+            ("ClientWorldgenProfileDecoder$Session", "decode", "PredictionExecutionPlan", "javaSampler"),
+            ("TerraBlenderBackend", "open", "PredictionExecutionPlan", "javaSampler"),
+            ("PredictionExecutionPlan", "javaSampler", "ClientTerrainSampler", "stagedSurface"),
+            ("PredictionExecutionPlan", "javaSampler", "PredictionSurfaceTerrainSampler", "<init>"),
+            ("PredictionSurfaceTerrainSampler", "<init>", "PredictionChunkTerrain", "<init>"),
+            ("PredictionSurfaceTerrainSampler", "refineSurfaceChunk", "PredictionSurfaceStage", "refineChunk"),
+            ("RustTerrainSampler", "refineSurfaceChunk", "PredictionSurfaceStage", "refineChunk"),
+            ("PredictionFarDecoration", "generate", "PredictionSharedCache", "get"),
+            ("PredictionFarDecoration", "rotated", "PredictionSharedCache", "get"),
+            ("PredictionFarDecoration", "parsePlacedNew", "PredictionFarPlacementCount", "distantDensity"),
+            ("PredictionVoxySource", "build", "PredictionVoxyColumns", "retain")]:
+            refs = class_references(archive.read(prefix + cls + ".class"))
+            require(any(ref[:2] == (prefix + owner, called)
+                        for (declared, _), entries in refs.items()
+                        if declared == method
+                        for ref in entries), "Missing executed far/surface call: " + cls + "." + method + " -> " + called)
         for cls,method,owner,called in [
             ("PredictionVegetation","generate","PredictionBiomePruning","job"),
             ("PredictionVegetation","generate","PredictionBiomePruning$Job","excludes"),
@@ -184,7 +222,33 @@ def verify(jar, platform, build_id, source):
                     "Forge server-list compatibility still requires a client installation")
         check_class("common/worldgen/FreeTerraForgedRuntime", "TerraForgedChunkGenerator", "biomeReplacementConfig", "contributionRevision", "initializeEpoch")
         check_class("client/prediction/FreeTerraForgedCells", "getFilteredChunk", "getPaddedCell", "provideAtChunk", "releaseTileCache")
-        check_class("client/prediction/FreeTerraForgedDensity", "FreeTerraForgedCells", "readFinite")
+        check_class("common/worldgen/FreeTerraForgedVariant", "ultraterraforged", "ULTRA", "singleArgumentCellFields", "usesNativeTileFilters")
+        check_class("client/prediction/FreeTerraForgedFieldReader", "readFinite", "read", "singleArgumentCellFields", "dropArguments")
+        check_class("client/prediction/FreeTerraForgedDensity", "FreeTerraForgedCells", "FreeTerraForgedFieldReader")
+        check_class("client/prediction/FreeTerraForgedWater", "waterLevel", "waterY")
+        check_class("client/prediction/FreeTerraForgedSurfaceRules", "pointRules", "preview", "ACTIVE", "apply")
+        check_class("client/prediction/FreeTerraForgedSurfaceRules$1", "provideChunk")
+        check_class("client/prediction/FreeTerraForgedTerrainSampler", "FreeTerraForgedSurfaceRules", "preview")
+        for name in ["SurfaceRulesContextAccessor", "UltraTerraForgedPredictionNearGroundMixin", "UltraTerraForgedPredictionCellConditionMixin"]:
+            check_class("mixin/client/" + name)
+            require("client." + name in archive.read("vss.compat.mixins.json").decode(), "UTF preview hook missing: " + name)
+        check_class("client/prediction/ClientSurfaceResolver", "WORKERS_PER_THREAD", "requestActive", "request")
+        check_class("client/prediction/ClientTerrainSampler", "terrainRequest")
+        check_class("client/prediction/PredictionTileManager", "terrainRequest")
+        check_class("client/prediction/ClientCaptureExtractor", "terrainRequest", "extractInRequest")
+        check_class("client/prediction/RustReferenceCapture", "terrainRequest", "captureInRequest")
+        check_class("client/prediction/FreeTerraForgedExteriorOrder", "FreeTerraForgedVariant", "NoiseSampler")
+        check_class("client/prediction/FreeTerraForgedPredictionTasks", "WeakHashMap", "containsKey", "runAsync", "REGISTERING", "computeEntry", "register")
+        check_class("mixin/client/UltraTerraForgedPredictionTileCacheMixin", "computeEntry", "provide", "queue")
+        require("client.UltraTerraForgedPredictionTileCacheMixin" in archive.read("vss.compat.mixins.json").decode(), "UTF cache registration boundary missing")
+        check_class("client/prediction/FreeTerraForgedCompat$Api", "FreeTerraForgedPredictionTasks", "own")
+        check_class("mixin/client/UltraTerraForgedPredictionTasksMixin", "generate(II)", "FreeTerraForgedPredictionTasks")
+        check_class("common/worldgen/FreeTerraForgedVariant", "worldgen/structure_rule", "additionalRuntimeRegistries")
+        check_class("networking/server/session/WorldgenCodecSnapshot", "additionalRuntimeRegistries")
+        check_class("client/prediction/PredictionBackendSelection", "terrain-surface-context-r2:")
+        require("client.UltraTerraForgedPredictionTasksMixin" in archive.read("vss.compat.mixins.json").decode(),
+                "UTF prediction batch redirect is not configured")
+        check_class("client/prediction/PredictionWorldgenCapabilities", "ultraterraforged")
         ftf = check_class("client/prediction/FreeTerraForgedCompat", "climateQuerySemantics", "setWorldgenPlan", "setClimateQuerySemantics",
                           "copySpawnSearch", "getSpawnSearch", "setSpawnSearch", "WORLD_ORIGIN", "getConstructor", "newInstance")
         ftf_refs = class_references(ftf)
@@ -195,9 +259,34 @@ def verify(jar, platform, build_id, source):
             require(any(ref[0] == owner and ref[1] == called
                         for (method, _), entries in ftf_refs.items() if method == "copySpawnSearch" for ref in entries),
                     "FTF default spawn-search construction is missing: " + owner + "." + called)
+        check_class("client/prediction/ClientTerrainSampler", "sampleDisplay")
+        check_class("client/prediction/FreeTerraForgedTerrainSampler", "sampleDisplay", "samplePreview")
+        check_class("client/prediction/PredictionFarGround", "points", "sampleDisplay", "sampleDisplayPoints")
+        check_class("client/prediction/FreeTerraForgedExterior$Work", "firstY", "endY")
+        check_class("client/prediction/PredictionJavaExterior$Work", "firstY", "endY")
+        check_class("client/prediction/PredictionTileManager", "nearbyDetailWaiting", "nearbyDetail")
+        check_class("config/VSSClientConfig", "predictionDecorations", "predictionDecorationDistanceChunks")
+        check_class("client/VSSVoxyOptionsIntegration", "prediction_decorations", "prediction_decoration_distance")
+        check_class("client/prediction/PredictionDecorationRange", "placementChunk", "placementPoint", "display", "covers")
+        check_class("client/prediction/PredictionTileManager", "decorationAllowed", "refreshDecorations", "queueDecorationUpdate", "partialSurfaceRanges")
+        decoration_calls = [
+            ("PredictionVegetation", "generationSources", "PredictionDecorationRange", "placementChunk"),
+            ("PredictionVegetation", "restoreForRendering", "PredictionDecorationRange", "placementChunk"),
+            ("PredictionFarDecoration", "generate", "PredictionDecorationRange", "placementPoint"),
+            ("PredictionTileManager", "surfaceBuildReady", "PredictionTileManager", "decorationAllowed"),
+            ("PredictionTileManager", "buildDemandCurrent", "PredictionTileManager", "decorationAllowed"),
+            ("PredictionTileManager", "publishTile", "PredictionDecorationRange", "display")]
+        for owner, caller, target, method in decoration_calls:
+            refs = class_references(archive.read(prefix + owner + ".class"))
+            require(any(ref[0] == prefix + target and ref[1] == method
+                        for (name, _), entries in refs.items() if name == caller for ref in entries),
+                    "Missing decoration control call: " + owner + "." + caller + " -> " + method)
+        widening = archive.read("META-INF/accesstransformer.cfg").decode()
+        require("NoiseChunk cellCountY" in widening or "NoiseChunk f_188719_" in widening, "Interpolation height access rule missing")
+        require("NoiseChunk cellNoiseMinY" in widening or "NoiseChunk f_188720_" in widening, "Interpolation floor access rule missing")
         check_class("client/prediction/FreeTerraForgedTerrainSampler", "runtimeOwner", "FreeTerraForgedCells")
         check_class("client/prediction/ClientWorldgenProfileDecoder", "FreeTerraForgedRuntime", "vss_freeterraforged_runtime")
-        check_class("networking/server/session/WorldgenCodecSnapshot", "FreeTerraForgedRuntime", "vss_freeterraforged_release")
+        check_class("networking/server/session/WorldgenCodecSnapshot", "FreeTerraForgedRuntime", "vss_freeterraforged_release", "vss_freeterraforged_variant")
         check_class("client/prediction/PredictionClimateSampler", "FabricBiomeCompat", "copyClimateContext")
         check_class("client/prediction/PredictionClimateSampler", "PredictionHorizontalClimate", "bindHorizontal")
         check_class("client/prediction/PredictionClimateCache", "horizontalDescriptor", "horizontalBytes", "LIVE_BYTES")
@@ -284,12 +373,20 @@ def verify(jar, platform, build_id, source):
         check_class("compat/VoxyRealIngestAccess", "VoxyRealCoveragePersistence", "ACCESS", "save")
         check_class("compat/VoxyRealIngestAccess$1", "saveSection", "markDirty")
         check_class("compat/VoxyRealCoveragePersistence", "SHA-256", "getWorldId", "loadedSuccessfully")
-        check_class("compat/transform/VoxyStorageTransformer", "vss$coverageSaveBody", "vss$coverageLoadBody", "capture")
+        storage_transformer = check_class("compat/transform/VoxyStorageTransformer", "vss$coverageSave", "vss$coverageLoad", "captureCodec",
+                                         "trackBatch", "vss$coverageBatchAdd", "vss$coverageBatchCommit")
+        require(b"SectionSerializationStorage" not in storage_transformer, "Storage adapter still targets early-loaded config classes")
+        check_class("compat/VoxyRealCoveragePersistence", "captureCodec", "stageBatch", "completeBatch")
         require("dev/xantha/vss/mixin/voxy/PredictionVoxyStoragePlugin.class" not in archive.namelist(),
                 "Storage helper remains in a reserved Mixin package")
         check_class("mixin/voxy/PredictionVoxyStorageIdentityMixin")
+        check_class("mixin/voxy/PredictionVoxyStorageMixin", "me.cortex.voxy.common.world.WorldEngine")
+        check_class("mixin/voxy/PredictionVoxyStorageSaveMixin", "me.cortex.voxy.common.world.service.SectionSavingService")
+        check_class("mixin/voxy/PredictionVoxyStorageCodecMixin", "me.cortex.voxy.common.world.SaveLoadSystem3")
         strict_config = json.loads(archive.read("vss.strict.mixins.json"))
         require("voxy.PredictionVoxyStorageMixin" in strict_config["client"]
+                and "voxy.PredictionVoxyStorageSaveMixin" in strict_config["client"]
+                and "voxy.PredictionVoxyStorageCodecMixin" in strict_config["client"]
                 and "voxy.PredictionVoxyStorageIdentityMixin" in strict_config["client"], "Real storage hooks absent")
         check_class("compat/VoxyPredictionBridge$Context", "hasSkyLight")
         check_class("compat/VoxyCapacityPlan", "initialCapacity", "capacity")
@@ -314,7 +411,7 @@ def verify(jar, platform, build_id, source):
         check_class("client/prediction/PredictionVoxySource", "vegetationVisible")
         check_class("client/prediction/PredictionTileManager", "surfaceFallbackReady")
         check_class("client/prediction/PredictionVoxyBoxes", "changedBounds")
-        check_class("client/prediction/PredictionDiskCache", "voxelWrites", "unchangedVoxelWrites", "contentIdentity")
+        check_class("client/prediction/PredictionDiskCache", "voxelWrites", "unchangedVoxelWrites", "cacheContentIdentity")
         check_class("client/prediction/PredictionVoxelCache", "FEATURE_PAGE_SIZE", "contentIdentity", "voxel feature page invalid")
         check_class("compat/VoxySectionSignature", "SHA-256", "faces")
         check_class("compat/VoxyPredictionBridge$Delivered", "changes")
@@ -435,7 +532,7 @@ def verify(jar, platform, build_id, source):
                 "Stale CPU metric sample class packaged")
         priority = check_class("networking/client/PredictionGenerationPriority", "shared-", "detail-ready")
         require(b"exclusive" not in priority and b"STALL" not in priority, "Exclusive prediction generation gate packaged")
-        requests = check_class("networking/client/LodRequestManager", "reserveLocalGeneration")
+        requests = check_class("networking/client/LodRequestManager", "reserveLocalGeneration", "probeReadOnlyQueued")
         require(b"localGenerationLimit" not in requests, "Non-atomic generation admission still packaged")
 
         check_class("compat/VoxyFluidSurface", "top", "pack", "transitions", "meshTransitions", "LiquidBlock")
@@ -516,8 +613,12 @@ def verify(jar, platform, build_id, source):
                                 "partial-vegetation-lod-union", "complete-surface-eviction-fallback",
                                 "active-projected-sample-demand", "zoom-sensitive-view-refresh", "prediction-horizon-mask",
                                 "indexed-horizon-invalidation",
+                                "actual-chunk-surface-context", "request-scoped-surface-lifetime", "utf-batched-exterior",
+                                "prediction-owned-utf-batch-budget", "utf-batches-after-cache-unlock", "utf-runtime-structure-rule-snapshot", "corrected-surface-cache-identity",
                                 "off-lock-publication-evidence", "shared-horizontal-change-evidence", "spatial-cache-invalidation",
-                                "asynchronous-native-demand-handoff", "bulk-exact-section-signatures", "bounded-middle-cover", "first-terrain-priority", "bounded-cache-probe-wait", "offscreen-retirement-without-generation"]}
+                                "asynchronous-native-demand-handoff", "bulk-exact-section-signatures", "bounded-middle-cover", "first-terrain-priority", "bounded-cache-probe-wait", "offscreen-retirement-without-generation",
+                                "runtime-surface-basic-coverage", "pending-surface-refinement-demand",
+                                "raw-native-surface-input", "chunk-grouped-hook-refinement"]}
 
 
 if __name__ == "__main__":

@@ -36,6 +36,26 @@ public final class VSSClientCommands {
                 .then(Commands.literal("prediction")
                         .executes(context -> VSSCommandHelp.client(context.getSource(), "prediction"))
                         .then(performanceCommand())
+                        .then(Commands.literal("acceptance-mode")
+                                .requires(source -> dev.xantha.vss.client.prediction.PredictionAcceptanceProbe.enabled())
+                                .then(Commands.argument("mode", StringArgumentType.word()).executes(context ->
+                                        dev.xantha.vss.client.prediction.PredictionAcceptanceProbe.mode(StringArgumentType.getString(context,"mode")))))
+                         .then(Commands.literal("acceptance")
+                                .requires(source -> dev.xantha.vss.client.prediction.PredictionAcceptanceProbe.enabled())
+                                .then(Commands.argument("id", StringArgumentType.word())
+                                  .then(Commands.argument("x", com.mojang.brigadier.arguments.IntegerArgumentType.integer(-30000000,30000000))
+                                    .then(Commands.argument("z", com.mojang.brigadier.arguments.IntegerArgumentType.integer(-30000000,30000000))
+                                      .then(Commands.argument("side", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1,8))
+                                        .then(Commands.argument("step", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1,256))
+                                          .executes(context -> {
+                                            var future=dev.xantha.vss.client.prediction.PredictionAcceptanceProbe.request(
+                                                StringArgumentType.getString(context,"id"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context,"x"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context,"z"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context,"side"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context,"step"));
+                                            performanceResult(context.getSource(),future,"vss.command.perf.report");return 1;
+                                          })))))))
                         .then(Commands.literal("rendercapture")
                                 .executes(context -> captureRender(context.getSource(), 0.5, 0.65))
                                 .then(Commands.argument("x", com.mojang.brigadier.arguments.DoubleArgumentType.doubleArg(0, 1))

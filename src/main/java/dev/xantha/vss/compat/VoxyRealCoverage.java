@@ -58,8 +58,14 @@ final class VoxyRealCoverage implements VoxyPredictionBridge.RealColumn {
 
     @Override public int coverageMask(int x,int firstY,int z,int count,int lod) {
         if (closed || !columns.contains(dev.xantha.vss.common.PositionUtil.packPosition(x,z))) return 0;
-        int result=0;
-        for(int i=0;i<count;i++)if(containsSection(x,firstY+i,z))result|=1<<i;
+        int result=0,limit=Math.min(32,count);
+        // Adjacent 16-block vertical cells share one native 32-cube entry.
+        for(int i=0;i<limit;) {
+            int y=firstY+i,n=Math.min(limit-i,2-(y&1));
+            int mask=sections.getOrDefault(VoxySectionPosition.key(0,x>>1,y>>1,z>>1),0);
+            for(int j=0;j<n;j++)if((mask&1<<((x&1)|(z&1)<<1|((y+j)&1)<<2))!=0)result|=1<<(i+j);
+            i+=n;
+        }
         return result;
     }
 }

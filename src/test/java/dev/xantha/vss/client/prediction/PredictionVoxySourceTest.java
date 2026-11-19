@@ -10,6 +10,28 @@ import org.junit.jupiter.api.Test;
 
 class PredictionVoxySourceTest {
 
+    @Test void stagedColumnReuseMatchesFullRebuildAndRetainsUnchangedColumns() {
+        int grid=6,axis=grid-2,step=4;
+        var profile=new dev.xantha.vss.networking.payloads.WorldgenProfileS2CPayload.DimensionProfile(
+                Level.OVERWORLD.location(),42,-64,384,"noise","overworld",1);
+        var sampler=org.mockito.Mockito.mock(ClientTerrainSampler.class);
+        org.mockito.Mockito.when(sampler.profile()).thenReturn(profile);
+        org.mockito.Mockito.when(sampler.cacheBiomes()).thenReturn(List.of("minecraft:plains"));
+        var key=new PredictionTileManager.PredictionTileKey(Level.OVERWORLD,-1,2,0);
+        var samples=new ClientColumnSample[grid*grid];
+        Arrays.fill(samples,PredictionVoxelFixtures.sample(64));
+        var before=PredictionVoxySource.build(key,samples,grid,step,sampler,PredictionVegetation.Tile.EMPTY,null);
+        var previous=new ClientColumnSample[(axis+1)*(axis+1)];
+        Arrays.fill(previous,samples[0]);
+        samples[2*grid+3]=PredictionVoxelFixtures.sample(79);
+        var reused=PredictionVoxySource.build(key,samples,grid,step,sampler,PredictionVegetation.Tile.EMPTY,null,false,before,previous);
+        var rebuilt=PredictionVoxySource.build(key,samples,grid,step,sampler,PredictionVegetation.Tile.EMPTY,null);
+        assertArrayEquals(rebuilt.columns(),reused.columns());
+        assertEquals(rebuilt.bytes(),reused.bytes());
+        for(int i=0;i<axis*axis;i++)if(i!=axis+2)assertSame(before.columns()[i],reused.columns()[i]);
+        assertNotEquals(before.columns()[axis+2],reused.columns()[axis+2]);
+    }
+
     @Test void relocatedHorizonProvesOldPredictionAbsentBeforeDeferredCpuRetirement() {
         try(var source=new PredictionVoxySource()) {
             source.put(tile(0,0,0,32,1,8));

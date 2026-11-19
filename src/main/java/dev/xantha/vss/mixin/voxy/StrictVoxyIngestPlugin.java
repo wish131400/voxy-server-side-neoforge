@@ -204,7 +204,7 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
     }
 
     @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) {
-        if(mixin.endsWith(".PredictionVoxyStorageMixin") || mixin.endsWith(".PredictionVoxyStorageIdentityMixin")) {
+        if (isStorageMixin(mixin)) {
             if(!VoxyStorageTransformer.instrument(node))VSSLogger.warn("Unsupported Voxy storage layout; real coverage persists only for this session");
             return;
         }
@@ -216,8 +216,7 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
     @Override public boolean shouldApplyMixin(String target, String mixin) {
         // Ingest is independent of the renderer. Incomplete server/data-only ports must
         // not receive half of the mutually dependent mesh/batch/upload tracking group.
-        if (mixin.endsWith(".StrictVoxyIngestMixin") || mixin.endsWith(".PredictionVoxyStorageMixin")
-                || mixin.endsWith(".PredictionVoxyStorageIdentityMixin")) return true;
+        if (mixin.endsWith(".StrictVoxyIngestMixin") || isStorageMixin(mixin)) return true;
         if (rendererPresent == null) {
             try {
                 var provider = org.spongepowered.asm.service.MixinService.getService().getBytecodeProvider();
@@ -229,6 +228,9 @@ public final class StrictVoxyIngestPlugin implements IMixinConfigPlugin {
             } catch (Exception absent) { rendererPresent = false; }
         }
         return rendererPresent;
+    }
+    private static boolean isStorageMixin(String mixin) {
+        return mixin.substring(mixin.lastIndexOf('.') + 1).startsWith("PredictionVoxyStorage");
     }
     @Override public void onLoad(String mixinPackage) { }
     @Override public String getRefMapperConfig() { return null; }

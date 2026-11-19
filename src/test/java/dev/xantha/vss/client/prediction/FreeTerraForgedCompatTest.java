@@ -20,8 +20,50 @@ class FreeTerraForgedCompatTest {
     // NeoForge's process-wide registry catalog permits one instance per registry.
     // Keep the published mod's classes in one loader for this test JVM.
     static synchronized URLClassLoader releaseLoader() throws Exception {
-        if (releaseLoader == null) releaseLoader = new URLClassLoader(new java.net.URL[]{
-                Path.of(System.getProperty("vss.freeTerraForgedJar")).toUri().toURL()}, FreeTerraForgedCompatTest.class.getClassLoader());
+        if (releaseLoader == null) {
+            Path jar = Path.of(System.getProperty("vss.freeTerraForgedJar"));
+            String prefix = "com.pandaismyname1.ultraterraforged.";
+            String target = prefix + "world.worldgen.tile.TileGenerator";
+            boolean ultra;
+            try (var zip = new java.util.zip.ZipFile(jar.toFile())) { ultra = zip.getEntry(target.replace('.','/') + ".class") != null; }
+            if (ultra) {
+                var harness = new dev.xantha.vss.testutil.VoxyMixinHarness(jar.toString(), """
+                        {"required":true,"minVersion":"0.8","package":"dev.xantha.vss.mixin.client",
+                         "compatibilityLevel":"JAVA_21","client":["UltraTerraForgedPredictionTasksMixin","UltraTerraForgedPredictionTileCacheMixin",
+                         "SurfaceRulesContextAccessor","UltraTerraForgedPredictionNearGroundMixin","UltraTerraForgedPredictionCellConditionMixin"]}
+                        """);
+                byte[] transformed = harness.apply(target);
+                String cacheTarget = prefix + "world.worldgen.tile.TileCache";
+                byte[] transformedCache = harness.apply(cacheTarget);
+                var extra = new java.util.HashMap<String,byte[]>();
+                for (String name : List.of("NearGroundCondition", "CellCondition")) {
+                    String condition = prefix + "world.worldgen.surface.condition." + name;
+                    byte[] bytes = harness.apply(condition); extra.put(condition, bytes);
+                    var applied = new org.objectweb.asm.tree.ClassNode(); new org.objectweb.asm.ClassReader(bytes).accept(applied,0);
+                    assertTrue(applied.methods.stream().anyMatch(m -> m.name.contains("vss$previewChunk")));
+                }
+                byte[] accessor = harness.apply("net.minecraft.world.level.levelgen.SurfaceRules$Context");
+                var accessed = new org.objectweb.asm.tree.ClassNode(); new org.objectweb.asm.ClassReader(accessor).accept(accessed,0);
+                assertTrue(accessed.interfaces.contains("dev/xantha/vss/mixin/client/SurfaceRulesContextAccessor"));
+                var cacheNode = new org.objectweb.asm.tree.ClassNode(); new org.objectweb.asm.ClassReader(transformedCache).accept(cacheNode,0);
+                assertTrue(cacheNode.methods.stream().anyMatch(m -> m.name.contains("vss$registerBeforePredictionBatches")));
+                var node = new org.objectweb.asm.tree.ClassNode(); new org.objectweb.asm.ClassReader(transformed).accept(node,0);
+                assertTrue(node.methods.stream().anyMatch(m -> m.name.contains("vss$predictionBatch")), "apply the production redirect to the real UTF release");
+                releaseLoader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, FreeTerraForgedCompatTest.class.getClassLoader()) {
+                    @Override protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                        if (!name.startsWith(prefix)) return super.loadClass(name,resolve);
+                        synchronized (getClassLoadingLock(name)) {
+                            Class<?> type = findLoadedClass(name);
+                            if (type == null) type = name.equals(target) ? defineClass(name,transformed,0,transformed.length)
+                                    : name.equals(cacheTarget) ? defineClass(name,transformedCache,0,transformedCache.length)
+                                    : extra.containsKey(name) ? defineClass(name,extra.get(name),0,extra.get(name).length) : findClass(name);
+                            if (resolve) resolveClass(type);
+                            return type;
+                        }
+                    }
+                };
+            } else releaseLoader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, FreeTerraForgedCompatTest.class.getClassLoader());
+        }
         return releaseLoader;
     }
 
@@ -31,10 +73,18 @@ class FreeTerraForgedCompatTest {
 
     static Object defaultPreset(ClassLoader loader) throws Exception {
         var variant = FreeTerraForgedVariant.detect(loader);
+        if (variant == FreeTerraForgedVariant.ULTRA)
+            return loader.loadClass(variant.packagePrefix + "data.preset.settings.BuiltinPresets")
+                    .getMethod("makeDefault").invoke(null);
         return loader.loadClass(variant.packagePrefix + "data.worldgen.preset.settings.Presets")
                 .getMethod("make" + variant.abbreviation + "Default").invoke(null);
     }
-    @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
+    @BeforeAll static void bootstrap() throws Exception {
+        var list = net.neoforged.fml.loading.LoadingModList.of(List.of(), List.of(), List.of(), List.of(), java.util.Map.of());
+        var field = net.neoforged.fml.loading.FMLLoader.class.getDeclaredField("loadingModList");
+        field.setAccessible(true); field.set(null, list);
+        ClientTerrainSamplerTest.bootstrapMinecraft();
+    }
 
     @Test void dimensionScopeRestoresCallerOnSuccessAndFailure() {
         ThreadLocal<Boolean> flag = ThreadLocal.withInitial(() -> false);
@@ -69,9 +119,9 @@ class FreeTerraForgedCompatTest {
             assertFalse(api.overworld.get());
             var variant = api.variant;
             String prefix = variant.packagePrefix;
-            Class<?> presetType = loader.loadClass(prefix + "data.worldgen.preset.settings.Preset");
-            Codec<Object> codec = (Codec<Object>) presetType.getField("DIRECT_CODEC").get(null);
             Object preset = defaultPreset(loader);
+            Class<?> presetType = preset.getClass();
+            Codec<Object> codec = (Codec<Object>) presetType.getField(variant == FreeTerraForgedVariant.ULTRA ? "CODEC" : "DIRECT_CODEC").get(null);
             var key = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse(variant.namespace + ":worldgen/preset"));
             var id = ResourceKey.create(key, ResourceLocation.parse(variant.namespace + ":preset"));
             var registry = new MappedRegistry<Object>(key, Lifecycle.stable());
@@ -116,6 +166,21 @@ class FreeTerraForgedCompatTest {
         }
         // Standalone tests have no mod event bus. Apply only the actual mod's
         // queued custom codec registrations to its isolated registry objects.
+        if (variant == FreeTerraForgedVariant.ULTRA) {
+            var registryUtil = loader.loadClass(prefix + "platform.neoforge.RegistryUtilImpl");
+            var entriesField = registryUtil.getDeclaredField("ENTRIES"); entriesField.setAccessible(true);
+            var registers = (java.util.Map<?, ?>) entriesField.get(null);
+            for (var field : loader.loadClass(prefix + "registries.UTFBuiltInRegistries").getFields()) {
+                if (!(field.get(null) instanceof Registry target)) continue;
+                var entries = (java.util.List<?>) registers.get(target.key());
+                if (entries == null) continue;
+                for (Object entry : entries) {
+                    var name = entry.getClass().getDeclaredMethod("name"); name.setAccessible(true);
+                    var value = entry.getClass().getDeclaredMethod("value"); value.setAccessible(true);
+                    Registry.register(target, (ResourceLocation) name.invoke(entry), value.invoke(entry));
+                }
+            }
+        } else {
         var registryUtil = loader.loadClass(prefix + "platform.neoforge.RegistryUtilImpl");
         boolean epoch = new FreeTerraForgedCompat.Api(loader).epochBased;
         var registersField = registryUtil.getDeclaredField(epoch ? "REGISTRATIONS" : "REGISTERS");
@@ -139,6 +204,7 @@ class FreeTerraForgedCompatTest {
                     entriesField.get(deferred);
             for (var entry : entries.entrySet()) Registry.register(target, entry.getKey().getId(), entry.getValue().get());
         }
+        }
         var noiseKey = ResourceKey.<Object>createRegistryKey(ResourceLocation.parse(variant.namespace + ":worldgen/noise"));
         var noises = new MappedRegistry<Object>(noiseKey, Lifecycle.stable());
         var registration = noises.createRegistrationLookup();
@@ -151,7 +217,7 @@ class FreeTerraForgedCompatTest {
                 throw new IllegalStateException("Unexpected noise bootstrap dependency " + key);
             }
         };
-        loader.loadClass(prefix + "data.worldgen.preset.PresetNoiseData").getMethod("bootstrap",
+        loader.loadClass(prefix + (variant == FreeTerraForgedVariant.ULTRA ? "data.preset.PresetNoiseData" : "data.worldgen.preset.PresetNoiseData")).getMethod("bootstrap",
                 preset.getClass(), net.minecraft.data.worldgen.BootstrapContext.class).invoke(null, preset, bootstrap);
         noises.freeze();
         Class<?> noiseType = loader.loadClass(prefix + "world.worldgen.noise.module.Noise");
@@ -193,7 +259,7 @@ class FreeTerraForgedCompatTest {
         String prefix = api.variant.worldgenClass("");
         var contexts = new java.util.ArrayList<Object>();
         try {
-            var fieldType = loader.loadClass(prefix + "densityfunction.CellSampler$Field");
+            var fieldType = loader.loadClass(prefix + (api.variant.singleArgumentCellFields() ? "cell.CellField" : "densityfunction.CellSampler$Field"));
             var height = fieldType.getField("HEIGHT").get(null);
             var marker = loader.loadClass(prefix + "densityfunction.CellSampler$Marker")
                     .getConstructor(fieldType).newInstance(height);
@@ -232,11 +298,21 @@ class FreeTerraForgedCompatTest {
                             target.setAccessible(true);
                             return target.invoke(mixin, args);
                         });
-                FreeTerraForgedCompat.scoped(api.overworld, true, () -> { api.initialize(proxy, access); return null; });
+                FreeTerraForgedCompat.scoped(api.overworld, true, () -> {
+                    if (api.variant == FreeTerraForgedVariant.ULTRA && access == source) {
+                        // The server baseline keeps UTF's original asynchronous pool.
+                        try { api.initialize.invoke(proxy,access); }
+                        catch (ReflectiveOperationException e) { throw new IllegalStateException(e); }
+                    } else api.initialize(proxy, access);
+                    return null;
+                });
                 Object context = api.context.invoke(proxy);
                 assertNotNull(context, "the real initializer must build a terrain context");
+                assertEquals(api.variant, FreeTerraForgedCompat.variant(proxy));
                 contexts.add(context);
                 assertClimateContextCopy(loader, api.variant, context);
+                if (api.variant == FreeTerraForgedVariant.ULTRA && access == decoded)
+                    UltraTerraForgedExteriorReleasedTest.verify(loader, context, mixin, access);
                 functions.add(FreeTerraForgedDensity.map(context, mapped).finalDensity());
                 assertFalse(api.overworld.get());
             }
@@ -254,15 +330,32 @@ class FreeTerraForgedCompatTest {
                 Object tileCache = context.getClass().getField("cache").get(context);
                 tiles.add(tileCache.getClass().getMethod("provideAtChunk", int.class, int.class).invoke(tileCache, 0, 0));
             }
-            var readHeight = fieldType.getMethod("read", loader.loadClass(prefix + "cell.Cell"),
-                    loader.loadClass(prefix + "cell.heightmap.Heightmap"));
+            if (api.variant == FreeTerraForgedVariant.ULTRA) {
+                UltraTerraForgedSurfaceReleasedTest.verify(loader, contexts.getLast());
+                for (int i = 0; i < 64; i++) {
+                    int x = i * 3 % 64, z = i * 7 % 64;
+                    Object a = tiles.getFirst().getClass().getMethod("lookup",int.class,int.class).invoke(tiles.getFirst(),x,z);
+                    Object b = tiles.getLast().getClass().getMethod("lookup",int.class,int.class).invoke(tiles.getLast(),x,z);
+                    for (var field : a.getClass().getFields()) if (field.getType().isPrimitive() && !java.lang.reflect.Modifier.isStatic(field.getModifiers()))
+                        assertEquals(field.get(a),field.get(b), "UTF caller batches preserve filtered cell " + x + "," + z + ":" + field.getName());
+                }
+                System.out.println("Released UTF serial batches match original async pool: 64 filtered cells, all primitive fields");
+            }
+            var readHeight = api.variant.singleArgumentCellFields()
+                    ? fieldType.getMethod("read", loader.loadClass(prefix + "cell.Cell"))
+                    : fieldType.getMethod("read", loader.loadClass(prefix + "cell.Cell"),
+                            loader.loadClass(prefix + "cell.heightmap.Heightmap"));
             for (int i = 0; i < 8; i++) {
                 int x = 17 + i * 5, z = 9 + i * 3;
                 Object tile = tiles.getFirst();
                 Object cell = tile.getClass().getMethod("lookup", int.class, int.class).invoke(tile, x, z);
-                Object lookup = contexts.getFirst().getClass().getField("lookup").get(contexts.getFirst());
-                Object heightmap = lookup.getClass().getMethod("getHeightmap").invoke(lookup);
-                double expected = ((Number) readHeight.invoke(height, cell, heightmap)).doubleValue();
+                double expected;
+                if (api.variant.singleArgumentCellFields()) expected = ((Number) readHeight.invoke(height, cell)).doubleValue();
+                else {
+                    Object lookup = contexts.getFirst().getClass().getField("lookup").get(contexts.getFirst());
+                    Object heightmap = lookup.getClass().getMethod("getHeightmap").invoke(lookup);
+                    expected = ((Number) readHeight.invoke(height, cell, heightmap)).doubleValue();
+                }
                 var point = new net.minecraft.world.level.levelgen.DensityFunction.SinglePointContext(x, 80, z);
                 assertEquals(expected, functions.getFirst().compute(point), 0.0);
                 assertEquals(expected, functions.getLast().compute(point), 0.0);
@@ -271,6 +364,26 @@ class FreeTerraForgedCompatTest {
             var cellClass = cell.getClass();
             var water = new FreeTerraForgedWater(contexts.getFirst());
             assertEquals(Integer.MIN_VALUE, water.surfaceY(cell), "dry cells must not acquire river water");
+            if (api.variant == FreeTerraForgedVariant.ULTRA) {
+                Object levels = contexts.getFirst().getClass().getField("levels").get(contexts.getFirst());
+                var level = cellClass.getField("waterLevel");
+                int sea = levels.getClass().getField("waterY").getInt(levels);
+                int worldHeight = levels.getClass().getField("worldHeight").getInt(levels);
+                level.setFloat(cell, (float) sea / worldHeight);
+                assertEquals(Integer.MIN_VALUE, water.surfaceY(cell), "UTF does not refill the sea");
+                level.setFloat(cell, (sea + 32.5f) / worldHeight);
+                assertEquals(sea + 33, water.surfaceY(cell), "UTF waterLevel is an absolute height; terrain kind is irrelevant");
+                UltraTerraForgedTileCacheReleasedTest.verify(contexts.getLast());
+                var firstCache = contexts.getFirst().getClass().getField("cache").get(contexts.getFirst());
+                var secondCache = contexts.getLast().getClass().getField("cache").get(contexts.getLast());
+                var raw = firstCache.getClass().getDeclaredField("cache"); raw.setAccessible(true);
+                Object old = raw.get(firstCache), current = raw.get(secondCache);
+                FreeTerraForgedCompat.releaseTileCache(firstCache);
+                assertEquals(false, old.getClass().getMethod("isPolling").invoke(old));
+                assertEquals(true, current.getClass().getMethod("isPolling").invoke(current), "closing old prediction must leave new world's cache polling");
+                assertTrue(Double.isFinite(functions.getLast().compute(new net.minecraft.world.level.levelgen.DensityFunction.SinglePointContext(11, 80, -13))));
+                return;
+            }
             boolean elevatedWater = java.util.Arrays.stream(cellClass.getFields())
                     .anyMatch(field -> field.getName().equals("riverWaterLevel"));
             if (!elevatedWater) {
@@ -302,6 +415,9 @@ class FreeTerraForgedCompatTest {
             assertEquals(expectedWater, water.surfaceY(cell), "match this release's own surface hydrology");
             assertTrue(water.surfaceY(cell) > oceanTop, "uplift rivers must not be flattened to sea level");
         } finally {
+            if (api.variant == FreeTerraForgedVariant.ULTRA) {
+                for (Object context : contexts) FreeTerraForgedCompat.releaseTileCache(context.getClass().getField("cache").get(context));
+            } else {
             var registryField = loader.loadClass(api.variant.packagePrefix + "concurrent.cache.CacheManager").getDeclaredField("CACHES");
             registryField.setAccessible(true);
             var caches = (java.util.List<?>) registryField.get(null);
@@ -309,6 +425,7 @@ class FreeTerraForgedCompatTest {
                 int before = caches.size();
                 FreeTerraForgedCompat.releaseTileCache(context.getClass().getField("cache").get(context));
                 assertEquals(before - 1, caches.size(), "release only this context's tile cache");
+            }
             }
             // The test owns this isolated classloader's scheduler, never the game's scheduler.
             Class<?> cacheClass = loader.loadClass(api.variant.packagePrefix + "concurrent.cache.Cache");
@@ -318,6 +435,16 @@ class FreeTerraForgedCompatTest {
 
     private static void assertClimateContextCopy(ClassLoader loader, FreeTerraForgedVariant variant, Object context) throws Exception {
         assertDoesNotThrow(() -> FreeTerraForgedCompat.copyClimateContext(new Object(), new Object()));
+        if (variant == FreeTerraForgedVariant.ULTRA) {
+            var api = loader.loadClass(variant.worldgenClass("biome.UTFClimateSampler"));
+            var spawn = new net.minecraft.core.BlockPos(-173, 97, 4097);
+            Object source = java.lang.reflect.Proxy.newProxyInstance(loader, new Class<?>[]{api}, (p, method, args) -> spawn);
+            var copied = new java.util.concurrent.atomic.AtomicReference<Object>();
+            Object target = java.lang.reflect.Proxy.newProxyInstance(loader, new Class<?>[]{api}, (p, method, args) -> { copied.set(args[0]); return null; });
+            FreeTerraForgedCompat.copyClimateContext(source, target);
+            assertEquals(spawn, copied.get());
+            return;
+        }
         if (variant != FreeTerraForgedVariant.CURRENT) return;
         var api = loader.loadClass(variant.worldgenClass("biome.FTFClimateSampler"));
         Object preset = context.getClass().getField("preset").get(context);

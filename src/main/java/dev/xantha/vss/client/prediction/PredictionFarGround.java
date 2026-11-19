@@ -4,6 +4,7 @@ package dev.xantha.vss.client.prediction;
 final class PredictionFarGround {
     private final ClientTerrainSampler sampler;
     private final PredictionSharedCache<Long,ClientColumnSample[]> pages = new PredictionSharedCache<>(2048);
+    private final PredictionSharedCache<Long,ClientColumnSample> points = new PredictionSharedCache<>(32768);
     private final long seed;
     PredictionFarGround(ClientTerrainSampler sampler) {
         this.sampler = sampler;
@@ -16,11 +17,19 @@ final class PredictionFarGround {
     int z(int gz, long root) { return gz * 5 + (int)Long.remainderUnsigned(PredictionFarDecoration.mix(root ^ 17), 5) - 2; }
 
     ClientColumnSample at(int gx, int gz, Runnable check) {
+        if (!(sampler instanceof RustTerrainSampler)) {
+            long key = (long)gx << 32 | gz & 0xffffffffL;
+            return points.get(key, () -> {
+                long root = root(gx, gz);
+                return sample(x(gx, root), z(gz, root));
+            }, check);
+        }
         int px = Math.floorDiv(gx, 8), pz = Math.floorDiv(gz, 8);
         long key = (long)px << 32 | pz & 0xffffffffL;
         var page = pages.get(key, () -> build(px * 8, pz * 8, check), check);
         return page[Math.floorMod(gz, 8) * 8 + Math.floorMod(gx, 8)];
     }
+    ClientColumnSample sample(int x, int z) { return sampler.sampleDisplay(x, z); }
     private ClientColumnSample[] build(int gx, int gz, Runnable check) {
         int[] positions = new int[128];
         for (int i = 0; i < 64; i++) {
@@ -30,10 +39,7 @@ final class PredictionFarGround {
         }
         check.run();
         var result = new ClientColumnSample[64];
-        if (sampler instanceof RustTerrainSampler rust) rust.sampleDisplayPoints(positions, 64, result);
-        else for (int i = 0; i < 64; i++) {
-            check.run(); result[i] = sampler.sampleForLod(positions[i * 2], positions[i * 2 + 1], 1);
-        }
+        ((RustTerrainSampler)sampler).sampleDisplayPoints(positions, 64, result);
         return result;
     }
 }

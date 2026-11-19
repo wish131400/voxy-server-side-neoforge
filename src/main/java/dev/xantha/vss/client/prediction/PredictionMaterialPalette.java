@@ -7,14 +7,13 @@ import net.minecraft.world.level.block.state.BlockState;
 /** Registry material rules shared by sampling and Voxy voxel publication. */
 public final class PredictionMaterialPalette {
     private PredictionMaterialPalette() { }
-    private static volatile int[] blockIds;
     static int grassBlockIndex() {
-        return ids()[0];
+        return id(Blocks.GRASS_BLOCK);
     }
 
     static int surfaceBlock(ClientColumnSample sample) {
         if (sample != null && sample.hasSurface() && sample.snow() && !sample.hasFluid()
-                && supportsSnow(sample.topBlockIndex())) return ids()[8];
+                && supportsSnow(sample.topBlockIndex())) return id(Blocks.SNOW_BLOCK);
         return groundBlock(sample);
     }
 
@@ -23,7 +22,7 @@ public final class PredictionMaterialPalette {
             return ClientColumnSample.NO_BLOCK;
         }
         int block = sample.topBlockIndex();
-        if (block == ids()[9] && (sample.flags() & ClientColumnSample.FLAG_TREE_HERE) != 0
+        if (block == id(Blocks.OAK_LEAVES) && (sample.flags() & ClientColumnSample.FLAG_TREE_HERE) != 0
                 && !sample.snow() && sample.fluid() == 0) {
             return grassBlockIndex();
         }
@@ -97,28 +96,27 @@ public final class PredictionMaterialPalette {
 
     public static int representativeBlock(String biomePath, boolean snow, boolean lava,
                                            boolean tree) {
-        int[] ids = ids();
-        if (lava) return ids[5];
-        if (snow) return ids[8];
+        if (lava) return id(Blocks.NETHERRACK);
+        if (snow) return id(Blocks.SNOW_BLOCK);
         String path = biomePath == null ? "" : biomePath;
         if (path.contains("desert") || path.contains("beach")) {
-            return ids[2];
+            return id(Blocks.SAND);
         }
         if (path.contains("badlands") || path.contains("mesa")) {
-            return ids[3];
+            return id(Blocks.RED_TERRACOTTA);
         }
         if (path.contains("mushroom") || path.contains("mycelium")) {
-            return id("mycelium");
+            return id(Blocks.MYCELIUM);
         }
-        if (tree) return ids[9];
-        return ids[0];
+        if (tree) return id(Blocks.OAK_LEAVES);
+        return id(Blocks.GRASS_BLOCK);
     }
 
-    public static int logIndex() { return id("oak_log"); }
+    public static int logIndex() { return id(Blocks.OAK_LOG); }
 
-    public static int dirtIndex() { return ids()[4]; }
+    public static int dirtIndex() { return id(Blocks.DIRT); }
 
-    public static int stoneIndex() { return ids()[1]; }
+    public static int stoneIndex() { return id(Blocks.STONE); }
 
     private static int id(String path) {
         try {
@@ -142,18 +140,7 @@ public final class PredictionMaterialPalette {
         return ClientColumnSample.NO_BLOCK;
     }
 
-    static int[] ids() {
-        int[] result = blockIds;
-        if (result != null) return result;
-        synchronized (PredictionMaterialPalette.class) {
-            result = blockIds;
-            if (result == null) {
-                result = new int[]{id("grass_block"), id("stone"), id("sand"),
-                        id("red_terracotta"), id("dirt"), id("netherrack"),
-                        id("water"), id("lava"), id("snow_block"), id("oak_leaves")};
-                blockIds = result;
-            }
-        }
-        return result;
+    private static int id(Block block) {
+        return BuiltInRegistries.BLOCK.getId(block);
     }
 }

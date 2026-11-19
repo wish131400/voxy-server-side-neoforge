@@ -9,13 +9,16 @@ import org.objectweb.asm.tree.analysis.*;
 import java.nio.charset.StandardCharsets;
 
 class VoxyStorageMixinApplicationTest {
-    @Test void realSpongeAppliesTheStorageWrappersAndIdentityHook() throws Exception {
+    @Test void realSpongeAppliesStorageHooksEvenWhenConfigStorageWasLoadedByVoxyPlugin() throws Exception {
         String configuration;
         try (var input = getClass().getClassLoader().getResourceAsStream("vss.strict.mixins.json")) {
             configuration = new String(java.util.Objects.requireNonNull(input).readAllBytes(), StandardCharsets.UTF_8);
         }
         var harness = new VoxyMixinHarness(System.getProperty("vss.voxyJar"), configuration);
-        for (String target : new String[]{VoxyStorageBytecodeTest.STORAGE, VoxyStorageBytecodeTest.CLIENT}) {
+        // NeoVoxy's plugin initializes Serialization, whose config scan loads this
+        // concrete storage before Mixin prepares the VSS configuration.
+        harness.markLoaded(VoxyStorageBytecodeTest.STORAGE);
+        for (String target : VoxyStorageBytecodeTest.TARGETS) {
             byte[] transformed = harness.apply(target.replace('/', '.'));
             ClassNode node = new ClassNode(); new ClassReader(transformed).accept(node, 0);
             assertTrue(node.methods.stream().anyMatch(m -> m.name.equals("vss$coveragePersistenceReady")), target);

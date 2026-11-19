@@ -32,12 +32,14 @@ class PredictionCpuAdmissionIntegrationTest {
             42L, -64, 384, "noise", "minecraft:overworld", 123L);
     private String previousTier;
     private int previousDistance;
+    private int previousWorkers;
 
     @BeforeAll static void bootstrap() { ClientTerrainSamplerTest.bootstrapMinecraft(); }
 
     @BeforeEach void lowTierFixture() {
         var config = VSSClientConfig.CONFIG;
         previousTier = config.performanceTier;
+        previousWorkers = config.predictionWorkerThreads;
         previousDistance = config.predictionDistanceBlocks;
 
 
@@ -49,8 +51,39 @@ class PredictionCpuAdmissionIntegrationTest {
     @AfterEach void restoreFixture() {
         var config = VSSClientConfig.CONFIG;
         config.performanceTier = previousTier;
+        config.predictionWorkerThreads = previousWorkers;
         config.predictionDistanceBlocks = previousDistance;
         PredictionFramePace.resetForTesting();
+    }
+
+    @Test void changingThreadsResizesExistingManagerAndSharedCapsWithoutCancellingActiveWork() throws Exception {
+        var config = VSSClientConfig.CONFIG;
+        config.performanceTier = "custom";
+        config.predictionWorkerThreads = 1;
+        var memory = new PredictionMemoryBudget(4096L * PredictionMemoryBudget.MIB, 0,
+                () -> Long.MAX_VALUE, System::nanoTime, PredictionPerformanceProfile.maximumWorkers());
+        try (var manager = new PredictionTileManager(PROFILE.levelKey(), new Sampler(null), memory, null, budget(new AtomicLong()))) {
+            var pool = (ThreadPoolExecutor) field("executor").get(manager);
+            assertEquals(1, pool.getCorePoolSize());
+            var release = blockWorker(manager);
+            try {
+                int raised = Math.min(3, PredictionPerformanceProfile.maximumWorkers());
+                config.predictionWorkerThreads = raised;
+                manager.refreshWorkerAllocation();
+                assertEquals(raised, pool.getCorePoolSize());
+                assertEquals(raised, pool.getMaximumPoolSize());
+                assertEquals(raised, PredictionMemoryBudget.SHARED.buildLimit());
+                assertTrue(PredictionCpuBudget.SHARED.diagnostics().contains("limit=" + raised + ","));
+                config.predictionWorkerThreads = 1;
+                manager.refreshWorkerAllocation();
+                assertEquals(1, pool.getCorePoolSize());
+                assertEquals(1, pool.getMaximumPoolSize());
+                assertEquals(1, PredictionMemoryBudget.SHARED.buildLimit());
+                assertTrue(PredictionMemoryBudget.SHARED.availableBuildSlots() <= 1);
+                assertEquals(1, release.getCount(), "changing allocations must not interrupt running work");
+                assertEquals(1, pool.getActiveCount());
+            } finally { release.countDown(); }
+        }
     }
 
     @Test void detailBuildsPublishBackToBackWithoutAdvancingTheClock() throws Exception {

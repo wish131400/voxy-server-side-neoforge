@@ -21,6 +21,7 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
     private final Map<String, String> configurations = new LinkedHashMap<>();
     private final String configuration;
     private IMixinTransformer transformer;
+    private final Set<String> loadedClasses = new HashSet<>();
 
     public VoxyMixinHarness(String jar, String configuration) throws IOException {
         this.configuration = configuration;
@@ -86,7 +87,16 @@ public final class VoxyMixinHarness extends MixinServiceAbstract implements ICla
     @Override public IClassProvider getClassProvider() { return this; }
     @Override public IClassBytecodeProvider getBytecodeProvider() { return this; }
     @Override public ITransformerProvider getTransformerProvider() { return null; }
-    @Override public IClassTracker getClassTracker() { return null; }
+    /** Models classes loaded by another mod's config plugin before VSS prepares its mixins. */
+    public void markLoaded(String name) { loadedClasses.add(name.replace('/', '.')); }
+
+    @Override public IClassTracker getClassTracker() {
+        return new IClassTracker() {
+            @Override public void registerInvalidClass(String name) { }
+            @Override public boolean isClassLoaded(String name) { return loadedClasses.contains(name); }
+            @Override public String getClassRestrictions(String name) { return ""; }
+        };
+    }
     @Override public IMixinAuditTrail getAuditTrail() { return null; }
     @Override public Collection<String> getPlatformAgents() { return List.of(); }
     @Override public IContainerHandle getPrimaryContainer() { return new ContainerHandleVirtual("VSS ingest tests"); }

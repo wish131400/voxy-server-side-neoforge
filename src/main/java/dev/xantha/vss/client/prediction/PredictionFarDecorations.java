@@ -6,12 +6,12 @@ import java.util.function.LongPredicate;
 /** World-owned distant decoration context. Approximate placements never enter exact surface/disk caches. */
 final class PredictionFarDecorations {
     static boolean supported(ClientTerrainSampler terrain) {
-        return (terrain instanceof RustTerrainSampler || terrain instanceof FreeTerraForgedTerrainSampler)
-                && !terrain.interiorTerrain();
+        return terrain.supportsFarDecorations();
     }
     private final ClientTerrainSampler terrain;
     private volatile PredictionVegetation vegetation;
     private volatile PredictionFarDecoration models;
+    private PredictionFarDecoration initializingModels;
     private final java.util.concurrent.atomic.LongAdder woodyAnchors=new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder scatteredBoxes=new java.util.concurrent.atomic.LongAdder();
     private final java.util.concurrent.atomic.LongAdder builds=new java.util.concurrent.atomic.LongAdder();
@@ -33,7 +33,12 @@ final class PredictionFarDecorations {
         var value=models;
         if(value!=null)return value;
         synchronized(this) {
-            if(models==null)models=new PredictionFarDecoration(terrain,true,8,current);
+            if (models == null) {
+                if (initializingModels == null) initializingModels = new PredictionFarDecoration(terrain, true, 8);
+                initializingModels.initialize(current);
+                models = initializingModels;
+                initializingModels = null;
+            }
             return models;
         }
     }
@@ -54,7 +59,8 @@ final class PredictionFarDecorations {
         long start=System.nanoTime();
         var session=models(current).session();
         try(var scope=session.enter(current,captured,base)) {
-            boolean regenerate=!base.approximateDecorations() || base.needsDecorationRefinement();
+            boolean regenerate=!base.approximateDecorations() || base.needsDecorationRefinement()
+                    || PredictionDecorationRange.partial(base);
             var scattered=regenerate ? session.generate(base.baseX(),base.baseZ(),base.span(),base.step(),true) : null;
             var fallback=complete && !base.surfaceComplete() ? vegetation().tileForRendering(base.baseX(),base.baseZ(),base.span(),1,trees,captured,current)
                     : PredictionVegetation.Tile.EMPTY;
@@ -86,9 +92,16 @@ final class PredictionFarDecorations {
         }
     }
     void invalidate(int x,int z) { var value=vegetation;if(value!=null)value.invalidate(x,z); }
+    java.util.Map<String,Object> catalog() {
+        var active = models;
+        return active == null ? java.util.Map.of() : active.initialization();
+    }
     java.util.Map<String,Object> performanceSnapshot() {
+        var active=models;
         return java.util.Map.of("initialized",models!=null,"previewBuilds",previews.sum(),"previewNanos",previewNanos.sum(),
-                "completionBuilds",builds.sum(),"completionNanos",nanos.sum(),"woodyAnchors",woodyAnchors.sum(),"boxes",scatteredBoxes.sum());
+                "completionBuilds",builds.sum(),"completionNanos",nanos.sum(),"woodyAnchors",woodyAnchors.sum(),"boxes",scatteredBoxes.sum(),
+                "selectionCache",active==null?java.util.Map.of():active.selections.statistics(),
+                "rotationCache",active==null?java.util.Map.of():active.rotations.statistics());
     }
     String diagnostics() { return "farDecoration="+performanceSnapshot(); }
 }

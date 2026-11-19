@@ -78,10 +78,11 @@ final class FreeTerraForgedExteriorOrder {
             };
         }
         boolean vanilla = name.startsWith("net.minecraft.world.level.levelgen.DensityFunctions$");
-        boolean ftf = name.startsWith("etcodehome.freeterraforged.world.worldgen.densityfunction.")
-                || name.startsWith("raccoonman.reterraforged.world.worldgen.densityfunction.");
+        boolean ftf = java.util.Arrays.stream(dev.xantha.vss.common.worldgen.FreeTerraForgedVariant.values())
+                .anyMatch(variant -> name.startsWith(variant.worldgenClass("densityfunction.")));
         if (ftf && (simple.equals("CellSampler") || simple.equals("NoiseFunction")
-                || name.endsWith("CellSampler$Marker") || name.endsWith("NoiseFunction$Marker"))) return HORIZONTAL;
+                || simple.equals("NoiseSampler") || name.endsWith("CellSampler$Marker")
+                || name.endsWith("NoiseFunction$Marker") || name.endsWith("NoiseSampler$Marker"))) return HORIZONTAL;
         // 0023 caches only its XZ surface lookup; the returned depth still depends on Y.
         if (ftf && simple.equals("ClimateDepthFunction")) return new Info(true, false);
         if (name.equals("net.minecraft.world.level.levelgen.synth.BlendedNoise")) return new Info(true, false);

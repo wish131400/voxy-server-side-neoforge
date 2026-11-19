@@ -17,11 +17,20 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /** Source-built Rust terrain, surface and tint backend. Work runs on prediction builders. */
 final class RustTerrainSampler extends ClientTerrainSampler implements AutoCloseable {
-    static final String ALGORITHM = "vanilla-rust-abi6-interior-r1";
+    @Override boolean supportsFarDecorations() { return !context.interiorTerrain(); }
+    static final String ALGORITHM = "vanilla-rust-abi6-chunk-surface-r5";
     private static boolean attempted, loaded;
     private volatile long world;
     private volatile boolean cancelled;
     private final ClientTerrainSampler context;
+    private boolean javaSurface;
+    private boolean javaBiomes;
+    private PredictionSurfaceStage surfaceStage;
+    private final java.util.concurrent.atomic.LongAdder javaSurfaceColumns = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder javaSurfaceNanos = new java.util.concurrent.atomic.LongAdder();
+    private volatile boolean javaSurfaceFailed;
+    private final ThreadLocal<ByteBuffer> terrainHeightInput = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN));
+    private final ThreadLocal<ByteBuffer> terrainHeightOutput = ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(40).order(ByteOrder.LITTLE_ENDIAN));
     // JNI rows use the noise generator's bounds, which may differ from the dimension.
     private final int nativeMinY, nativeHeight;
     private final boolean terrablenderRouting;
@@ -109,6 +118,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             handle = RustWorldgenBackend.create(profile.seed(), BiomeManager.obfuscateSeed(profile.seed()), serialized);
             timing.mark("nativeCreate");
             RustTerrainSampler sampler = new RustTerrainSampler(handle, profile, context, shared.canonicalStates());
+            sampler.configureRuntimeStages(generator,registries);
             if ((generator.has("vss_terrablender") || generator.has("vss_terrablender_end")
                     || generator.has("vss_blueprint")
                     && generator.getAsJsonObject("vss_blueprint").has("original_terrablender"))
@@ -130,6 +140,12 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         } finally {
             if (handle != 0) RustWorldgenBackend.close(handle);
         }
+    }
+
+    void configureRuntimeStages(JsonObject generator,JsonObject registries) {
+            javaSurface = PredictionExecutionPlan.resolve(generator, registries).javaSurface();
+            javaBiomes=generator.has("vss_java_biomes");
+            if(generator.has("vss_surface_stage"))surfaceStage=new PredictionSurfaceStage(context,this::fillNativeChunk);
     }
 
     RustTerrainSampler(long world, DimensionProfile profile, ClientTerrainSampler context) {
@@ -250,6 +266,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         for(int n=0;n<pending;n++) {
             int i=missing[n];int[] row=rows[i]=new int[10];
             for(int j=0;j<10;j++)row[j]=output.getInt((n*10+j)*4);
+            applyJavaSurface(row, x+i/side, z+i%side);
             rememberPoint((long)(x+i/side)<<32|(z+i%side)&0xffffffffL,row);
         }
         return rows;
@@ -263,9 +280,80 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         if (RustWorldgenBackend.decorationPoints(id,input,output,16)!=16)
             throw new IllegalStateException("Incomplete display decoration page");
         int[][] rows = new int[16][10];
-        for (int i=0;i<16;i++) for (int j=0;j<10;j++) rows[i][j]=output.getInt((i*10+j)*4);
+        for (int i=0;i<16;i++) {
+            for (int j=0;j<10;j++) rows[i][j]=output.getInt((i*10+j)*4);
+            applyJavaSurface(rows[i], x+i/4, z+i%4,false);
+        }
         return rows;
     }
+    boolean nativeDecorationCompatible() { return !javaSurface && !javaBiomes; }
+
+    private void applyJavaSurface(int[] row, int x, int z) { applyJavaSurface(row,x,z,true); }
+    private void applyJavaSurface(int[] row, int x, int z, boolean complete) {
+        if (surfaceStage != null && !complete) {
+            // Full runtime rules build a NoiseChunk per sampled chunk. Sparse previews
+            // paint the basic biome material; the staged pass runs the original hooks.
+            row[3] |= ClientColumnSample.FLAG_SURFACE_PENDING;
+            if ((row[3] & ClientColumnSample.FLAG_NO_SURFACE) == 0 && row[2] == 0) {
+                int block = context.previewGroundBlock(x, row[0], z);
+                Integer state = stateIds.get(net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState());
+                if (state != null) row[4] = state;
+            }
+            return;
+        }
+        if (!javaSurface || javaSurfaceFailed || (surfaceStage==null && (row[3] & ClientColumnSample.FLAG_NO_SURFACE) != 0)) return;
+        long started = System.nanoTime();
+        try {
+            if(surfaceStage!=null && complete) {
+                var resolved=surfaceStage.sample(x,z);
+                row[0]=resolved.surfaceY();row[1]=resolved.fluidY();row[2]=resolved.fluid();row[3]=resolved.flags();
+                row[4]=surfaceState(resolved.topBlockIndex());row[5]=surfaceState(resolved.underBlockIndex());row[6]=surfaceState(resolved.deepBlockIndex());
+                if(row.length>10)row[10]=resolved.biomeIndex();
+                javaSurfaceColumns.increment();return;
+            }
+            var sample = sampleRecord(row, 0);
+            // Sparse previews must not trigger full native columns via Java surface height probes.
+            var resolved = complete ? context.resolveSurface(sample, x, z, this::terrainHeight)
+                    : context.resolvePreviewSurface(sample, x, z, this::previewTerrainHeight);
+            int top = surfaceState(resolved.topBlockIndex()), under = surfaceState(resolved.underBlockIndex()),
+                    deep = surfaceState(resolved.deepBlockIndex());
+            row[4] = top; row[5] = under; row[6] = deep; row[3] = resolved.flags();
+            javaSurfaceColumns.increment();
+        } catch (CancellationException cancelled) { throw cancelled; }
+        catch (RuntimeException failure) {
+            synchronized (this) {
+                if (!javaSurfaceFailed) VSSLogger.warn("VSS Java surface stage failed for " + profile().dimension()
+                        + "; keeping completed Rust terrain; authoritative LOD remains preferred", failure);
+                javaSurfaceFailed = true;
+            }
+        } finally { javaSurfaceNanos.add(System.nanoTime() - started); }
+    }
+    private int surfaceState(int block) {
+        var state = block<0 ? Blocks.AIR.defaultBlockState() : net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+        Integer index = stateIds.get(state);
+        if (index == null) throw new IllegalArgumentException("Java surface state absent from native palette: " + state);
+        return index;
+    }
+    // Height neighbours for Java rules must never recurse into the surface stage.
+    private int terrainHeight(int x, int z) {
+        if(surfaceStage==null) synchronized (points) {
+            int[] cached = points.get((long)x<<32|z&0xffffffffL);
+            if (cached != null) return cached[0];
+        }
+        ByteBuffer input = terrainHeightInput.get(), output = terrainHeightOutput.get();
+        input.putInt(0,x).putInt(4,z);
+        if (RustWorldgenBackend.surfacePoints(handle(),input,output,1)!=1) throw new IllegalStateException("Incomplete terrain height");
+        return output.getInt(0);
+    }
+    private int previewTerrainHeight(int x, int z) {
+        ByteBuffer input = terrainHeightInput.get(), output = terrainHeightOutput.get();
+        input.putInt(0, x).putInt(4, z);
+        if (RustWorldgenBackend.previewPoints(handle(), input, output, 1) != 1)
+            throw new IllegalStateException("Incomplete preview terrain height");
+        return output.getInt(0);
+    }
+
+    @Override SamplingScope terrainRequest() { return context.terrainRequest(); }
     ClientColumnSample surfaceSample(int[] record) { return sampleRecord(record, 0); }
     BlockState proxyBlock(int[] c, int y) {
         if(y>=c[0]) {
@@ -295,6 +383,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         return min;
     }
     private int[] colors(int x,int y,int z) {
+        if(javaBiomes)return new int[]{context.surfaceColor(x,y,z),context.foliageColor(x,y,z),context.waterTint(x,y,z)};
         handle();
         long generation = tints.generation();
         long key = BlockPos.asLong(x,y,z);
@@ -313,7 +402,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     void rememberColors(int x, int z, int[] data, long generation) {
         // Display grids may interpolate interior height/color; those records must
         // never populate the exact-position tint cache used by fine terrain.
-        if ((data[3] & ClientColumnSample.FLAG_APPROXIMATE) != 0) return;
+        if (javaBiomes || (data[3] & ClientColumnSample.FLAG_APPROXIMATE) != 0) return;
         int y = data[2] != 0 ? data[1] - 1 : data[0];
         if (tints.put(BlockPos.asLong(x,y,z), new int[]{data[7],data[8],data[9]}, generation)) tintSeeded.increment();
     }
@@ -325,15 +414,16 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         queries[at*3+2]=z>>2;
     }
     private void surfaceBiomeIndices(int[] queries,int count,int[] indices) {
-        if (nativeBiomeMapping==null || legacyBiomeIndices) {
+        if (javaBiomes) { context.sampleBiomeIndices(queries,count,indices);
+        } else if (nativeBiomeMapping==null || legacyBiomeIndices) {
             Arrays.fill(indices,0,count,-1); // Preserve deferred Java resolution for older libraries.
         } else sampleBiomeIndices(queries,count,indices);
     }
     @Override void sampleBiomeIndices(int[] quartPositions, int count, int[] indices) {
         handle();
-        if (nativeBiomeMapping == null || legacyBiomeIndices) {
+        if (javaBiomes || nativeBiomeMapping == null || legacyBiomeIndices) {
             biomeJavaFallbacks.add(count);
-            super.sampleBiomeIndices(quartPositions, count, indices);
+            context.sampleBiomeIndices(quartPositions, count, indices);
             return;
         }
         ByteBuffer input=biomePositions.get(), output=biomeResults.get();
@@ -347,7 +437,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             } catch (UnsatisfiedLinkError olderLibrary) {
                 legacyBiomeIndices=true;
                 biomeJavaFallbacks.add(count);
-                super.sampleBiomeIndices(quartPositions,count,indices);
+                context.sampleBiomeIndices(quartPositions,count,indices);
                 return;
             }
             biomeNativeBatches.increment(); biomeNativePoints.add(batch);
@@ -364,7 +454,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             int[] point={quartPositions[i*3],quartPositions[i*3+1],quartPositions[i*3+2]};
             int[] fallback=new int[1];
             biomeJavaFallbacks.increment();
-            super.sampleBiomeIndices(point,1,fallback); indices[i]=fallback[0];
+            context.sampleBiomeIndices(point,1,fallback); indices[i]=fallback[0];
         }
     }
     @Override long colorCacheFingerprint() { return colorFingerprint; }
@@ -372,7 +462,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     private final ThreadLocal<ByteBuffer> possibleBiomeResults = new ThreadLocal<>();
     java.util.BitSet possibleBiomes(int minX, int minZ, int maxX, int maxZ) {
         long id = handle();
-        if (legacyPossibleBiomes || nativeBiomeMapping == null || legacyBiomeIndices) return null;
+        if (javaBiomes || legacyPossibleBiomes || nativeBiomeMapping == null || legacyBiomeIndices) return null;
         long nx = (long) maxX - minX + 1, nz = (long) maxZ - minZ + 1;
         if (nx <= 0 || nz <= 0 || nx > 32 || nz > 32
                 || minX < -7_500_000 || maxX > 7_500_000 || minZ < -7_500_000 || maxZ > 7_500_000)
@@ -431,6 +521,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
 
     String diagnostics() {return "backend="+ALGORITHM+",nativeFeatures="+nativeFeatures.sum()+",compatibilityFeatures="+javaFeatures.sum()
             +","+javaFeatureDiagnostics()
+            +",surfaceStage={java="+javaSurface+",runtime="+(surfaceStage!=null)+",runtimeChunks="+runtimeSurfaceChunks()+",runtimeFailures="+(surfaceStage==null?0:surfaceStage.failures())+",failed="+javaSurfaceFailed+",columns="+javaSurfaceColumns.sum()+",ms="+javaSurfaceNanos.sum()/1_000_000+"}"
             +",tintCache={"+tints.diagnostics()+",nativeCalls="+tintNativeCalls.sum()+",seeded="+tintSeeded.sum()+"}"
             +",gridCacheHits="+gridCacheHits.sum()+",gridSubmittedPoints="+gridComputedPoints.sum()
             +",biomeIdentity={nativeBatches="+biomeNativeBatches.sum()+",nativePoints="+biomeNativePoints.sum()
@@ -513,7 +604,10 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             int[] cached;
             // Display observations never depend on which exact columns decoration prefetched.
             synchronized(points) { cached=display ? null : points.getAndMoveToLast(key); }
-            if(cached!=null) { result[target]=sampleRecord(cached.length==10 ? point(xx,zz) : cached,0); continue; }
+            if (cached != null && (!preview || cached.length != 10)) {
+                result[target] = sampleRecord(cached.length == 10 ? point(xx, zz) : cached, 0);
+                continue;
+            }
             missing[count++]=i;
         }
         // Refinement grids share aligned columns with their parents. Only
@@ -559,6 +653,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
             for(int j=0;j<10;j++) decoded[j]=output.getInt(((gridResult ? i : n)*10+j)*4);
             decoded[10]=indices[n];
             int xx=x+i%width*spacing,zz=z+i/width*spacing;
+            applyJavaSurface(decoded,xx,zz,!preview && !display);
             rememberColors(xx,zz,decoded,tintGeneration);
             boolean cache = !preview && !display && (decoded[3] & ClientColumnSample.FLAG_APPROXIMATE)==0;
             int[] data = cache ? java.util.Arrays.copyOf(decoded, decoded.length) : decoded;
@@ -585,6 +680,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         for(int i=0;i<count;i++) {
             for(int j=0;j<10;j++)decoded[j]=output.getInt((i*10+j)*4);
             decoded[10]=indices[i];
+            applyJavaSurface(decoded,xz[i*2],xz[i*2+1],false);
             rememberColors(xz[i*2],xz[i*2+1],decoded,tintGeneration);
             result[i]=sampleRecord(decoded,0);
         }
@@ -599,7 +695,12 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
                 ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN, ClientColumnSample.NO_SPAN);
     }
     @Override public ClientColumnSample sampleSurface(int x, int z) { return sample(x, z); }
+    @Override public ClientColumnSample samplePreview(int x, int z) { return samplePreview(x, z, 1); }
+    @Override public ClientColumnSample samplePreview(int x, int z, int step) {
+        return sampleGrid(x, z, step, 1, 1, new ClientColumnSample[1], true, false, false)[0];
+    }
     @Override PredictionColumnVolume exteriorColumn(int x, int z) {
+        if(surfaceStage!=null)return surfaceStage.column(x,z);
         // Occupancy needs no biome/surface-rule pass or four neighboring surface queries.
         ByteBuffer input = positions.get(), output = wallColumn.get();
         input.putInt(0, x).putInt(4, z);
@@ -618,7 +719,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     private final ThreadLocal<ByteBuffer> footprintResults;
     @Override boolean[][] exteriorFootprints(int[] x, int[] z, int step, int[] bottom, int[] top, int count,
                                                java.util.function.BooleanSupplier valid) {
-        if (count < 2 || legacyExteriorBatch || legacyExteriorBackend)
+        if (surfaceStage!=null || count < 2 || legacyExteriorBatch || legacyExteriorBackend)
             return super.exteriorFootprints(x, z, step, bottom, top, count, valid);
         if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new CancellationException();
         ByteBuffer input = footprintRequests.get(), output = footprintResults.get();
@@ -652,7 +753,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         if (top <= bottom) return null;
         if (!valid.getAsBoolean() || Thread.currentThread().isInterrupted())
             throw new java.util.concurrent.CancellationException();
-        if (legacyExteriorBackend) return super.exteriorFootprint(x, z, step, bottom, top, valid);
+        if (surfaceStage!=null || legacyExteriorBackend) return super.exteriorFootprint(x, z, step, bottom, top, valid);
         ByteBuffer output = wallColumn.get();
         final int count;
         try { count = RustWorldgenBackend.exteriorFootprint(handle(), x, z, step, bottom, top, output); }
@@ -672,23 +773,30 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
         for (int i = 0; i < count; i++) occupied[i] = output.get(i) != 0;
         return occupied;
     }
+    @Override void refineSurfaceChunk(int baseX,int baseZ,int step,int grid,ClientColumnSample[] samples,
+            int fromX,int toX,int fromZ,int toZ,java.util.function.BooleanSupplier current) {
+        if(surfaceStage!=null)surfaceStage.refineChunk(baseX,baseZ,step,grid,samples,fromX,toX,fromZ,toZ,current);
+        else super.refineSurfaceChunk(baseX,baseZ,step,grid,samples,fromX,toX,fromZ,toZ,current);
+    }
     @Override ClientColumnSample sampleInterior(int x, int z) {
+        if(surfaceStage!=null)return surfaceStage.sample(x,z);
         ByteBuffer input = positions.get(), output = wallColumn.get();
         input.putInt(0, x).putInt(4, z);
         if (RustWorldgenBackend.interiorColumns(handle(), input, output, 1) != 1)
             throw new IllegalStateException("Incomplete native interior column");
         int min = nativeMinY, height = output.getInt(12);
         if (height != nativeHeight) throw new IllegalStateException("Interior column height mismatch");
-        return PredictionColumnVolume.sample(min, height, y -> {
+        var result = PredictionColumnVolume.sample(min, height, y -> {
             int state = output.getInt(16 + (y - min) * 4);
             return states[state].isAir() ? -1 : blocks[state];
         }, block -> {
             var state = net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
             return state.getFluidState().isEmpty() ? 0 : state.is(Blocks.LAVA) ? 2 : 1;
         }).asSample();
+        return javaSurface && !javaSurfaceFailed ? context.resolveInterior(result,x,z,this::terrainHeight) : result;
     }
     @Override ClientColumnSample wallEvidence(int x, int z, ClientColumnSample sample) {
-        if (cancelled || world == 0) return sample;
+        if (surfaceStage!=null || cancelled || world == 0) return sample;
         ByteBuffer input = positions.get();
         ByteBuffer output = wallColumn.get();
         input.putInt(0, x).putInt(4, z);
@@ -709,6 +817,62 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     @Override public int foliageColor(int x, int y, int z) { return 0xff000000 | colors(x,y,z)[1]; }
     @Override public int waterTint(int x, int y, int z) { return 0xb2000000 | colors(x,y,z)[2]; }
     @Override public boolean exactWorldgen() { return true; }
+    @Override boolean stagedSurface() { return surfaceStage!=null; }
+    @Override boolean basicInteriorTerrain() { return context.interiorTerrain(); }
+    @Override ClientColumnSample sampleBasicInterior(int x,int z) {
+        // Full occupancy is still required for ceiling worlds and floating islands.
+        ByteBuffer input=positions.get(),output=wallColumn.get();input.putInt(0,x).putInt(4,z);
+        if(RustWorldgenBackend.columns(handle(),input,output,1)!=1)throw new IllegalStateException("Incomplete basic column");
+        if(output.getInt(12)!=nativeHeight)throw new IllegalStateException("Basic column height mismatch");
+        var sample=PredictionColumnVolume.sample(nativeMinY,nativeHeight,y->{
+            int state=output.getInt(16+(y-nativeMinY)*4);return states[state].isAir()?-1:blocks[state];
+        },block->{var state=net.minecraft.core.registries.BuiltInRegistries.BLOCK.byId(block).defaultBlockState();
+            return state.getFluidState().isEmpty()?0:state.is(Blocks.LAVA)?2:1;}).asSample();
+        return PredictionSurfaceRefinement.basic(context.resolveInterior(sample,x,z,this::terrainHeight));
+    }
+    @Override boolean interiorTerrain() { return surfaceStage!=null || context.interiorTerrain(); }
+    long runtimeSurfaceChunks() { return surfaceStage==null?0:surfaceStage.builds(); }
+    private final ThreadLocal<ByteBuffer[]> surfaceChunkBuffers=new ThreadLocal<>();
+    private volatile boolean legacyRawChunk;
+    private final ThreadLocal<ByteBuffer> rawChunkBuffer=new ThreadLocal<>();
+    private void fillNativeChunk(net.minecraft.world.level.ChunkPos pos,net.minecraft.world.level.chunk.ProtoChunk chunk) {
+        if(!legacyRawChunk) {
+            ByteBuffer raw=rawChunkBuffer.get();
+            if(raw==null){raw=ByteBuffer.allocateDirect(256*nativeHeight*4).order(ByteOrder.LITTLE_ENDIAN);rawChunkBuffer.set(raw);}
+            try {
+                if(RustWorldgenBackend.rawChunk(handle(),pos.getMinBlockX()>>4,pos.getMinBlockZ()>>4,raw)!=256)
+                    throw new IllegalStateException("Incomplete native raw chunk");
+                var position=new BlockPos.MutableBlockPos();
+                for(int x=0;x<16;x++)for(int z=0;z<16;z++)for(int y=0;y<nativeHeight;y++) {
+                    BlockState state=states[raw.getInt(((x*16+z)*nativeHeight+y)*4)];
+                    if(!state.isAir())chunk.setBlockState(position.set(pos.getMinBlockX()+x,nativeMinY+y,pos.getMinBlockZ()+z),state,false);
+                }
+                return;
+            } catch(UnsatisfiedLinkError olderLibrary){legacyRawChunk=true;}
+        }
+
+        ByteBuffer[] buffers=surfaceChunkBuffers.get();
+        if(buffers==null) {
+            buffers=new ByteBuffer[]{ByteBuffer.allocateDirect(64*8).order(ByteOrder.LITTLE_ENDIAN),
+                    ByteBuffer.allocateDirect(64*(16+nativeHeight*4)).order(ByteOrder.LITTLE_ENDIAN)};
+            surfaceChunkBuffers.set(buffers);
+        }
+        ByteBuffer input=buffers[0],output=buffers[1];
+        var cursor=new BlockPos.MutableBlockPos();int stride=16+nativeHeight*4;
+        for(int first=0;first<256;first+=64) {
+            handle();input.clear();
+            for(int i=first;i<first+64;i++)input.putInt(pos.getMinBlockX()+(i&15)).putInt(pos.getMinBlockZ()+(i>>4));
+            if(RustWorldgenBackend.columns(handle(),input,output,64)!=64)throw new IllegalStateException("Incomplete native surface chunk");
+            for(int i=0;i<64;i++) {
+                int at=(first+i),x=pos.getMinBlockX()+(at&15),z=pos.getMinBlockZ()+(at>>4);
+                if(output.getInt(i*stride+12)!=nativeHeight)throw new IllegalStateException("Native surface height mismatch");
+                for(int y=0;y<nativeHeight;y++) {
+                    BlockState state=states[output.getInt(i*stride+16+y*4)];
+                    if(!state.isAir())chunk.setBlockState(cursor.set(x,nativeMinY+y,z),state,false);
+                }
+            }
+        }
+    }
     @Override boolean floatingTerrain() { return context.floatingTerrain(); }
     @Override public int seaLevel() { return context.seaLevel(); }
     @Override public int fluidColor() { return context.fluidColor(); }
@@ -721,6 +885,7 @@ final class RustTerrainSampler extends ClientTerrainSampler implements AutoClose
     @Override public synchronized void close() {
         context.detachHorizontalClimate();
         long id = world; world = 0; cancelled=true;
+        if(surfaceStage!=null)surfaceStage.close();
         if (id == 0) return;
         try {
             try { RustWorldgenBackend.cancel(id); } finally { RustWorldgenBackend.close(id); }

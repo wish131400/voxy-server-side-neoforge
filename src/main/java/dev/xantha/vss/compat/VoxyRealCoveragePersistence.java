@@ -16,6 +16,7 @@ import java.util.zip.CRC32;
 public final class VoxyRealCoveragePersistence {
     private static final Map<Object, State> STORAGES = new WeakHashMap<>();
     private static final Map<Object, Binding> ENGINES = new WeakHashMap<>();
+    private static final Map<Object, Batch> BATCHES = new WeakHashMap<>();
     private static volatile long generation;
     private static final ClassValue<Map<String, Field>> FIELDS = new ClassValue<>() {
         @Override protected Map<String, Field> computeValue(Class<?> type) {
@@ -102,11 +103,17 @@ public final class VoxyRealCoveragePersistence {
         Binding binding = binding(engine);
         if (binding == null || lod < 0 || lod > 4 || count <= 0
                 || !binding.restoredColumns.contains(column(cx, cz))) return 0;
-        int result = 0;
-        for (int i = 0; i < Math.min(32, count); i++) {
-            int cy = firstY + i;
+        int result = 0, limit = Math.min(32, count), width = 1 << (lod + 1);
+        // A mask query often reads 32 cells of the same immutable saved node.
+        // Query each node once, including negative and unaligned vertical ranges.
+        for (int i = 0; i < limit;) {
+            int cy = firstY + i, run = Math.min(limit - i, width - (cy & (width - 1)));
             Node node = binding.nodes.get(key(lod, cx >> (lod + 1), cy >> (lod + 1), cz >> (lod + 1)));
-            if (node != null && node.restored.get(bit(cx, cy, cz, lod))) result |= 1 << i;
+            if (node != null) {
+                BitSet restored = node.restored;
+                for (int j = 0; j < run; j++) if (restored.get(bit(cx, cy + j, cz, lod))) result |= 1 << (i + j);
+            }
+            i += run;
         }
         return result;
     }
@@ -168,6 +175,12 @@ public final class VoxyRealCoveragePersistence {
     public static void capture(Object memory, Object storage, Object section) {
         Token token = ACTIVE.get();
         if (token != null && token.storage == storage && token.section == section) capture(memory);
+    }
+
+    /** Only the codec invocation belonging to this native IO may supply its image. */
+    public static void captureCodec(Object memory, Object section, boolean saving) {
+        Token token = ACTIVE.get();
+        if (token != null && token.section == section && token.saving == saving) capture(memory);
     }
 
     public static void capture(Object memory) {
@@ -232,6 +245,56 @@ public final class VoxyRealCoveragePersistence {
     }
 
     public static boolean loadedSuccessfully(int status) { return status == 0; }
+
+    /** Keeps native batching intact; only compact image proofs wait for its commit. */
+    public static Object trackBatch(Object batch, Object storage) {
+        synchronized (STORAGES) {
+            if (STORAGES.containsKey(storage)) BATCHES.put(batch, new Batch(storage));
+        }
+        return batch;
+    }
+
+    public static Object beginBatch(Object batch, Object section) {
+        Batch tracked;
+        synchronized (STORAGES) { tracked = BATCHES.get(batch); }
+        return tracked == null ? null : begin(tracked.storage, section, true);
+    }
+
+    public static void stageBatch(Object batch, Object object, boolean success) {
+        if (!(object instanceof Token token)) return;
+        // Never retain native buffers/sections or hold multiple stripe locks
+        // while the native saver collects a batch in arbitrary section order.
+        finish(token, false);
+        if (!success || token.hash == null || token.mask == null || token.mask.isEmpty()) return;
+        Batch tracked;
+        synchronized (STORAGES) { tracked = BATCHES.get(batch); }
+        if (tracked != null) synchronized (tracked) {
+            tracked.images.put(token.key, new StagedImage(token.state, token.lock,
+                    new Proof(token.key, token.length, token.hash, token.mask)));
+        }
+    }
+
+    public static void completeBatch(Object batch, boolean success) {
+        Batch tracked;
+        synchronized (STORAGES) { tracked = BATCHES.get(batch); }
+        if (tracked == null) return;
+        List<StagedImage> images;
+        synchronized (tracked) { images = List.copyOf(tracked.images.values()); tracked.images.clear(); }
+        if (!success) return;
+        for (StagedImage image : images) {
+            image.lock.lock();
+            try { image.state.region(image.proof.key).append(image.proof); }
+            catch (IOException | RuntimeException failure) { image.state.warn(failure); }
+            finally { image.lock.unlock(); }
+        }
+    }
+
+    private static final class Batch {
+        final Object storage;
+        final Map<Long, StagedImage> images = new HashMap<>();
+        Batch(Object storage) { this.storage = storage; }
+    }
+    private record StagedImage(State state, ReentrantLock lock, Proof proof) { }
 
     private static Object field(Object object, String name) throws ReflectiveOperationException {
         Field field = FIELDS.get(object.getClass()).get(name);

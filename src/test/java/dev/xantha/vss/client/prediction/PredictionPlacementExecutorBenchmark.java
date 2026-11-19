@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 import net.minecraft.core.Direction;
 import net.minecraft.util.RandomSource;
@@ -20,7 +19,6 @@ import net.minecraft.world.level.levelgen.VerticalAnchor;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.placement.*;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -29,18 +27,12 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 class PredictionPlacementExecutorBenchmark {
     private static final int WARMUP = 16, ROUNDS = 10, OPERATIONS = 2048;
     private static volatile long consumed;
-    private static Map<PlacedFeature, PredictionPlacementExecutor.Plan> savedPlans;
     private final com.sun.management.ThreadMXBean threads =
             (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
     record Result(long wall, long cpu, long bytes, long writes, long checksum) { }
 
-    @BeforeAll static void bootstrap() throws ReflectiveOperationException {
+    @BeforeAll static void bootstrap() {
         PredictionDecorationQueryTest.bootstrap();
-        synchronized (planCache()) { savedPlans = new java.util.HashMap<>(planCache()); }
-    }
-
-    @AfterAll static void restorePlans() throws ReflectiveOperationException {
-        synchronized (planCache()) { planCache().clear(); planCache().putAll(savedPlans); }
     }
 
     @Test void compareWholeFeaturesWithIdenticalWritesAndRandomContinuation() throws Exception {
@@ -53,7 +45,7 @@ class PredictionPlacementExecutorBenchmark {
             List<PlacementModifier> modifiers = modifiers(scenario);
             var feature = PredictionPlacementExecutorTest.feature(modifiers);
             var plan = PredictionPlacementExecutor.compile(modifiers, ignored -> true);
-            synchronized (planCache()) { planCache().put(feature, plan); }
+            assertSame(plan, planCache().get(feature, () -> plan));
             var fixture = new PredictionPlacementExecutorTest.Fixture();
             // Paired actual map and subsequent RNG equality are outside the timed workload.
             for (int seed = 0; seed < 32; seed++) {
@@ -96,10 +88,10 @@ class PredictionPlacementExecutorBenchmark {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<PlacedFeature, PredictionPlacementExecutor.Plan> planCache() throws ReflectiveOperationException {
+    private static PredictionIdentityPlans<PlacedFeature, PredictionPlacementExecutor.Plan> planCache() throws ReflectiveOperationException {
         var field = PredictionPlacementExecutor.class.getDeclaredField("PLANS");
         field.setAccessible(true);
-        return (Map<PlacedFeature, PredictionPlacementExecutor.Plan>) field.get(null);
+        return (PredictionIdentityPlans<PlacedFeature, PredictionPlacementExecutor.Plan>) field.get(null);
     }
 
     private static List<PlacementModifier> modifiers(String scenario) {

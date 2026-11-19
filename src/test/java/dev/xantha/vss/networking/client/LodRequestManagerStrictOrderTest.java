@@ -171,11 +171,17 @@ class LodRequestManagerStrictOrderTest {
             assertTrue(probes[i]);
         }
     }
-    @Test void unavailableColumnWithoutGenerationDoesNotBlockTheRing() throws Exception {
+    @Test void unavailableColumnWithoutGenerationSettlesOnlyAfterExistingChunkRead() throws Exception {
         field(LodRequestManager.class,"sessionConfig").set(manager,
                 new SessionConfigS2CPayload(1,true,128,0,0,0,0,0,128,false,0L,1L));
         int id=tracker.track(PositionUtil.packPosition(0,0),false,true,false,60_000_000_000L,0L);
         manager.onColumnNotGenerated(id);
+        assertFalse(manager.strictColumnReady(0,0));
+        assertFalse(manager.strictColumnRenderReady(0,0,ignored -> false));
+        assertEquals(1, collect(new RequestWindow(1,0,0,0,0,0,0)));
+        assertFalse(generation[0]);
+        assertFalse(probes[0]);
+        manager.onColumnNotGenerated(ids[0]);
         assertTrue(manager.strictColumnReady(0,0));
         assertTrue(manager.strictColumnRenderReady(0,0,ignored -> false));
     }
@@ -326,7 +332,7 @@ class LodRequestManagerStrictOrderTest {
         field(LodRequestManager.class,"sessionConfig").set(manager,
                 new SessionConfigS2CPayload(1,true,128,0,0,0,0,0,128,false,0L,1L));
         long position = PositionUtil.packPosition(0,0);
-        int miss = tracker.track(position,false,true,false,60_000_000_000L,0L);
+        int miss = tracker.track(position,false,false,false,60_000_000_000L,0L);
         manager.onColumnNotGenerated(miss);
         assertTrue(manager.strictColumnReady(0,0));
         var notices = new dev.xantha.vss.networking.server.generation.ChunkyColumnAvailability(

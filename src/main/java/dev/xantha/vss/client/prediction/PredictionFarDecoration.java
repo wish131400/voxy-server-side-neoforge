@@ -50,8 +50,12 @@ final class PredictionFarDecoration {
     final Set<PlacedFeature> replaced;
     final Map<Integer,List<Rule>> biomeRules;
     final Map<PlacedFeature,List<Choice>> parsed;
+    final Map<PlacementModifier,Double> densities;
+    final PredictionSharedCache<Long,SelectionPage> selections;
+    final PredictionSharedCache<RotationKey,List<Span>> rotations;
     final Map<ConfiguredFeature<?,?>,List<Template>> templates;
     final List<Map<String,Object>> audit;
+    private static final int MAX_PENDING_TEMPLATES_PER_PASS = 32;
     long anchors, selected, accepted, anchorSamples, emitted, tinyOmitted, templateAttempts, templateFailures;
     final Map<String,Long> acceptedByBiome = new TreeMap<>();
     final Map<String,Long> groundByBiome = new TreeMap<>();
@@ -64,6 +68,12 @@ final class PredictionFarDecoration {
     record Choice(ConfiguredFeature<?,?> feature,double weight,List<Template> models) {}
     record Rule(long salt,double count,List<Choice> choices,boolean woody) {}
     record Anchor(int x,int y,int z,long id,Template model) {}
+    private record SelectionCell(int biome,int selected,List<Anchor> sites) {}
+    private record SelectionPage(SelectionCell[] cells,long bytes) {}
+    private record RotationKey(Template template,int rotation) {
+        @Override public boolean equals(Object other){return other instanceof RotationKey k && template==k.template && rotation==k.rotation;}
+        @Override public int hashCode(){return System.identityHashCode(template)*31+rotation;}
+    }
     record Result(List<PredictionVoxySource.Box> boxes,List<Anchor> anchors) {}
     static final class Votes {
         private final int step;
@@ -79,20 +89,17 @@ final class PredictionFarDecoration {
         }
         void add(BlockState state,int x,int z,int bottom,int top) {
             containsNonLeaves|=!state.is(BlockTags.LEAVES);
-            int weight=0;
-            int offset=(z*step+x)*step;
-            for(int y=bottom;y<top;y++) {
-                int bit=offset+y;
-                long mask=1L<<(bit&63);
+            int weight=0,bit=(z*step+x)*step+bottom,end=(z*step+x)*step+top;
+            while(bit<end) {
+                int count=Math.min(end-bit,64-(bit&63));
+                long mask=(-1L >>> (64-count)) << (bit&63);
                 if(coverage==null) {
-                    if((firstCoverage&mask)!=0)continue;
-                    firstCoverage|=mask;
+                    weight+=Long.bitCount(mask&~firstCoverage);firstCoverage|=mask;
                 } else {
                     int word=bit>>>6;
-                    if((coverage[word]&mask)!=0)continue;
-                    coverage[word]|=mask;
+                    weight+=Long.bitCount(mask&~coverage[word]);coverage[word]|=mask;
                 }
-                weight++;
+                bit+=count;
             }
             // Overlapping crowns cannot vote multiple times for the same fine voxel.
             occupied+=weight;
@@ -118,34 +125,60 @@ final class PredictionFarDecoration {
                 || active.proxyEnvironment && feature.feature().value().feature()==Feature.FREEZE_TOP_LAYER);
     }
 
-    PredictionFarDecoration(ClientTerrainSampler sampler,boolean proxyEnvironment,int environmentStep,
-                            java.util.function.BooleanSupplier current) {
-        currentBuild=current;
-        checkCurrent();
+    PredictionFarDecoration(ClientTerrainSampler sampler, boolean proxyEnvironment, int environmentStep) {
         this.sampler=sampler;
         anchorGround=new PredictionFarGround(sampler);
+        selections=new PredictionSharedCache<>(4096,8L<<20,SelectionPage::bytes);
+        rotations=new PredictionSharedCache<>(512,8L<<20,spans->64L+spans.size()*48L);
         this.proxyEnvironment=proxyEnvironment;
         this.environmentStep=environmentStep;
         context=sampler.decorationContext();
         replaced=Collections.newSetFromMap(new IdentityHashMap<>());
-        biomeRules=new HashMap<>(); parsed=new IdentityHashMap<>(); templates=new IdentityHashMap<>(); audit=new ArrayList<>();
+        biomeRules=new HashMap<>(); parsed=new IdentityHashMap<>(); densities=new IdentityHashMap<>(); templates=new IdentityHashMap<>(); audit=new ArrayList<>();
+    }
+
+    void initialize(java.util.function.BooleanSupplier current) {
+        currentBuild = current;
+        try {
+            initializeBiomes();
+        } finally {
+            currentBuild = () -> true;
+        }
+    }
+
+    private void initializeBiomes() {
         var registry=context.decorationAccess().registryOrThrow(Registries.PLACED_FEATURE);
         var names=context.cacheBiomes();
-        for(int index=0;index<names.size();index++) {
+        // Let independent features request their templates in parallel. Completed rules
+        // and captured templates stay in the catalog while resources are pending.
+        Set<PlacedFeature> awaiting = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int index = 0; index < names.size(); index++) {
+            if (biomeRules.containsKey(index)) continue;
             checkCurrent();
             var holder=context.cacheBiomeHolder(index);
             if(holder==null)continue;
             var features=context.generatorContext().getBiomeGenerationSettings(holder).features();
-            var rules=new ArrayList<Rule>();
+            var rules = new ArrayList<Rule>();
+            boolean biomePending = false;
             // Keep terrain-changing features, local modifications, ores and structures on the existing path.
             // Only the biome's visible VEGETAL_DECORATION stage is eligible for distant templates.
             if(features.size()>9) for(var entry:features.get(9)) {
                 PlacedFeature feature=entry.value();
                 List<Choice> choices=parsed.get(feature);
-                if(!parsed.containsKey(feature)) {
-                    try { choices=parsePlaced(feature,0); }
-                    catch (java.util.concurrent.CancellationException | PredictionWorkDeferred cancelled) { throw cancelled; }
-                    catch (RuntimeException unsupported) { choices=List.of(); }
+                if (choices == null) {
+                    if (awaiting.contains(feature)) {
+                        biomePending = true;
+                        continue;
+                    }
+                    try { choices = parsePlaced(feature, 0); }
+                    catch (PredictionWorkDeferred pending) {
+                        awaiting.add(feature);
+                        if (awaiting.size() >= MAX_PENDING_TEMPLATES_PER_PASS) throw pending;
+                        biomePending = true;
+                        continue;
+                    }
+                    catch (java.util.concurrent.CancellationException cancelled) { throw cancelled; }
+                    catch (RuntimeException unsupported) { choices = List.of(); }
                     parsed.put(feature,choices);
                     var name=registry.getKey(feature);
                     audit.add(Map.of("feature",String.valueOf(name),"replaced",!choices.isEmpty(),
@@ -159,16 +192,17 @@ final class PredictionFarDecoration {
                 rules.add(new Rule(stringHash(name),count,choices,woody));
                 replaced.add(feature);
             }
-            biomeRules.put(index,List.copyOf(rules));
+            if (!biomePending) biomeRules.put(index, List.copyOf(rules));
         }
-        // The shared model must not retain the first job's cancellation closure or tile graph.
-        currentBuild=()->true;
+        if (!awaiting.isEmpty()) throw new PredictionWorkDeferred();
     }
 
     private PredictionFarDecoration(PredictionFarDecoration model) {
         anchorGround=model.anchorGround;
         sampler=model.sampler; context=model.context; proxyEnvironment=model.proxyEnvironment; environmentStep=model.environmentStep;
         replaced=model.replaced; biomeRules=model.biomeRules; parsed=model.parsed;
+        densities=model.densities;
+        selections=model.selections;rotations=model.rotations;
         templates=model.templates; audit=model.audit;
     }
     PredictionFarDecoration session() { return new PredictionFarDecoration(this); }
@@ -193,13 +227,20 @@ final class PredictionFarDecoration {
         int ax = Math.floorDiv(x, environmentStep) * environmentStep, az = Math.floorDiv(z, environmentStep) * environmentStep;
         long key = (long) ax << 32 | az & 0xffffffffL;
         var sample = javaColumns.get(key);
-        if (sample == null) { sample = sampler.sampleForLod(ax, az, environmentStep); javaColumns.put(key, sample); }
+        if (sample == null) { sample = anchorGround.sample(ax, az); javaColumns.put(key, sample); }
         return sample;
     }
 
     private List<Choice> parsePlaced(PlacedFeature feature,int depth) {
         checkCurrent();
         if(depth>12)return List.of();
+        var cached=parsed.get(feature);
+        if(cached!=null)return cached;
+        var result=parsePlacedNew(feature,depth);
+        parsed.put(feature,result);
+        return result;
+    }
+    private List<Choice> parsePlacedNew(PlacedFeature feature,int depth) {
         double count=1;
         for(var modifier:feature.placement()) {
             Boolean dimensionAllowed = PredictionDimensionFilter.allows(modifier, context.profile().dimension());
@@ -208,7 +249,17 @@ final class PredictionFarDecoration {
                 continue;
             }
             String type=BuiltInRegistries.PLACEMENT_MODIFIER_TYPE.getKey(modifier.type()).getPath();
-            if(type.equals("count") || type.equals("rarity_filter") || type.equals("noise_based_count") || type.equals("noise_threshold_count")) {
+            if(type.equals("fast_poission") || type.equals("fast_poisson")) {
+                Double density=densities.get(modifier);
+                if(density==null) {
+                    var sampled=PredictionFarPlacementCount.distantDensity(modifier,context.profile().seed(),this::checkCurrent);
+                    if(sampled.isEmpty())return List.of();
+                    density=sampled.getAsDouble();densities.put(modifier,density);
+                }
+                count*=density;
+            } else if(type.equals("count") || type.equals("rarity_filter") || type.equals("noise_based_count") || type.equals("noise_threshold_count")) {
+                Double density=densities.get(modifier);
+                if(density==null) {
                 int n=type.startsWith("noise_")?2048:256;
                 double sum=0;
                 var random=RandomSource.create(0x46524152554c4553L);
@@ -217,7 +268,9 @@ final class PredictionFarDecoration {
                     var pos=new BlockPos((int)mix(i*0x9e3779b97f4a7c15L),64,(int)mix(i*0xc2b2ae3d27d4eb4fL));
                     sum+=PredictionFarPlacementCount.sample(modifier,random,pos);
                 }
-                count*=sum/n;
+                density=sum/n;densities.put(modifier,density);
+                }
+                count*=density;
             } else if(!Set.of("in_square","biome","heightmap","surface_water_depth_filter","block_predicate_filter").contains(type)) {
                 return List.of();
             }
@@ -269,9 +322,10 @@ final class PredictionFarDecoration {
         for(int variant=0;variant<3;variant++) {
             checkCurrent();
             templateAttempts++;
+            boolean nbtTree = BuiltInRegistries.FEATURE.getKey(feature.feature()).getNamespace().equals("ohthetreesyoullgrow");
             long seed=mix(0x4652415254454d50L+variant);
             var soils=new LinkedHashSet<GroundCondition>();
-            var level=new PredictionTemplateStampLevel(seed,context,Blocks.GRASS_BLOCK.defaultBlockState()) {
+            var level=new PredictionTemplateStampLevel(seed,context,Blocks.GRASS_BLOCK.defaultBlockState(),nbtTree) {
                 @Override public net.minecraft.resources.ResourceLocation predictionDimension() { return context.profile().dimension(); }
                 @Override public boolean isStateAtPosition(BlockPos p,java.util.function.Predicate<BlockState> predicate) {
                     boolean result=super.isStateAtPosition(p,predicate);
@@ -318,6 +372,53 @@ final class PredictionFarDecoration {
         acceptedByBiome.clear();groundByBiome.clear();
     }
 
+    private SelectionPage selectPage(int gx,int gz) {
+        var cells=new SelectionCell[64];long bytes=64+64*40;
+        for(int i=0;i<64;i++) {
+            checkCurrent();int cx=gx+i%8,cz=gz+i/8;
+            long root=anchorGround.root(cx,cz);
+            int anchorX=anchorGround.x(cx,root),anchorZ=anchorGround.z(cz,root);
+            var ground=anchorGround.at(cx,cz,this::checkCurrent);anchorSamples++;
+            int biome=ground.biomeIndex(),chosen=0;
+            var sites=new ArrayList<Anchor>();
+            if(ground.hasSurface() && !ground.hasFluid())for(var rule:biomeRules.getOrDefault(biome,List.of())) {
+                long cellHash=mix(root^rule.salt);
+                int candidates=densityPlacements(rule.count*25.0/256.0,cellHash);
+                for(int candidate=0;candidate<candidates;candidate++) {
+                    checkCurrent();long hash=candidate==0?cellHash:mix(cellHash^candidate*0x632be59bd9b4e019L);
+                    int x=candidate==0?anchorX:cx*5+(int)Long.remainderUnsigned(mix(hash^11),5)-2;
+                    int z=candidate==0?anchorZ:cz*5+(int)Long.remainderUnsigned(mix(hash^17),5)-2;
+                    var support=candidate==0?ground:anchorGround.sample(x,z);
+                    if(candidate!=0)anchorSamples++;
+                    if(!support.hasSurface() || support.hasFluid()
+                            || !biomeRules.getOrDefault(support.biomeIndex(),List.of()).contains(rule))continue;
+                    chosen++;
+                    double value=unit(mix(hash^23))*rule.count;
+                    Choice choice=rule.choices.getLast();
+                    for(var c:rule.choices){value-=c.weight;if(value<0){choice=c;break;}}
+                    var model=choice.models.get((int)Long.remainderUnsigned(mix(hash^31),choice.models.size()));
+                    BlockState soil=BuiltInRegistries.BLOCK.byId(support.topBlockIndex()).defaultBlockState();
+                    if(!model.soils.isEmpty() && model.soils.stream().anyMatch(predicate->!predicate.matches(soil)))continue;
+                    sites.add(new Anchor(x,support.surfaceY(),z,hash,model));
+                }
+            }
+            cells[i]=new SelectionCell(biome,chosen,List.copyOf(sites));bytes+=sites.size()*64L;
+        }
+        return new SelectionPage(cells,bytes);
+    }
+    private List<Span> rotated(Template model,int rotation) {
+        if(rotation==0)return model.spans;
+        return rotations.get(new RotationKey(model,rotation),()->{
+            var result=new ArrayList<Span>(model.spans.size());
+            for(var s:model.spans) {
+                int x=s.x,z=s.z;
+                if(rotation==1){x=-s.z;z=s.x;}else if(rotation==2){x=-s.x;z=-s.z;}else{x=s.z;z=-s.x;}
+                result.add(new Span(x,z,s.bottom,s.top,s.state.rotate(net.minecraft.world.level.block.Rotation.values()[rotation])));
+            }
+            return List.copyOf(result);
+        },this::checkCurrent);
+    }
+
     Result generate(int bx,int bz,int span,int step,boolean coarse) {
         reset();
         var boxes=new PredictionVoxyBoxes.Builder();
@@ -326,65 +427,41 @@ final class PredictionFarDecoration {
         // Fixed 5-block world grid, including template radius on all sides. Coordinates never depend on target LOD.
         int minX=Math.floorDiv(bx-26,5),maxX=Math.floorDiv(bx+span+25,5);
         int minZ=Math.floorDiv(bz-26,5),maxZ=Math.floorDiv(bz+span+25,5);
-        var column=new ClientColumnSample[1];
-        var localGround=new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<ClientColumnSample>();
+        long pageKey=Long.MIN_VALUE;
+        SelectionPage page=null;
         for(int gz=minZ;gz<=maxZ;gz++)for(int gx=minX;gx<=maxX;gx++) {
             checkCurrent(); anchors++;
             long root=anchorGround.root(gx,gz);
-            int anchorX=gx*5+(int)Long.remainderUnsigned(mix(root^11),5)-2;
-            int anchorZ=gz*5+(int)Long.remainderUnsigned(mix(root^17),5)-2;
-            int x=anchorX,z=anchorZ;
-            // One stable, exact-coordinate display anchor per cell. Preserve it across LOD changes.
-            var ground=anchorGround.at(gx,gz,this::checkCurrent);
-            anchorSamples++;
-            localGround.clear();
-            localGround.put((long)x<<32 | z&0xffffffffL,ground);
-            var rules=biomeRules.getOrDefault(ground.biomeIndex(),List.of());
-            String biome=sampler.cacheBiomes().get(ground.biomeIndex());
-            groundByBiome.merge(biome,1L,Long::sum);
-            if(!ground.hasSurface() || ground.hasFluid() || isCaptured(x,z))continue;
-            for(var rule:rules) {
-                long cellHash=mix(root^rule.salt);
-                int candidates=densityPlacements(rule.count*25.0/256.0,cellHash);
-                for(int candidate=0;candidate<candidates;candidate++) {
-                checkCurrent();
-                long hash=candidate==0?cellHash:mix(cellHash^candidate*0x632be59bd9b4e019L);
-                x=candidate==0?anchorX:gx*5+(int)Long.remainderUnsigned(mix(hash^11),5)-2;
-                z=candidate==0?anchorZ:gz*5+(int)Long.remainderUnsigned(mix(hash^17),5)-2;
-                long groundKey=(long)x<<32 | z&0xffffffffL;
-                ground=localGround.get(groundKey);
-                if(ground==null) {
-                    column[0]=null;
-                    if (sampler instanceof RustTerrainSampler rust) rust.sampleDisplayGridInPlace(x,z,1,1,1,column,0,1);
-                    else column[0]=sampler.sampleForLod(x,z,1);
-                    ground=column[0];localGround.put(groundKey,ground);anchorSamples++;
-                }
-                if(!ground.hasSurface() || ground.hasFluid() || isCaptured(x,z)
-                        || !biomeRules.getOrDefault(ground.biomeIndex(),List.of()).contains(rule))continue;
-                selected++;
-                double choiceValue=unit(mix(hash^23))*rule.count;
-                Choice choice=rule.choices.getLast();
-                for(var c:rule.choices) { choiceValue-=c.weight;if(choiceValue<0){choice=c;break;} }
-                var model=choice.models.get((int)Long.remainderUnsigned(mix(hash^31),choice.models.size()));
-                BlockState soil=BuiltInRegistries.BLOCK.byId(ground.topBlockIndex()).defaultBlockState();
-                if(!model.soils.isEmpty() && model.soils.stream().anyMatch(predicate -> !predicate.matches(soil)))continue;
+            int anchorX=anchorGround.x(gx,root),anchorZ=anchorGround.z(gz,root);
+            if(!PredictionDecorationRange.placementPoint(anchorX,anchorZ) || isCaptured(anchorX,anchorZ))continue;
+            int px=Math.floorDiv(gx,8),pz=Math.floorDiv(gz,8);
+            long selectionKey=(long)px<<32 | pz&0xffffffffL;
+            if(page==null || pageKey!=selectionKey) {
+                final int pageX=px,pageZ=pz;
+                page=selections.get(selectionKey,()->selectPage(pageX*8,pageZ*8),this::checkCurrent);pageKey=selectionKey;
+            }
+            var selection=page.cells[Math.floorMod(gz,8)*8+Math.floorMod(gx,8)];
+            String biome=sampler.cacheBiomes().get(selection.biome);
+            groundByBiome.merge(biome,1L,Long::sum);selected+=selection.selected;
+            for(var site:selection.sites) {
+                int x=site.x,z=site.z;
+                if(!PredictionDecorationRange.placementPoint(x,z) || isCaptured(x,z))continue;
+                var model=site.model;
                 if(coarse && step>=4 && model.height<=2 && !model.woody){tinyOmitted++;continue;}
                 accepted++;
                 if(model.woody)acceptedByBiome.merge(biome,1L,Long::sum);
-                int rotation=(int)mix(hash^41)&3;
-                sites.add(new Anchor(x,ground.surfaceY(),z,hash,model));
-                for(var s:model.spans) {
-                    int rx=s.x,rz=s.z;
-                    if(rotation==1){rx=-s.z;rz=s.x;}else if(rotation==2){rx=-s.x;rz=-s.z;}else if(rotation==3){rx=s.z;rz=-s.x;}
-                    int wx=x+rx,wz=z+rz;
+                int rotation=(int)mix(site.id^41)&3;
+                sites.add(site);
+                for(var s:rotated(model,rotation)) {
+                    int wx=x+s.x,wz=z+s.z;
                     int localX=wx-bx,localZ=wz-bz;
                     if(localX<0||localZ<0||localX>=span||localZ>=span || isCaptured(wx,wz))continue;
                     // Accumulate real coverage; a thin leaf edge must not automatically fill a coarse cell.
                     int sx=coarse?Math.floorDiv(localX,step)*step:localX;
                     int sz=coarse?Math.floorDiv(localZ,step)*step:localZ;
                     int width=coarse?step:1;
-                    BlockState rotated=s.state.rotate(net.minecraft.world.level.block.Rotation.values()[rotation]);
-                    int bottom=ground.surfaceY()+s.bottom,top=ground.surfaceY()+s.top;
+                    BlockState rotated=s.state;
+                    int bottom=site.y+s.bottom,top=site.y+s.top;
                     if(displayGround!=null && s.bottom==0 && s.state.is(BlockTags.LOGS)) {
                         int cellX=Math.min(displayGround.axis()-1,localX/displayGround.step());
                         int cellZ=Math.min(displayGround.axis()-1,localZ/displayGround.step());
@@ -406,7 +483,6 @@ final class PredictionFarDecoration {
                     } else boxes.add(sx,bottom,sz,Math.min(span,sx+width),top,Math.min(span,sz+width),rotated);
                     emitted++;
                 }
-                }
             }
         }
         if(coarse) {
@@ -425,7 +501,8 @@ final class PredictionFarDecoration {
     }
     Map<String,Object> stats() {
         return Map.of("anchors",anchors,"selected",selected,"accepted",accepted,"anchorSamples",anchorSamples,
-                "rawSpans",emitted,"tinyOmitted",tinyOmitted,"woodyByBiome",Map.copyOf(acceptedByBiome),"groundByBiome",Map.copyOf(groundByBiome));
+                "rawSpans",emitted,"tinyOmitted",tinyOmitted,"woodyByBiome",Map.copyOf(acceptedByBiome),"groundByBiome",Map.copyOf(groundByBiome),
+                "selectionCache",selections.statistics(),"rotationCache",rotations.statistics());
     }
     Map<String,Object> initialization() {
         return Map.of("biomes",biomeRules.size(),"replacedFeatures",replaced.size(),"parsedFeatures",parsed.size(),
